@@ -1923,8 +1923,13 @@ dependencies = [
 name = "oidc-exchange"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-sdk-cloudtraildata",
+ "aws-sdk-dynamodb",
+ "aws-sdk-kms",
  "axum",
  "config",
+ "futures",
  "http-body-util",
  "oidc-exchange-adapters",
  "oidc-exchange-core",
@@ -1939,6 +1944,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -3182,6 +3188,7 @@ dependencies = [
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tower",

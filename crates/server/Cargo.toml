@@ -15,9 +15,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.8"
 subtle = "2"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "request-id"] }
+tower-http = { version = "0.6", features = ["trace", "request-id", "catch-panic"] }
 toml = "0.8"
 config = "0.14"
+uuid = { version = "1", features = ["v4"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = "1"
+aws-sdk-kms = "1"
+aws-sdk-cloudtraildata = "1"
+futures = "0.3"
 
 [dev-dependencies]
 oidc-exchange-test-utils.workspace = true
