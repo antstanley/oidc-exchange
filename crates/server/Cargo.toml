@@ -1,0 +1,22 @@
+[package]
+name = "oidc-exchange"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+oidc-exchange-core.workspace = true
+oidc-exchange-adapters.workspace = true
+oidc-exchange-providers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "request-id"] }
+toml = "0.8"
+config = "0.14"
+
+[dev-dependencies]
+oidc-exchange-test-utils.workspace = true

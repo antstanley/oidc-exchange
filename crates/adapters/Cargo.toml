@@ -1,0 +1,17 @@
+[package]
+name = "oidc-exchange-adapters"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+oidc-exchange-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+oidc-exchange-test-utils.workspace = true
+wiremock = "0.6"

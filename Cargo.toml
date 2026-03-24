@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/adapters",
+    "crates/providers",
+    "crates/server",
+    "crates/test-utils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Core
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+ulid = "1"
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+
+# Internal crates
+oidc-exchange-core = { path = "crates/core" }
+oidc-exchange-adapters = { path = "crates/adapters" }
+oidc-exchange-providers = { path = "crates/providers" }
+oidc-exchange-test-utils = { path = "crates/test-utils" }
