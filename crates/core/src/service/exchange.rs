@@ -1,15 +1,11 @@
-use std::collections::HashMap;
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{
-    AccessTokenClaims, NewUser, Session, TokenResponse, UserStatus,
-};
+use crate::domain::{NewUser, Session, TokenResponse, UserStatus};
 use crate::error::{Error, Result};
-use crate::service::AppService;
+use crate::service::{parse_duration_secs, AppService};
 
 pub struct ExchangeRequest {
     pub code: String,
@@ -17,36 +13,11 @@ pub struct ExchangeRequest {
     pub provider: String,
 }
 
-/// Parse a duration string like "15m", "1h", "30d" into seconds.
-fn parse_duration_secs(s: &str) -> Result<u64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err(Error::ConfigError {
-            detail: "empty duration string".to_string(),
-        });
-    }
-
-    let (num_str, suffix) = s.split_at(s.len() - 1);
-    let value: u64 = num_str.parse().map_err(|_| Error::ConfigError {
-        detail: format!("invalid duration number: {}", num_str),
-    })?;
-
-    match suffix {
-        "s" => Ok(value),
-        "m" => Ok(value * 60),
-        "h" => Ok(value * 3600),
-        "d" => Ok(value * 86400),
-        _ => Err(Error::ConfigError {
-            detail: format!("unknown duration suffix: {}", suffix),
-        }),
-    }
-}
-
 /// Check whether an email's domain matches any entry in the allowlist.
 ///
 /// Each entry can be:
-/// - An exact domain, e.g. `example.com` — matches only `example.com`.
-/// - A wildcard, e.g. `*.example.com` — matches any subdomain such as
+/// - An exact domain, e.g. `example.com` -- matches only `example.com`.
+/// - A wildcard, e.g. `*.example.com` -- matches any subdomain such as
 ///   `sub.example.com` or `a.b.example.com`, but NOT `example.com` itself.
 fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
     let domain = match email.rsplit_once('@') {
@@ -59,7 +30,7 @@ fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
     for entry in allowlist {
         let entry_lower = entry.to_lowercase();
         if let Some(suffix) = entry_lower.strip_prefix('*') {
-            // Wildcard entry like "*.example.com" → suffix is ".example.com"
+            // Wildcard entry like "*.example.com" -> suffix is ".example.com"
             // The email domain must end with the suffix AND be strictly longer
             // (i.e., there must be at least one subdomain level).
             if domain_lower.ends_with(&suffix) && domain_lower.len() > suffix.len() {
@@ -171,41 +142,8 @@ impl AppService {
         };
         self.repo.store_refresh_token(&session).await?;
 
-        // 9. Build access token claims and sign as JWT
-        let now = Utc::now();
-        let access_ttl_secs =
-            parse_duration_secs(&self.config.token.access_token_ttl)?;
-
-        let access_claims = AccessTokenClaims {
-            sub: user.id.clone(),
-            iss: self.config.server.issuer.clone(),
-            aud: self.config.token.audience.clone().unwrap_or_default(),
-            iat: now.timestamp() as u64,
-            exp: (now.timestamp() as u64) + access_ttl_secs,
-            custom: HashMap::new(), // custom claims resolution is Task 11
-        };
-
-        let claims_json = serde_json::to_vec(&access_claims).map_err(|e| {
-            Error::ConfigError {
-                detail: format!("failed to serialize access token claims: {}", e),
-            }
-        })?;
-
-        let header = serde_json::json!({
-            "alg": self.keys.algorithm(),
-            "typ": "JWT",
-            "kid": self.keys.key_id()
-        });
-        let header_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&header).map_err(|e| Error::ConfigError {
-                detail: format!("failed to serialize JWT header: {}", e),
-            })?,
-        );
-        let payload_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
-        let signing_input = format!("{}.{}", header_b64, payload_b64);
-        let signature = self.keys.sign(signing_input.as_bytes()).await?;
-        let sig_b64 = URL_SAFE_NO_PAD.encode(&signature);
-        let access_token = format!("{}.{}", signing_input, sig_b64);
+        // 9. Build access token JWT (shared logic)
+        let (access_token, access_ttl_secs) = self.build_access_token(&user).await?;
 
         Ok(TokenResponse {
             access_token,
@@ -220,7 +158,8 @@ impl AppService {
 /// unit testing via integration tests.
 #[cfg(test)]
 mod tests {
-    use super::{matches_domain_allowlist, parse_duration_secs};
+    use super::matches_domain_allowlist;
+    use crate::service::parse_duration_secs;
 
     #[test]
     fn parse_duration_secs_works() {
