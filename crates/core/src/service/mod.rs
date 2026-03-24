@@ -45,6 +45,16 @@ impl AppService {
         }
     }
 
+    /// Return the public key in JWK format for the JWKS endpoint.
+    pub async fn public_jwk(&self) -> Result<serde_json::Value> {
+        self.keys.public_jwk().await
+    }
+
+    /// Return the signing algorithm identifier (e.g. "EdDSA", "ES256").
+    pub fn signing_algorithm(&self) -> &str {
+        self.keys.algorithm()
+    }
+
     /// Build and sign an access token JWT for the given user.
     ///
     /// Returns `(jwt_string, expires_in_seconds)`.

@@ -20,3 +20,6 @@ config = "0.14"
 
 [dev-dependencies]
 oidc-exchange-test-utils.workspace = true
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tokio = { workspace = true, features = ["full"] }

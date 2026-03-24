@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Top-level application configuration, matching the TOML structure.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -35,7 +35,7 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     pub host: String,
@@ -53,7 +53,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RegistrationConfig {
     pub mode: String,
@@ -69,7 +69,7 @@ impl Default for RegistrationConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TokenConfig {
     pub access_token_ttl: String,
@@ -89,7 +89,7 @@ impl Default for TokenConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {
     pub adapter: String,
@@ -107,12 +107,12 @@ impl Default for AuditConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CloudTrailConfig {
     pub channel_arn: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct KeyManagerConfig {
     pub adapter: String,
@@ -130,21 +130,21 @@ impl Default for KeyManagerConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct KmsConfig {
     pub key_id: String,
     pub algorithm: String,
     pub kid: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LocalKeyConfig {
     pub private_key_path: String,
     pub algorithm: String,
     pub kid: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RepositoryConfig {
     pub adapter: String,
@@ -160,13 +160,13 @@ impl Default for RepositoryConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DynamoConfig {
     pub table_name: String,
     pub region: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct UserSyncConfig {
     pub enabled: bool,
@@ -184,7 +184,7 @@ impl Default for UserSyncConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
     pub secret: String,
@@ -192,7 +192,7 @@ pub struct WebhookConfig {
     pub retries: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TelemetryConfig {
     pub enabled: bool,
@@ -216,7 +216,7 @@ impl Default for TelemetryConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct InternalApiConfig {
     pub enabled: bool,
@@ -237,7 +237,7 @@ impl Default for InternalApiConfig {
 /// Provider configuration. The `adapter` field selects the provider type, and
 /// all remaining fields are captured into `extra` via `#[serde(flatten)]` so
 /// that each adapter can define its own schema.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
     pub adapter: String,
     #[serde(flatten)]

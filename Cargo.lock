@@ -1925,6 +1925,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "config",
+ "http-body-util",
  "oidc-exchange-adapters",
  "oidc-exchange-core",
  "oidc-exchange-providers",
