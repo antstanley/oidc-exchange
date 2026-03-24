@@ -4,8 +4,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, ServerConfig, TokenConfig};
-use oidc_exchange_core::domain::{AccessTokenClaims, UserPatch, UserStatus};
+use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::domain::{AccessTokenClaims, IdentityClaims, NewUser, UserPatch, UserStatus};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, Repository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
@@ -32,6 +32,14 @@ fn make_config() -> AppConfig {
 }
 
 fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppService {
+    make_service_with_config(repo, provider, make_config())
+}
+
+fn make_service_with_config(
+    repo: MockRepository,
+    provider: MockIdentityProvider,
+    config: AppConfig,
+) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert(provider_id, Box::new(provider));
@@ -42,7 +50,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
         providers,
-        make_config(),
+        config,
     )
 }
 
@@ -220,5 +228,281 @@ async fn exchange_unknown_provider_is_rejected() {
             assert_eq!(provider, "nonexistent");
         }
         other => panic!("expected UnknownProvider, got: {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registration policy tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn exchange_domain_allowlist_rejects_non_matching_domain() {
+    let config = AppConfig {
+        registration: RegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: Some(vec!["example.com".to_string()]),
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    // Default claims have email = "test@example.com", change to a non-matching domain
+    provider
+        .set_claims(IdentityClaims {
+            subject: "test-subject".to_string(),
+            email: Some("user@other.com".to_string()),
+            email_verified: Some(true),
+            name: Some("Test User".to_string()),
+            raw_claims: HashMap::new(),
+        })
+        .await;
+
+    let svc = make_service_with_config(repo, provider, config);
+
+    let request = ExchangeRequest {
+        code: "code".to_string(),
+        redirect_uri: "https://app.test.com/callback".to_string(),
+        provider: "mock".to_string(),
+    };
+
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("should reject non-matching domain");
+
+    match err {
+        Error::AccessDenied { .. } => {} // expected
+        other => panic!("expected AccessDenied, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn exchange_wildcard_subdomain_matching() {
+    let base_config = || AppConfig {
+        registration: RegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: Some(vec!["*.example.com".to_string()]),
+        },
+        ..make_config()
+    };
+
+    // sub.example.com should be allowed
+    {
+        let repo = MockRepository::new();
+        let provider = MockIdentityProvider::new("mock");
+        provider
+            .set_claims(IdentityClaims {
+                subject: "subject-1".to_string(),
+                email: Some("user@sub.example.com".to_string()),
+                email_verified: Some(true),
+                name: None,
+                raw_claims: HashMap::new(),
+            })
+            .await;
+        let svc = make_service_with_config(repo, provider, base_config());
+        let request = ExchangeRequest {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+            provider: "mock".to_string(),
+        };
+        svc.exchange(request)
+            .await
+            .expect("sub.example.com should be allowed");
+    }
+
+    // a.b.example.com should be allowed
+    {
+        let repo = MockRepository::new();
+        let provider = MockIdentityProvider::new("mock");
+        provider
+            .set_claims(IdentityClaims {
+                subject: "subject-2".to_string(),
+                email: Some("user@a.b.example.com".to_string()),
+                email_verified: Some(true),
+                name: None,
+                raw_claims: HashMap::new(),
+            })
+            .await;
+        let svc = make_service_with_config(repo, provider, base_config());
+        let request = ExchangeRequest {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+            provider: "mock".to_string(),
+        };
+        svc.exchange(request)
+            .await
+            .expect("a.b.example.com should be allowed");
+    }
+
+    // example.com itself should be rejected (wildcard requires subdomain)
+    {
+        let repo = MockRepository::new();
+        let provider = MockIdentityProvider::new("mock");
+        provider
+            .set_claims(IdentityClaims {
+                subject: "subject-3".to_string(),
+                email: Some("user@example.com".to_string()),
+                email_verified: Some(true),
+                name: None,
+                raw_claims: HashMap::new(),
+            })
+            .await;
+        let svc = make_service_with_config(repo, provider, base_config());
+        let request = ExchangeRequest {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+            provider: "mock".to_string(),
+        };
+        let err = svc
+            .exchange(request)
+            .await
+            .expect_err("example.com should be rejected by wildcard");
+        match err {
+            Error::AccessDenied { .. } => {}
+            other => panic!("expected AccessDenied, got: {:?}", other),
+        }
+    }
+
+    // notexample.com should be rejected
+    {
+        let repo = MockRepository::new();
+        let provider = MockIdentityProvider::new("mock");
+        provider
+            .set_claims(IdentityClaims {
+                subject: "subject-4".to_string(),
+                email: Some("user@notexample.com".to_string()),
+                email_verified: Some(true),
+                name: None,
+                raw_claims: HashMap::new(),
+            })
+            .await;
+        let svc = make_service_with_config(repo, provider, base_config());
+        let request = ExchangeRequest {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+            provider: "mock".to_string(),
+        };
+        let err = svc
+            .exchange(request)
+            .await
+            .expect_err("notexample.com should be rejected");
+        match err {
+            Error::AccessDenied { .. } => {}
+            other => panic!("expected AccessDenied, got: {:?}", other),
+        }
+    }
+}
+
+#[tokio::test]
+async fn exchange_existing_users_only_rejects_new_user() {
+    let config = AppConfig {
+        registration: RegistrationConfig {
+            mode: "existing_users_only".to_string(),
+            domain_allowlist: None,
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service_with_config(repo, provider, config);
+
+    let request = ExchangeRequest {
+        code: "code".to_string(),
+        redirect_uri: "https://app.test.com/callback".to_string(),
+        provider: "mock".to_string(),
+    };
+
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("should reject new user in existing_users_only mode");
+
+    match err {
+        Error::AccessDenied { .. } => {} // expected
+        other => panic!("expected AccessDenied, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn exchange_existing_user_bypasses_domain_allowlist() {
+    // Configure allowlist that does NOT include the user's domain
+    let config = AppConfig {
+        registration: RegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: Some(vec!["allowed-only.com".to_string()]),
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+
+    // Pre-create the user in the repository (simulating an existing user)
+    // The mock provider will return claims with subject "test-subject" and
+    // email "test@example.com" — a domain NOT in the allowlist.
+    repo.create_user(&NewUser {
+        external_id: "test-subject".to_string(),
+        provider: "mock".to_string(),
+        email: Some("test@example.com".to_string()),
+        display_name: Some("Test User".to_string()),
+    })
+    .await
+    .expect("pre-create user should succeed");
+
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service_with_config(repo, provider, config);
+
+    let request = ExchangeRequest {
+        code: "code".to_string(),
+        redirect_uri: "https://app.test.com/callback".to_string(),
+        provider: "mock".to_string(),
+    };
+
+    // Should succeed because existing users bypass the registration policy
+    svc.exchange(request)
+        .await
+        .expect("existing user should bypass domain allowlist");
+}
+
+#[tokio::test]
+async fn exchange_no_email_rejected_when_allowlist_configured() {
+    let config = AppConfig {
+        registration: RegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: Some(vec!["example.com".to_string()]),
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    // Set claims with no email
+    provider
+        .set_claims(IdentityClaims {
+            subject: "test-subject-no-email".to_string(),
+            email: None,
+            email_verified: None,
+            name: Some("No Email User".to_string()),
+            raw_claims: HashMap::new(),
+        })
+        .await;
+
+    let svc = make_service_with_config(repo, provider, config);
+
+    let request = ExchangeRequest {
+        code: "code".to_string(),
+        redirect_uri: "https://app.test.com/callback".to_string(),
+        provider: "mock".to_string(),
+    };
+
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("should reject when no email and allowlist is configured");
+
+    match err {
+        Error::AccessDenied { .. } => {} // expected
+        other => panic!("expected AccessDenied, got: {:?}", other),
     }
 }

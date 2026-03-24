@@ -42,6 +42,40 @@ fn parse_duration_secs(s: &str) -> Result<u64> {
     }
 }
 
+/// Check whether an email's domain matches any entry in the allowlist.
+///
+/// Each entry can be:
+/// - An exact domain, e.g. `example.com` — matches only `example.com`.
+/// - A wildcard, e.g. `*.example.com` — matches any subdomain such as
+///   `sub.example.com` or `a.b.example.com`, but NOT `example.com` itself.
+fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
+    let domain = match email.rsplit_once('@') {
+        Some((_, domain)) => domain,
+        None => return false,
+    };
+
+    let domain_lower = domain.to_lowercase();
+
+    for entry in allowlist {
+        let entry_lower = entry.to_lowercase();
+        if let Some(suffix) = entry_lower.strip_prefix('*') {
+            // Wildcard entry like "*.example.com" → suffix is ".example.com"
+            // The email domain must end with the suffix AND be strictly longer
+            // (i.e., there must be at least one subdomain level).
+            if domain_lower.ends_with(&suffix) && domain_lower.len() > suffix.len() {
+                return true;
+            }
+        } else {
+            // Exact match
+            if domain_lower == entry_lower {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 impl AppService {
     pub async fn exchange(&self, request: ExchangeRequest) -> Result<TokenResponse> {
         // 1. Resolve provider
@@ -60,7 +94,7 @@ impl AppService {
         // 3. Validate ID token and extract claims
         let claims = provider.validate_id_token(&tokens.id_token).await?;
 
-        // 4. Look up user by external ID
+        // 4. Look up user by external ID, applying registration policy for new users
         let user = match self.repo.get_user_by_external_id(&claims.subject).await? {
             Some(user) => {
                 if user.status != UserStatus::Active {
@@ -71,7 +105,34 @@ impl AppService {
                 user
             }
             None => {
-                // Create new user (registration policy enforcement is Task 7)
+                // Apply registration policy before creating a new user
+
+                // Check domain allowlist if configured
+                if let Some(ref allowlist) = self.config.registration.domain_allowlist {
+                    match claims.email {
+                        Some(ref email) => {
+                            if !matches_domain_allowlist(email, allowlist) {
+                                return Err(Error::AccessDenied {
+                                    reason: "email domain not in allowlist".to_string(),
+                                });
+                            }
+                        }
+                        None => {
+                            return Err(Error::AccessDenied {
+                                reason: "email required when domain allowlist is configured"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                }
+
+                // Check registration mode
+                if self.config.registration.mode == "existing_users_only" {
+                    return Err(Error::AccessDenied {
+                        reason: "registration is restricted to existing users only".to_string(),
+                    });
+                }
+
                 let new_user = NewUser {
                     external_id: claims.subject.clone(),
                     provider: request.provider.clone(),
@@ -159,7 +220,7 @@ impl AppService {
 /// unit testing via integration tests.
 #[cfg(test)]
 mod tests {
-    use super::parse_duration_secs;
+    use super::{matches_domain_allowlist, parse_duration_secs};
 
     #[test]
     fn parse_duration_secs_works() {
@@ -170,5 +231,55 @@ mod tests {
         assert!(parse_duration_secs("").is_err());
         assert!(parse_duration_secs("abc").is_err());
         assert!(parse_duration_secs("15x").is_err());
+    }
+
+    #[test]
+    fn domain_allowlist_exact_match() {
+        let allowlist = vec!["example.com".to_string()];
+        assert!(matches_domain_allowlist("user@example.com", &allowlist));
+        assert!(!matches_domain_allowlist("user@other.com", &allowlist));
+        assert!(!matches_domain_allowlist("user@sub.example.com", &allowlist));
+    }
+
+    #[test]
+    fn domain_allowlist_wildcard_match() {
+        let allowlist = vec!["*.example.com".to_string()];
+        assert!(matches_domain_allowlist("user@sub.example.com", &allowlist));
+        assert!(matches_domain_allowlist("user@a.b.example.com", &allowlist));
+        assert!(
+            !matches_domain_allowlist("user@example.com", &allowlist),
+            "wildcard requires at least one subdomain"
+        );
+        assert!(!matches_domain_allowlist("user@notexample.com", &allowlist));
+    }
+
+    #[test]
+    fn domain_allowlist_case_insensitive() {
+        let allowlist = vec!["Example.COM".to_string()];
+        assert!(matches_domain_allowlist("user@example.com", &allowlist));
+        assert!(matches_domain_allowlist("user@EXAMPLE.COM", &allowlist));
+    }
+
+    #[test]
+    fn domain_allowlist_no_at_sign() {
+        let allowlist = vec!["example.com".to_string()];
+        assert!(!matches_domain_allowlist("noemailformat", &allowlist));
+    }
+
+    #[test]
+    fn domain_allowlist_empty_list() {
+        let allowlist: Vec<String> = vec![];
+        assert!(!matches_domain_allowlist("user@example.com", &allowlist));
+    }
+
+    #[test]
+    fn domain_allowlist_multiple_entries() {
+        let allowlist = vec![
+            "example.com".to_string(),
+            "*.acme.corp".to_string(),
+        ];
+        assert!(matches_domain_allowlist("user@example.com", &allowlist));
+        assert!(matches_domain_allowlist("user@dev.acme.corp", &allowlist));
+        assert!(!matches_domain_allowlist("user@other.org", &allowlist));
     }
 }
