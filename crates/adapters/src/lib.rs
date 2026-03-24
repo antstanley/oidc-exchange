@@ -1,3 +1,4 @@
+pub mod dynamo;
 pub mod local_keys;
 pub mod noop;
 pub mod oidc;
