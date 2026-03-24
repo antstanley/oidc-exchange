@@ -1,0 +1,5 @@
+{
+  "name": "oidc-exchange-aws-web-example",
+  "private": true,
+  "workspaces": ["infra", "demo-app"]
+}

@@ -1,0 +1,43 @@
+[server]
+issuer = "${ISSUER_URL}"
+
+[registration]
+mode = "open"
+
+[token]
+access_token_ttl = "15m"
+refresh_token_ttl = "30d"
+audience = "${AUDIENCE_URL}"
+
+[key_manager]
+adapter = "kms"
+
+[key_manager.kms]
+key_id = "${KMS_KEY_ID}"
+algorithm = "ECDSA_SHA_256"
+kid = "example-key-1"
+
+[repository]
+adapter = "dynamodb"
+
+[repository.dynamodb]
+table_name = "${TABLE_NAME}"
+
+[audit]
+adapter = "cloudtrail"
+blocking_threshold = "warning"
+
+[audit.cloudtrail]
+channel_arn = "${CLOUDTRAIL_CHANNEL_ARN}"
+
+[telemetry]
+enabled = true
+exporter = "xray"
+service_name = "oidc-exchange-example"
+
+[providers.google]
+adapter = "oidc"
+issuer = "https://accounts.google.com"
+client_id = "${GOOGLE_CLIENT_ID}"
+client_secret = "${GOOGLE_CLIENT_SECRET}"
+scopes = ["openid", "email", "profile"]
