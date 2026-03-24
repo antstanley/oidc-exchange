@@ -1,4 +1,5 @@
 pub mod health;
+pub mod internal;
 pub mod keys;
 pub mod revoke;
 pub mod token;
@@ -19,4 +20,8 @@ pub fn public_routes() -> Router<AppState> {
             get(well_known::openid_config_handler),
         )
         .route("/health", get(health::health_handler))
+}
+
+pub fn internal_routes(state: AppState) -> Router<AppState> {
+    internal::router(state)
 }

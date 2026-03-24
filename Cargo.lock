@@ -1932,6 +1932,7 @@ dependencies = [
  "oidc-exchange-test-utils",
  "serde",
  "serde_json",
+ "subtle",
  "tokio",
  "toml",
  "tower",
