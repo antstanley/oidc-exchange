@@ -26,6 +26,7 @@ ulid = "1"
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
+toml = "0.8"
 
 # Internal crates
 oidc-exchange-core = { path = "crates/core" }
