@@ -30,3 +30,4 @@ oidc-exchange-test-utils.workspace = true
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true, features = ["full"] }
+base64.workspace = true

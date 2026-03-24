@@ -1928,6 +1928,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
  "axum",
+ "base64 0.22.1",
  "config",
  "futures",
  "http-body-util",

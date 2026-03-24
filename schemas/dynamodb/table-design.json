@@ -1,0 +1,84 @@
+{
+  "table": {
+    "table_name": "oidc-exchange",
+    "key_schema": {
+      "pk": { "type": "S", "description": "Partition key" },
+      "sk": { "type": "S", "description": "Sort key" }
+    },
+    "global_secondary_indexes": [
+      {
+        "index_name": "GSI1",
+        "key_schema": {
+          "GSI1pk": { "type": "S" },
+          "GSI1sk": { "type": "S" }
+        },
+        "projection": "ALL"
+      }
+    ]
+  },
+  "access_patterns": {
+    "get_user_by_id": {
+      "operation": "GetItem",
+      "pk": "USER#<user_id>",
+      "sk": "PROFILE"
+    },
+    "get_user_by_external_id": {
+      "operation": "Query",
+      "index": "GSI1",
+      "GSI1pk": "EXT#<external_id>",
+      "GSI1sk": "USER"
+    },
+    "get_session_by_refresh_token": {
+      "operation": "GetItem",
+      "pk": "SESSION#<refresh_token_hash>",
+      "sk": "SESSION"
+    },
+    "list_user_sessions": {
+      "operation": "Query",
+      "index": "GSI1",
+      "GSI1pk": "USER#<user_id>",
+      "GSI1sk": "begins_with SESSION#"
+    },
+    "revoke_all_user_sessions": {
+      "operation": "Query + BatchWrite (delete)",
+      "description": "Query all sessions for user via GSI1, then batch delete"
+    }
+  },
+  "item_schemas": {
+    "User": {
+      "pk": "USER#<id>",
+      "sk": "PROFILE",
+      "GSI1pk": "EXT#<external_id>",
+      "GSI1sk": "USER",
+      "attributes": {
+        "id": "S",
+        "external_id": "S",
+        "provider": "S",
+        "email": "S (optional)",
+        "display_name": "S (optional)",
+        "metadata": "S (JSON string, optional)",
+        "claims": "S (JSON string, optional)",
+        "status": "S",
+        "created_at": "S (ISO 8601)",
+        "updated_at": "S (ISO 8601)"
+      }
+    },
+    "Session": {
+      "pk": "SESSION#<refresh_token_hash>",
+      "sk": "SESSION",
+      "GSI1pk": "USER#<user_id>",
+      "GSI1sk": "SESSION#<created_at>",
+      "attributes": {
+        "user_id": "S",
+        "refresh_token_hash": "S",
+        "provider": "S",
+        "expires_at": "S (ISO 8601)",
+        "device_id": "S (optional)",
+        "user_agent": "S (optional)",
+        "ip_address": "S (optional)",
+        "created_at": "S (ISO 8601)",
+        "ttl": "N (epoch seconds, DynamoDB TTL)"
+      }
+    }
+  }
+}

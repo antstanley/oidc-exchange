@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OIDC Exchange Data Model",
+  "definitions": {
+    "User": {
+      "type": "object",
+      "required": ["id", "external_id", "provider", "status", "created_at", "updated_at"],
+      "properties": {
+        "id": { "type": "string", "description": "Internal user ID (e.g., usr_01ARZ3NDEK...)" },
+        "external_id": { "type": "string", "description": "Provider subject claim or DID" },
+        "provider": { "type": "string", "description": "Provider identifier (google, apple, atproto)" },
+        "email": { "type": ["string", "null"] },
+        "display_name": { "type": ["string", "null"] },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Extensible key-value pairs for sync data"
+        },
+        "claims": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Per-user private claims added to access token JWT, managed via internal API"
+        },
+        "status": { "enum": ["active", "suspended", "deleted"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "Session": {
+      "type": "object",
+      "required": ["user_id", "refresh_token_hash", "provider", "expires_at", "created_at"],
+      "properties": {
+        "user_id": { "type": "string" },
+        "refresh_token_hash": { "type": "string", "description": "SHA-256 hash of the opaque refresh token" },
+        "provider": { "type": "string" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "device_id": { "type": ["string", "null"] },
+        "user_agent": { "type": ["string", "null"] },
+        "ip_address": { "type": ["string", "null"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "AuditEvent": {
+      "type": "object",
+      "required": ["id", "timestamp", "severity", "event_type", "outcome"],
+      "properties": {
+        "id": { "type": "string", "description": "ULID" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "severity": { "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"] },
+        "event_type": { "type": "string" },
+        "actor": { "type": ["string", "null"], "description": "User ID if known" },
+        "provider": { "type": ["string", "null"] },
+        "ip_address": { "type": ["string", "null"] },
+        "user_agent": { "type": ["string", "null"] },
+        "detail": { "type": "object", "additionalProperties": true },
+        "outcome": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": { "enum": ["success", "failure"] },
+            "reason": { "type": ["string", "null"] }
+          }
+        }
+      }
+    }
+  }
+}
