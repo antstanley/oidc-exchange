@@ -1,3 +1,4 @@
+pub mod claims;
 pub mod exchange;
 pub mod refresh;
 pub mod revoke;
@@ -56,7 +57,7 @@ impl AppService {
             aud: self.config.token.audience.clone().unwrap_or_default(),
             iat: now.timestamp() as u64,
             exp: (now.timestamp() as u64) + access_ttl_secs,
-            custom: HashMap::new(), // custom claims resolution is Task 11
+            custom: claims::resolve_custom_claims(&self.config.token.custom_claims, user),
         };
 
         let claims_json = serde_json::to_vec(&access_claims).map_err(|e| {
