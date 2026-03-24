@@ -1,5 +1,6 @@
 pub mod exchange;
 pub mod refresh;
+pub mod revoke;
 
 use std::collections::HashMap;
 
