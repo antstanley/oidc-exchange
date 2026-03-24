@@ -9,7 +9,9 @@ use base64::Engine;
 use chrono::Utc;
 
 use crate::config::AppConfig;
-use crate::domain::{AccessTokenClaims, User};
+use crate::domain::{
+    AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
+};
 use crate::error::{Error, Result};
 use crate::ports::{AuditLog, IdentityProvider, KeyManager, Repository, UserSync};
 
@@ -80,6 +82,70 @@ impl AppService {
         let access_token = format!("{}.{}", signing_input, sig_b64);
 
         Ok((access_token, access_ttl_secs))
+    }
+
+    pub async fn emit_audit(&self, event: AuditEvent) -> Result<()> {
+        match self.audit.emit(&event).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Always emit to stdout/stderr as fallback
+                let serialized = serde_json::to_string(&event)
+                    .unwrap_or_else(|_| format!("{:?}", event));
+
+                if event.severity as u8 <= AuditSeverity::Error as u8 {
+                    eprintln!("{serialized}");
+                } else {
+                    println!("{serialized}");
+                }
+
+                // Parse blocking threshold from config
+                let threshold = parse_severity(&self.config.audit.blocking_threshold)
+                    .unwrap_or(AuditSeverity::Warning);
+
+                if event.severity as u8 <= threshold as u8 {
+                    // Severity meets blocking threshold — fail the operation
+                    Err(e)
+                } else {
+                    tracing::warn!(error = %e, "audit provider down, event emitted to std stream");
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+pub fn create_audit_event(
+    event_type: AuditEventType,
+    severity: AuditSeverity,
+    outcome: AuditOutcome,
+    actor: Option<String>,
+    provider: Option<String>,
+) -> AuditEvent {
+    AuditEvent {
+        id: ulid::Ulid::new().to_string(),
+        timestamp: Utc::now(),
+        severity,
+        event_type,
+        actor,
+        provider,
+        ip_address: None,
+        user_agent: None,
+        detail: HashMap::new(),
+        outcome,
+    }
+}
+
+pub fn parse_severity(s: &str) -> Option<AuditSeverity> {
+    match s.trim().to_lowercase().as_str() {
+        "emergency" => Some(AuditSeverity::Emergency),
+        "alert" => Some(AuditSeverity::Alert),
+        "critical" => Some(AuditSeverity::Critical),
+        "error" => Some(AuditSeverity::Error),
+        "warning" => Some(AuditSeverity::Warning),
+        "notice" => Some(AuditSeverity::Notice),
+        "info" => Some(AuditSeverity::Info),
+        "debug" => Some(AuditSeverity::Debug),
+        _ => None,
     }
 }
 
