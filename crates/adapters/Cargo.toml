@@ -10,9 +10,9 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 base64.workspace = true
 aws-sdk-dynamodb = "1"
 aws-sdk-cloudtraildata = "1"
