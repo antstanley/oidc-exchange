@@ -85,7 +85,7 @@ oidc-exchange/
 │   │   │   ├── lib.rs
 │   │   │   ├── ports/
 │   │   │   │   ├── mod.rs
-│   │   │   │   ├── session_store.rs
+│   │   │   │   ├── repository.rs
 │   │   │   │   ├── key_manager.rs
 │   │   │   │   ├── audit.rs
 │   │   │   │   ├── identity_provider.rs
@@ -168,11 +168,11 @@ The workspace compiles to a single binary from the `server` crate. All adapters 
 
 All ports live in `crates/core/src/ports/`. They define contracts the core depends on — no adapter-specific types leak in. All return `Result<T>` using a domain-specific error type. Adapters map their internal errors into domain errors before returning.
 
-### SessionStore
+### Repository
 
 ```rust
 #[async_trait]
-pub trait SessionStore: Send + Sync {
+pub trait Repository: Send + Sync {
     // User operations
     async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>>;
     async fn get_user_by_external_id(&self, external_id: &str) -> Result<Option<User>>;
@@ -186,6 +186,8 @@ pub trait SessionStore: Send + Sync {
     async fn revoke_session(&self, token_hash: &str) -> Result<()>;
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
 }
+// Note: User listing/search is deferred to a future enhancement. v1 supports lookup by ID or external_id only.
+// User ID generation: `usr_` prefix + ULID, generated in the core service layer.
 ```
 
 ### KeyManager
@@ -247,6 +249,25 @@ pub trait UserSync: Send + Sync {
     async fn notify_user_deleted(&self, user_id: &str) -> Result<()>;
 }
 ```
+
+**Webhook adapter contract:**
+
+The webhook adapter sends notifications as HTTP requests:
+
+- **Method:** `POST`
+- **Content-Type:** `application/json`
+- **Authentication:** HMAC-SHA256 of the raw request body using the configured `secret`, sent in `X-Signature-256` header (hex-encoded)
+- **Payload:**
+  ```json
+  {
+    "event": "user.created",
+    "timestamp": "2026-03-24T10:00:00Z",
+    "data": { /* User object */ }
+  }
+  ```
+  Event types: `user.created`, `user.updated`, `user.deleted`
+- **Success:** Any 2xx response
+- **Retry:** Up to `retries` attempts (configurable) with exponential backoff on 5xx or timeout
 
 ---
 
@@ -315,6 +336,7 @@ The raw refresh token is only held in memory during issuance and returned to the
 /// Returned to the client from POST /token
 pub struct TokenResponse {
     pub access_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,   // present on code exchange, absent on refresh
     pub token_type: &'static str,        // always "Bearer"
     pub expires_in: u64,                 // seconds
@@ -327,8 +349,10 @@ pub struct AccessTokenClaims {
     pub aud: String,
     pub iat: u64,
     pub exp: u64,
+    #[serde(flatten)]
     pub custom: HashMap<String, Value>,  // merged: config template claims + user.claims
 }
+// Note: `aud` is a single string (v1 simplification). Multi-audience (array) is a future enhancement.
 
 /// What we get back from a provider after code exchange
 pub struct ProviderTokens {
@@ -403,15 +427,18 @@ pub enum AuditOutcome {
 /// Loaded from TOML config — standard OIDC providers need only this
 pub struct OidcProviderConfig {
     pub provider_id: String,
-    pub issuer: String,
+    pub issuer: String,                              // required — used for discovery
     pub client_id: String,
     pub client_secret: Option<String>,
-    pub jwks_uri: String,
-    pub token_endpoint: String,
-    pub revocation_endpoint: Option<String>,
+    pub jwks_uri: Option<String>,                    // optional — discovered from issuer if absent
+    pub token_endpoint: Option<String>,              // optional — discovered from issuer if absent
+    pub revocation_endpoint: Option<String>,         // optional — discovered from issuer if absent
     pub scopes: Vec<String>,
     pub additional_params: HashMap<String, String>,
 }
+// For Tier 1 providers, only `issuer`, `client_id`, and `client_secret` are required.
+// Endpoint fields are populated from the issuer's .well-known/openid-configuration at startup.
+// If provided in config, they override the discovered values.
 ```
 
 ---
@@ -424,7 +451,7 @@ The `service/` module in core contains business logic that coordinates ports.
 
 ```rust
 pub struct AppService {
-    sessions: Box<dyn SessionStore>,
+    repo: Box<dyn Repository>,
     keys: Box<dyn KeyManager>,
     audit: Box<dyn AuditLog>,
     user_sync: Box<dyn UserSync>,
@@ -436,30 +463,31 @@ pub struct AppService {
 ### Token Exchange Flow (POST /token with grant_type=authorization_code)
 
 1. Resolve provider from request (`provider` field maps to provider lookup)
-2. Audit: emit `TokenExchange` event (Info, non-blocking)
-3. `provider.exchange_code(code, redirect_uri)`
-4. `provider.validate_id_token(id_token)` — verify signature via provider JWKS, validate `iss`, `aud`, `exp`
-5. **Registration policy check:**
-   - If `domain_allowlist` is configured:
-     - Extract domain from `claims.email`
-     - If no email claim → reject with `access_denied`, audit `RegistrationDenied`
-     - If domain not in allowlist (exact or wildcard match) → reject with `access_denied`, audit `RegistrationDenied`
-   - `sessions.get_user_by_external_id(claims.subject)`:
+2. `provider.exchange_code(code, redirect_uri)`
+3. `provider.validate_id_token(id_token)` — verify signature via provider JWKS, validate `iss`, `aud`, `exp`
+4. **User lookup and registration policy check:**
+   - `repo.get_user_by_external_id(claims.subject)`:
      - If Some(user) and `user.status != Active` → reject, audit `Unauthorized`
-     - If Some(user) and `user.status == Active` → proceed to step 6
-     - If None and `mode == "open"` → `sessions.create_user(new_user)`, audit `UserCreated` (Notice), `user_sync.notify_user_created(user)`
-     - If None and `mode == "existing_users_only"` → reject with `access_denied`, audit `RegistrationDenied`
-6. Generate refresh token (random 256-bit, base64url encoded)
-7. `sessions.store_refresh_token(Session { token_hash: sha256(token), ... })`
-8. `keys.sign(access_token_claims)` to produce JWT
-9. Audit: emit `TokenExchange` outcome (Notice, blocking per config)
+     - If Some(user) and `user.status == Active` → proceed to step 5 (existing users bypass registration policy)
+     - If None → apply registration policy:
+       - If `domain_allowlist` is configured:
+         - Extract domain from `claims.email`
+         - If no email claim → reject with `access_denied`, audit `RegistrationDenied`
+         - If domain not in allowlist (exact or wildcard match) → reject with `access_denied`, audit `RegistrationDenied`
+       - If `mode == "open"` → `repo.create_user(new_user)`, audit `UserCreated` (Notice)
+       - If `mode == "existing_users_only"` → reject with `access_denied`, audit `RegistrationDenied`
+5. Generate refresh token (random 256-bit, base64url encoded)
+6. `repo.store_refresh_token(Session { token_hash: sha256(token), ... })`
+7. `keys.sign(access_token_claims)` to produce JWT
+8. Audit: emit `TokenExchange` outcome (Notice, blocking per config)
+9. `user_sync.notify_user_created(user)` if new user — **non-blocking**: sync failures are logged via `tracing::warn!` and do not fail the exchange
 10. Return `TokenResponse { access_token, refresh_token, ... }`
 
 ### Token Refresh Flow (POST /token with grant_type=refresh_token)
 
 1. Hash the presented refresh token
-2. `sessions.get_session_by_refresh_token(hash)` — if None or expired, reject, audit `Unauthorized`
-3. `sessions.get_user_by_id(session.user_id)` — if `status != Active`, reject, audit `Unauthorized`
+2. `repo.get_session_by_refresh_token(hash)` — if None or expired, reject, audit `Unauthorized`
+3. `repo.get_user_by_id(session.user_id)` — if `status != Active`, reject, audit `Unauthorized`
 4. `keys.sign(new_access_token_claims)` to produce JWT
 5. Audit: emit `TokenRefresh` (Info, non-blocking)
 6. Return `TokenResponse { access_token, token_type, expires_in }` (no new refresh token)
@@ -467,8 +495,8 @@ pub struct AppService {
 ### Revocation Flow (POST /revoke)
 
 1. Accept either `refresh_token` or `access_token` with `token_type_hint`
-2. If refresh_token: hash it, `sessions.revoke_session(hash)`
-3. If access_token: decode JWT, extract `sub`, `sessions.revoke_all_user_sessions(user_id)` (since individual JWTs can't be revoked)
+2. If refresh_token: hash it, `repo.revoke_session(hash)`
+3. If access_token: decode JWT, extract `sub`, `repo.revoke_all_user_sessions(user_id)` (since individual JWTs can't be revoked)
 4. Optionally revoke at upstream provider if supported
 5. Audit: emit `TokenRevocation` (Notice, blocking per config)
 6. Return `200 OK` (per RFC 7009, always 200 even if token unknown)
@@ -540,6 +568,7 @@ Reserved claim names (`sub`, `iss`, `aud`, `iat`, `exp`) cannot be overridden by
 | POST | `/revoke` | Token revocation |
 | GET | `/keys` | JWKS endpoint |
 | GET | `/.well-known/openid-configuration` | OIDC discovery document |
+| GET | `/health` | Health check (200 if operational) |
 | POST | `/internal/users` | Create/upsert user (trusted) |
 | GET | `/internal/users/{id}` | Get user (trusted) |
 | PATCH | `/internal/users/{id}` | Update user (trusted) |
@@ -620,7 +649,7 @@ Always returns `200 OK` with empty body.
   "grant_types_supported": ["authorization_code", "refresh_token"],
   "response_types_supported": ["code"],
   "subject_types_supported": ["public"],
-  "id_token_signing_alg_values_supported": ["EdDSA"]
+  "id_token_signing_alg_values_supported": ["EdDSA"]  // dynamically populated from key_manager.algorithm()
 }
 ```
 
@@ -803,10 +832,10 @@ private_key_path = "/secrets/ed25519.pem"
 algorithm = "EdDSA"
 kid = "key-2024-01"
 
-[session_store]
+[repository]
 adapter = "dynamodb"
 
-[session_store.dynamodb]
+[repository.dynamodb]
 table_name = "oidc-exchange"
 region = "us-east-1"
 
@@ -854,7 +883,7 @@ client_id = "https://example.com/oauth/client-metadata.json"
 ### Config Loading Order
 
 1. Load `config/default.toml` (compiled-in defaults)
-2. Load `config/{ENVIRONMENT}.toml` if it exists (e.g., `config/production.toml`)
+2. Load `config/{ENVIRONMENT}.toml` if it exists (e.g., `config/production.toml`). The `OIDC_EXCHANGE_ENV` environment variable sets `ENVIRONMENT`; defaults to `default` if unset.
 3. Override with environment variables: `OIDC_EXCHANGE__{section}__{key}`
 4. Resolve `${VAR_NAME}` placeholders from environment
 
@@ -978,6 +1007,9 @@ Responses follow OAuth 2.0 error codes (RFC 6749 Section 5.2):
 | ProviderError | 502 | `server_error` |
 | ProviderTimeout | 504 | `server_error` |
 | StoreError, KeyError, AuditError | 500 | `server_error` |
+| ConfigError | 500 | `server_error` |
+
+`SyncError` is not mapped to an HTTP response — user sync is non-blocking and never fails a request. Sync failures are logged via `tracing::warn!`. `ConfigError` is typically startup-fatal, but can occur at runtime during custom claims template resolution.
 
 Internal details are never leaked to the client. `server_error` responses log the detail internally and return a generic message.
 
@@ -1230,7 +1262,7 @@ Key design decisions:
 
 Dev-dependency providing:
 
-- `MockSessionStore` — in-memory `HashMap` implementation
+- `MockRepository` — in-memory `HashMap` implementation
 - `MockKeyManager` — deterministic Ed25519 key pair, reproducible across test runs
 - `MockAuditLog` — collects events into `Vec<AuditEvent>` for assertion
 - `MockUserSync` — records calls for assertion
