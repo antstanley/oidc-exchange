@@ -201,7 +201,7 @@ mod tests {
         use rsa::pkcs8::EncodePrivateKey;
         use rsa::traits::PublicKeyParts;
 
-        let rsa_key = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let rsa_key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
         let pkcs8_pem = rsa_key
             .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
             .unwrap();
@@ -209,8 +209,10 @@ mod tests {
 
         // Extract public key components for JWKS
         let public_key = rsa_key.to_public_key();
-        let n = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
-        let e = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+        let n_bytes = public_key.n().to_be_bytes();
+        let e_bytes = public_key.e().to_be_bytes();
+        let n = URL_SAFE_NO_PAD.encode(&n_bytes);
+        let e = URL_SAFE_NO_PAD.encode(&e_bytes);
 
         let kid = "test-key-1".to_string();
         let jwks = json!({

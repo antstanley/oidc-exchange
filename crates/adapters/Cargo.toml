@@ -10,9 +10,9 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-reqwest = { version = "0.13", features = ["json"] }
-ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
-jsonwebtoken = "10"
+reqwest = { version = "0.13", features = ["json", "form"] }
+ed25519-dalek = { version = "3.0.0-pre.6", features = ["rand_core", "pkcs8", "pem"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 base64.workspace = true
 aws-sdk-dynamodb = "1"
 aws-sdk-cloudtraildata = "1"
@@ -29,4 +29,4 @@ oidc-exchange-test-utils.workspace = true
 wiremock = "0.6"
 tempfile = "3"
 rand.workspace = true
-rsa = "0.9"
+rsa = "0.10.0-rc.1"

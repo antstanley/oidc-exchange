@@ -124,9 +124,7 @@ impl AppService {
         };
 
         // 5. Generate refresh token (256-bit random, base64url-encoded)
-        use rand::RngCore;
-        let mut token_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut token_bytes);
+        let token_bytes: [u8; 32] = rand::random();
         let refresh_token = URL_SAFE_NO_PAD.encode(token_bytes);
 
         // 6. Hash refresh token with SHA-256 (hex-encoded)

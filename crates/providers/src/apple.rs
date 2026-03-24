@@ -330,16 +330,20 @@ mod tests {
     fn generate_es256_test_keys() -> (Vec<u8>, serde_json::Value, String) {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
-        let signing_key = SigningKey::random(&mut rand::thread_rng());
+        use p256::elliptic_curve::Generate;
+        let signing_key = SigningKey::generate();
         let pem = signing_key
             .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
             .expect("PEM encoding should work");
 
         // Extract the public key for JWKS
         let verifying_key = signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(false);
-        let x = URL_SAFE_NO_PAD.encode(point.x().expect("x coord"));
-        let y = URL_SAFE_NO_PAD.encode(point.y().expect("y coord"));
+        // Extract raw public key bytes (uncompressed SEC1: 04 || x || y, 65 bytes for P-256)
+        let public_key = p256::PublicKey::from(verifying_key);
+        let sec1_bytes = public_key.to_sec1_bytes();
+        // Skip the 0x04 prefix byte, split into x (32 bytes) and y (32 bytes)
+        let x = URL_SAFE_NO_PAD.encode(&sec1_bytes[1..33]);
+        let y = URL_SAFE_NO_PAD.encode(&sec1_bytes[33..65]);
 
         let kid = "apple-test-key-1".to_string();
         let jwks = json!({
@@ -404,24 +408,24 @@ mod tests {
         assert_eq!(header.alg, Algorithm::ES256);
         assert_eq!(header.kid.as_deref(), Some("apple-test-key-1"));
 
-        // Decode claims (skip signature verification, just inspect payload)
-        let mut validation = Validation::new(Algorithm::ES256);
-        validation.insecure_disable_signature_validation();
-        validation.set_audience(&["https://appleid.apple.com"]);
-        validation.set_issuer(&["ABCDEF1234"]);
-        validation.set_required_spec_claims(&["iss", "sub", "aud", "iat", "exp"]);
+        // Decode claims by manually parsing the JWT payload (no signature verification needed)
+        let parts: Vec<&str> = secret.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT should have 3 parts");
+        use base64::Engine as _;
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .expect("valid base64url payload");
+        let claims: ClientSecretClaims =
+            serde_json::from_slice(&payload_bytes).expect("valid JSON claims");
 
-        let token_data = decode::<ClientSecretClaims>(&secret, &DecodingKey::from_secret(b""), &validation)
-            .expect("should decode claims");
-
-        assert_eq!(token_data.claims.iss, "ABCDEF1234");
-        assert_eq!(token_data.claims.sub, "com.example.app");
-        assert_eq!(token_data.claims.aud, "https://appleid.apple.com");
+        assert_eq!(claims.iss, "ABCDEF1234");
+        assert_eq!(claims.sub, "com.example.app");
+        assert_eq!(claims.aud, "https://appleid.apple.com");
 
         let now = now_epoch();
-        assert!(token_data.claims.iat <= now);
-        assert!(token_data.claims.exp > now);
-        assert!(token_data.claims.exp <= now + CLIENT_SECRET_LIFETIME_SECS + 1);
+        assert!(claims.iat <= now);
+        assert!(claims.exp > now);
+        assert!(claims.exp <= now + CLIENT_SECRET_LIFETIME_SECS + 1);
     }
 
     // ---------------------------------------------------------------

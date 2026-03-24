@@ -82,8 +82,7 @@ mod tests {
     #[tokio::test]
     async fn test_local_key_manager_sign_and_verify() {
         // 1. Generate an Ed25519 keypair
-        let mut rng = rand::thread_rng();
-        let signing_key = SigningKey::generate(&mut rng);
+        let signing_key = SigningKey::generate(&mut rand::rng());
 
         // 2. Write the private key as PEM to a temp file
         let pem_doc = signing_key
