@@ -12,6 +12,7 @@ tracing.workspace = true
 tokio.workspace = true
 reqwest = { version = "0.12", features = ["json"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+jsonwebtoken = "9"
 base64.workspace = true
 
 [dev-dependencies]
@@ -19,3 +20,4 @@ oidc-exchange-test-utils.workspace = true
 wiremock = "0.6"
 tempfile = "3"
 rand.workspace = true
+rsa = "0.9"
