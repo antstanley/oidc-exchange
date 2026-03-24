@@ -107,7 +107,7 @@ export class OidcExchangeExampleStack extends cdk.Stack {
     );
 
     const demoAppFunction = new lambda.Function(this, 'DemoAppFunction', {
-      runtime: lambda.Runtime.NODEJS_22_X,
+      runtime: lambda.Runtime.NODEJS_24_X,
       handler: 'run.sh',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../demo-app/dist/svelteKit')),
       memorySize: 256,
