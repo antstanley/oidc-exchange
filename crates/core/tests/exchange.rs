@@ -61,8 +61,9 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     let svc = make_service(repo.clone(), provider);
 
     let request = ExchangeRequest {
-        code: "auth-code-123".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("auth-code-123".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
 
@@ -114,8 +115,9 @@ async fn exchange_existing_user_does_not_create_new() {
 
     // First exchange: creates user
     let request1 = ExchangeRequest {
-        code: "code-1".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code-1".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
     let resp1 = svc
@@ -125,8 +127,9 @@ async fn exchange_existing_user_does_not_create_new() {
 
     // Second exchange: same external_id, should reuse user
     let request2 = ExchangeRequest {
-        code: "code-2".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code-2".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
     let resp2 = svc
@@ -164,8 +167,9 @@ async fn exchange_suspended_user_is_rejected() {
 
     // First exchange creates the user
     let request = ExchangeRequest {
-        code: "code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
     svc.exchange(request)
@@ -190,8 +194,9 @@ async fn exchange_suspended_user_is_rejected() {
 
     // Second exchange should fail
     let request2 = ExchangeRequest {
-        code: "code-2".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code-2".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
     let err = svc
@@ -214,8 +219,9 @@ async fn exchange_unknown_provider_is_rejected() {
     let svc = make_service(repo, provider);
 
     let request = ExchangeRequest {
-        code: "code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "nonexistent".to_string(),
     };
     let err = svc
@@ -261,8 +267,9 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: "code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
 
@@ -302,8 +309,9 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: "code".to_string(),
-            redirect_uri: "https://app.test.com/callback".to_string(),
+            code: Some("code".to_string()),
+            redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
             provider: "mock".to_string(),
         };
         svc.exchange(request)
@@ -326,8 +334,9 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: "code".to_string(),
-            redirect_uri: "https://app.test.com/callback".to_string(),
+            code: Some("code".to_string()),
+            redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
             provider: "mock".to_string(),
         };
         svc.exchange(request)
@@ -350,8 +359,9 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: "code".to_string(),
-            redirect_uri: "https://app.test.com/callback".to_string(),
+            code: Some("code".to_string()),
+            redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
             provider: "mock".to_string(),
         };
         let err = svc
@@ -379,8 +389,9 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: "code".to_string(),
-            redirect_uri: "https://app.test.com/callback".to_string(),
+            code: Some("code".to_string()),
+            redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
             provider: "mock".to_string(),
         };
         let err = svc
@@ -409,8 +420,9 @@ async fn exchange_existing_users_only_rejects_new_user() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: "code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
 
@@ -454,8 +466,9 @@ async fn exchange_existing_user_bypasses_domain_allowlist() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: "code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
 
@@ -491,8 +504,9 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: "code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
 
@@ -504,5 +518,53 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
     match err {
         Error::AccessDenied { .. } => {} // expected
         other => panic!("expected AccessDenied, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn exchange_with_direct_id_token_skips_code_exchange() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+
+    let svc = make_service(repo.clone(), provider);
+
+    // Use id_token grant — no code or redirect_uri needed
+    let request = ExchangeRequest {
+        code: None,
+        redirect_uri: None,
+        id_token: Some("fake.id.token".to_string()),
+        provider: "mock".to_string(),
+    };
+
+    let result = svc.exchange(request).await.expect("id_token exchange should succeed");
+
+    assert!(!result.access_token.is_empty());
+    assert!(result.refresh_token.is_some());
+    assert_eq!(result.token_type, "Bearer");
+
+    // Verify user was created
+    let users = repo.get_all_users().await;
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].external_id, "test-subject");
+}
+
+#[tokio::test]
+async fn exchange_with_neither_code_nor_id_token_fails() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+
+    let svc = make_service(repo, provider);
+
+    let request = ExchangeRequest {
+        code: None,
+        redirect_uri: None,
+        id_token: None,
+        provider: "mock".to_string(),
+    };
+
+    let err = svc.exchange(request).await.expect_err("should fail without code or id_token");
+    match err {
+        Error::InvalidRequest { .. } => {}
+        other => panic!("expected InvalidRequest, got: {:?}", other),
     }
 }

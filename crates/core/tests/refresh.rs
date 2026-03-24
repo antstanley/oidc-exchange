@@ -55,8 +55,9 @@ async fn exchange_and_get_refresh_token(
     svc: &AppService,
 ) -> String {
     let request = ExchangeRequest {
-        code: "auth-code-123".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("auth-code-123".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
     let response = svc.exchange(request).await.expect("exchange should succeed");

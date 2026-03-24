@@ -8,8 +8,9 @@ use crate::error::{Error, Result};
 use crate::service::{parse_duration_secs, AppService};
 
 pub struct ExchangeRequest {
-    pub code: String,
-    pub redirect_uri: String,
+    pub code: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub id_token: Option<String>,
     pub provider: String,
 }
 
@@ -57,13 +58,21 @@ impl AppService {
                     provider: request.provider.clone(),
                 })?;
 
-        // 2. Exchange code for provider tokens
-        let tokens = provider
-            .exchange_code(&request.code, &request.redirect_uri)
-            .await?;
-
-        // 3. Validate ID token and extract claims
-        let claims = provider.validate_id_token(&tokens.id_token).await?;
+        // 2. Get validated claims — either via code exchange or direct ID token
+        let claims = if let Some(ref id_token) = request.id_token {
+            // Direct ID token exchange (e.g., Google Sign-In SDK)
+            provider.validate_id_token(id_token).await?
+        } else {
+            // Authorization code exchange
+            let code = request.code.as_deref().ok_or_else(|| Error::InvalidRequest {
+                reason: "either 'code' or 'id_token' is required".to_string(),
+            })?;
+            let redirect_uri = request.redirect_uri.as_deref().ok_or_else(|| Error::InvalidRequest {
+                reason: "redirect_uri is required for authorization_code grant".to_string(),
+            })?;
+            let tokens = provider.exchange_code(code, redirect_uri).await?;
+            provider.validate_id_token(&tokens.id_token).await?
+        };
 
         // 4. Look up user by external ID, applying registration policy for new users
         let user = match self.repo.get_user_by_external_id(&claims.subject).await? {

@@ -17,6 +17,7 @@ pub struct TokenForm {
     pub redirect_uri: Option<String>,
     pub provider: Option<String>,
     pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
 }
 
 pub async fn token_handler(
@@ -24,21 +25,16 @@ pub async fn token_handler(
     Form(form): Form<TokenForm>,
 ) -> Result<impl IntoResponse, ApiError> {
     match form.grant_type.as_str() {
-        "authorization_code" => {
-            let code = form.code.ok_or_else(|| Error::InvalidRequest {
-                reason: "missing required parameter: code".to_string(),
-            })?;
-            let redirect_uri = form.redirect_uri.ok_or_else(|| Error::InvalidRequest {
-                reason: "missing required parameter: redirect_uri".to_string(),
-            })?;
+        "authorization_code" | "id_token" => {
             let provider = form.provider.ok_or_else(|| Error::InvalidRequest {
                 reason: "missing required parameter: provider".to_string(),
             })?;
             let result = state
                 .service
                 .exchange(ExchangeRequest {
-                    code,
-                    redirect_uri,
+                    code: form.code,
+                    redirect_uri: form.redirect_uri,
+                    id_token: form.id_token,
                     provider,
                 })
                 .await?;

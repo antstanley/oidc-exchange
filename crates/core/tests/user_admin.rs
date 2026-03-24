@@ -275,8 +275,9 @@ async fn admin_delete_user_revokes_sessions() {
 
     // Exchange to create a user + session
     let request = ExchangeRequest {
-        code: "auth-code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("auth-code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
     let response = svc.exchange(request).await.expect("exchange should succeed");

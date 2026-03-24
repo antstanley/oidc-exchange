@@ -49,8 +49,9 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
 /// Helper: perform an exchange and return the full token response.
 async fn do_exchange(svc: &AppService) -> oidc_exchange_core::domain::TokenResponse {
     let request = ExchangeRequest {
-        code: "auth-code".to_string(),
-        redirect_uri: "https://app.test.com/callback".to_string(),
+        code: Some("auth-code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
         provider: "mock".to_string(),
     };
     svc.exchange(request).await.expect("exchange should succeed")
