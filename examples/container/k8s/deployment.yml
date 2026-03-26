@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oidc-exchange
+  namespace: oidc-exchange
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: oidc-exchange
+  template:
+    metadata:
+      labels:
+        app: oidc-exchange
+    spec:
+      containers:
+        - name: oidc-exchange
+          image: your-registry/oidc-exchange:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: OIDC_EXCHANGE_ENV
+              value: production
+            - name: ISSUER_URL
+              value: "https://auth.example.com"
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-exchange-config
+                  key: google-client-id
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-exchange-config
+                  key: google-client-secret
+          volumeMounts:
+            - name: signing-key
+              mountPath: /etc/secrets
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+      volumes:
+        - name: signing-key
+          secret:
+            secretName: oidc-exchange-signing-key

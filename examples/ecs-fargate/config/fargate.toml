@@ -1,0 +1,42 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+issuer = "${ISSUER_URL}"
+
+[key_manager]
+adapter = "kms"
+
+[key_manager.kms]
+key_id = "${KMS_KEY_ARN}"
+algorithm = "ECDSA_SHA256"
+kid = "prod-1"
+
+[repository]
+adapter = "dynamodb"
+
+[repository.dynamodb]
+table_name = "${DYNAMODB_TABLE_NAME}"
+
+[session_repository]
+adapter = "valkey"
+
+[session_repository.valkey]
+url = "${VALKEY_URL}"
+key_prefix = "oidc:"
+
+[audit]
+adapter = "sqs"
+
+[audit.sqs]
+queue_url = "${AUDIT_QUEUE_URL}"
+
+[telemetry]
+enabled = true
+exporter = "stdout"
+
+[providers.google]
+adapter = "oidc"
+issuer = "https://accounts.google.com"
+client_id = "${GOOGLE_CLIENT_ID}"
+client_secret = "${GOOGLE_CLIENT_SECRET}"
+scopes = ["openid", "email", "profile"]

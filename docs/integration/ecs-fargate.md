@@ -1,13 +1,15 @@
 ---
 title: ECS Fargate with Auto-Scaling
-description: Deploy oidc-exchange on ECS Fargate with ALB, DynamoDB for users, and ElastiCache Valkey for sessions.
-version: "0.2"
+description: Deploy oidc-exchange on ECS Fargate with ALB, DynamoDB for users, and ElastiCache Valkey for sessions using Terraform.
+version: "0.3"
 last_updated: 2026-03-26
 ---
 
 # ECS Fargate with Auto-Scaling
 
 Run oidc-exchange as an auto-scaling containerized service on AWS ECS Fargate, with an Application Load Balancer for traffic distribution, DynamoDB for user storage, and ElastiCache Valkey for low-latency session lookups.
+
+Infrastructure is managed with Terraform. A complete runnable example is in [`examples/ecs-fargate/`](../../examples/ecs-fargate/).
 
 ## When to use this
 
@@ -46,366 +48,151 @@ All Fargate tasks share the same DynamoDB table and ElastiCache cluster.
 
 ## Infrastructure
 
-| Resource | Purpose | Key settings |
-|----------|---------|-------------|
-| VPC | Network isolation | 2+ AZs, private subnets for Fargate, public subnets for ALB |
-| ALB | TLS termination, health checks, traffic distribution | HTTPS listener, target group on port 8080 |
-| ECS Cluster | Fargate task orchestration | Capacity provider: FARGATE |
-| ECS Service | Desired count, auto-scaling | Min 2, max 20 tasks |
-| DynamoDB | User storage | On-demand billing, single-table design |
-| ElastiCache Valkey | Session storage | Serverless or single-node, in-VPC |
-| KMS | JWT signing | ECC_NIST_P256 key |
-| ECR | Container registry | Stores the oidc-exchange image |
-| Secrets Manager | OIDC client secrets | Referenced by ECS task definition |
+| Resource | Purpose | Managed by |
+|----------|---------|-----------|
+| VPC | Network isolation (2 AZs, public + private subnets) | Terraform |
+| ALB | TLS termination, health checks, traffic distribution | Terraform |
+| ECS Cluster + Service | Fargate task orchestration, auto-scaling (2-20 tasks) | Terraform |
+| DynamoDB | User storage (on-demand billing, single-table design) | Terraform |
+| ElastiCache Valkey | Session storage (single-node, in-VPC) | Terraform |
+| KMS | JWT signing (ECC_NIST_P256) | Terraform |
+| SQS | Audit event queue | Terraform |
+| ECR | Container registry | Terraform |
+| Secrets Manager | OIDC client secrets | Terraform |
 
-## Step-by-step
+## Prerequisites
 
-### 1. Build and push the container
+- [Terraform](https://www.terraform.io/) 1.5+
+- AWS CLI configured with credentials
+- Docker (to build and push the container image)
+- A Google OAuth client ID and secret (or another OIDC provider)
+- (Optional) An ACM certificate ARN for HTTPS
+
+## Deployment
+
+### 1. Build and push the container image
+
+From the repository root:
 
 ```bash
 # Build the image
-docker build -t oidc-exchange .
+docker build -t oidc-exchange -f examples/ecs-fargate/Dockerfile .
 
-# Create the ECR repository
-aws ecr create-repository --repository-name oidc-exchange
-
-# Login, tag, and push
-ECR_URI=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.$(aws configure get region).amazonaws.com
-aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_URI
-docker tag oidc-exchange:latest $ECR_URI/oidc-exchange:latest
-docker push $ECR_URI/oidc-exchange:latest
+# The Terraform config creates an ECR repository. If deploying for the first time,
+# run terraform apply first (step 3), then push:
+ECR_URL=$(terraform -chdir=examples/ecs-fargate/infra output -raw ecr_repository_url)
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_URL
+docker tag oidc-exchange:latest $ECR_URL:latest
+docker push $ECR_URL:latest
 ```
 
-### 2. Create the DynamoDB table
+### 2. Configure Terraform variables
 
 ```bash
-aws dynamodb create-table \
-  --table-name oidc-exchange \
-  --attribute-definitions \
-    AttributeName=PK,AttributeType=S \
-    AttributeName=SK,AttributeType=S \
-    AttributeName=GSI1pk,AttributeType=S \
-    AttributeName=GSI1sk,AttributeType=S \
-  --key-schema \
-    AttributeName=PK,KeyType=HASH \
-    AttributeName=SK,KeyType=RANGE \
-  --global-secondary-indexes \
-    'IndexName=GSI1,KeySchema=[{AttributeName=GSI1pk,KeyType=HASH},{AttributeName=GSI1sk,KeyType=RANGE}],Projection={ProjectionType=ALL}' \
-  --billing-mode PAY_PER_REQUEST \
-  --time-to-live-specification 'Enabled=true,AttributeName=ttl'
+cd examples/ecs-fargate/infra
+cp terraform.tfvars.example terraform.tfvars
 ```
 
-### 3. Create the ElastiCache Valkey cluster
+Edit `terraform.tfvars`:
 
-For serverless (simplest, auto-scales):
+```hcl
+aws_region           = "us-east-1"
+container_image      = "123456789012.dkr.ecr.us-east-1.amazonaws.com/oidc-exchange:latest"
+google_client_id     = "your-google-client-id"
+google_client_secret = "your-google-client-secret"
+issuer_url           = "https://auth.example.com"
+# certificate_arn    = "arn:aws:acm:us-east-1:123456789012:certificate/xxx"
+```
+
+### 3. Deploy
 
 ```bash
-aws elasticache create-serverless-cache \
-  --serverless-cache-name oidc-exchange-sessions \
-  --engine valkey \
-  --subnet-group-name your-private-subnet-group \
-  --security-group-ids sg-xxxxxxxxx
+terraform init
+terraform plan
+terraform apply
 ```
 
-For a single-node cluster (predictable cost):
+Terraform creates all infrastructure: VPC, subnets, NAT gateway, ALB, ECS cluster and service, DynamoDB table, ElastiCache Valkey cluster, KMS key, SQS queue, IAM roles, security groups, and auto-scaling policies.
+
+### 4. Verify
 
 ```bash
-aws elasticache create-cache-cluster \
-  --cache-cluster-id oidc-exchange-sessions \
-  --engine redis \
-  --cache-node-type cache.t4g.micro \
-  --num-cache-nodes 1 \
-  --cache-subnet-group-name your-private-subnet-group \
-  --security-group-ids sg-xxxxxxxxx
+ALB_URL=$(terraform output -raw alb_url)
+curl $ALB_URL/health
+curl $ALB_URL/.well-known/openid-configuration
 ```
 
-Note the cluster endpoint for the configuration.
+## Configuration
 
-### 4. Create the KMS signing key
-
-```bash
-aws kms create-key \
-  --key-spec ECC_NIST_P256 \
-  --key-usage SIGN_VERIFY \
-  --description "oidc-exchange JWT signing key"
-```
-
-### 5. Store secrets
-
-```bash
-aws secretsmanager create-secret \
-  --name oidc-exchange/google-client-id \
-  --secret-string "your-google-client-id"
-
-aws secretsmanager create-secret \
-  --name oidc-exchange/google-client-secret \
-  --secret-string "your-google-client-secret"
-```
-
-### 6. Configure
-
-Create `config/fargate.toml`:
+The TOML config at `examples/ecs-fargate/config/fargate.toml` uses environment variable placeholders. Terraform injects the actual values via the ECS task definition:
 
 ```toml
-[server]
-host = "0.0.0.0"
-port = 8080
-issuer = "https://auth.example.com"
-
-[key_manager]
-adapter = "kms"
-
-[key_manager.kms]
-key_id = "${KMS_KEY_ARN}"
-algorithm = "ECDSA_SHA256"
-kid = "prod-1"
-
-# Users in DynamoDB
 [repository]
 adapter = "dynamodb"
 
 [repository.dynamodb]
-table_name = "oidc-exchange"
+table_name = "${DYNAMODB_TABLE_NAME}"
 
-# Sessions in Valkey
 [session_repository]
 adapter = "valkey"
 
 [session_repository.valkey]
 url = "${VALKEY_URL}"
 key_prefix = "oidc:"
-
-[audit]
-adapter = "sqs"
-
-[audit.sqs]
-queue_url = "${AUDIT_QUEUE_URL}"
-
-[telemetry]
-enabled = true
-exporter = "otlp"
-
-[providers.google]
-adapter = "oidc"
-issuer = "https://accounts.google.com"
-client_id = "${GOOGLE_CLIENT_ID}"
-client_secret = "${GOOGLE_CLIENT_SECRET}"
-scopes = ["openid", "email", "profile"]
 ```
 
-### 7. Create the ECS task definition
+When `[session_repository]` is present, sessions use Valkey while users stay in DynamoDB. Remove the `[session_repository]` section to store everything in DynamoDB.
 
-```json
-{
-  "family": "oidc-exchange",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256",
-  "memory": "512",
-  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/oidc-exchange-execution",
-  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/oidc-exchange-task",
-  "containerDefinitions": [
-    {
-      "name": "oidc-exchange",
-      "image": "ACCOUNT.dkr.ecr.REGION.amazonaws.com/oidc-exchange:latest",
-      "portMappings": [
-        {
-          "containerPort": 8080,
-          "protocol": "tcp"
-        }
-      ],
-      "environment": [
-        { "name": "OIDC_EXCHANGE_ENV", "value": "fargate" },
-        { "name": "KMS_KEY_ARN", "value": "arn:aws:kms:..." },
-        { "name": "VALKEY_URL", "value": "rediss://oidc-exchange-sessions.xxxxx.valkey.REGION.cache.amazonaws.com:6379" },
-        { "name": "AUDIT_QUEUE_URL", "value": "https://sqs.REGION.amazonaws.com/ACCOUNT/oidc-exchange-audit" }
-      ],
-      "secrets": [
-        {
-          "name": "GOOGLE_CLIENT_ID",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:oidc-exchange/google-client-id"
-        },
-        {
-          "name": "GOOGLE_CLIENT_SECRET",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:oidc-exchange/google-client-secret"
-        }
-      ],
-      "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"],
-        "interval": 30,
-        "timeout": 5,
-        "retries": 3,
-        "startPeriod": 10
-      },
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/oidc-exchange",
-          "awslogs-region": "REGION",
-          "awslogs-stream-prefix": "oidc-exchange"
-        }
-      }
-    }
-  ]
-}
-```
+## Auto-scaling
 
-### 8. Create the ALB and ECS service
+The Terraform configuration sets up CPU-based target tracking:
 
-```bash
-# Create the target group
-aws elbv2 create-target-group \
-  --name oidc-exchange \
-  --protocol HTTP \
-  --port 8080 \
-  --vpc-id vpc-xxxxxxxxx \
-  --target-type ip \
-  --health-check-path /health \
-  --health-check-interval-seconds 30
+- **Target**: 60% average CPU utilization
+- **Min tasks**: 2 (configurable via `desired_count`)
+- **Max tasks**: 20 (configurable via `max_count`)
+- **Scale-out cooldown**: 60 seconds
+- **Scale-in cooldown**: 300 seconds
 
-# Create the ALB
-aws elbv2 create-load-balancer \
-  --name oidc-exchange-alb \
-  --subnets subnet-public-1 subnet-public-2 \
-  --security-groups sg-alb \
-  --scheme internet-facing
-
-# Create HTTPS listener (requires ACM certificate)
-aws elbv2 create-listener \
-  --load-balancer-arn $ALB_ARN \
-  --protocol HTTPS \
-  --port 443 \
-  --certificates CertificateArn=$ACM_CERT_ARN \
-  --default-actions Type=forward,TargetGroupArn=$TG_ARN
-
-# Create the ECS service
-aws ecs create-service \
-  --cluster default \
-  --service-name oidc-exchange \
-  --task-definition oidc-exchange \
-  --desired-count 2 \
-  --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[subnet-private-1,subnet-private-2],securityGroups=[sg-task],assignPublicIp=DISABLED}" \
-  --load-balancers "targetGroupArn=$TG_ARN,containerName=oidc-exchange,containerPort=8080" \
-  --deployment-configuration "minimumHealthyPercent=100,maximumPercent=200"
-```
-
-### 9. Configure auto-scaling
-
-```bash
-# Register the scalable target
-aws application-autoscaling register-scalable-target \
-  --service-namespace ecs \
-  --resource-id service/default/oidc-exchange \
-  --scalable-dimension ecs:service:DesiredCount \
-  --min-capacity 2 \
-  --max-capacity 20
-
-# Scale on CPU utilization
-aws application-autoscaling put-scaling-policy \
-  --service-namespace ecs \
-  --resource-id service/default/oidc-exchange \
-  --scalable-dimension ecs:service:DesiredCount \
-  --policy-name cpu-tracking \
-  --policy-type TargetTrackingScaling \
-  --target-tracking-scaling-policy-configuration '{
-    "TargetValue": 60.0,
-    "PredefinedMetricSpecification": {
-      "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
-    },
-    "ScaleInCooldown": 300,
-    "ScaleOutCooldown": 60
-  }'
-```
-
-This scales up when average CPU across tasks exceeds 60%, and scales in after 5 minutes of reduced load.
-
-## IAM policies
-
-### Task execution role
-
-Needs permissions to pull the image, read secrets, and write logs:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ecr:GetAuthorizationToken",
-        "ecr:BatchGetImage",
-        "ecr:GetDownloadUrlForLayer"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["secretsmanager:GetSecretValue"],
-      "Resource": "arn:aws:secretsmanager:*:*:secret:oidc-exchange/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-      "Resource": "arn:aws:logs:*:*:log-group:/ecs/oidc-exchange:*"
-    }
-  ]
-}
-```
-
-### Task role
-
-Needs permissions for the application to access DynamoDB, KMS, Valkey (via VPC), and SQS:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:DeleteItem",
-        "dynamodb:Query",
-        "dynamodb:BatchWriteItem"
-      ],
-      "Resource": [
-        "arn:aws:dynamodb:*:*:table/oidc-exchange",
-        "arn:aws:dynamodb:*:*:table/oidc-exchange/index/GSI1"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["kms:Sign", "kms:GetPublicKey"],
-      "Resource": "arn:aws:kms:*:*:key/KEY_ID"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["sqs:SendMessage"],
-      "Resource": "arn:aws:sqs:*:*:oidc-exchange-audit"
-    }
-  ]
-}
-```
-
-ElastiCache Valkey access is controlled via security groups (VPC networking), not IAM.
+Modify `variables.tf` defaults or override in `terraform.tfvars` to tune scaling behavior.
 
 ## Security groups
 
 | Resource | Inbound | Outbound |
 |----------|---------|----------|
-| ALB (`sg-alb`) | 443/tcp from 0.0.0.0/0 | 8080/tcp to `sg-task` |
+| ALB (`sg-alb`) | 80,443/tcp from 0.0.0.0/0 | 8080/tcp to `sg-task` |
 | Fargate tasks (`sg-task`) | 8080/tcp from `sg-alb` | 443/tcp to 0.0.0.0/0 (OIDC providers, AWS APIs) |
 | Fargate tasks (`sg-task`) | — | 6379/tcp to `sg-valkey` |
 | ElastiCache (`sg-valkey`) | 6379/tcp from `sg-task` | — |
 
 DynamoDB, KMS, SQS, and Secrets Manager are accessed via AWS service endpoints (HTTPS over port 443). For private networking, add VPC endpoints for these services.
 
+## IAM roles
+
+Terraform creates two IAM roles:
+
+**Task execution role** — used by ECS to pull images, read secrets, and write logs:
+- `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`
+- `secretsmanager:GetSecretValue` (scoped to `oidc-exchange/*`)
+- `logs:CreateLogStream`, `logs:PutLogEvents`
+
+**Task role** — used by the running container to access AWS services:
+- DynamoDB: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchWriteItem`
+- KMS: `Sign`, `GetPublicKey`
+- SQS: `SendMessage`
+
+ElastiCache Valkey access is controlled via security groups (VPC networking), not IAM.
+
 ## Cost optimization
 
-- **Fargate Spot**: for non-critical environments, use `capacityProviderStrategy` with `FARGATE_SPOT` for up to 70% savings. The ALB health checks and ECS service will replace interrupted tasks automatically.
-- **ElastiCache Serverless**: auto-scales with usage. For predictable workloads, a reserved `cache.t4g.micro` node is cheaper.
-- **DynamoDB on-demand**: no capacity planning needed. For steady-state traffic, consider switching to provisioned capacity with auto-scaling.
-- **ARM64**: build the container for `linux/arm64` and set the task definition to use ARM64 for ~20% lower Fargate cost.
+- **Fargate Spot**: add `capacity_provider_strategy` with `FARGATE_SPOT` in the ECS service for up to 70% savings
+- **ElastiCache**: the example uses a single `cache.t4g.micro` node; upgrade to a replication group for HA, or use ElastiCache Serverless for auto-scaling
+- **DynamoDB on-demand**: no capacity planning needed; switch to provisioned capacity for steady-state traffic
+- **ARM64**: build for `linux/arm64` and set `runtime_platform` in the task definition for ~20% lower Fargate cost
+
+## Cleanup
+
+```bash
+terraform destroy
+```
+
+This removes all AWS resources created by the example.

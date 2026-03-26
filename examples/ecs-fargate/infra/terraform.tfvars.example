@@ -1,0 +1,6 @@
+aws_region           = "us-east-1"
+container_image      = "123456789012.dkr.ecr.us-east-1.amazonaws.com/oidc-exchange:latest"
+google_client_id     = "your-google-client-id"
+google_client_secret = "your-google-client-secret"
+issuer_url           = "https://auth.example.com"
+# certificate_arn    = "arn:aws:acm:us-east-1:123456789012:certificate/xxx"

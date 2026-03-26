@@ -9,6 +9,8 @@ last_updated: 2026-03-26
 
 Run oidc-exchange as a long-lived container in ECS, EKS, Cloud Run, or any container orchestrator. The binary runs as an axum HTTP server when `AWS_LAMBDA_RUNTIME_API` is not set.
 
+A runnable example with Docker Compose and Kubernetes manifests is in [`examples/container/`](../../examples/container/).
+
 ## Dockerfile
 
 ```dockerfile

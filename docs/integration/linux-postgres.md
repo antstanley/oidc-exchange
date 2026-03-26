@@ -9,6 +9,8 @@ last_updated: 2026-03-26
 
 Run oidc-exchange on a Linux host using PostgreSQL for persistent storage. This guide covers PostgreSQL for both users and sessions, with an optional Valkey/Redis upgrade for session storage when you need lower-latency token operations.
 
+A runnable example with Docker Compose configs is in [`examples/linux-postgres/`](../../examples/linux-postgres/).
+
 ## When to use this
 
 - You already run PostgreSQL and prefer a single relational database for all state

@@ -11,6 +11,8 @@ Run oidc-exchange on a single Linux host using SQLite for all persistent storage
 
 Optionally, use LMDB for session storage when you want faster session lookups without adding a network service.
 
+A runnable example with setup scripts and configs is in [`examples/linux-sqlite/`](../../examples/linux-sqlite/).
+
 ## When to use this
 
 - Single-server deployment with no external database dependencies

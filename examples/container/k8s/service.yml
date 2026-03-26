@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: oidc-exchange
+  namespace: oidc-exchange
+spec:
+  selector:
+    app: oidc-exchange
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
