@@ -9,7 +9,7 @@ use tracing::instrument;
 
 use oidc_exchange_core::domain::{NewUser, Session, User, UserPatch, UserStatus};
 use oidc_exchange_core::error::{Error, Result};
-use oidc_exchange_core::ports::Repository;
+use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
 use schema::{item_to_session, item_to_user, session_to_item, user_to_item};
 
@@ -33,7 +33,7 @@ impl DynamoRepository {
 }
 
 #[async_trait]
-impl Repository for DynamoRepository {
+impl UserRepository for DynamoRepository {
     #[instrument(skip(self), fields(user_id))]
     async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         let result = self
@@ -163,7 +163,10 @@ impl Repository for DynamoRepository {
         .await?;
         Ok(())
     }
+}
 
+#[async_trait]
+impl SessionRepository for DynamoRepository {
     #[instrument(skip(self, session), fields(user_id = %session.user_id))]
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
         let item = session_to_item(session);

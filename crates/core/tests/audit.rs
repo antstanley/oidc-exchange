@@ -27,6 +27,7 @@ fn make_service_with_audit(audit: MockAuditLog, config: AppConfig) -> AppService
 
     AppService::new(
         Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),

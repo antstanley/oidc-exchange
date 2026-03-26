@@ -17,12 +17,16 @@ base64.workspace = true
 aws-sdk-dynamodb = "1"
 aws-sdk-cloudtraildata = "1"
 aws-sdk-kms = "1"
+aws-sdk-sqs = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 hmac = "0.12"
 sha2 = "0.10"
+heed = "0.22"
 hex.workspace = true
 ulid.workspace = true
 chrono.workspace = true
+fred = { version = "10", features = ["serde-json"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "json"] }
 
 [dev-dependencies]
 oidc-exchange-test-utils.workspace = true

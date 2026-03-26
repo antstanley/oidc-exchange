@@ -33,6 +33,7 @@ fn build_e2e_app() -> Router {
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
@@ -56,6 +57,7 @@ fn build_e2e_app_with_config(config: AppConfig) -> Router {
     providers.insert("test".to_string(), Box::new(provider));
 
     let service = AppService::new(
+        Box::new(MockRepository::new()),
         Box::new(MockRepository::new()),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),

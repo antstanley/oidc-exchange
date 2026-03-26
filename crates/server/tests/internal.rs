@@ -31,6 +31,7 @@ fn build_test_app() -> Router {
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),

@@ -42,6 +42,7 @@ fn make_service_with_mocks(
     let sync_clone = user_sync.clone();
 
     let svc = AppService::new(
+        Box::new(repo.clone()),
         Box::new(repo),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
@@ -63,6 +64,7 @@ fn make_service_with_provider(
     providers.insert(provider_id, Box::new(provider));
 
     AppService::new(
+        Box::new(repo.clone()),
         Box::new(repo),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),

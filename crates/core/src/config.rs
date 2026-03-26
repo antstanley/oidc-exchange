@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub audit: AuditConfig,
     pub key_manager: KeyManagerConfig,
     pub repository: RepositoryConfig,
+    #[serde(default)]
+    pub session_repository: SessionRepositoryConfig,
     pub user_sync: UserSyncConfig,
     pub telemetry: TelemetryConfig,
     pub internal_api: InternalApiConfig,
@@ -27,6 +29,7 @@ impl Default for AppConfig {
             audit: AuditConfig::default(),
             key_manager: KeyManagerConfig::default(),
             repository: RepositoryConfig::default(),
+            session_repository: SessionRepositoryConfig::default(),
             user_sync: UserSyncConfig::default(),
             telemetry: TelemetryConfig::default(),
             internal_api: InternalApiConfig::default(),
@@ -95,6 +98,7 @@ pub struct AuditConfig {
     pub adapter: String,
     pub blocking_threshold: String,
     pub cloudtrail: Option<CloudTrailConfig>,
+    pub sqs: Option<SqsAuditConfig>,
 }
 
 impl Default for AuditConfig {
@@ -103,6 +107,7 @@ impl Default for AuditConfig {
             adapter: "noop".to_string(),
             blocking_threshold: "warning".to_string(),
             cloudtrail: None,
+            sqs: None,
         }
     }
 }
@@ -110,6 +115,12 @@ impl Default for AuditConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CloudTrailConfig {
     pub channel_arn: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SqsAuditConfig {
+    pub queue_url: String,
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,6 +160,8 @@ pub struct LocalKeyConfig {
 pub struct RepositoryConfig {
     pub adapter: String,
     pub dynamodb: Option<DynamoConfig>,
+    pub postgres: Option<PostgresConfig>,
+    pub sqlite: Option<SqliteConfig>,
 }
 
 impl Default for RepositoryConfig {
@@ -156,6 +169,26 @@ impl Default for RepositoryConfig {
         Self {
             adapter: String::new(),
             dynamodb: None,
+            postgres: None,
+            sqlite: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SessionRepositoryConfig {
+    pub adapter: Option<String>,
+    pub valkey: Option<ValkeyConfig>,
+    pub lmdb: Option<LmdbConfig>,
+}
+
+impl Default for SessionRepositoryConfig {
+    fn default() -> Self {
+        Self {
+            adapter: None,
+            valkey: None,
+            lmdb: None,
         }
     }
 }
@@ -164,6 +197,29 @@ impl Default for RepositoryConfig {
 pub struct DynamoConfig {
     pub table_name: String,
     pub region: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PostgresConfig {
+    pub url: String,
+    pub max_connections: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SqliteConfig {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ValkeyConfig {
+    pub url: String,
+    pub key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LmdbConfig {
+    pub path: String,
+    pub max_size_mb: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

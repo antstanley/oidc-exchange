@@ -75,7 +75,7 @@ impl AppService {
         };
 
         // 4. Look up user by external ID, applying registration policy for new users
-        let user = match self.repo.get_user_by_external_id(&claims.subject).await? {
+        let user = match self.user_repo.get_user_by_external_id(&claims.subject).await? {
             Some(user) => {
                 if user.status != UserStatus::Active {
                     return Err(Error::UserSuspended {
@@ -119,7 +119,7 @@ impl AppService {
                     email: claims.email.clone(),
                     display_name: claims.name.clone(),
                 };
-                self.repo.create_user(&new_user).await?
+                self.user_repo.create_user(&new_user).await?
             }
         };
 
@@ -147,7 +147,7 @@ impl AppService {
             ip_address: None,
             created_at: Utc::now(),
         };
-        self.repo.store_refresh_token(&session).await?;
+        self.session_repo.store_refresh_token(&session).await?;
 
         // 9. Build access token JWT (shared logic)
         let (access_token, access_ttl_secs) = self.build_access_token(&user).await?;

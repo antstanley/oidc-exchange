@@ -23,6 +23,7 @@ aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-dynamodb = "1"
 aws-sdk-kms = "1"
 aws-sdk-cloudtraildata = "1"
+aws-sdk-sqs = "1"
 futures = "0.3"
 
 [dev-dependencies]

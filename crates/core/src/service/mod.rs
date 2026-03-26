@@ -15,10 +15,11 @@ use crate::domain::{
     AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
 };
 use crate::error::{Error, Result};
-use crate::ports::{AuditLog, IdentityProvider, KeyManager, Repository, UserSync};
+use crate::ports::{AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync};
 
 pub struct AppService {
-    pub(crate) repo: Box<dyn Repository>,
+    pub(crate) user_repo: Box<dyn UserRepository>,
+    pub(crate) session_repo: Box<dyn SessionRepository>,
     pub(crate) keys: Box<dyn KeyManager>,
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
@@ -28,7 +29,8 @@ pub struct AppService {
 
 impl AppService {
     pub fn new(
-        repo: Box<dyn Repository>,
+        user_repo: Box<dyn UserRepository>,
+        session_repo: Box<dyn SessionRepository>,
         keys: Box<dyn KeyManager>,
         audit: Box<dyn AuditLog>,
         user_sync: Box<dyn UserSync>,
@@ -36,7 +38,8 @@ impl AppService {
         config: AppConfig,
     ) -> Self {
         Self {
-            repo,
+            user_repo,
+            session_repo,
             keys,
             audit,
             user_sync,

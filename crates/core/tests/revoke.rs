@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::AccessTokenClaims;
-use oidc_exchange_core::ports::{IdentityProvider, Repository};
+use oidc_exchange_core::ports::{IdentityProvider, SessionRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::revoke::RevokeRequest;
 use oidc_exchange_core::service::AppService;
@@ -37,6 +37,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
     providers.insert(provider_id, Box::new(provider));
 
     AppService::new(
+        Box::new(repo.clone()),
         Box::new(repo),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),

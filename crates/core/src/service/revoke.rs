@@ -16,7 +16,7 @@ impl AppService {
             Some("access_token") => {
                 // Decode the JWT payload (second segment) without verification
                 if let Some(user_id) = extract_sub_from_jwt(&request.token) {
-                    let _ = self.repo.revoke_all_user_sessions(&user_id).await;
+                    let _ = self.session_repo.revoke_all_user_sessions(&user_id).await;
                 }
                 // Per RFC 7009: always succeed
                 Ok(())
@@ -25,13 +25,13 @@ impl AppService {
                 // Hash the token (SHA-256, hex) — same as exchange/refresh
                 let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
                 // Revoke the session; if not found, that's OK per RFC 7009
-                let _ = self.repo.revoke_session(&token_hash).await;
+                let _ = self.session_repo.revoke_session(&token_hash).await;
                 Ok(())
             }
             Some(_) => {
                 // Unknown hint — treat as refresh_token per spec
                 let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
-                let _ = self.repo.revoke_session(&token_hash).await;
+                let _ = self.session_repo.revoke_session(&token_hash).await;
                 Ok(())
             }
         }

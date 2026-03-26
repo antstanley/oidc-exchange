@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::{AccessTokenClaims, IdentityClaims, NewUser, UserPatch, UserStatus};
 use oidc_exchange_core::error::Error;
-use oidc_exchange_core::ports::{IdentityProvider, Repository};
+use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::AppService;
 
@@ -45,6 +45,7 @@ fn make_service_with_config(
     providers.insert(provider_id, Box::new(provider));
 
     AppService::new(
+        Box::new(repo.clone()),
         Box::new(repo),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),

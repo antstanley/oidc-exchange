@@ -16,7 +16,7 @@ impl AppService {
 
         // 2. Look up session by refresh token hash
         let session = self
-            .repo
+            .session_repo
             .get_session_by_refresh_token(&token_hash)
             .await?
             .ok_or_else(|| Error::InvalidToken {
@@ -32,7 +32,7 @@ impl AppService {
 
         // 4. Look up the user and check status
         let user = self
-            .repo
+            .user_repo
             .get_user_by_id(&session.user_id)
             .await?
             .ok_or_else(|| Error::InvalidToken {

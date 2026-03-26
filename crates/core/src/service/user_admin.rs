@@ -11,7 +11,7 @@ impl AppService {
     ///
     /// Calls `repo.create_user()`, then notifies user sync (non-blocking).
     pub async fn admin_create_user(&self, new_user: &NewUser) -> Result<User> {
-        let user = self.repo.create_user(new_user).await?;
+        let user = self.user_repo.create_user(new_user).await?;
 
         if let Err(e) = self.user_sync.notify_user_created(&user).await {
             tracing::warn!(error = %e, user_id = %user.id, "user sync notify_user_created failed");
@@ -22,7 +22,7 @@ impl AppService {
 
     /// Get a user by ID via admin API.
     pub async fn admin_get_user(&self, user_id: &str) -> Result<Option<User>> {
-        self.repo.get_user_by_id(user_id).await
+        self.user_repo.get_user_by_id(user_id).await
     }
 
     /// Update a user via admin API with a partial patch.
@@ -30,7 +30,7 @@ impl AppService {
     /// Calls `repo.update_user()`, then notifies user sync with the list of
     /// changed fields (non-blocking).
     pub async fn admin_update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
-        let user = self.repo.update_user(user_id, patch).await?;
+        let user = self.user_repo.update_user(user_id, patch).await?;
 
         let mut changed_fields: Vec<&str> = Vec::new();
         if patch.email.is_some() {
@@ -71,8 +71,8 @@ impl AppService {
             claims: None,
             status: Some(UserStatus::Deleted),
         };
-        self.repo.update_user(user_id, &patch).await?;
-        self.repo.revoke_all_user_sessions(user_id).await?;
+        self.user_repo.update_user(user_id, &patch).await?;
+        self.session_repo.revoke_all_user_sessions(user_id).await?;
 
         if let Err(e) = self.user_sync.notify_user_deleted(user_id).await {
             tracing::warn!(error = %e, user_id = %user_id, "user sync notify_user_deleted failed");
@@ -86,7 +86,7 @@ impl AppService {
     /// Returns `Error::InvalidRequest` if user not found.
     pub async fn admin_get_claims(&self, user_id: &str) -> Result<HashMap<String, Value>> {
         let user = self
-            .repo
+            .user_repo
             .get_user_by_id(user_id)
             .await?
             .ok_or_else(|| Error::InvalidRequest {
@@ -103,7 +103,7 @@ impl AppService {
         claims: HashMap<String, Value>,
     ) -> Result<()> {
         // Verify user exists
-        self.repo
+        self.user_repo
             .get_user_by_id(user_id)
             .await?
             .ok_or_else(|| Error::InvalidRequest {
@@ -117,7 +117,7 @@ impl AppService {
             claims: Some(claims),
             status: None,
         };
-        self.repo.update_user(user_id, &patch).await?;
+        self.user_repo.update_user(user_id, &patch).await?;
         Ok(())
     }
 
@@ -130,7 +130,7 @@ impl AppService {
         claims: HashMap<String, Value>,
     ) -> Result<()> {
         let user = self
-            .repo
+            .user_repo
             .get_user_by_id(user_id)
             .await?
             .ok_or_else(|| Error::InvalidRequest {
@@ -149,14 +149,14 @@ impl AppService {
             claims: Some(merged),
             status: None,
         };
-        self.repo.update_user(user_id, &patch).await?;
+        self.user_repo.update_user(user_id, &patch).await?;
         Ok(())
     }
 
     /// Clear all custom claims for a user (set to empty map).
     pub async fn admin_clear_claims(&self, user_id: &str) -> Result<()> {
         // Verify user exists
-        self.repo
+        self.user_repo
             .get_user_by_id(user_id)
             .await?
             .ok_or_else(|| Error::InvalidRequest {
@@ -170,7 +170,7 @@ impl AppService {
             claims: Some(HashMap::new()),
             status: None,
         };
-        self.repo.update_user(user_id, &patch).await?;
+        self.user_repo.update_user(user_id, &patch).await?;
         Ok(())
     }
 }

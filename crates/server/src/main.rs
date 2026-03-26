@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use oidc_exchange_core::config::{AppConfig, ProviderConfig};
 use oidc_exchange_core::error::Error;
-use oidc_exchange_core::ports::{AuditLog, IdentityProvider, KeyManager, Repository, UserSync};
+use oidc_exchange_core::ports::{AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync};
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange::middleware::audit_context::audit_context_layer;
@@ -30,14 +30,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("configuration loaded");
 
     // 3. Build adapters
-    let repo = build_repository(&config).await?;
+    let user_repo = build_user_repository(&config).await?;
+    let session_repo = build_session_repository(&config).await?;
     let keys = build_key_manager(&config)?;
     let audit = build_audit_log(&config).await?;
     let user_sync = build_user_sync(&config)?;
     let providers = build_providers(&config).await?;
 
     // 4. Build AppService
-    let service = Arc::new(AppService::new(repo, keys, audit, user_sync, providers, config.clone()));
+    let service = Arc::new(AppService::new(user_repo, session_repo, keys, audit, user_sync, providers, config.clone()));
     let state = AppState {
         service,
         config: Arc::new(config.clone()),
@@ -100,36 +101,130 @@ fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 // Adapter builders
 // ---------------------------------------------------------------------------
 
-async fn build_repository(
+async fn build_dynamo_client(
     config: &AppConfig,
-) -> Result<Box<dyn Repository>, Box<dyn std::error::Error>> {
+) -> Result<(aws_sdk_dynamodb::Client, String), Box<dyn std::error::Error>> {
+    let dynamo_cfg = config.repository.dynamodb.as_ref().ok_or_else(|| {
+        Error::ConfigError {
+            detail: "repository.adapter is 'dynamodb' but [repository.dynamodb] section is missing".into(),
+        }
+    })?;
+
+    let mut aws_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+
+    if let Some(ref region) = dynamo_cfg.region {
+        aws_loader = aws_loader.region(aws_config::Region::new(region.clone()));
+    }
+
+    let sdk_config = aws_loader.load().await;
+    let client = aws_sdk_dynamodb::Client::new(&sdk_config);
+    Ok((client, dynamo_cfg.table_name.clone()))
+}
+
+async fn build_user_repository(
+    config: &AppConfig,
+) -> Result<Box<dyn UserRepository>, Box<dyn std::error::Error>> {
     match config.repository.adapter.as_str() {
         "dynamodb" => {
-            let dynamo_cfg = config.repository.dynamodb.as_ref().ok_or_else(|| {
-                Error::ConfigError {
-                    detail: "repository.adapter is 'dynamodb' but [repository.dynamodb] section is missing".into(),
-                }
-            })?;
-
-            let mut aws_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-
-            if let Some(ref region) = dynamo_cfg.region {
-                aws_loader = aws_loader.region(aws_config::Region::new(region.clone()));
-            }
-
-            let sdk_config = aws_loader.load().await;
-            let client = aws_sdk_dynamodb::Client::new(&sdk_config);
-
+            let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(oidc_exchange_adapters::dynamo::DynamoRepository::new(
                 client,
-                dynamo_cfg.table_name.clone(),
+                table_name,
             )))
+        }
+        "postgres" => {
+            let pg_cfg = config.repository.postgres.as_ref().ok_or_else(|| {
+                Error::ConfigError {
+                    detail: "repository.adapter is 'postgres' but [repository.postgres] section is missing".into(),
+                }
+            })?;
+            let pool = oidc_exchange_adapters::postgres::create_pool(&pg_cfg.url, pg_cfg.max_connections.unwrap_or(5)).await?;
+            Ok(Box::new(oidc_exchange_adapters::postgres::PostgresRepository::new(pool)))
+        }
+        "sqlite" => {
+            let sq_cfg = config.repository.sqlite.as_ref().ok_or_else(|| {
+                Error::ConfigError {
+                    detail: "repository.adapter is 'sqlite' but [repository.sqlite] section is missing".into(),
+                }
+            })?;
+            let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
+            Ok(Box::new(oidc_exchange_adapters::sqlite::SqliteRepository::new(pool)))
         }
         "" => Err(Box::new(Error::ConfigError {
             detail: "repository.adapter is not configured".into(),
         })),
         other => Err(Box::new(Error::ConfigError {
             detail: format!("unknown repository adapter: {other}"),
+        })),
+    }
+}
+
+async fn build_session_repository(
+    config: &AppConfig,
+) -> Result<Box<dyn SessionRepository>, Box<dyn std::error::Error>> {
+    // If a separate session_repository adapter is configured, use it.
+    // Otherwise, fall back to the same adapter as the user repository.
+    let adapter = config
+        .session_repository
+        .adapter
+        .as_deref()
+        .unwrap_or(config.repository.adapter.as_str());
+
+    match adapter {
+        "dynamodb" => {
+            let (client, table_name) = build_dynamo_client(config).await?;
+            Ok(Box::new(oidc_exchange_adapters::dynamo::DynamoRepository::new(
+                client,
+                table_name,
+            )))
+        }
+        "postgres" => {
+            let pg_cfg = config.repository.postgres.as_ref().ok_or_else(|| {
+                Error::ConfigError {
+                    detail: "session_repository adapter is 'postgres' but [repository.postgres] section is missing".into(),
+                }
+            })?;
+            let pool = oidc_exchange_adapters::postgres::create_pool(&pg_cfg.url, pg_cfg.max_connections.unwrap_or(5)).await?;
+            Ok(Box::new(oidc_exchange_adapters::postgres::PostgresRepository::new(pool)))
+        }
+        "sqlite" => {
+            let sq_cfg = config.repository.sqlite.as_ref().ok_or_else(|| {
+                Error::ConfigError {
+                    detail: "session_repository adapter is 'sqlite' but [repository.sqlite] section is missing".into(),
+                }
+            })?;
+            let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
+            Ok(Box::new(oidc_exchange_adapters::sqlite::SqliteRepository::new(pool)))
+        }
+        "valkey" => {
+            let vk_cfg = config.session_repository.valkey.as_ref().ok_or_else(|| {
+                Error::ConfigError {
+                    detail: "session_repository adapter is 'valkey' but [session_repository.valkey] section is missing".into(),
+                }
+            })?;
+            let client = oidc_exchange_adapters::valkey::ValkeySessionRepository::new(
+                &vk_cfg.url,
+                vk_cfg.key_prefix.clone().unwrap_or_else(|| "oidc:".to_string()),
+            ).await?;
+            Ok(Box::new(client))
+        }
+        "lmdb" => {
+            let lm_cfg = config.session_repository.lmdb.as_ref().ok_or_else(|| {
+                Error::ConfigError {
+                    detail: "session_repository adapter is 'lmdb' but [session_repository.lmdb] section is missing".into(),
+                }
+            })?;
+            let repo = oidc_exchange_adapters::lmdb::LmdbSessionRepository::new(
+                &lm_cfg.path,
+                lm_cfg.max_size_mb.unwrap_or(256),
+            )?;
+            Ok(Box::new(repo))
+        }
+        "" => Err(Box::new(Error::ConfigError {
+            detail: "repository.adapter is not configured".into(),
+        })),
+        other => Err(Box::new(Error::ConfigError {
+            detail: format!("unknown session_repository adapter: {other}"),
         })),
     }
 }
@@ -203,6 +298,27 @@ async fn build_audit_log(
                 oidc_exchange_adapters::cloudtrail::CloudTrailAuditLog::new(
                     client,
                     ct_cfg.channel_arn.clone(),
+                ),
+            ))
+        }
+        "sqs" => {
+            let sqs_cfg = config.audit.sqs.as_ref().ok_or_else(|| {
+                Error::ConfigError {
+                    detail: "audit.adapter is 'sqs' but [audit.sqs] section is missing".into(),
+                }
+            })?;
+
+            let mut aws_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+            if let Some(ref region) = sqs_cfg.region {
+                aws_loader = aws_loader.region(aws_config::Region::new(region.clone()));
+            }
+            let sdk_config = aws_loader.load().await;
+            let client = aws_sdk_sqs::Client::new(&sdk_config);
+
+            Ok(Box::new(
+                oidc_exchange_adapters::sqs_audit::SqsAuditLog::new(
+                    client,
+                    sqs_cfg.queue_url.clone(),
                 ),
             ))
         }

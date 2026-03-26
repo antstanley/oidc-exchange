@@ -9,7 +9,7 @@ use oidc_exchange_core::domain::{
     AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
-use oidc_exchange_core::ports::{AuditLog, IdentityProvider, KeyManager, Repository, UserSync};
+use oidc_exchange_core::ports::{AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync};
 
 // ---------------------------------------------------------------------------
 // MockRepository
@@ -53,7 +53,7 @@ impl Default for MockRepository {
 }
 
 #[async_trait]
-impl Repository for MockRepository {
+impl UserRepository for MockRepository {
     async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         let state = self.state.lock().await;
         Ok(state.users.get(user_id).cloned())
@@ -129,7 +129,10 @@ impl Repository for MockRepository {
         user.updated_at = Utc::now();
         Ok(())
     }
+}
 
+#[async_trait]
+impl SessionRepository for MockRepository {
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
         let mut state = self.state.lock().await;
         state
