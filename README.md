@@ -213,6 +213,19 @@ docker run -p 8000:8000 amazon/dynamodb-local
 cargo nextest run -p oidc-exchange-adapters -- --ignored
 ```
 
+## Deployment Guides
+
+See [docs/integration/](docs/integration/README.md) for detailed deployment guides:
+
+| Guide | Best for |
+|-------|----------|
+| [AWS Lambda](docs/integration/aws-lambda.md) | Serverless, pay-per-request |
+| [ECS Fargate](docs/integration/ecs-fargate.md) | Auto-scaling containers with ALB |
+| [Linux + PostgreSQL](docs/integration/linux-postgres.md) | Relational storage, optional Valkey |
+| [Linux + SQLite](docs/integration/linux-sqlite.md) | Single-server, zero dependencies |
+| [Generic Container](docs/integration/container.md) | K8s, Cloud Run, any orchestrator |
+| [Generic Linux](docs/integration/linux-server.md) | On-prem, simple single-server |
+
 ## Project Structure
 
 ```
@@ -230,6 +243,8 @@ oidc-exchange/
 │   ├── server/                   # HTTP layer + bootstrap
 │   └── test-utils/               # Mock implementations
 └── docs/
+    ├── integration/              # Deployment guides
+    ├── contributing.md           # Contributing guide
     └── superpowers/
         ├── specs/                # Design specification
         └── plans/                # Implementation plan
