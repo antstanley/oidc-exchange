@@ -44,6 +44,7 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub issuer: String,
+    pub role: String,
 }
 
 impl Default for ServerConfig {
@@ -52,6 +53,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             issuer: String::new(),
+            role: "all".to_string(),
         }
     }
 }

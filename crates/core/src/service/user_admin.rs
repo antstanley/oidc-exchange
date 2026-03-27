@@ -173,4 +173,50 @@ impl AppService {
         self.user_repo.update_user(user_id, &patch).await?;
         Ok(())
     }
+
+    /// Get aggregate stats for the dashboard.
+    pub async fn admin_stats(&self) -> Result<AdminStats> {
+        let user_counts = self.user_repo.count_by_status().await?;
+        let active_sessions = self.session_repo.count_active_sessions().await?;
+
+        let active = *user_counts.get("active").unwrap_or(&0);
+        let suspended = *user_counts.get("suspended").unwrap_or(&0);
+        let deleted = *user_counts.get("deleted").unwrap_or(&0);
+
+        Ok(AdminStats {
+            users: UserStats {
+                total: active + suspended + deleted,
+                active,
+                suspended,
+                deleted,
+            },
+            sessions: SessionStats {
+                active: active_sessions,
+            },
+        })
+    }
+
+    /// List users with pagination.
+    pub async fn admin_list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+        self.user_repo.list_users(offset, limit).await
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdminStats {
+    pub users: UserStats,
+    pub sessions: SessionStats,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UserStats {
+    pub total: u64,
+    pub active: u64,
+    pub suspended: u64,
+    pub deleted: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionStats {
+    pub active: u64,
 }

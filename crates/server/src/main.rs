@@ -13,6 +13,7 @@ use oidc_exchange::routes;
 use oidc_exchange::state::AppState;
 use oidc_exchange::telemetry;
 
+use axum::Router;
 use tower_http::catch_panic::CatchPanicLayer;
 
 // ---------------------------------------------------------------------------
@@ -29,13 +30,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("configuration loaded");
 
-    // 3. Build adapters
+    let role = config.server.role.as_str();
+    tracing::info!(role = %role, "server role");
+
+    // 3. Build adapters (skip unused ones based on role)
     let user_repo = build_user_repository(&config).await?;
     let session_repo = build_session_repository(&config).await?;
-    let keys = build_key_manager(&config)?;
+
+    // Key manager and providers only needed for exchange role
+    let keys: Box<dyn KeyManager> = if role == "admin" {
+        Box::new(oidc_exchange_adapters::noop::NoopKeyManager)
+    } else {
+        build_key_manager(&config)?
+    };
+
     let audit = build_audit_log(&config).await?;
-    let user_sync = build_user_sync(&config)?;
-    let providers = build_providers(&config).await?;
+
+    // User sync only needed for admin role
+    let user_sync: Box<dyn UserSync> = if role == "exchange" {
+        Box::new(oidc_exchange_adapters::noop::NoopUserSync::new())
+    } else {
+        build_user_sync(&config)?
+    };
+
+    // Providers only needed for exchange role
+    let providers = if role == "admin" {
+        HashMap::new()
+    } else {
+        build_providers(&config).await?
+    };
 
     // 4. Build AppService
     let service = Arc::new(AppService::new(user_repo, session_repo, keys, audit, user_sync, providers, config.clone()));
@@ -44,9 +67,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: Arc::new(config.clone()),
     };
 
-    // 5. Build router
-    let app = routes::public_routes()
-        .merge(routes::internal_routes(state.clone()))
+    // 5. Build router based on role
+    let mut app: Router<AppState> = Router::new()
+        .route("/health", axum::routing::get(routes::health::health_handler));
+
+    if role == "exchange" || role == "all" {
+        app = app.merge(routes::public_routes());
+    }
+    if role == "admin" || role == "all" {
+        app = app.merge(routes::internal_routes(state.clone()));
+    }
+
+    let app = app
         .layer(axum::middleware::from_fn(request_id_layer))
         .layer(axum::middleware::from_fn(audit_context_layer))
         .layer(CatchPanicLayer::custom(panic_handler))

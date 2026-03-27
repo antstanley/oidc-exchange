@@ -163,6 +163,89 @@ impl UserRepository for DynamoRepository {
         .await?;
         Ok(())
     }
+
+    #[instrument(skip(self))]
+    async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("sk = :sk")
+                .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()))
+                .projection_expression("#s")
+                .expression_attribute_names("#s", "status");
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+            let items = result.items.unwrap_or_default();
+
+            for item in &items {
+                let status = item
+                    .get("status")
+                    .and_then(|v| v.as_s().ok())
+                    .unwrap_or(&"unknown".to_string())
+                    .clone();
+                *counts.entry(status).or_insert(0) += 1;
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        Ok(counts)
+    }
+
+    #[instrument(skip(self))]
+    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+        let mut all_users: Vec<User> = Vec::new();
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("sk = :sk")
+                .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()));
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+            let items = result.items.unwrap_or_default();
+
+            for item in &items {
+                all_users.push(item_to_user(item)?);
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        // Sort by created_at descending
+        all_users.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        // Apply offset and limit
+        let start = offset as usize;
+        let end = std::cmp::min(start + limit as usize, all_users.len());
+        if start >= all_users.len() {
+            return Ok(Vec::new());
+        }
+
+        Ok(all_users[start..end].to_vec())
+    }
 }
 
 #[async_trait]
@@ -218,6 +301,44 @@ impl SessionRepository for DynamoRepository {
             .map_err(Self::store_err)?;
 
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn count_active_sessions(&self) -> Result<u64> {
+        let now = Utc::now();
+        let mut count: u64 = 0;
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("sk = :sk")
+                .expression_attribute_values(":sk", AttributeValue::S("SESSION".to_string()));
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+            let items = result.items.unwrap_or_default();
+
+            for item in &items {
+                if let Ok(session) = item_to_session(item) {
+                    if session.expires_at > now {
+                        count += 1;
+                    }
+                }
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        Ok(count)
     }
 
     #[instrument(skip(self), fields(user_id))]

@@ -317,6 +317,46 @@ impl UserRepository for SqliteRepository {
         .await?;
         Ok(())
     }
+
+    #[instrument(skip(self))]
+    async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+        let rows = sqlx::query("SELECT status, COUNT(*) as count FROM users GROUP BY status")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        let mut counts = HashMap::new();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("count");
+            counts.insert(status, count as u64);
+        }
+
+        Ok(counts)
+    }
+
+    #[instrument(skip(self))]
+    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+        let rows = sqlx::query(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+        )
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+
+        let mut users = Vec::new();
+        for row in &rows {
+            users.push(row_to_user(row)?);
+        }
+
+        Ok(users)
+    }
 }
 
 #[async_trait]
@@ -374,6 +414,21 @@ impl SessionRepository for SqliteRepository {
             })?;
 
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn count_active_sessions(&self) -> Result<u64> {
+        let now_str = Utc::now().to_rfc3339();
+        let row = sqlx::query("SELECT COUNT(*) as count FROM sessions WHERE expires_at > ?1")
+            .bind(&now_str)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        let count: i64 = row.get("count");
+        Ok(count as u64)
     }
 
     #[instrument(skip(self), fields(user_id))]

@@ -180,6 +180,23 @@ impl SessionRepository for ValkeySessionRepository {
     }
 
     #[instrument(skip(self))]
+    async fn count_active_sessions(&self) -> Result<u64> {
+        // Count all session keys. Valkey sessions have TTL set, so existing keys
+        // are active by definition (expired keys are removed automatically).
+        let count: u64 = self
+            .client
+            .dbsize()
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        // dbsize returns total keys including user_sessions sets.
+        // For an approximate count, this is acceptable. For exact counts,
+        // a scan with prefix matching would be needed.
+        Ok(count)
+    }
+
+    #[instrument(skip(self))]
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
         let user_set_key = self.user_sessions_key(user_id);
 

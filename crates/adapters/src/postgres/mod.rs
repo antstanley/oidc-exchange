@@ -279,6 +279,42 @@ impl UserRepository for PostgresRepository {
         .await?;
         Ok(())
     }
+
+    #[instrument(skip(self))]
+    async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+        let rows = sqlx::query("SELECT status, COUNT(*) as count FROM users GROUP BY status")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Self::store_err)?;
+
+        let mut counts = HashMap::new();
+        for row in &rows {
+            let status: String = row.try_get("status").map_err(Self::store_err)?;
+            let count: i64 = row.try_get("count").map_err(Self::store_err)?;
+            counts.insert(status, count as u64);
+        }
+
+        Ok(counts)
+    }
+
+    #[instrument(skip(self))]
+    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+        let rows = sqlx::query(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Self::store_err)?;
+
+        let mut users = Vec::new();
+        for row in &rows {
+            users.push(row_to_user(row)?);
+        }
+
+        Ok(users)
+    }
 }
 
 #[async_trait]
@@ -335,6 +371,17 @@ impl SessionRepository for PostgresRepository {
             .map_err(Self::store_err)?;
 
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn count_active_sessions(&self) -> Result<u64> {
+        let row = sqlx::query("SELECT COUNT(*) as count FROM sessions WHERE expires_at > NOW()")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Self::store_err)?;
+
+        let count: i64 = row.try_get("count").map_err(Self::store_err)?;
+        Ok(count as u64)
     }
 
     #[instrument(skip(self), fields(user_id))]

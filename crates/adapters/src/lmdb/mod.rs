@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::Utc;
 use heed::types::{Bytes, Str};
 use heed::{Database, Env, EnvOpenOptions};
 use oidc_exchange_core::domain::Session;
@@ -192,6 +193,41 @@ impl SessionRepository for LmdbSessionRepository {
             })?;
 
             Ok(())
+        })
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?
+    }
+
+    #[instrument(skip(self))]
+    async fn count_active_sessions(&self) -> oidc_exchange_core::error::Result<u64> {
+        let env = self.env.clone();
+        let sessions_db = self.sessions;
+
+        tokio::task::spawn_blocking(move || {
+            let now = Utc::now();
+            let rtxn = env.read_txn().map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+            let mut count: u64 = 0;
+            let iter = sessions_db.iter(&rtxn).map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+            for result in iter {
+                let (_key, bytes) = result.map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+                if let Ok(session) = serde_json::from_slice::<Session>(bytes) {
+                    if session.expires_at > now {
+                        count += 1;
+                    }
+                }
+            }
+
+            Ok(count)
         })
         .await
         .map_err(|e| Error::StoreError {

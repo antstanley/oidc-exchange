@@ -129,6 +129,32 @@ impl UserRepository for MockRepository {
         user.updated_at = Utc::now();
         Ok(())
     }
+
+    async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+        let state = self.state.lock().await;
+        let mut counts: HashMap<String, u64> = HashMap::new();
+        for user in state.users.values() {
+            let status_str = match user.status {
+                UserStatus::Active => "active",
+                UserStatus::Suspended => "suspended",
+                UserStatus::Deleted => "deleted",
+            };
+            *counts.entry(status_str.to_string()).or_insert(0) += 1;
+        }
+        Ok(counts)
+    }
+
+    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+        let state = self.state.lock().await;
+        let mut users: Vec<User> = state.users.values().cloned().collect();
+        users.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        let start = offset as usize;
+        let end = std::cmp::min(start + limit as usize, users.len());
+        if start >= users.len() {
+            return Ok(Vec::new());
+        }
+        Ok(users[start..end].to_vec())
+    }
 }
 
 #[async_trait]
@@ -150,6 +176,17 @@ impl SessionRepository for MockRepository {
         let mut state = self.state.lock().await;
         state.sessions.remove(token_hash);
         Ok(())
+    }
+
+    async fn count_active_sessions(&self) -> Result<u64> {
+        let state = self.state.lock().await;
+        let now = Utc::now();
+        let count = state
+            .sessions
+            .values()
+            .filter(|s| s.expires_at > now)
+            .count();
+        Ok(count as u64)
     }
 
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {

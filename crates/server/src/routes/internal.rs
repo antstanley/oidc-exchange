@@ -15,7 +15,8 @@ use oidc_exchange_core::domain::{NewUser, UserPatch};
 /// Build the internal API router with shared-secret auth middleware.
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/internal/users", post(create_user))
+        .route("/internal/stats", get(stats))
+        .route("/internal/users", get(list_users).post(create_user))
         .route(
             "/internal/users/{id}",
             get(get_user).patch(update_user).delete(delete_user),
@@ -28,6 +29,37 @@ pub fn router(state: AppState) -> Router<AppState> {
                 .delete(clear_claims),
         )
         .layer(middleware::from_fn_with_state(state, internal_auth_layer))
+}
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+pub async fn stats(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let stats = state.service.admin_stats().await?;
+    Ok(Json(stats))
+}
+
+// ---------------------------------------------------------------------------
+// User list
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct ListUsersQuery {
+    offset: Option<u64>,
+    limit: Option<u64>,
+}
+
+pub async fn list_users(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<ListUsersQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(50).min(200);
+    let users = state.service.admin_list_users(offset, limit).await?;
+    Ok(Json(users))
 }
 
 // ---------------------------------------------------------------------------

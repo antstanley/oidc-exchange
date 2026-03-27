@@ -19,7 +19,6 @@ pub fn public_routes() -> Router<AppState> {
             "/.well-known/openid-configuration",
             get(well_known::openid_config_handler),
         )
-        .route("/health", get(health::health_handler))
 }
 
 pub fn internal_routes(state: AppState) -> Router<AppState> {
