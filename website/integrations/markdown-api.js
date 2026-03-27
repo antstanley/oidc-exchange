@@ -14,12 +14,11 @@
  *    same URL — browsers get HTML, agents get markdown.
  */
 
-import type { AstroIntegration } from 'astro';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, relative, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-function stripFrontmatter(content: string): string {
+function stripFrontmatter(content) {
 	if (!content.startsWith('---')) return content;
 	const end = content.indexOf('\n---', 3);
 	if (end === -1) return content;
@@ -27,8 +26,8 @@ function stripFrontmatter(content: string): string {
 }
 
 /** Recursively find all files matching extensions in a directory. */
-function walkDir(dir: string, exts: string[]): string[] {
-	const results: string[] = [];
+function walkDir(dir, exts) {
+	const results = [];
 	for (const entry of readdirSync(dir)) {
 		const full = join(dir, entry);
 		const stat = statSync(full);
@@ -41,14 +40,13 @@ function walkDir(dir: string, exts: string[]): string[] {
 	return results;
 }
 
-export default function markdownApi(): AstroIntegration {
-	let contentDir: string;
+export default function markdownApi() {
+	let contentDir;
 
 	return {
 		name: 'markdown-api',
 		hooks: {
 			'astro:config:setup': ({ addMiddleware, logger }) => {
-				// Inject the content-negotiation middleware for dev + SSR
 				addMiddleware({
 					entrypoint: new URL('../src/middleware-markdown.ts', import.meta.url).pathname,
 					order: 'pre',
@@ -57,7 +55,6 @@ export default function markdownApi(): AstroIntegration {
 			},
 
 			'astro:config:done': ({ config }) => {
-				// Resolve the content docs directory from the project root
 				contentDir = fileURLToPath(new URL('src/content/docs/', config.root));
 			},
 
@@ -71,8 +68,6 @@ export default function markdownApi(): AstroIntegration {
 					const source = readFileSync(file, 'utf-8');
 					const markdown = stripFrontmatter(source);
 
-					// Map to output path: getting-started/introduction.md
-					// .mdx files become .md in the output
 					const outPath = rel.replace(/\.mdx$/, '.md');
 					const outFile = join(outDir, outPath);
 
