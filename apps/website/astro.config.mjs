@@ -7,6 +7,9 @@ import markdownApi from './integrations/markdown-api.js';
 // https://astro.build/config
 export default defineConfig({
 	site: 'https://oidc-exchange.dev',
+	redirects: {
+		'/': '/getting-started/introduction/',
+	},
 	integrations: [
 		starlight({
 			title: 'oidc-exchange',
