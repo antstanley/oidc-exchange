@@ -74,7 +74,7 @@ Managing users, sessions, and claims currently requires direct API calls with cu
 
 ### Design
 
-A standalone SvelteKit application in `admin-ui/` at the repo root. It connects to the oidc-exchange internal API as a client.
+A standalone SvelteKit application in `apps/admin-ui/`. It connects to the oidc-exchange internal API as a client.
 
 **Tech stack:**
 - SvelteKit with Node adapter (server-rendered for auth)

@@ -1,0 +1,7 @@
+{
+  "name": "oidc-exchange",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ]
+}

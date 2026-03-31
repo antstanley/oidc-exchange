@@ -27,7 +27,7 @@
 ## Track 2: SvelteKit Admin UI
 
 ### Step 5: Scaffold SvelteKit app
-- Create `admin-ui/` with SvelteKit, TailwindCSS 4, Node adapter
+- Create `apps/admin-ui/` with SvelteKit, TailwindCSS 4, Node adapter
 - Add LayerChart dependency
 - Configure for server-side rendering
 
