@@ -9,16 +9,20 @@ Your client application handles the OAuth flow with the identity provider and se
 
 ## Token exchange flow
 
-```
-Client → Authorization Code + Provider → POST /token
-  → Provider validates code, returns ID token
-  → Service validates ID token (signature, iss, aud, exp)
-  → Registration policy check (domain allowlist, mode)
-  → User lookup/creation
-  → Generate refresh token (256-bit random, stored hashed)
-  → Sign access token JWT (short-lived)
-  → Return { access_token, refresh_token, token_type, expires_in }
-```
+![Token exchange flow diagram](/oidc-exchange.png)
+
+The diagram above shows the three participants in the exchange: your **User Application**, the **Identity Provider** (Google, Apple, etc.), and **oidc-exchange**.
+
+1. **Initiate sign-in** — the user taps "Sign In" and your app redirects to the identity provider's `/authorize` endpoint.
+2. **Authenticate with the provider** — the provider presents its login form. The user enters their credentials and submits them back to the provider via `POST /authorize`.
+3. **Redirect with ID token** — after successful authentication the provider issues a 302 redirect back to your app's callback URL, including the ID token.
+4. **Exchange the token** — your app sends a `POST /token` request to oidc-exchange with the ID token. The service then:
+   - Validates the ID token (signature, issuer, audience, expiry)
+   - Applies registration policy checks (domain allowlist, open/existing-users mode)
+   - Looks up or creates the user
+   - Generates a refresh token (256-bit random, stored hashed)
+   - Signs a short-lived JWT access token
+5. **Receive credentials** — oidc-exchange responds with `{ access_token, refresh_token, token_type, expires_in }` and your app signs the user in.
 
 ## Features
 
