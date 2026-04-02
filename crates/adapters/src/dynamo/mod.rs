@@ -52,8 +52,8 @@ impl UserRepository for DynamoRepository {
         }
     }
 
-    #[instrument(skip(self), fields(external_id))]
-    async fn get_user_by_external_id(&self, external_id: &str) -> Result<Option<User>> {
+    #[instrument(skip(self), fields(external_id, provider))]
+    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>> {
         let result = self
             .client
             .query()
@@ -62,7 +62,7 @@ impl UserRepository for DynamoRepository {
             .key_condition_expression("GSI1pk = :pk AND GSI1sk = :sk")
             .expression_attribute_values(
                 ":pk",
-                AttributeValue::S(format!("EXT#{external_id}")),
+                AttributeValue::S(format!("EXT#{provider}#{external_id}")),
             )
             .expression_attribute_values(":sk", AttributeValue::S("USER".to_string()))
             .limit(1)
@@ -645,7 +645,7 @@ mod tests {
 
         // Get user by external ID
         let fetched_ext = repo
-            .get_user_by_external_id("google|user123")
+            .get_user_by_external_id("google|user123", "google")
             .await
             .expect("get_user_by_external_id")
             .expect("user should exist");

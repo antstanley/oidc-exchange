@@ -8,7 +8,7 @@ use crate::error::Result;
 #[async_trait]
 pub trait UserRepository: Send + Sync {
     async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>>;
-    async fn get_user_by_external_id(&self, external_id: &str) -> Result<Option<User>>;
+    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>>;
     async fn create_user(&self, user: &NewUser) -> Result<User>;
     async fn update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User>;
     async fn delete_user(&self, user_id: &str) -> Result<()>;

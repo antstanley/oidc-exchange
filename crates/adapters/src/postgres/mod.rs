@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_id ON users (external_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_id_provider ON users (external_id, provider);
 
 CREATE TABLE IF NOT EXISTS sessions (
     refresh_token_hash  TEXT PRIMARY KEY,
@@ -167,10 +167,11 @@ impl UserRepository for PostgresRepository {
         }
     }
 
-    #[instrument(skip(self), fields(external_id))]
-    async fn get_user_by_external_id(&self, external_id: &str) -> Result<Option<User>> {
-        let row = sqlx::query("SELECT * FROM users WHERE external_id = $1")
+    #[instrument(skip(self), fields(external_id, provider))]
+    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>> {
+        let row = sqlx::query("SELECT * FROM users WHERE external_id = $1 AND provider = $2")
             .bind(external_id)
+            .bind(provider)
             .fetch_optional(&self.pool)
             .await
             .map_err(Self::store_err)?;

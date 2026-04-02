@@ -75,7 +75,7 @@ impl AppService {
         };
 
         // 4. Look up user by external ID, applying registration policy for new users
-        let user = match self.user_repo.get_user_by_external_id(&claims.subject).await? {
+        let user = match self.user_repo.get_user_by_external_id(&claims.subject, &request.provider).await? {
             Some(user) => {
                 if user.status != UserStatus::Active {
                     return Err(Error::UserSuspended {
@@ -91,6 +91,12 @@ impl AppService {
                 if let Some(ref allowlist) = self.config.registration.domain_allowlist {
                     match claims.email {
                         Some(ref email) => {
+                            // Reject unverified emails for allowlist matching
+                            if claims.email_verified != Some(true) {
+                                return Err(Error::AccessDenied {
+                                    reason: "verified email required when domain allowlist is configured".to_string(),
+                                });
+                            }
                             if !matches_domain_allowlist(email, allowlist) {
                                 return Err(Error::AccessDenied {
                                     reason: "email domain not in allowlist".to_string(),

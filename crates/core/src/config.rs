@@ -242,12 +242,23 @@ impl Default for UserSyncConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
     pub secret: String,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
+}
+
+impl std::fmt::Debug for WebhookConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookConfig")
+            .field("url", &self.url)
+            .field("secret", &"<redacted>")
+            .field("timeout", &self.timeout)
+            .field("retries", &self.retries)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -274,12 +285,22 @@ impl Default for TelemetryConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct InternalApiConfig {
     pub enabled: bool,
     pub auth_method: Option<String>,
     pub shared_secret: Option<String>,
+}
+
+impl std::fmt::Debug for InternalApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InternalApiConfig")
+            .field("enabled", &self.enabled)
+            .field("auth_method", &self.auth_method)
+            .field("shared_secret", &self.shared_secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Default for InternalApiConfig {

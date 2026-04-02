@@ -59,12 +59,12 @@ impl UserRepository for MockRepository {
         Ok(state.users.get(user_id).cloned())
     }
 
-    async fn get_user_by_external_id(&self, external_id: &str) -> Result<Option<User>> {
+    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>> {
         let state = self.state.lock().await;
         Ok(state
             .users
             .values()
-            .find(|u| u.external_id == external_id)
+            .find(|u| u.external_id == external_id && u.provider == provider)
             .cloned())
     }
 

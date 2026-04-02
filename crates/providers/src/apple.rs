@@ -248,9 +248,18 @@ impl IdentityProvider for AppleProvider {
                 reason: format!("Cannot build decoding key from JWK: {e}"),
             })?;
 
-        // 5. Configure validation
-        let alg = header.alg;
-        let mut validation = Validation::new(alg);
+        // 5. Configure validation — derive algorithm from the trusted JWK, not the untrusted JWT header
+        let jwk_alg = jwk.get("alg")
+            .and_then(|a| a.as_str())
+            .and_then(|a| match a {
+                "RS256" => Some(Algorithm::RS256),
+                "ES256" => Some(Algorithm::ES256),
+                _ => None,
+            })
+            .ok_or_else(|| Error::InvalidGrant {
+                reason: "Apple JWK has unsupported or missing algorithm".into(),
+            })?;
+        let mut validation = Validation::new(jwk_alg);
         validation.set_issuer(&[APPLE_ISSUER]);
         validation.set_audience(&[&self.client_id]);
 
@@ -262,8 +271,16 @@ impl IdentityProvider for AppleProvider {
 
         let claims = &token_data.claims;
 
+        let subject = claims["sub"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::InvalidGrant {
+                reason: "ID token missing required 'sub' claim".into(),
+            })?
+            .to_string();
+
         Ok(IdentityClaims {
-            subject: claims["sub"].as_str().unwrap_or_default().to_string(),
+            subject,
             email: claims["email"].as_str().map(String::from),
             email_verified: claims["email_verified"].as_bool(),
             name: claims["name"].as_str().map(String::from),

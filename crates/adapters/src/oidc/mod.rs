@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use oidc_exchange_core::domain::provider::OidcProviderConfig;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
@@ -119,9 +119,23 @@ impl IdentityProvider for OidcProvider {
                 reason: format!("Cannot build decoding key from JWK: {e}"),
             })?;
 
-        // 5. Configure validation
-        let alg = header.alg;
-        let mut validation = Validation::new(alg);
+        // 5. Configure validation — use the algorithm from the JWK (trusted), not the JWT header (untrusted)
+        let jwk_alg = jwk.get("alg")
+            .and_then(|a| a.as_str())
+            .and_then(|a| match a {
+                "RS256" => Some(Algorithm::RS256),
+                "RS384" => Some(Algorithm::RS384),
+                "RS512" => Some(Algorithm::RS512),
+                "ES256" => Some(Algorithm::ES256),
+                "ES384" => Some(Algorithm::ES384),
+                "PS256" => Some(Algorithm::PS256),
+                "PS384" => Some(Algorithm::PS384),
+                "PS512" => Some(Algorithm::PS512),
+                "EdDSA" => Some(Algorithm::EdDSA),
+                _ => None,
+            })
+            .unwrap_or(Algorithm::RS256);
+        let mut validation = Validation::new(jwk_alg);
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.client_id]);
 
@@ -133,8 +147,16 @@ impl IdentityProvider for OidcProvider {
 
         let claims = &token_data.claims;
 
+        let subject = claims["sub"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::InvalidGrant {
+                reason: "ID token missing required 'sub' claim".into(),
+            })?
+            .to_string();
+
         Ok(IdentityClaims {
-            subject: claims["sub"].as_str().unwrap_or_default().to_string(),
+            subject,
             email: claims["email"].as_str().map(String::from),
             email_verified: claims["email_verified"].as_bool(),
             name: claims["name"].as_str().map(String::from),

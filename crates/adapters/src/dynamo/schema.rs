@@ -16,10 +16,10 @@ pub fn user_to_item(user: &User) -> HashMap<String, AttributeValue> {
     item.insert("pk".to_string(), AttributeValue::S(format!("USER#{}", user.id)));
     item.insert("sk".to_string(), AttributeValue::S("PROFILE".to_string()));
 
-    // GSI1 — lookup by external_id
+    // GSI1 — lookup by provider + external_id
     item.insert(
         "GSI1pk".to_string(),
-        AttributeValue::S(format!("EXT#{}", user.external_id)),
+        AttributeValue::S(format!("EXT#{}#{}", user.provider, user.external_id)),
     );
     item.insert("GSI1sk".to_string(), AttributeValue::S("USER".to_string()));
 
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(item.get("sk").unwrap().as_s().unwrap(), "PROFILE");
         assert_eq!(
             item.get("GSI1pk").unwrap().as_s().unwrap(),
-            &format!("EXT#{}", user.external_id)
+            &format!("EXT#{}#{}", user.provider, user.external_id)
         );
         assert_eq!(item.get("GSI1sk").unwrap().as_s().unwrap(), "USER");
     }
