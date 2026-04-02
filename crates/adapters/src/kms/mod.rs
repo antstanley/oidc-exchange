@@ -5,6 +5,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::KeyManager;
+use rsa::pkcs8::DecodePublicKey;
+use rsa::traits::PublicKeyParts;
 
 /// AWS KMS-backed key manager that uses the KMS Sign API for JWT signing.
 pub struct KmsKeyManager {
@@ -50,11 +52,7 @@ impl KmsKeyManager {
         }
     }
 
-    /// Fetch the public key from KMS and build a JWK-like structure.
-    ///
-    /// For v1, this returns the raw DER-encoded public key in a JWK-compatible
-    /// structure. The exact JWK conversion (parsing ASN.1 to extract x/y
-    /// coordinates for EC keys, or n/e for RSA) can be refined later.
+    /// Fetch the public key from KMS and build an RFC 7517 compliant JWK.
     async fn fetch_public_jwk(&self) -> Result<serde_json::Value> {
         let resp = self
             .client
@@ -73,22 +71,81 @@ impl KmsKeyManager {
             })?
             .as_ref();
 
-        let key_type = match self.algorithm.as_str() {
-            a if a.starts_with("RS") || a.starts_with("PS") => "RSA",
-            a if a.starts_with("ES") => "EC",
-            _ => "unknown",
-        };
+        parse_spki_to_jwk(public_key_der, &self.algorithm, &self.kid)
+    }
+}
 
-        // v1: Return the DER bytes base64url-encoded in a JWK-like structure.
-        // A production implementation would parse the SubjectPublicKeyInfo ASN.1
-        // to extract the actual key components (n/e for RSA, x/y/crv for EC).
-        Ok(serde_json::json!({
-            "kty": key_type,
-            "alg": self.algorithm,
-            "use": "sig",
-            "kid": self.kid,
-            "x5c": [URL_SAFE_NO_PAD.encode(public_key_der)],
-        }))
+/// Parse a DER-encoded SubjectPublicKeyInfo into an RFC 7517 JWK JSON value.
+///
+/// Supports RSA (RS256/384/512, PS256/384/512) and EC (ES256, ES384) keys.
+fn parse_spki_to_jwk(
+    spki_der: &[u8],
+    algorithm: &str,
+    kid: &str,
+) -> Result<serde_json::Value> {
+    match algorithm {
+        a if a.starts_with("RS") || a.starts_with("PS") => {
+            let public_key = rsa::RsaPublicKey::from_public_key_der(spki_der)
+                .map_err(|e| Error::KeyError {
+                    detail: format!("failed to parse RSA public key DER: {e}"),
+                })?;
+
+            let n = URL_SAFE_NO_PAD.encode(public_key.n().to_be_bytes());
+            let e = URL_SAFE_NO_PAD.encode(public_key.e().to_be_bytes());
+
+            Ok(serde_json::json!({
+                "kty": "RSA",
+                "alg": algorithm,
+                "use": "sig",
+                "kid": kid,
+                "n": n,
+                "e": e,
+            }))
+        }
+        "ES256" | "ES384" => {
+            // EC keys in SPKI DER contain an uncompressed SEC1 point: 0x04 || x || y
+            let (crv, coord_len) = match algorithm {
+                "ES256" => ("P-256", 32),
+                "ES384" => ("P-384", 48),
+                _ => unreachable!(),
+            };
+
+            let point_len = 1 + 2 * coord_len;
+            if spki_der.len() < point_len {
+                return Err(Error::KeyError {
+                    detail: format!(
+                        "SPKI DER too short for {crv}: expected at least {point_len} bytes, got {}",
+                        spki_der.len()
+                    ),
+                });
+            }
+
+            let point = &spki_der[spki_der.len() - point_len..];
+            if point[0] != 0x04 {
+                return Err(Error::KeyError {
+                    detail: format!(
+                        "expected uncompressed EC point (0x04 prefix), got 0x{:02x}",
+                        point[0]
+                    ),
+                });
+            }
+
+            let x = URL_SAFE_NO_PAD.encode(&point[1..1 + coord_len]);
+            let y = URL_SAFE_NO_PAD.encode(&point[1 + coord_len..]);
+
+            Ok(serde_json::json!({
+                "kty": "EC",
+                "crv": crv,
+                "alg": algorithm,
+                "use": "sig",
+                "kid": kid,
+                "x": x,
+                "y": y,
+            }))
+        }
+        other => Err(Error::KeyError {
+            detail: format!("unsupported algorithm for JWK generation: {other}"),
+        }),
     }
 }
 
@@ -211,6 +268,60 @@ mod tests {
 
         assert_eq!(mgr.algorithm(), "ES256");
         assert_eq!(mgr.key_id(), "my-kid-42");
+    }
+
+    #[test]
+    fn test_parse_ec_public_key_to_jwk() {
+        use p256::ecdsa::SigningKey;
+        use p256::elliptic_curve::Generate;
+        use p256::pkcs8::EncodePublicKey;
+
+        let signing_key = SigningKey::generate();
+        let public_key = signing_key.verifying_key();
+        let spki_der = p256::PublicKey::from(public_key)
+            .to_public_key_der()
+            .expect("DER encoding should work");
+
+        let jwk = parse_spki_to_jwk(spki_der.as_ref(), "ES256", "test-kid")
+            .expect("should parse EC key");
+
+        assert_eq!(jwk["kty"], "EC");
+        assert_eq!(jwk["crv"], "P-256");
+        assert_eq!(jwk["alg"], "ES256");
+        assert_eq!(jwk["kid"], "test-kid");
+        assert!(jwk["x"].as_str().is_some(), "should have x coordinate");
+        assert!(jwk["y"].as_str().is_some(), "should have y coordinate");
+        let x_len = jwk["x"].as_str().unwrap().len();
+        let y_len = jwk["y"].as_str().unwrap().len();
+        assert!(x_len >= 42 && x_len <= 44, "x should be ~43 base64url chars, got {x_len}");
+        assert!(y_len >= 42 && y_len <= 44, "y should be ~43 base64url chars, got {y_len}");
+    }
+
+    #[test]
+    fn test_parse_rsa_public_key_to_jwk() {
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::RsaPrivateKey;
+
+        let private_key = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let public_key = private_key.to_public_key();
+        let spki_der = public_key
+            .to_public_key_der()
+            .expect("DER encoding should work");
+
+        let jwk = parse_spki_to_jwk(spki_der.as_ref(), "RS256", "test-kid")
+            .expect("should parse RSA key");
+
+        assert_eq!(jwk["kty"], "RSA");
+        assert_eq!(jwk["alg"], "RS256");
+        assert_eq!(jwk["kid"], "test-kid");
+        assert!(jwk["n"].as_str().is_some(), "should have modulus");
+        assert!(jwk["e"].as_str().is_some(), "should have exponent");
+    }
+
+    #[test]
+    fn test_parse_spki_unsupported_algorithm() {
+        let result = parse_spki_to_jwk(&[0u8; 32], "EdDSA", "kid");
+        assert!(result.is_err());
     }
 
     #[tokio::test]

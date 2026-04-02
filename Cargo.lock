@@ -2243,7 +2243,7 @@ dependencies = [
  "hmac 0.12.1",
  "js-sys",
  "p256 0.13.2",
- "p384",
+ "p384 0.13.1",
  "pem",
  "rand 0.8.5",
  "rsa 0.9.10",
@@ -2543,6 +2543,8 @@ dependencies = [
  "jsonwebtoken",
  "oidc-exchange-core",
  "oidc-exchange-test-utils",
+ "p256 0.14.0-rc.8",
+ "p384 0.14.0-rc.8",
  "rand 0.10.0",
  "reqwest",
  "rsa 0.10.0-rc.17",
@@ -2677,6 +2679,20 @@ dependencies = [
  "elliptic-curve 0.13.8",
  "primeorder 0.13.6",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "p384"
+version = "0.14.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b079e66810c55ab3d6ba424e056dc4aefcdb8046c8c3f3816142edbdd7af7721"
+dependencies = [
+ "ecdsa 0.17.0-rc.16",
+ "elliptic-curve 0.14.0-rc.29",
+ "fiat-crypto 0.3.0",
+ "primefield",
+ "primeorder 0.14.0-rc.8",
+ "sha2 0.11.0-rc.5",
 ]
 
 [[package]]

@@ -17,6 +17,9 @@ base64.workspace = true
 aws-sdk-dynamodb = "1"
 aws-sdk-cloudtraildata = "1"
 aws-sdk-kms = "1"
+rsa = "0.10.0-rc.1"
+p256 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
+p384 = "0.14.0-rc.1"
 aws-sdk-sqs = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 hmac = "0.12"
