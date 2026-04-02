@@ -1,0 +1,12 @@
+{
+  "name": "oidc-exchange-fastify-example",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@oidc-exchange/node": "^0.1.0",
+    "fastify": "^5"
+  }
+}

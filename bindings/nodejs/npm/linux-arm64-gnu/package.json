@@ -1,0 +1,1 @@
+{"name":"@oidc-exchange/linux-arm64-gnu","version":"0.1.0","os":["linux"],"cpu":["arm64"],"main":"oidc-exchange.linux-arm64-gnu.node","files":["oidc-exchange.linux-arm64-gnu.node"],"license":"MIT"}

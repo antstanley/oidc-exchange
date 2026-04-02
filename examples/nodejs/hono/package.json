@@ -1,0 +1,16 @@
+{
+  "name": "oidc-exchange-hono-example",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@oidc-exchange/node": "^0.1.0",
+    "hono": "^4",
+    "@hono/node-server": "^1"
+  },
+  "devDependencies": {
+    "tsx": "^4"
+  }
+}
