@@ -7,21 +7,29 @@ const TEST_KEY_PATH = '/tmp/oidc-test-nodejs-key.pem';
 const TEST_DB_PATH = '/tmp/oidc-test-nodejs.db';
 
 const TEST_CONFIG = `
-[session_store]
-type = "sqlite"
+[server]
+issuer = "https://auth.test.com"
+role = "exchange"
+
+[registration]
+mode = "open"
+
+[repository]
+adapter = "sqlite"
+
+[repository.sqlite]
 path = "${TEST_DB_PATH}"
 
 [key_manager]
-type = "local"
-key_path = "${TEST_KEY_PATH}"
+adapter = "local"
+
+[key_manager.local]
+private_key_path = "${TEST_KEY_PATH}"
+algorithm = "EdDSA"
+kid = "test-key-1"
 
 [audit]
-type = "noop"
-
-[server]
-issuer = "https://auth.test.com"
-registration_mode = "open"
-role = "exchange"
+adapter = "noop"
 
 [telemetry]
 enabled = false

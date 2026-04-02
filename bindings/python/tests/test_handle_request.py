@@ -6,7 +6,6 @@ import tempfile
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 
 from oidc_exchange import OidcExchange
 
@@ -29,21 +28,29 @@ def test_config(test_key_path):
     """Return a TOML config string for testing."""
     db_path = "/tmp/oidc-test-python.db"
     return f"""
-[session_store]
-type = "sqlite"
+[server]
+issuer = "https://auth.test.com"
+role = "exchange"
+
+[registration]
+mode = "open"
+
+[repository]
+adapter = "sqlite"
+
+[repository.sqlite]
 path = "{db_path}"
 
 [key_manager]
-type = "local"
-key_path = "{test_key_path}"
+adapter = "local"
+
+[key_manager.local]
+private_key_path = "{test_key_path}"
+algorithm = "EdDSA"
+kid = "test-key-1"
 
 [audit]
-type = "noop"
-
-[server]
-issuer = "https://auth.test.com"
-registration_mode = "open"
-role = "exchange"
+adapter = "noop"
 
 [telemetry]
 enabled = false
@@ -65,14 +72,22 @@ def test_missing_config():
 def test_health_endpoint(test_config):
     """GET /health returns status 200."""
     instance = OidcExchange(config_string=test_config)
-    response = instance.handle_request_sync("GET", "/health", {}, None)
+    response = instance.handle_request_sync({
+        "method": "GET",
+        "path": "/health",
+        "headers": {},
+    })
     assert response["status"] == 200
 
 
 def test_jwks_endpoint(test_config):
     """GET /keys returns status 200 with a JSON body containing a 'keys' array."""
     instance = OidcExchange(config_string=test_config)
-    response = instance.handle_request_sync("GET", "/keys", {}, None)
+    response = instance.handle_request_sync({
+        "method": "GET",
+        "path": "/keys",
+        "headers": {},
+    })
     assert response["status"] == 200
     body = json.loads(response["body"])
     assert "keys" in body
@@ -82,9 +97,11 @@ def test_jwks_endpoint(test_config):
 def test_openid_discovery(test_config):
     """GET /.well-known/openid-configuration returns the correct issuer."""
     instance = OidcExchange(config_string=test_config)
-    response = instance.handle_request_sync(
-        "GET", "/.well-known/openid-configuration", {}, None
-    )
+    response = instance.handle_request_sync({
+        "method": "GET",
+        "path": "/.well-known/openid-configuration",
+        "headers": {},
+    })
     assert response["status"] == 200
     body = json.loads(response["body"])
     assert body["issuer"] == "https://auth.test.com"
@@ -93,7 +110,11 @@ def test_openid_discovery(test_config):
 def test_unknown_route(test_config):
     """GET /nonexistent returns status 404."""
     instance = OidcExchange(config_string=test_config)
-    response = instance.handle_request_sync("GET", "/nonexistent", {}, None)
+    response = instance.handle_request_sync({
+        "method": "GET",
+        "path": "/nonexistent",
+        "headers": {},
+    })
     assert response["status"] == 404
 
 
@@ -101,5 +122,9 @@ def test_unknown_route(test_config):
 async def test_async_health(test_config):
     """Async handle_request for GET /health returns status 200."""
     instance = OidcExchange(config_string=test_config)
-    response = await instance.handle_request("GET", "/health", {}, None)
+    response = await instance.handle_request({
+        "method": "GET",
+        "path": "/health",
+        "headers": {},
+    })
     assert response["status"] == 200

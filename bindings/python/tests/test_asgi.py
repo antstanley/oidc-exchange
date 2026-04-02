@@ -30,21 +30,29 @@ def test_config(test_key_path):
     """Return a TOML config string for testing."""
     db_path = "/tmp/oidc-test-python-asgi.db"
     return f"""
-[session_store]
-type = "sqlite"
+[server]
+issuer = "https://auth.test.com"
+role = "exchange"
+
+[registration]
+mode = "open"
+
+[repository]
+adapter = "sqlite"
+
+[repository.sqlite]
 path = "{db_path}"
 
 [key_manager]
-type = "local"
-key_path = "{test_key_path}"
+adapter = "local"
+
+[key_manager.local]
+private_key_path = "{test_key_path}"
+algorithm = "EdDSA"
+kid = "test-key-1"
 
 [audit]
-type = "noop"
-
-[server]
-issuer = "https://auth.test.com"
-registration_mode = "open"
-role = "exchange"
+adapter = "noop"
 
 [telemetry]
 enabled = false

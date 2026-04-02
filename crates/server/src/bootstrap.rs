@@ -125,7 +125,10 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     if role == "admin" || role == "all" {
         app = app.merge(routes::internal_routes(state.clone()));
         // Ensure /health is available even in admin-only mode
-        app = app.route("/health", axum::routing::get(routes::health::health_handler));
+        // (only add if not already present from public_routes)
+        if role == "admin" {
+            app = app.route("/health", axum::routing::get(routes::health::health_handler));
+        }
     }
 
     app.layer(axum::middleware::from_fn(request_id_layer))
