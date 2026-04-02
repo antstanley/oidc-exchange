@@ -6,9 +6,8 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from werkzeug.test import Client
-
 from oidc_exchange import OidcExchange
+from werkzeug.test import Client
 
 
 @pytest.fixture(scope="session")

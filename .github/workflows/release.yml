@@ -188,10 +188,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install -g @napi-rs/cli
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - run: pnpm install -g @napi-rs/cli
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: npm install
+        run: pnpm install
       - name: Build
         working-directory: bindings/nodejs
         run: napi build --release --target ${{ matrix.target }}
@@ -222,7 +225,7 @@ jobs:
         run: npm install
       - name: Publish
         working-directory: bindings/nodejs
-        run: npm publish --access public
+        run: pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -250,10 +253,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install maturin
+      - uses: astral-sh/setup-uv@v5
       - name: Build wheel
         working-directory: bindings/python
-        run: maturin build --release --target ${{ matrix.target }}
+        run: uvx maturin build --release --target ${{ matrix.target }}
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
@@ -268,7 +271,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install twine
+      - uses: astral-sh/setup-uv@v5
       - name: Download all wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -276,7 +279,7 @@ jobs:
           path: wheels
           merge-multiple: true
       - name: Publish to PyPI
-        run: twine upload wheels/*.whl
+        run: uvx twine upload wheels/*.whl
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}

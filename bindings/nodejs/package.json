@@ -19,10 +19,16 @@
   "files": ["index.js", "index.d.ts"],
   "scripts": {
     "build": "napi build --release",
-    "test": "node --test __tests__/index.test.mjs"
+    "test": "vitest run",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2"
+    "@napi-rs/cli": "^2",
+    "vitest": "^3",
+    "oxfmt": "^0",
+    "oxlint": "^0"
   },
   "engines": {
     "node": ">= 22"
@@ -32,5 +38,6 @@
     "type": "git",
     "url": "https://github.com/antstanley/oidc-exchange.git",
     "directory": "bindings/nodejs"
-  }
+  },
+  "packageManager": "pnpm@10.11.0"
 }

@@ -1,14 +1,11 @@
 """Tests for OidcExchange ASGI adapter."""
 
-import json
 import subprocess
 import tempfile
 from pathlib import Path
 
 import httpx
 import pytest
-import pytest_asyncio
-
 from oidc_exchange import OidcExchange
 
 

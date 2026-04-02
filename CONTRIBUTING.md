@@ -1,10 +1,3 @@
----
-title: Contributing Guide
-description: How to set up a development environment, run tests, and contribute to oidc-exchange.
-version: "0.1"
-last_updated: 2026-03-26
----
-
 # Contributing Guide
 
 ## Development Setup
@@ -16,6 +9,10 @@ last_updated: 2026-03-26
 - **cargo-lambda** — required only for building Lambda binaries. Install with `cargo install cargo-lambda`.
 - **Docker** — required for DynamoDB Local integration tests.
 - **jj (Jujutsu)** — version control. Install from [martinvonz/jj](https://github.com/martinvonz/jj). This project uses jj exclusively; do not use git CLI commands.
+- **Node.js 22+** — required for Node.js bindings development.
+- **pnpm** — Node.js package manager. Install with `npm install -g pnpm`.
+- **Python 3.10+** — required for Python bindings development.
+- **uv** — Python package manager. Install from [astral.sh/uv](https://docs.astral.sh/uv/).
 
 ### Clone and build
 
@@ -33,7 +30,19 @@ The workspace is a standard Cargo workspace. Any editor with rust-analyzer suppo
 
 This project uses **Jujutsu (jj)** for version control. jj is a Git-compatible VCS with a simpler mental model — there is no staging area, and every working-copy state is automatically committed.
 
-### Common workflows
+**Always use `jj` for version control. Never use `git` CLI commands directly.**
+
+### Standard workflow
+
+For every change:
+
+1. Create a new change: `jj new`
+2. Make your edits
+3. Describe the change: `jj describe -m "feat: add domain allowlist validation"`
+4. Set the main bookmark: `jj bookmark set main`
+5. Push: `jj git push`
+
+### Common commands
 
 ```bash
 # See status
@@ -52,7 +61,7 @@ jj log
 jj git push
 ```
 
-### Branching
+### Bookmarks (branches)
 
 jj uses bookmarks instead of branches:
 
@@ -74,9 +83,56 @@ jj git push --bookmark my-feature
 - **Conflict markers in files** — jj allows conflicted states to exist in the working copy. Resolve conflicts, then `jj status` confirms resolution.
 - **`jj new` instead of `git commit`** — when your current change is ready, run `jj new` to start a fresh change on top of it.
 
+## Language-Specific Standards
+
+### Rust
+
+| Concern | Tool | Command |
+|---------|------|---------|
+| Formatting | `rustfmt` | `cargo fmt --all` |
+| Linting | `clippy` | `cargo clippy --workspace -- -D warnings` |
+| Testing | `cargo-nextest` | `cargo nextest run --workspace` |
+
+All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace -- -D warnings` with zero warnings before pushing.
+
+### Node.js
+
+| Concern | Tool | Command |
+|---------|------|---------|
+| Package manager | `pnpm` | `pnpm install` |
+| Formatting | `oxfmt` | `pnpm fmt` / `pnpm fmt:check` |
+| Linting | `oxlint` | `pnpm lint` |
+| Testing | `vitest` | `pnpm test` |
+
+**Always use `pnpm`** — never `npm` or `yarn`. The `pnpm-lock.yaml` is the lockfile of record.
+
+**Always use `oxfmt`** for formatting JavaScript, TypeScript, JSON, and related files.
+
+**Always use `oxlint`** for linting JavaScript and TypeScript.
+
+**Always use `vitest`** for testing. Tests live in `__tests__/` directories or alongside source files with `.test.ts`/`.test.mjs` extensions.
+
+### Python
+
+| Concern | Tool | Command |
+|---------|------|---------|
+| Package manager | `uv` | `uv sync` / `uv add <pkg>` |
+| Formatting | `ruff format` | `uv run ruff format .` |
+| Linting | `ruff check` | `uv run ruff check .` |
+| Type validation | `pydantic` | Use for data models requiring validation |
+| Testing | `pytest` | `uv run pytest` |
+
+**Always use `uv`** for Python package management — never `pip`, `pip install`, or manual virtualenvs. `uv` manages the virtualenv automatically.
+
+**Always use `ruff`** for both formatting and linting Python code.
+
+**Always use `pydantic`** for types and validation where structured data validation is required.
+
+**Always use `pytest`** for testing. Tests live in `tests/` directories.
+
 ## Testing
 
-### Test runner
+### Rust tests
 
 All tests run through [cargo-nextest](https://nexte.st/), configured in `.config/nextest.toml`.
 
@@ -94,6 +150,20 @@ cargo nextest run --workspace -E 'test(exchange_valid_code)'
 
 # Use the CI profile (stricter: 2 retries, fail-fast)
 cargo nextest run --workspace --profile ci
+```
+
+### Node.js tests
+
+```bash
+cd bindings/nodejs
+pnpm test          # runs vitest
+```
+
+### Python tests
+
+```bash
+cd bindings/python
+uv run pytest      # runs pytest via uv-managed virtualenv
 ```
 
 ### Integration tests
@@ -133,15 +203,20 @@ The codebase uses the hexagonal architecture to make testing straightforward:
 | `crates/core` | `oidc-exchange-core` | Domain types, port traits, service logic. Zero infrastructure dependencies. |
 | `crates/adapters` | `oidc-exchange-adapters` | Implementations of port traits for DynamoDB, KMS, CloudTrail, OIDC, webhooks. |
 | `crates/providers` | `oidc-exchange-providers` | Non-standard identity provider modules (Apple). |
-| `crates/server` | `oidc-exchange` | HTTP layer (axum), middleware, telemetry, and the binary entrypoint. |
+| `crates/server` | `oidc-exchange` | HTTP layer (axum), middleware, telemetry, bootstrap, and the binary entrypoint. |
+| `crates/ffi` | `oidc-exchange-ffi` | FFI wrapper for language bindings. Wraps AppService + Axum router. |
 | `crates/test-utils` | `oidc-exchange-test-utils` | Mock implementations of all ports. Dev-dependency only. |
+| `bindings/nodejs` | `@oidc-exchange/node` | Node.js bindings via napi-rs. |
+| `bindings/python` | `oidc-exchange` (PyPI) | Python bindings via PyO3/maturin. |
 
 ### Dependency rules
 
 - `core` depends on nothing infrastructure-specific (no AWS SDKs, no HTTP clients).
 - `adapters` and `providers` depend on `core` for trait definitions.
 - `server` depends on `core`, `adapters`, and `providers`.
+- `ffi` depends on `server` (for bootstrap module), `core`, `adapters`, and `providers`.
 - `test-utils` depends only on `core`.
+- `bindings/nodejs` and `bindings/python` depend only on `ffi`.
 
 These boundaries are enforced by the Cargo workspace. If `core` compiles, the domain logic is free of infrastructure coupling.
 
@@ -150,28 +225,32 @@ These boundaries are enforced by the Cargo workspace. If `core` compiles, the do
 1. Define the implementation in `crates/adapters/src/`.
 2. Implement the relevant port trait from `crates/core/src/ports/`.
 3. Add a builder function (e.g., `from_config()`) that constructs the adapter from the TOML config.
-4. Wire it into the adapter selection in `crates/server/src/main.rs`.
+4. Wire it into the adapter selection in `crates/server/src/bootstrap.rs`.
 5. Add tests — use wiremock for HTTP-based adapters, Docker services for database adapters.
 
 ### Adding a new identity provider
 
 1. If the provider follows standard OIDC, it only needs a config entry — no code.
 2. If the provider has quirks (like Apple), add a module in `crates/providers/src/` implementing `IdentityProvider`.
-3. Add an adapter name and wire it into provider construction in `crates/server/src/main.rs`.
+3. Add an adapter name and wire it into provider construction in `crates/server/src/bootstrap.rs`.
 
 ## Code Standards
 
 ### Formatting and linting
 
 ```bash
-# Format
+# Rust
 cargo fmt --all
+cargo clippy --workspace -- -D warnings
 
-# Lint
-cargo clippy --workspace --all-targets
+# Node.js
+cd bindings/nodejs && pnpm fmt && pnpm lint
+
+# Python
+cd bindings/python && uv run ruff format . && uv run ruff check .
 ```
 
-Both should pass with zero warnings before pushing.
+All must pass with zero warnings/errors before pushing.
 
 ### Error handling
 
@@ -187,7 +266,7 @@ Both should pass with zero warnings before pushing.
 
 ### Commit messages
 
-Write concise commit messages that describe *what* changed and *why*. Use `jj describe` to amend the current change's description.
+Write concise commit messages that describe *what* changed and *why*. Use `jj describe` to set the current change's description.
 
 ```
 fix: reject expired refresh tokens before database lookup

@@ -1,6 +1,7 @@
 """ASGI adapter for oidc-exchange."""
 
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -40,18 +41,21 @@ def make_asgi_app(oidc: OidcExchange):
         response = await oidc.handle_request(request)
 
         resp_headers = [
-            (k.encode("latin-1"), v.encode("latin-1"))
-            for k, v in response["headers"].items()
+            (k.encode("latin-1"), v.encode("latin-1")) for k, v in response["headers"].items()
         ]
 
-        await send({
-            "type": "http.response.start",
-            "status": response["status"],
-            "headers": resp_headers,
-        })
-        await send({
-            "type": "http.response.body",
-            "body": response["body"],
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": response["status"],
+                "headers": resp_headers,
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": response["body"],
+            }
+        )
 
     return app
