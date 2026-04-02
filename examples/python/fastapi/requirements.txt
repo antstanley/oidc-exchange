@@ -1,0 +1,3 @@
+oidc-exchange
+fastapi
+uvicorn[standard]
