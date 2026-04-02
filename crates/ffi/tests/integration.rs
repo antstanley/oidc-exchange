@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 use oidc_exchange_ffi::OidcExchange;
@@ -118,18 +117,18 @@ fn test_openid_discovery() {
 
 #[test]
 fn test_invalid_config() {
-    let result = OidcExchange::new("this is not valid toml {{{");
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.code, "CONFIG_ERROR");
+    match OidcExchange::new("this is not valid toml {{{") {
+        Err(err) => assert_eq!(err.code, "CONFIG_ERROR"),
+        Ok(_) => panic!("expected error for invalid TOML"),
+    }
 }
 
 #[test]
 fn test_invalid_method() {
     let (exchange, _tmp) = setup();
 
-    let result = exchange.handle_request("NOTAMETHOD", "/health", vec![], vec![]);
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert_eq!(err.code, "INVALID_METHOD");
+    match exchange.handle_request("NOTAMETHOD", "/health", vec![], vec![]) {
+        Err(err) => assert_eq!(err.code, "INVALID_METHOD"),
+        Ok(_) => panic!("expected error for invalid method"),
+    }
 }

@@ -83,15 +83,15 @@ impl OidcExchange {
             .handle_request(&method, &path, headers, body)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        let result = PyDict::new(py);
+        let result = PyDict::new_bound(py);
         result.set_item("status", response.status)?;
 
-        let resp_headers = PyDict::new(py);
+        let resp_headers = PyDict::new_bound(py);
         for (k, v) in &response.headers {
             resp_headers.set_item(k, v)?;
         }
         result.set_item("headers", resp_headers)?;
-        result.set_item("body", PyBytes::new(py, &response.body))?;
+        result.set_item("body", PyBytes::new_bound(py, &response.body))?;
 
         Ok(result.into())
     }
