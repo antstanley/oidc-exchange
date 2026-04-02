@@ -1,0 +1,15 @@
+{
+  "name": "oidc-exchange-lambda-example",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@oidc-exchange/lambda": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,4 @@
+packages:
+  - "bindings/nodejs"
+  - "bindings/lambda"
+  - "apps/*"

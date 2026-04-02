@@ -3,6 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "dependencies": {
-    "@oidc-exchange/node": "^0.1.0"
+    "@oidc-exchange/lambda": "^0.1.0"
   }
 }

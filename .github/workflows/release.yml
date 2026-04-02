@@ -223,9 +223,17 @@ jobs:
       - name: Install dependencies
         working-directory: bindings/nodejs
         run: npm install
-      - name: Publish
+      - name: Publish @oidc-exchange/node
         working-directory: bindings/nodejs
         run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Build and publish @oidc-exchange/lambda
+        working-directory: bindings/lambda
+        run: |
+          pnpm install
+          pnpm build
+          pnpm publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

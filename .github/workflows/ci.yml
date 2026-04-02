@@ -61,6 +61,21 @@ jobs:
       - name: Run tests
         working-directory: bindings/nodejs
         run: pnpm test
+      - name: Install Lambda adapter dependencies
+        working-directory: bindings/lambda
+        run: pnpm install
+      - name: Lint Lambda adapter
+        working-directory: bindings/lambda
+        run: pnpm lint
+      - name: Check Lambda adapter formatting
+        working-directory: bindings/lambda
+        run: pnpm fmt:check
+      - name: Build Lambda adapter
+        working-directory: bindings/lambda
+        run: pnpm build
+      - name: Test Lambda adapter
+        working-directory: bindings/lambda
+        run: pnpm test
 
   python-test:
     name: Python Binding Tests
