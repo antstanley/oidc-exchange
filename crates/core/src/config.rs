@@ -298,7 +298,10 @@ impl std::fmt::Debug for InternalApiConfig {
         f.debug_struct("InternalApiConfig")
             .field("enabled", &self.enabled)
             .field("auth_method", &self.auth_method)
-            .field("shared_secret", &self.shared_secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "shared_secret",
+                &self.shared_secret.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -329,9 +332,11 @@ mod tests {
 
     #[test]
     fn deserialize_default_toml() {
-        let toml_str =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/default.toml"))
-                .expect("failed to read config/default.toml");
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/default.toml"
+        ))
+        .expect("failed to read config/default.toml");
 
         let config: AppConfig = toml::from_str(&toml_str).expect("failed to deserialize config");
 
@@ -443,7 +448,8 @@ client_secret = "google-client-secret"
 scopes = ["openid", "email", "profile"]
 "#;
 
-        let config: AppConfig = toml::from_str(toml_str).expect("failed to deserialize full config");
+        let config: AppConfig =
+            toml::from_str(toml_str).expect("failed to deserialize full config");
 
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9090);
@@ -453,7 +459,10 @@ scopes = ["openid", "email", "profile"]
         let allowlist = config.registration.domain_allowlist.unwrap();
         assert_eq!(allowlist.len(), 2);
 
-        assert_eq!(config.token.audience.as_deref(), Some("https://api.example.com"));
+        assert_eq!(
+            config.token.audience.as_deref(),
+            Some("https://api.example.com")
+        );
         let claims = config.token.custom_claims.unwrap();
         assert_eq!(claims.get("org").unwrap(), "example");
 
@@ -479,7 +488,10 @@ scopes = ["openid", "email", "profile"]
         assert_eq!(config.telemetry.sample_rate, Some(0.5));
 
         assert!(config.internal_api.enabled);
-        assert_eq!(config.internal_api.shared_secret.as_deref(), Some("my-secret"));
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("my-secret")
+        );
 
         let google = config.providers.get("google").unwrap();
         assert_eq!(google.adapter, "oidc");

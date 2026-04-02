@@ -55,13 +55,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let doc = discover(&server.uri()).await.expect("discovery should succeed");
+        let doc = discover(&server.uri())
+            .await
+            .expect("discovery should succeed");
 
         assert_eq!(doc.issuer, server.uri());
-        assert_eq!(
-            doc.token_endpoint,
-            format!("{}/oauth/token", server.uri())
-        );
+        assert_eq!(doc.token_endpoint, format!("{}/oauth/token", server.uri()));
         assert_eq!(
             doc.jwks_uri,
             format!("{}/.well-known/jwks.json", server.uri())
@@ -88,7 +87,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let doc = discover(&server.uri()).await.expect("discovery should succeed");
+        let doc = discover(&server.uri())
+            .await
+            .expect("discovery should succeed");
 
         assert_eq!(doc.issuer, server.uri());
         assert!(doc.revocation_endpoint.is_none());

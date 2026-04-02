@@ -59,13 +59,12 @@ impl OidcExchange {
             message: e.to_string(),
         })?;
 
-        let service =
-            runtime
-                .block_on(oidc_exchange::bootstrap::build_service(&config))
-                .map_err(|e| FfiError {
-                    code: "SERVICE_ERROR".to_string(),
-                    message: e.to_string(),
-                })?;
+        let service = runtime
+            .block_on(oidc_exchange::bootstrap::build_service(&config))
+            .map_err(|e| FfiError {
+                code: "SERVICE_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
 
         let router = oidc_exchange::bootstrap::build_router(&config, service);
 
@@ -110,13 +109,10 @@ impl OidcExchange {
         let router = self.router.clone();
 
         let response = self.runtime.block_on(async {
-            router
-                .oneshot(request)
-                .await
-                .map_err(|e| FfiError {
-                    code: "ROUTER_ERROR".to_string(),
-                    message: e.to_string(),
-                })
+            router.oneshot(request).await.map_err(|e| FfiError {
+                code: "ROUTER_ERROR".to_string(),
+                message: e.to_string(),
+            })
         })?;
 
         let status = response.status().as_u16();

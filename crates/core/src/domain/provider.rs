@@ -25,7 +25,10 @@ impl std::fmt::Debug for OidcProviderConfig {
             .field("provider_id", &self.provider_id)
             .field("issuer", &self.issuer)
             .field("client_id", &self.client_id)
-            .field("client_secret", &self.client_secret.as_ref().map(|_| "<redacted>"))
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
             .field("jwks_uri", &self.jwks_uri)
             .field("token_endpoint", &self.token_endpoint)
             .field("revocation_endpoint", &self.revocation_endpoint)

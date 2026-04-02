@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{middleware, Json, Router};
 use serde_json::Value;
 
@@ -35,9 +35,7 @@ pub fn router(state: AppState) -> Router<AppState> {
 // Stats
 // ---------------------------------------------------------------------------
 
-pub async fn stats(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, ApiError> {
+pub async fn stats(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let stats = state.service.admin_stats().await?;
     Ok(Json(stats))
 }

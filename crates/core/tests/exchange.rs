@@ -5,7 +5,9 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
-use oidc_exchange_core::domain::{AccessTokenClaims, IdentityClaims, NewUser, UserPatch, UserStatus};
+use oidc_exchange_core::domain::{
+    AccessTokenClaims, IdentityClaims, NewUser, UserPatch, UserStatus,
+};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
@@ -68,7 +70,10 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
         provider: "mock".to_string(),
     };
 
-    let response = svc.exchange(request).await.expect("exchange should succeed");
+    let response = svc
+        .exchange(request)
+        .await
+        .expect("exchange should succeed");
 
     // Should return a Bearer token response
     assert_eq!(response.token_type, "Bearer");
@@ -312,7 +317,7 @@ async fn exchange_wildcard_subdomain_matching() {
         let request = ExchangeRequest {
             code: Some("code".to_string()),
             redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+            id_token: None,
             provider: "mock".to_string(),
         };
         svc.exchange(request)
@@ -337,7 +342,7 @@ async fn exchange_wildcard_subdomain_matching() {
         let request = ExchangeRequest {
             code: Some("code".to_string()),
             redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+            id_token: None,
             provider: "mock".to_string(),
         };
         svc.exchange(request)
@@ -362,7 +367,7 @@ async fn exchange_wildcard_subdomain_matching() {
         let request = ExchangeRequest {
             code: Some("code".to_string()),
             redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+            id_token: None,
             provider: "mock".to_string(),
         };
         let err = svc
@@ -392,7 +397,7 @@ async fn exchange_wildcard_subdomain_matching() {
         let request = ExchangeRequest {
             code: Some("code".to_string()),
             redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+            id_token: None,
             provider: "mock".to_string(),
         };
         let err = svc
@@ -537,7 +542,10 @@ async fn exchange_with_direct_id_token_skips_code_exchange() {
         provider: "mock".to_string(),
     };
 
-    let result = svc.exchange(request).await.expect("id_token exchange should succeed");
+    let result = svc
+        .exchange(request)
+        .await
+        .expect("id_token exchange should succeed");
 
     assert!(!result.access_token.is_empty());
     assert!(result.refresh_token.is_some());
@@ -563,7 +571,10 @@ async fn exchange_with_neither_code_nor_id_token_fails() {
         provider: "mock".to_string(),
     };
 
-    let err = svc.exchange(request).await.expect_err("should fail without code or id_token");
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("should fail without code or id_token");
     match err {
         Error::InvalidRequest { .. } => {}
         other => panic!("expected InvalidRequest, got: {:?}", other),

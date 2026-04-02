@@ -40,9 +40,7 @@ impl AppService {
             })?;
 
         if user.status != UserStatus::Active {
-            return Err(Error::UserSuspended {
-                user_id: user.id,
-            });
+            return Err(Error::UserSuspended { user_id: user.id });
         }
 
         // 5. Build and sign a new access token JWT (shared logic)

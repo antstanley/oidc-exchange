@@ -63,10 +63,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install maturin pytest httpx werkzeug pytest-asyncio
+      - name: Set up virtualenv and install dependencies
+        working-directory: bindings/python
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin pytest httpx werkzeug pytest-asyncio
       - name: Build Python module
         working-directory: bindings/python
-        run: maturin develop
+        run: |
+          source .venv/bin/activate
+          maturin develop
       - name: Run tests
         working-directory: bindings/python
-        run: pytest tests/
+        run: |
+          source .venv/bin/activate
+          pytest tests/

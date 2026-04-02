@@ -105,10 +105,9 @@ impl AppleProvider {
                     detail: format!("apple: failed to read private key at {private_key_path}: {e}"),
                 })?;
 
-        let signing_key =
-            EncodingKey::from_ec_pem(&pem_bytes).map_err(|e| Error::ConfigError {
-                detail: format!("apple: invalid ES256 private key: {e}"),
-            })?;
+        let signing_key = EncodingKey::from_ec_pem(&pem_bytes).map_err(|e| Error::ConfigError {
+            detail: format!("apple: invalid ES256 private key: {e}"),
+        })?;
 
         // Use well-known Apple endpoints (or discover them).
         // Apple's discovery document is stable, so we use the known values directly.
@@ -218,17 +217,16 @@ impl IdentityProvider for AppleProvider {
         let jwks = self.jwks_cache.get_keys().await?;
 
         // 3. Find matching key by kid
-        let kid = header
-            .kid
-            .as_deref()
-            .ok_or_else(|| Error::InvalidGrant {
-                reason: "JWT missing kid header".into(),
-            })?;
-
-        let keys = jwks["keys"].as_array().ok_or_else(|| Error::ProviderError {
-            provider: "apple".into(),
-            detail: "JWKS response missing 'keys' array".into(),
+        let kid = header.kid.as_deref().ok_or_else(|| Error::InvalidGrant {
+            reason: "JWT missing kid header".into(),
         })?;
+
+        let keys = jwks["keys"]
+            .as_array()
+            .ok_or_else(|| Error::ProviderError {
+                provider: "apple".into(),
+                detail: "JWKS response missing 'keys' array".into(),
+            })?;
 
         let jwk = keys
             .iter()
@@ -243,13 +241,13 @@ impl IdentityProvider for AppleProvider {
                 reason: format!("Invalid JWK: {e}"),
             })?;
 
-        let decoding_key =
-            DecodingKey::from_jwk(&jwk_value).map_err(|e| Error::InvalidGrant {
-                reason: format!("Cannot build decoding key from JWK: {e}"),
-            })?;
+        let decoding_key = DecodingKey::from_jwk(&jwk_value).map_err(|e| Error::InvalidGrant {
+            reason: format!("Cannot build decoding key from JWK: {e}"),
+        })?;
 
         // 5. Configure validation — derive algorithm from the trusted JWK, not the untrusted JWT header
-        let jwk_alg = jwk.get("alg")
+        let jwk_alg = jwk
+            .get("alg")
             .and_then(|a| a.as_str())
             .and_then(|a| match a {
                 "RS256" => Some(Algorithm::RS256),
@@ -519,8 +517,8 @@ mod tests {
 
         let mut id_header = JwtHeader::new(Algorithm::ES256);
         id_header.kid = Some(kid);
-        let id_token = jwt_encode(&id_header, &id_claims, &encoding_key)
-            .expect("should encode ID token");
+        let id_token =
+            jwt_encode(&id_header, &id_claims, &encoding_key).expect("should encode ID token");
 
         // Mount mock token endpoint
         let token_response = json!({
@@ -566,10 +564,7 @@ mod tests {
 
         assert_eq!(tokens.id_token, id_token);
         assert_eq!(tokens.access_token.as_deref(), Some("apple-access-token"));
-        assert_eq!(
-            tokens.refresh_token.as_deref(),
-            Some("apple-refresh-token")
-        );
+        assert_eq!(tokens.refresh_token.as_deref(), Some("apple-refresh-token"));
 
         // Step 2: Validate the ID token
         let identity = provider

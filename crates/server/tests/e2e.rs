@@ -124,10 +124,7 @@ async fn e2e_full_auth_flow() {
     assert_eq!(exchange_json["token_type"], "Bearer");
 
     // Step 2: POST /token with grant_type=refresh_token → get new access_token
-    let refresh_body = format!(
-        "grant_type=refresh_token&refresh_token={}",
-        refresh_token
-    );
+    let refresh_body = format!("grant_type=refresh_token&refresh_token={}", refresh_token);
 
     let response = app
         .clone()
@@ -150,10 +147,7 @@ async fn e2e_full_auth_flow() {
     assert_eq!(refresh_json["token_type"], "Bearer");
 
     // Step 3: POST /revoke with the refresh token → 200
-    let revoke_body = format!(
-        "token={}&token_type_hint=refresh_token",
-        refresh_token
-    );
+    let revoke_body = format!("token={}&token_type_hint=refresh_token", refresh_token);
 
     let response = app
         .clone()
@@ -272,7 +266,10 @@ async fn e2e_internal_api_custom_claims() {
     let payload = decode_jwt_payload(access_token);
     assert_eq!(payload["sub"], user_id);
     assert_eq!(payload["iss"], "https://auth.example.com");
-    assert_eq!(payload["role"], "admin", "custom claim 'role' should be 'admin' in the JWT");
+    assert_eq!(
+        payload["role"], "admin",
+        "custom claim 'role' should be 'admin' in the JWT"
+    );
 }
 
 // ===========================================================================

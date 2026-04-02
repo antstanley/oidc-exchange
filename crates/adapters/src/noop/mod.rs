@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use oidc_exchange_core::domain::{AuditEvent, User};
-use oidc_exchange_core::error::Result;
 use oidc_exchange_core::error::Error;
+use oidc_exchange_core::error::Result;
 use oidc_exchange_core::ports::{AuditLog, KeyManager, UserSync};
 
 /// A no-op audit log that silently discards all events.

@@ -55,7 +55,9 @@ async fn do_exchange(svc: &AppService) -> oidc_exchange_core::domain::TokenRespo
         id_token: None,
         provider: "mock".to_string(),
     };
-    svc.exchange(request).await.expect("exchange should succeed")
+    svc.exchange(request)
+        .await
+        .expect("exchange should succeed")
 }
 
 #[tokio::test]
@@ -81,7 +83,11 @@ async fn revoke_refresh_token_removes_session() {
 
     // Verify session is removed
     let sessions = repo.get_all_sessions().await;
-    assert_eq!(sessions.len(), 0, "session should be removed after revocation");
+    assert_eq!(
+        sessions.len(),
+        0,
+        "session should be removed after revocation"
+    );
 
     // Also verify by hash lookup
     let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
@@ -89,7 +95,10 @@ async fn revoke_refresh_token_removes_session() {
         .get_session_by_refresh_token(&token_hash)
         .await
         .expect("lookup should not error");
-    assert!(session.is_none(), "session should not exist after revocation");
+    assert!(
+        session.is_none(),
+        "session should not exist after revocation"
+    );
 }
 
 #[tokio::test]
@@ -108,7 +117,10 @@ async fn revoke_access_token_removes_all_user_sessions() {
 
     // Verify both sessions belong to the same user
     let user_id = sessions[0].user_id.clone();
-    assert_eq!(sessions[1].user_id, user_id, "both sessions should belong to same user");
+    assert_eq!(
+        sessions[1].user_id, user_id,
+        "both sessions should belong to same user"
+    );
 
     // Revoke using the access token from the first exchange
     let revoke_req = RevokeRequest {
@@ -147,7 +159,10 @@ async fn revoke_unknown_token_returns_ok() {
         token_type_hint: Some("refresh_token".to_string()),
     };
     let result = svc.revoke(revoke_req).await;
-    assert!(result.is_ok(), "revoke should always return Ok per RFC 7009");
+    assert!(
+        result.is_ok(),
+        "revoke should always return Ok per RFC 7009"
+    );
 
     // Also try with access_token hint and a bogus JWT
     let revoke_req = RevokeRequest {
@@ -155,7 +170,10 @@ async fn revoke_unknown_token_returns_ok() {
         token_type_hint: Some("access_token".to_string()),
     };
     let result = svc.revoke(revoke_req).await;
-    assert!(result.is_ok(), "revoke should always return Ok per RFC 7009");
+    assert!(
+        result.is_ok(),
+        "revoke should always return Ok per RFC 7009"
+    );
 
     // Also try with a completely garbage string (not even JWT-shaped)
     let revoke_req = RevokeRequest {
@@ -163,7 +181,10 @@ async fn revoke_unknown_token_returns_ok() {
         token_type_hint: Some("access_token".to_string()),
     };
     let result = svc.revoke(revoke_req).await;
-    assert!(result.is_ok(), "revoke should always return Ok per RFC 7009");
+    assert!(
+        result.is_ok(),
+        "revoke should always return Ok per RFC 7009"
+    );
 }
 
 #[tokio::test]

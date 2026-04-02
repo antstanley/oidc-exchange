@@ -51,10 +51,17 @@ impl KeyManager for LocalKeyManager {
     async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool> {
         use ed25519_dalek::{Signature, Verifier};
         let sig_bytes: [u8; 64] = signature.try_into().map_err(|_| Error::KeyError {
-            detail: format!("invalid Ed25519 signature length: expected 64, got {}", signature.len()),
+            detail: format!(
+                "invalid Ed25519 signature length: expected 64, got {}",
+                signature.len()
+            ),
         })?;
         let sig = Signature::from_bytes(&sig_bytes);
-        Ok(self.signing_key.verifying_key().verify(payload, &sig).is_ok())
+        Ok(self
+            .signing_key
+            .verifying_key()
+            .verify(payload, &sig)
+            .is_ok())
     }
 
     async fn public_jwk(&self) -> Result<serde_json::Value> {
@@ -104,19 +111,13 @@ mod tests {
         tmp.flush().expect("failed to flush temp file");
 
         // 3. Create a LocalKeyManager from the PEM file
-        let manager = LocalKeyManager::from_file(
-            tmp.path().to_str().unwrap(),
-            "EdDSA",
-            "my-test-key-42",
-        )
-        .expect("failed to create LocalKeyManager from PEM file");
+        let manager =
+            LocalKeyManager::from_file(tmp.path().to_str().unwrap(), "EdDSA", "my-test-key-42")
+                .expect("failed to create LocalKeyManager from PEM file");
 
         // 4. Sign a payload
         let payload = b"hello, this is a test payload";
-        let sig_bytes = manager
-            .sign(payload)
-            .await
-            .expect("signing should succeed");
+        let sig_bytes = manager.sign(payload).await.expect("signing should succeed");
         assert_eq!(sig_bytes.len(), 64, "Ed25519 signature should be 64 bytes");
 
         // 5. Verify the signature using the public key from public_jwk()
@@ -129,7 +130,11 @@ mod tests {
         let pub_key_bytes = URL_SAFE_NO_PAD
             .decode(x_b64)
             .expect("base64url decode should succeed");
-        assert_eq!(pub_key_bytes.len(), 32, "Ed25519 public key should be 32 bytes");
+        assert_eq!(
+            pub_key_bytes.len(),
+            32,
+            "Ed25519 public key should be 32 bytes"
+        );
 
         let pub_key_array: [u8; 32] = pub_key_bytes.try_into().unwrap();
         let verifying_key = VerifyingKey::from_bytes(&pub_key_array)
@@ -161,7 +166,10 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             Error::KeyError { detail } => {
-                assert!(detail.contains("failed to parse"), "unexpected detail: {detail}");
+                assert!(
+                    detail.contains("failed to parse"),
+                    "unexpected detail: {detail}"
+                );
             }
             other => panic!("expected KeyError, got: {other:?}"),
         }
@@ -174,7 +182,10 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             Error::KeyError { detail } => {
-                assert!(detail.contains("invalid UTF-8"), "unexpected detail: {detail}");
+                assert!(
+                    detail.contains("invalid UTF-8"),
+                    "unexpected detail: {detail}"
+                );
             }
             other => panic!("expected KeyError, got: {other:?}"),
         }
@@ -187,7 +198,10 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             Error::KeyError { detail } => {
-                assert!(detail.contains("failed to read"), "unexpected detail: {detail}");
+                assert!(
+                    detail.contains("failed to read"),
+                    "unexpected detail: {detail}"
+                );
             }
             other => panic!("expected KeyError, got: {other:?}"),
         }

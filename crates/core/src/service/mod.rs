@@ -15,7 +15,9 @@ use crate::domain::{
     AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
 };
 use crate::error::{Error, Result};
-use crate::ports::{AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync};
+use crate::ports::{
+    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+};
 
 pub struct AppService {
     pub(crate) user_repo: Box<dyn UserRepository>,
@@ -74,10 +76,8 @@ impl AppService {
             custom: claims::resolve_custom_claims(&self.config.token.custom_claims, user),
         };
 
-        let claims_json = serde_json::to_vec(&access_claims).map_err(|e| {
-            Error::ConfigError {
-                detail: format!("failed to serialize access token claims: {}", e),
-            }
+        let claims_json = serde_json::to_vec(&access_claims).map_err(|e| Error::ConfigError {
+            detail: format!("failed to serialize access token claims: {}", e),
         })?;
 
         let header = serde_json::json!({
@@ -85,11 +85,11 @@ impl AppService {
             "typ": "JWT",
             "kid": self.keys.key_id()
         });
-        let header_b64 = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&header).map_err(|e| Error::ConfigError {
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).map_err(|e| {
+            Error::ConfigError {
                 detail: format!("failed to serialize JWT header: {}", e),
-            })?,
-        );
+            }
+        })?);
         let payload_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
         let signature = self.keys.sign(signing_input.as_bytes()).await?;
@@ -104,8 +104,8 @@ impl AppService {
             Ok(()) => Ok(()),
             Err(e) => {
                 // Always emit via tracing as fallback (captured by Lambda, CloudWatch, etc.)
-                let serialized = serde_json::to_string(&event)
-                    .unwrap_or_else(|_| format!("{:?}", event));
+                let serialized =
+                    serde_json::to_string(&event).unwrap_or_else(|_| format!("{:?}", event));
 
                 if event.severity as u8 <= AuditSeverity::Error as u8 {
                     tracing::error!(audit_fallback = true, "{serialized}");

@@ -53,7 +53,11 @@ impl UserRepository for DynamoRepository {
     }
 
     #[instrument(skip(self), fields(external_id, provider))]
-    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>> {
+    async fn get_user_by_external_id(
+        &self,
+        external_id: &str,
+        provider: &str,
+    ) -> Result<Option<User>> {
         let result = self
             .client
             .query()
@@ -271,10 +275,7 @@ impl SessionRepository for DynamoRepository {
             .client
             .get_item()
             .table_name(&self.table_name)
-            .key(
-                "pk",
-                AttributeValue::S(format!("SESSION#{token_hash}")),
-            )
+            .key("pk", AttributeValue::S(format!("SESSION#{token_hash}")))
             .key("sk", AttributeValue::S("SESSION".to_string()))
             .send()
             .await
@@ -291,10 +292,7 @@ impl SessionRepository for DynamoRepository {
         self.client
             .delete_item()
             .table_name(&self.table_name)
-            .key(
-                "pk",
-                AttributeValue::S(format!("SESSION#{token_hash}")),
-            )
+            .key("pk", AttributeValue::S(format!("SESSION#{token_hash}")))
             .key("sk", AttributeValue::S("SESSION".to_string()))
             .send()
             .await
@@ -370,12 +368,14 @@ impl SessionRepository for DynamoRepository {
                 let delete_requests: Vec<_> = chunk
                     .iter()
                     .map(|item| {
-                        let pk = item.get("pk").cloned().unwrap_or_else(|| {
-                            AttributeValue::S("UNKNOWN".to_string())
-                        });
-                        let sk = item.get("sk").cloned().unwrap_or_else(|| {
-                            AttributeValue::S("UNKNOWN".to_string())
-                        });
+                        let pk = item
+                            .get("pk")
+                            .cloned()
+                            .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
+                        let sk = item
+                            .get("sk")
+                            .cloned()
+                            .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
 
                         aws_sdk_dynamodb::types::WriteRequest::builder()
                             .delete_request(
@@ -420,10 +420,7 @@ impl SessionRepository for DynamoRepository {
                 .table_name(&self.table_name)
                 .index_name(GSI1_NAME)
                 .key_condition_expression("GSI1pk = :pk AND begins_with(GSI1sk, :sk_prefix)")
-                .expression_attribute_values(
-                    ":pk",
-                    AttributeValue::S(format!("USER#{user_id}")),
-                )
+                .expression_attribute_values(":pk", AttributeValue::S(format!("USER#{user_id}")))
                 .expression_attribute_values(
                     ":sk_prefix",
                     AttributeValue::S("SESSION#".to_string()),
@@ -445,12 +442,14 @@ impl SessionRepository for DynamoRepository {
                     let delete_requests: Vec<_> = chunk
                         .iter()
                         .map(|item| {
-                            let pk = item.get("pk").cloned().unwrap_or_else(|| {
-                                AttributeValue::S("UNKNOWN".to_string())
-                            });
-                            let sk = item.get("sk").cloned().unwrap_or_else(|| {
-                                AttributeValue::S("UNKNOWN".to_string())
-                            });
+                            let pk = item
+                                .get("pk")
+                                .cloned()
+                                .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
+                            let sk = item
+                                .get("sk")
+                                .cloned()
+                                .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
 
                             aws_sdk_dynamodb::types::WriteRequest::builder()
                                 .delete_request(
@@ -514,11 +513,7 @@ mod tests {
 
     async fn create_test_table(client: &aws_sdk_dynamodb::Client, table_name: &str) {
         // Delete if exists (ignore errors)
-        let _ = client
-            .delete_table()
-            .table_name(table_name)
-            .send()
-            .await;
+        let _ = client.delete_table().table_name(table_name).send().await;
 
         client
             .create_table()
@@ -664,7 +659,10 @@ mod tests {
             display_name: None,
             metadata: Some({
                 let mut m = HashMap::new();
-                m.insert("key".to_string(), serde_json::Value::String("val".to_string()));
+                m.insert(
+                    "key".to_string(),
+                    serde_json::Value::String("val".to_string()),
+                );
                 m
             }),
             claims: None,
@@ -681,9 +679,7 @@ mod tests {
         );
 
         // Delete user (soft delete)
-        repo.delete_user(&created.id)
-            .await
-            .expect("delete_user");
+        repo.delete_user(&created.id).await.expect("delete_user");
         let deleted = repo
             .get_user_by_id(&created.id)
             .await

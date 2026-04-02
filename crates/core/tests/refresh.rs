@@ -51,17 +51,17 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
 
 /// Helper: perform an exchange to get a refresh token, then return it along
 /// with the service and repo for further testing.
-async fn exchange_and_get_refresh_token(
-    _repo: &MockRepository,
-    svc: &AppService,
-) -> String {
+async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService) -> String {
     let request = ExchangeRequest {
         code: Some("auth-code-123".to_string()),
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
     };
-    let response = svc.exchange(request).await.expect("exchange should succeed");
+    let response = svc
+        .exchange(request)
+        .await
+        .expect("exchange should succeed");
     response.refresh_token.expect("should have a refresh token")
 }
 
@@ -83,7 +83,10 @@ async fn refresh_happy_path_returns_new_access_token() {
     // Verify the response
     assert_eq!(response.token_type, "Bearer");
     assert_eq!(response.expires_in, 900); // 15m = 900s
-    assert!(response.refresh_token.is_none(), "refresh should not return a new refresh token");
+    assert!(
+        response.refresh_token.is_none(),
+        "refresh should not return a new refresh token"
+    );
     assert!(!response.access_token.is_empty());
 
     // Access token should be a valid JWT structure (3 dot-separated parts)
@@ -137,9 +140,7 @@ async fn refresh_expired_token_returns_invalid_token() {
         .expect("store should succeed");
 
     // Now try to refresh with the expired token
-    let request = RefreshRequest {
-        refresh_token,
-    };
+    let request = RefreshRequest { refresh_token };
     let err = svc
         .refresh(request)
         .await
@@ -198,9 +199,7 @@ async fn refresh_suspended_user_returns_user_suspended() {
     .expect("update should succeed");
 
     // Now try to refresh
-    let request = RefreshRequest {
-        refresh_token,
-    };
+    let request = RefreshRequest { refresh_token };
     let err = svc
         .refresh(request)
         .await

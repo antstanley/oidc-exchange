@@ -69,21 +69,16 @@ impl JwksCache {
     }
 
     async fn fetch_keys(&self) -> Result<serde_json::Value> {
-        let response =
-            reqwest::get(&self.jwks_uri)
-                .await
-                .map_err(|e| Error::ProviderError {
-                    provider: self.jwks_uri.clone(),
-                    detail: e.to_string(),
-                })?;
-        let keys: serde_json::Value =
-            response
-                .json()
-                .await
-                .map_err(|e| Error::ProviderError {
-                    provider: self.jwks_uri.clone(),
-                    detail: e.to_string(),
-                })?;
+        let response = reqwest::get(&self.jwks_uri)
+            .await
+            .map_err(|e| Error::ProviderError {
+                provider: self.jwks_uri.clone(),
+                detail: e.to_string(),
+            })?;
+        let keys: serde_json::Value = response.json().await.map_err(|e| Error::ProviderError {
+            provider: self.jwks_uri.clone(),
+            detail: e.to_string(),
+        })?;
         Ok(keys)
     }
 }
@@ -157,10 +152,7 @@ mod tests {
             .await;
 
         // Use a very short TTL so the cache becomes stale immediately.
-        let cache = JwksCache::with_ttl(
-            format!("{}/jwks", server.uri()),
-            Duration::from_millis(1),
-        );
+        let cache = JwksCache::with_ttl(format!("{}/jwks", server.uri()), Duration::from_millis(1));
 
         let _keys1 = cache.get_keys().await.expect("first call");
 

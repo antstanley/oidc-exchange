@@ -28,8 +28,7 @@ pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 
     // Try to read config files
     let default_config = std::fs::read_to_string("config/default.toml").unwrap_or_default();
-    let env_config =
-        std::fs::read_to_string(format!("config/{}.toml", env)).unwrap_or_default();
+    let env_config = std::fs::read_to_string(format!("config/{}.toml", env)).unwrap_or_default();
 
     // Use the env-specific config if it exists, otherwise fall back to default.
     let merged = if env_config.is_empty() {
@@ -60,9 +59,7 @@ pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Err
 /// Build the full `AppService` from a loaded config, instantiating all
 /// adapters (repositories, key manager, audit log, user sync, providers)
 /// according to the configured role.
-pub async fn build_service(
-    config: &AppConfig,
-) -> Result<AppService, Box<dyn std::error::Error>> {
+pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std::error::Error>> {
     let role = config.server.role.as_str();
 
     // Build adapters (skip unused ones based on role)
@@ -127,7 +124,10 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         // Ensure /health is available even in admin-only mode
         // (only add if not already present from public_routes)
         if role == "admin" {
-            app = app.route("/health", axum::routing::get(routes::health::health_handler));
+            app = app.route(
+                "/health",
+                axum::routing::get(routes::health::health_handler),
+            );
         }
     }
 
@@ -144,12 +144,14 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 async fn build_dynamo_client(
     config: &AppConfig,
 ) -> Result<(aws_sdk_dynamodb::Client, String), Box<dyn std::error::Error>> {
-    let dynamo_cfg = config.repository.dynamodb.as_ref().ok_or_else(|| {
-        Error::ConfigError {
+    let dynamo_cfg = config
+        .repository
+        .dynamodb
+        .as_ref()
+        .ok_or_else(|| Error::ConfigError {
             detail: "repository.adapter is 'dynamodb' but [repository.dynamodb] section is missing"
                 .into(),
-        }
-    })?;
+        })?;
 
     let mut aws_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
 
@@ -190,13 +192,15 @@ async fn build_user_repository(
             ))
         }
         "sqlite" => {
-            let sq_cfg = config.repository.sqlite.as_ref().ok_or_else(|| {
-                Error::ConfigError {
+            let sq_cfg = config
+                .repository
+                .sqlite
+                .as_ref()
+                .ok_or_else(|| Error::ConfigError {
                     detail:
                         "repository.adapter is 'sqlite' but [repository.sqlite] section is missing"
                             .into(),
-                }
-            })?;
+                })?;
             let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
             Ok(Box::new(
                 oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
@@ -269,7 +273,8 @@ async fn build_session_repository(
             })?;
             let client = oidc_exchange_adapters::valkey::ValkeySessionRepository::new(
                 &vk_cfg.url,
-                vk_cfg.key_prefix
+                vk_cfg
+                    .key_prefix
                     .clone()
                     .unwrap_or_else(|| "oidc:".to_string()),
             )
@@ -304,13 +309,18 @@ fn build_key_manager(
 ) -> Result<Box<dyn KeyManager>, Box<dyn std::error::Error>> {
     match config.key_manager.adapter.as_str() {
         "local" => {
-            let local_cfg = config.key_manager.local.as_ref().ok_or_else(|| {
-                Error::ConfigError {
+            let local_cfg =
+                config
+                    .key_manager
+                    .local
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Error::ConfigError {
                     detail:
                         "key_manager.adapter is 'local' but [key_manager.local] section is missing"
                             .into(),
                 }
-            })?;
+                    })?;
 
             let mgr = oidc_exchange_adapters::local_keys::LocalKeyManager::from_file(
                 &local_cfg.private_key_path,
@@ -320,12 +330,14 @@ fn build_key_manager(
             Ok(Box::new(mgr))
         }
         "kms" => {
-            let kms_cfg = config.key_manager.kms.as_ref().ok_or_else(|| {
-                Error::ConfigError {
+            let kms_cfg = config
+                .key_manager
+                .kms
+                .as_ref()
+                .ok_or_else(|| Error::ConfigError {
                     detail: "key_manager.adapter is 'kms' but [key_manager.kms] section is missing"
                         .into(),
-                }
-            })?;
+                })?;
 
             // Build KMS client synchronously using a blocking load.
             let sdk_config = futures::executor::block_on(
@@ -355,13 +367,15 @@ async fn build_audit_log(
     match config.audit.adapter.as_str() {
         "noop" | "" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
         "cloudtrail" => {
-            let ct_cfg = config.audit.cloudtrail.as_ref().ok_or_else(|| {
-                Error::ConfigError {
+            let ct_cfg = config
+                .audit
+                .cloudtrail
+                .as_ref()
+                .ok_or_else(|| Error::ConfigError {
                     detail:
                         "audit.adapter is 'cloudtrail' but [audit.cloudtrail] section is missing"
                             .into(),
-                }
-            })?;
+                })?;
 
             let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
                 .load()
@@ -376,11 +390,13 @@ async fn build_audit_log(
             ))
         }
         "sqs" => {
-            let sqs_cfg = config.audit.sqs.as_ref().ok_or_else(|| {
-                Error::ConfigError {
+            let sqs_cfg = config
+                .audit
+                .sqs
+                .as_ref()
+                .ok_or_else(|| Error::ConfigError {
                     detail: "audit.adapter is 'sqs' but [audit.sqs] section is missing".into(),
-                }
-            })?;
+                })?;
 
             let mut aws_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
             if let Some(ref region) = sqs_cfg.region {
@@ -402,22 +418,22 @@ async fn build_audit_log(
     }
 }
 
-fn build_user_sync(
-    config: &AppConfig,
-) -> Result<Box<dyn UserSync>, Box<dyn std::error::Error>> {
+fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std::error::Error>> {
     if !config.user_sync.enabled {
         return Ok(Box::new(oidc_exchange_adapters::noop::NoopUserSync::new()));
     }
 
     match config.user_sync.adapter.as_deref() {
         Some("webhook") => {
-            let wh_cfg = config.user_sync.webhook.as_ref().ok_or_else(|| {
-                Error::ConfigError {
+            let wh_cfg = config
+                .user_sync
+                .webhook
+                .as_ref()
+                .ok_or_else(|| Error::ConfigError {
                     detail:
                         "user_sync.adapter is 'webhook' but [user_sync.webhook] section is missing"
                             .into(),
-                }
-            })?;
+                })?;
 
             let timeout_secs = wh_cfg
                 .timeout
@@ -496,7 +512,11 @@ fn provider_config_to_oidc(
     use oidc_exchange_core::domain::provider::OidcProviderConfig;
 
     let get_str = |key: &str| -> Option<String> {
-        config.extra.get(key).and_then(|v| v.as_str()).map(String::from)
+        config
+            .extra
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(String::from)
     };
 
     let issuer = get_str("issuer").ok_or_else(|| Error::ConfigError {

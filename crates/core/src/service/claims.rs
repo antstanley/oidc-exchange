@@ -55,8 +55,7 @@ fn resolve_template(template: &str, user: &User) -> Option<Value> {
     if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
         let inner = trimmed[2..trimmed.len() - 2].trim();
         if let Some((path, default)) = parse_default_filter(inner) {
-            resolve_field(path.trim(), user)
-                .or_else(|| Some(Value::String(default)))
+            resolve_field(path.trim(), user).or_else(|| Some(Value::String(default)))
         } else {
             resolve_field(inner, user)
         }
@@ -107,10 +106,7 @@ fn resolve_field(path: &str, user: &User) -> Option<Value> {
     match segments[1] {
         "id" => Some(Value::String(user.id.clone())),
         "email" => user.email.as_ref().map(|e| Value::String(e.clone())),
-        "display_name" => user
-            .display_name
-            .as_ref()
-            .map(|d| Value::String(d.clone())),
+        "display_name" => user.display_name.as_ref().map(|d| Value::String(d.clone())),
         "provider" => Some(Value::String(user.provider.clone())),
         "external_id" => Some(Value::String(user.external_id.clone())),
         "metadata" => {

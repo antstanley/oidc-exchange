@@ -57,7 +57,10 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<(), Box<dyn std::error
                 .with_env_filter(filter)
                 .json()
                 .init();
-            tracing::warn!(exporter = other, "unknown telemetry exporter — using stdout JSON logs");
+            tracing::warn!(
+                exporter = other,
+                "unknown telemetry exporter — using stdout JSON logs"
+            );
         }
     }
 

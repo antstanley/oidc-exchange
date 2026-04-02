@@ -64,23 +64,32 @@ impl AppService {
             provider.validate_id_token(id_token).await?
         } else {
             // Authorization code exchange
-            let code = request.code.as_deref().ok_or_else(|| Error::InvalidRequest {
-                reason: "either 'code' or 'id_token' is required".to_string(),
-            })?;
-            let redirect_uri = request.redirect_uri.as_deref().ok_or_else(|| Error::InvalidRequest {
-                reason: "redirect_uri is required for authorization_code grant".to_string(),
-            })?;
+            let code = request
+                .code
+                .as_deref()
+                .ok_or_else(|| Error::InvalidRequest {
+                    reason: "either 'code' or 'id_token' is required".to_string(),
+                })?;
+            let redirect_uri =
+                request
+                    .redirect_uri
+                    .as_deref()
+                    .ok_or_else(|| Error::InvalidRequest {
+                        reason: "redirect_uri is required for authorization_code grant".to_string(),
+                    })?;
             let tokens = provider.exchange_code(code, redirect_uri).await?;
             provider.validate_id_token(&tokens.id_token).await?
         };
 
         // 4. Look up user by external ID, applying registration policy for new users
-        let user = match self.user_repo.get_user_by_external_id(&claims.subject, &request.provider).await? {
+        let user = match self
+            .user_repo
+            .get_user_by_external_id(&claims.subject, &request.provider)
+            .await?
+        {
             Some(user) => {
                 if user.status != UserStatus::Active {
-                    return Err(Error::UserSuspended {
-                        user_id: user.id,
-                    });
+                    return Err(Error::UserSuspended { user_id: user.id });
                 }
                 user
             }
@@ -137,10 +146,8 @@ impl AppService {
         let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
 
         // 7. Compute session expiry from config
-        let refresh_ttl_secs =
-            parse_duration_secs(&self.config.token.refresh_token_ttl)?;
-        let expires_at =
-            Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
+        let refresh_ttl_secs = parse_duration_secs(&self.config.token.refresh_token_ttl)?;
+        let expires_at = Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
 
         // 8. Store session
         let session = Session {
@@ -190,7 +197,10 @@ mod tests {
         let allowlist = vec!["example.com".to_string()];
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(!matches_domain_allowlist("user@other.com", &allowlist));
-        assert!(!matches_domain_allowlist("user@sub.example.com", &allowlist));
+        assert!(!matches_domain_allowlist(
+            "user@sub.example.com",
+            &allowlist
+        ));
     }
 
     #[test]
@@ -226,10 +236,7 @@ mod tests {
 
     #[test]
     fn domain_allowlist_multiple_entries() {
-        let allowlist = vec![
-            "example.com".to_string(),
-            "*.acme.corp".to_string(),
-        ];
+        let allowlist = vec!["example.com".to_string(), "*.acme.corp".to_string()];
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(matches_domain_allowlist("user@dev.acme.corp", &allowlist));
         assert!(!matches_domain_allowlist("user@other.org", &allowlist));

@@ -13,7 +13,10 @@ pub fn user_to_item(user: &User) -> HashMap<String, AttributeValue> {
     let mut item = HashMap::new();
 
     // Keys
-    item.insert("pk".to_string(), AttributeValue::S(format!("USER#{}", user.id)));
+    item.insert(
+        "pk".to_string(),
+        AttributeValue::S(format!("USER#{}", user.id)),
+    );
     item.insert("sk".to_string(), AttributeValue::S("PROFILE".to_string()));
 
     // GSI1 — lookup by provider + external_id
@@ -134,7 +137,10 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     );
 
     if let Some(ref device_id) = session.device_id {
-        item.insert("device_id".to_string(), AttributeValue::S(device_id.clone()));
+        item.insert(
+            "device_id".to_string(),
+            AttributeValue::S(device_id.clone()),
+        );
     }
     if let Some(ref user_agent) = session.user_agent {
         item.insert(
@@ -185,7 +191,9 @@ fn get_s(item: &HashMap<String, AttributeValue>, key: &str) -> Result<String> {
 }
 
 fn get_s_opt(item: &HashMap<String, AttributeValue>, key: &str) -> Option<String> {
-    item.get(key).and_then(|v| v.as_s().ok()).map(|s| s.to_string())
+    item.get(key)
+        .and_then(|v| v.as_s().ok())
+        .map(|s| s.to_string())
 }
 
 fn get_json_map(

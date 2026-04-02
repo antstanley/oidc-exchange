@@ -7,10 +7,7 @@ use axum::response::IntoResponse;
 /// If the incoming request already contains an `X-Request-Id` header it is reused;
 /// otherwise a new UUID v4 is generated.  The value is recorded on the current
 /// tracing span and propagated back on the response.
-pub async fn request_id_layer(
-    request: Request<axum::body::Body>,
-    next: Next,
-) -> impl IntoResponse {
+pub async fn request_id_layer(request: Request<axum::body::Body>, next: Next) -> impl IntoResponse {
     let request_id = request
         .headers()
         .get("x-request-id")

@@ -113,17 +113,17 @@ fn row_to_user(row: &sqlx::sqlite::SqliteRow) -> Result<User> {
             detail: format!("failed to parse claims: {e}"),
         })?;
     let created_at: DateTime<Utc> =
-        created_at_str.parse().map_err(|e: chrono::ParseError| {
-            Error::StoreError {
+        created_at_str
+            .parse()
+            .map_err(|e: chrono::ParseError| Error::StoreError {
                 detail: format!("failed to parse created_at: {e}"),
-            }
-        })?;
+            })?;
     let updated_at: DateTime<Utc> =
-        updated_at_str.parse().map_err(|e: chrono::ParseError| {
-            Error::StoreError {
+        updated_at_str
+            .parse()
+            .map_err(|e: chrono::ParseError| Error::StoreError {
                 detail: format!("failed to parse updated_at: {e}"),
-            }
-        })?;
+            })?;
 
     Ok(User {
         id: row.get("id"),
@@ -144,17 +144,17 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
     let created_at_str: String = row.get("created_at");
 
     let expires_at: DateTime<Utc> =
-        expires_at_str.parse().map_err(|e: chrono::ParseError| {
-            Error::StoreError {
+        expires_at_str
+            .parse()
+            .map_err(|e: chrono::ParseError| Error::StoreError {
                 detail: format!("failed to parse expires_at: {e}"),
-            }
-        })?;
+            })?;
     let created_at: DateTime<Utc> =
-        created_at_str.parse().map_err(|e: chrono::ParseError| {
-            Error::StoreError {
+        created_at_str
+            .parse()
+            .map_err(|e: chrono::ParseError| Error::StoreError {
                 detail: format!("failed to parse created_at: {e}"),
-            }
-        })?;
+            })?;
 
     Ok(Session {
         user_id: row.get("user_id"),
@@ -187,7 +187,11 @@ impl UserRepository for SqliteRepository {
     }
 
     #[instrument(skip(self), fields(external_id, provider))]
-    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>> {
+    async fn get_user_by_external_id(
+        &self,
+        external_id: &str,
+        provider: &str,
+    ) -> Result<Option<User>> {
         let row = sqlx::query("SELECT * FROM users WHERE external_id = ?1 AND provider = ?2")
             .bind(external_id)
             .bind(provider)
@@ -276,10 +280,9 @@ impl UserRepository for SqliteRepository {
             serde_json::to_string(&user.metadata).map_err(|e| Error::StoreError {
                 detail: e.to_string(),
             })?;
-        let claims_str =
-            serde_json::to_string(&user.claims).map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+        let claims_str = serde_json::to_string(&user.claims).map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
         let status_str = status_to_str(&user.status);
         let updated_at_str = user.updated_at.to_rfc3339();
 
@@ -340,16 +343,14 @@ impl UserRepository for SqliteRepository {
 
     #[instrument(skip(self))]
     async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        let rows = sqlx::query(
-            "SELECT * FROM users ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
-        )
-        .bind(limit as i64)
-        .bind(offset as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| Error::StoreError {
-            detail: e.to_string(),
-        })?;
+        let rows = sqlx::query("SELECT * FROM users ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
 
         let mut users = Vec::new();
         for row in &rows {
@@ -641,9 +642,7 @@ mod tests {
             .is_some());
 
         // Re-store first, then revoke all
-        repo.store_refresh_token(&session)
-            .await
-            .expect("re-store");
+        repo.store_refresh_token(&session).await.expect("re-store");
         repo.revoke_all_user_sessions("usr_test123")
             .await
             .expect("revoke_all");

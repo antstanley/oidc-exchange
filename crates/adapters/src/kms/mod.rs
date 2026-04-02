@@ -78,15 +78,11 @@ impl KmsKeyManager {
 /// Parse a DER-encoded SubjectPublicKeyInfo into an RFC 7517 JWK JSON value.
 ///
 /// Supports RSA (RS256/384/512, PS256/384/512) and EC (ES256, ES384) keys.
-fn parse_spki_to_jwk(
-    spki_der: &[u8],
-    algorithm: &str,
-    kid: &str,
-) -> Result<serde_json::Value> {
+fn parse_spki_to_jwk(spki_der: &[u8], algorithm: &str, kid: &str) -> Result<serde_json::Value> {
     match algorithm {
         a if a.starts_with("RS") || a.starts_with("PS") => {
-            let public_key = rsa::RsaPublicKey::from_public_key_der(spki_der)
-                .map_err(|e| Error::KeyError {
+            let public_key =
+                rsa::RsaPublicKey::from_public_key_der(spki_der).map_err(|e| Error::KeyError {
                     detail: format!("failed to parse RSA public key DER: {e}"),
                 })?;
 
@@ -302,8 +298,8 @@ mod tests {
             .to_public_key_der()
             .expect("DER encoding should work");
 
-        let jwk = parse_spki_to_jwk(spki_der.as_ref(), "ES256", "test-kid")
-            .expect("should parse EC key");
+        let jwk =
+            parse_spki_to_jwk(spki_der.as_ref(), "ES256", "test-kid").expect("should parse EC key");
 
         assert_eq!(jwk["kty"], "EC");
         assert_eq!(jwk["crv"], "P-256");
@@ -313,8 +309,14 @@ mod tests {
         assert!(jwk["y"].as_str().is_some(), "should have y coordinate");
         let x_len = jwk["x"].as_str().unwrap().len();
         let y_len = jwk["y"].as_str().unwrap().len();
-        assert!(x_len >= 42 && x_len <= 44, "x should be ~43 base64url chars, got {x_len}");
-        assert!(y_len >= 42 && y_len <= 44, "y should be ~43 base64url chars, got {y_len}");
+        assert!(
+            x_len >= 42 && x_len <= 44,
+            "x should be ~43 base64url chars, got {x_len}"
+        );
+        assert!(
+            y_len >= 42 && y_len <= 44,
+            "y should be ~43 base64url chars, got {y_len}"
+        );
     }
 
     #[test]

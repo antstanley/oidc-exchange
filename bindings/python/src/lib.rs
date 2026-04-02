@@ -53,17 +53,16 @@ impl OidcExchange {
             .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("path"))?
             .extract()?;
 
-        let headers: Vec<(String, String)> =
-            if let Some(h) = request.get_item("headers")? {
-                let hdict: &Bound<'py, PyDict> = h.downcast()?;
-                let mut vec = Vec::new();
-                for (k, v) in hdict.iter() {
-                    vec.push((k.extract::<String>()?, v.extract::<String>()?));
-                }
-                vec
-            } else {
-                Vec::new()
-            };
+        let headers: Vec<(String, String)> = if let Some(h) = request.get_item("headers")? {
+            let hdict: &Bound<'py, PyDict> = h.downcast()?;
+            let mut vec = Vec::new();
+            for (k, v) in hdict.iter() {
+                vec.push((k.extract::<String>()?, v.extract::<String>()?));
+            }
+            vec
+        } else {
+            Vec::new()
+        };
 
         let body: Vec<u8> = if let Some(b) = request.get_item("body")? {
             // Try bytes first, then string, default empty

@@ -70,10 +70,7 @@ impl OidcExchange {
             .map(|h| (h.name, h.value))
             .collect();
 
-        let body = request
-            .body
-            .map(|b| b.to_vec())
-            .unwrap_or_default();
+        let body = request.body.map(|b| b.to_vec()).unwrap_or_default();
 
         let response = self
             .inner

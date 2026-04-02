@@ -53,7 +53,10 @@ impl LmdbSessionRepository {
 #[async_trait]
 impl SessionRepository for LmdbSessionRepository {
     #[instrument(skip(self, session), fields(token_hash = %session.refresh_token_hash, user_id = %session.user_id))]
-    async fn store_refresh_token(&self, session: &Session) -> oidc_exchange_core::error::Result<()> {
+    async fn store_refresh_token(
+        &self,
+        session: &Session,
+    ) -> oidc_exchange_core::error::Result<()> {
         let env = self.env.clone();
         let sessions_db = self.sessions;
         let user_sessions_db = self.user_sessions;
@@ -74,8 +77,10 @@ impl SessionRepository for LmdbSessionRepository {
                     detail: e.to_string(),
                 })?;
 
-            let index_key =
-                LmdbSessionRepository::user_session_key(&session.user_id, &session.refresh_token_hash);
+            let index_key = LmdbSessionRepository::user_session_key(
+                &session.user_id,
+                &session.refresh_token_hash,
+            );
             user_sessions_db
                 .put(&mut wtxn, &index_key, "")
                 .map_err(|e| Error::StoreError {
@@ -133,10 +138,7 @@ impl SessionRepository for LmdbSessionRepository {
     }
 
     #[instrument(skip(self))]
-    async fn revoke_session(
-        &self,
-        token_hash: &str,
-    ) -> oidc_exchange_core::error::Result<()> {
+    async fn revoke_session(&self, token_hash: &str) -> oidc_exchange_core::error::Result<()> {
         let env = self.env.clone();
         let sessions_db = self.sessions;
         let user_sessions_db = self.user_sessions;
@@ -321,11 +323,12 @@ impl SessionRepository for LmdbSessionRepository {
 
             let mut to_delete: Vec<(String, String)> = Vec::new(); // (index_key, token_hash)
 
-            let iter = user_sessions_db
-                .prefix_iter(&rtxn, &prefix)
-                .map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
+            let iter =
+                user_sessions_db
+                    .prefix_iter(&rtxn, &prefix)
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
 
             for result in iter {
                 let (key, _val) = result.map_err(|e| Error::StoreError {

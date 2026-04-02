@@ -30,20 +30,13 @@ pub async fn exchange_code(
             detail: e.to_string(),
         })?;
 
-    let body: serde_json::Value =
-        response
-            .json()
-            .await
-            .map_err(|e| Error::ProviderError {
-                provider: token_endpoint.to_string(),
-                detail: e.to_string(),
-            })?;
+    let body: serde_json::Value = response.json().await.map_err(|e| Error::ProviderError {
+        provider: token_endpoint.to_string(),
+        detail: e.to_string(),
+    })?;
 
     Ok(ProviderTokens {
-        id_token: body["id_token"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
+        id_token: body["id_token"].as_str().unwrap_or_default().to_string(),
         refresh_token: body["refresh_token"].as_str().map(String::from),
         access_token: body["access_token"].as_str().map(String::from),
     })
@@ -130,10 +123,7 @@ mod tests {
         .expect("exchange should succeed");
 
         assert_eq!(result.id_token, "id-token-value");
-        assert_eq!(
-            result.access_token.as_deref(),
-            Some("access-token-value")
-        );
+        assert_eq!(result.access_token.as_deref(), Some("access-token-value"));
         assert!(result.refresh_token.is_none());
     }
 

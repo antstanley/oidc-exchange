@@ -28,7 +28,10 @@ fn static_claim() {
 
     let result = resolve_custom_claims(&Some(config_claims), &user);
 
-    assert_eq!(result.get("org"), Some(&Value::String("example".to_string())));
+    assert_eq!(
+        result.get("org"),
+        Some(&Value::String("example".to_string()))
+    );
 }
 
 #[test]
@@ -99,7 +102,10 @@ fn reserved_claim_rejected_from_config() {
     assert!(!result.contains_key("aud"));
     assert!(!result.contains_key("iat"));
     assert!(!result.contains_key("exp"));
-    assert_eq!(result.get("org"), Some(&Value::String("allowed".to_string())));
+    assert_eq!(
+        result.get("org"),
+        Some(&Value::String("allowed".to_string()))
+    );
 }
 
 #[test]

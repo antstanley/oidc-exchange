@@ -95,7 +95,9 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
         provider: row
             .try_get("provider")
             .map_err(PostgresRepository::store_err)?,
-        email: row.try_get("email").map_err(PostgresRepository::store_err)?,
+        email: row
+            .try_get("email")
+            .map_err(PostgresRepository::store_err)?,
         display_name: row
             .try_get("display_name")
             .map_err(PostgresRepository::store_err)?,
@@ -168,7 +170,11 @@ impl UserRepository for PostgresRepository {
     }
 
     #[instrument(skip(self), fields(external_id, provider))]
-    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>> {
+    async fn get_user_by_external_id(
+        &self,
+        external_id: &str,
+        provider: &str,
+    ) -> Result<Option<User>> {
         let row = sqlx::query("SELECT * FROM users WHERE external_id = $1 AND provider = $2")
             .bind(external_id)
             .bind(provider)
@@ -186,10 +192,10 @@ impl UserRepository for PostgresRepository {
     async fn create_user(&self, user: &NewUser) -> Result<User> {
         let now = Utc::now();
         let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
-        let metadata = serde_json::to_value(HashMap::<String, Value>::new())
-            .map_err(Self::store_err)?;
-        let claims = serde_json::to_value(HashMap::<String, Value>::new())
-            .map_err(Self::store_err)?;
+        let metadata =
+            serde_json::to_value(HashMap::<String, Value>::new()).map_err(Self::store_err)?;
+        let claims =
+            serde_json::to_value(HashMap::<String, Value>::new()).map_err(Self::store_err)?;
         let status = status_to_str(&UserStatus::Active);
 
         let row = sqlx::query(
@@ -240,10 +246,8 @@ impl UserRepository for PostgresRepository {
         }
         user.updated_at = Utc::now();
 
-        let metadata_json =
-            serde_json::to_value(&user.metadata).map_err(Self::store_err)?;
-        let claims_json =
-            serde_json::to_value(&user.claims).map_err(Self::store_err)?;
+        let metadata_json = serde_json::to_value(&user.metadata).map_err(Self::store_err)?;
+        let claims_json = serde_json::to_value(&user.claims).map_err(Self::store_err)?;
         let status_str = status_to_str(&user.status);
 
         let row = sqlx::query(
@@ -300,14 +304,12 @@ impl UserRepository for PostgresRepository {
 
     #[instrument(skip(self))]
     async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        let rows = sqlx::query(
-            "SELECT * FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-        )
-        .bind(limit as i64)
-        .bind(offset as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Self::store_err)?;
+        let rows = sqlx::query("SELECT * FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2")
+            .bind(limit as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(Self::store_err)?;
 
         let mut users = Vec::new();
         for row in &rows {

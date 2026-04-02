@@ -9,8 +9,7 @@ use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
-    UserSyncCall,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync, UserSyncCall,
 };
 
 fn make_config() -> AppConfig {
@@ -92,12 +91,13 @@ async fn admin_create_user_triggers_sync() {
     let (svc, repo_clone, sync_clone) = make_service_with_mocks(repo, user_sync);
 
     let nu = new_user("ext-1", "google");
-    let user = svc.admin_create_user(&nu).await.expect("create should succeed");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
 
     // Verify user in repo
-    let stored = repo_clone
-        .get_all_users()
-        .await;
+    let stored = repo_clone.get_all_users().await;
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].id, user.id);
     assert_eq!(stored[0].external_id, "ext-1");
@@ -124,7 +124,10 @@ async fn admin_update_user_partial_patch_reports_changed_fields() {
 
     // Create a user first
     let nu = new_user("ext-2", "google");
-    let user = svc.admin_create_user(&nu).await.expect("create should succeed");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
 
     // Update only email
     let patch = UserPatch {
@@ -167,7 +170,10 @@ async fn admin_merge_claims_preserves_existing() {
 
     // Create user
     let nu = new_user("ext-3", "google");
-    let user = svc.admin_create_user(&nu).await.expect("create should succeed");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
 
     // Set initial claims {"a": 1}
     let mut initial = HashMap::new();
@@ -203,7 +209,10 @@ async fn admin_set_claims_replaces_entirely() {
 
     // Create user
     let nu = new_user("ext-4", "google");
-    let user = svc.admin_create_user(&nu).await.expect("create should succeed");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
 
     // Set initial claims {"a": 1, "b": 2}
     let mut initial = HashMap::new();
@@ -241,7 +250,10 @@ async fn admin_clear_claims_empties_map() {
 
     // Create user
     let nu = new_user("ext-5", "google");
-    let user = svc.admin_create_user(&nu).await.expect("create should succeed");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
 
     // Set some claims
     let mut initial = HashMap::new();
@@ -282,7 +294,10 @@ async fn admin_delete_user_revokes_sessions() {
         id_token: None,
         provider: "mock".to_string(),
     };
-    let response = svc.exchange(request).await.expect("exchange should succeed");
+    let response = svc
+        .exchange(request)
+        .await
+        .expect("exchange should succeed");
     assert!(response.refresh_token.is_some());
 
     // Verify session exists
@@ -297,7 +312,10 @@ async fn admin_delete_user_revokes_sessions() {
 
     // Verify user status is Deleted
     let users = repo_clone.get_all_users().await;
-    let user = users.iter().find(|u| u.id == user_id).expect("user should exist");
+    let user = users
+        .iter()
+        .find(|u| u.id == user_id)
+        .expect("user should exist");
     assert_eq!(user.status, UserStatus::Deleted);
 
     // Verify all sessions revoked
@@ -309,6 +327,8 @@ async fn admin_delete_user_revokes_sessions() {
 
     // Verify sync call
     let calls = sync_clone.calls().await;
-    let has_deleted = calls.iter().any(|c| matches!(c, UserSyncCall::Deleted(id) if id == &user_id));
+    let has_deleted = calls
+        .iter()
+        .any(|c| matches!(c, UserSyncCall::Deleted(id) if id == &user_id));
     assert!(has_deleted, "should have a Deleted sync call for the user");
 }

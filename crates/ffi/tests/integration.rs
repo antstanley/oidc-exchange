@@ -56,10 +56,7 @@ fn setup() -> (OidcExchange, tempfile::TempDir) {
 
     setup_test_key(&key_path);
 
-    let config = minimal_config(
-        key_path.to_str().unwrap(),
-        db_path.to_str().unwrap(),
-    );
+    let config = minimal_config(key_path.to_str().unwrap(), db_path.to_str().unwrap());
 
     let exchange = OidcExchange::new(&config).expect("failed to create OidcExchange");
     (exchange, tmp)

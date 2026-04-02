@@ -123,14 +123,10 @@ impl<'de> Deserialize<'de> for AuditOutcome {
                 match status.as_str() {
                     "success" => Ok(AuditOutcome::Success),
                     "failure" => {
-                        let reason =
-                            reason.ok_or_else(|| de::Error::missing_field("reason"))?;
+                        let reason = reason.ok_or_else(|| de::Error::missing_field("reason"))?;
                         Ok(AuditOutcome::Failure { reason })
                     }
-                    other => Err(de::Error::unknown_variant(
-                        other,
-                        &["success", "failure"],
-                    )),
+                    other => Err(de::Error::unknown_variant(other, &["success", "failure"])),
                 }
             }
         }

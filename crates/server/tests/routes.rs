@@ -132,10 +132,7 @@ async fn token_missing_code_returns_400() {
 
     let json = body_to_json(response.into_body()).await;
     assert_eq!(json["error"], "invalid_request");
-    assert!(json["error_description"]
-        .as_str()
-        .unwrap()
-        .contains("code"));
+    assert!(json["error_description"].as_str().unwrap().contains("code"));
 }
 
 // ---------------------------------------------------------------------------

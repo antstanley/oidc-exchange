@@ -12,7 +12,10 @@ pub struct ValkeySessionRepository {
 }
 
 impl ValkeySessionRepository {
-    pub async fn new(url: &str, key_prefix: String) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(
+        url: &str,
+        key_prefix: String,
+    ) -> std::result::Result<Self, Box<dyn std::error::Error>> {
         let config = Config::from_url(url)?;
         let client = fred::clients::Client::new(config, None, None, None);
         client.init().await?;
@@ -94,12 +97,9 @@ impl SessionRepository for ValkeySessionRepository {
         }
 
         let get_field = |name: &str| -> Result<String> {
-            values
-                .get(name)
-                .cloned()
-                .ok_or_else(|| Error::StoreError {
-                    detail: format!("missing field: {}", name),
-                })
+            values.get(name).cloned().ok_or_else(|| Error::StoreError {
+                detail: format!("missing field: {}", name),
+            })
         };
 
         let parse_dt = |s: &str| -> Result<DateTime<Utc>> {
@@ -110,27 +110,30 @@ impl SessionRepository for ValkeySessionRepository {
                 })
         };
 
-        let device_id = values.get("device_id").and_then(|v| {
-            if v.is_empty() {
-                None
-            } else {
-                Some(v.clone())
-            }
-        });
-        let user_agent = values.get("user_agent").and_then(|v| {
-            if v.is_empty() {
-                None
-            } else {
-                Some(v.clone())
-            }
-        });
-        let ip_address = values.get("ip_address").and_then(|v| {
-            if v.is_empty() {
-                None
-            } else {
-                Some(v.clone())
-            }
-        });
+        let device_id =
+            values
+                .get("device_id")
+                .and_then(|v| if v.is_empty() { None } else { Some(v.clone()) });
+        let user_agent =
+            values.get("user_agent").and_then(
+                |v| {
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(v.clone())
+                    }
+                },
+            );
+        let ip_address =
+            values.get("ip_address").and_then(
+                |v| {
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(v.clone())
+                    }
+                },
+            );
 
         let expires_at_str = get_field("expires_at")?;
         let created_at_str = get_field("created_at")?;
@@ -152,13 +155,13 @@ impl SessionRepository for ValkeySessionRepository {
         let key = self.session_key(token_hash);
 
         // Get user_id before deleting so we can clean up the user set
-        let user_id: Option<String> = self
-            .client
-            .hget(&key, "user_id")
-            .await
-            .map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+        let user_id: Option<String> =
+            self.client
+                .hget(&key, "user_id")
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
 
         self.client
             .del::<(), _>(&key)
@@ -183,13 +186,9 @@ impl SessionRepository for ValkeySessionRepository {
     async fn count_active_sessions(&self) -> Result<u64> {
         // Count all session keys. Valkey sessions have TTL set, so existing keys
         // are active by definition (expired keys are removed automatically).
-        let count: u64 = self
-            .client
-            .dbsize()
-            .await
-            .map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+        let count: u64 = self.client.dbsize().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
         // dbsize returns total keys including user_sessions sets.
         // For an approximate count, this is acceptable. For exact counts,
         // a scan with prefix matching would be needed.
@@ -207,13 +206,13 @@ impl SessionRepository for ValkeySessionRepository {
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
         let user_set_key = self.user_sessions_key(user_id);
 
-        let token_hashes: Vec<String> = self
-            .client
-            .smembers(&user_set_key)
-            .await
-            .map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+        let token_hashes: Vec<String> =
+            self.client
+                .smembers(&user_set_key)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
 
         for token_hash in &token_hashes {
             let key = self.session_key(token_hash);

@@ -89,17 +89,16 @@ impl IdentityProvider for OidcProvider {
         let jwks = self.jwks_cache.get_keys().await?;
 
         // 3. Find matching key by kid
-        let kid = header
-            .kid
-            .as_deref()
-            .ok_or_else(|| Error::InvalidGrant {
-                reason: "JWT missing kid header".into(),
-            })?;
-
-        let keys = jwks["keys"].as_array().ok_or_else(|| Error::ProviderError {
-            provider: self.provider_id.clone(),
-            detail: "JWKS response missing 'keys' array".into(),
+        let kid = header.kid.as_deref().ok_or_else(|| Error::InvalidGrant {
+            reason: "JWT missing kid header".into(),
         })?;
+
+        let keys = jwks["keys"]
+            .as_array()
+            .ok_or_else(|| Error::ProviderError {
+                provider: self.provider_id.clone(),
+                detail: "JWKS response missing 'keys' array".into(),
+            })?;
 
         let jwk = keys
             .iter()
@@ -114,13 +113,13 @@ impl IdentityProvider for OidcProvider {
                 reason: format!("Invalid JWK: {e}"),
             })?;
 
-        let decoding_key =
-            DecodingKey::from_jwk(&jwk_value).map_err(|e| Error::InvalidGrant {
-                reason: format!("Cannot build decoding key from JWK: {e}"),
-            })?;
+        let decoding_key = DecodingKey::from_jwk(&jwk_value).map_err(|e| Error::InvalidGrant {
+            reason: format!("Cannot build decoding key from JWK: {e}"),
+        })?;
 
         // 5. Configure validation — use the algorithm from the JWK (trusted), not the JWT header (untrusted)
-        let jwk_alg = jwk.get("alg")
+        let jwk_alg = jwk
+            .get("alg")
             .and_then(|a| a.as_str())
             .and_then(|a| match a {
                 "RS256" => Some(Algorithm::RS256),
@@ -224,9 +223,7 @@ mod tests {
         use rsa::traits::PublicKeyParts;
 
         let rsa_key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
-        let pkcs8_pem = rsa_key
-            .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
+        let pkcs8_pem = rsa_key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
         let encoding_key = EncodingKey::from_rsa_pem(pkcs8_pem.as_bytes()).unwrap();
 
         // Extract public key components for JWKS
@@ -330,10 +327,7 @@ mod tests {
 
         assert_eq!(tokens.id_token, "id-token-value");
         assert_eq!(tokens.access_token.as_deref(), Some("access-token-value"));
-        assert_eq!(
-            tokens.refresh_token.as_deref(),
-            Some("refresh-token-value")
-        );
+        assert_eq!(tokens.refresh_token.as_deref(), Some("refresh-token-value"));
     }
 
     // ---------------------------------------------------------------

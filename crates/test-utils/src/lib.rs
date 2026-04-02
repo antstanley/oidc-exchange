@@ -9,7 +9,9 @@ use oidc_exchange_core::domain::{
     AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
-use oidc_exchange_core::ports::{AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync};
+use oidc_exchange_core::ports::{
+    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+};
 
 // ---------------------------------------------------------------------------
 // MockRepository
@@ -59,7 +61,11 @@ impl UserRepository for MockRepository {
         Ok(state.users.get(user_id).cloned())
     }
 
-    async fn get_user_by_external_id(&self, external_id: &str, provider: &str) -> Result<Option<User>> {
+    async fn get_user_by_external_id(
+        &self,
+        external_id: &str,
+        provider: &str,
+    ) -> Result<Option<User>> {
         let state = self.state.lock().await;
         Ok(state
             .users
@@ -237,10 +243,17 @@ impl KeyManager for MockKeyManager {
     async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool> {
         use ed25519_dalek::{Signature, Verifier};
         let sig_bytes: [u8; 64] = signature.try_into().map_err(|_| Error::KeyError {
-            detail: format!("invalid Ed25519 signature length: expected 64, got {}", signature.len()),
+            detail: format!(
+                "invalid Ed25519 signature length: expected 64, got {}",
+                signature.len()
+            ),
         })?;
         let sig = Signature::from_bytes(&sig_bytes);
-        Ok(self.signing_key.verifying_key().verify(payload, &sig).is_ok())
+        Ok(self
+            .signing_key
+            .verifying_key()
+            .verify(payload, &sig)
+            .is_ok())
     }
 
     async fn public_jwk(&self) -> Result<serde_json::Value> {
