@@ -2,8 +2,31 @@
   "name": "@oidc-exchange/node",
   "version": "0.1.0",
   "description": "Node.js bindings for oidc-exchange - OIDC token exchange service",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/antstanley/oidc-exchange.git",
+    "directory": "bindings/nodejs"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
   "main": "index.js",
   "types": "index.d.ts",
+  "scripts": {
+    "build": "napi build --release",
+    "test": "vitest run",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2",
+    "oxfmt": "^0",
+    "oxlint": "^0",
+    "vitest": "^3"
+  },
   "napi": {
     "name": "oidc-exchange",
     "triples": {
@@ -16,28 +39,8 @@
       ]
     }
   },
-  "files": ["index.js", "index.d.ts"],
-  "scripts": {
-    "build": "napi build --release",
-    "test": "vitest run",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check",
-    "lint": "oxlint"
-  },
-  "devDependencies": {
-    "@napi-rs/cli": "^2",
-    "vitest": "^3",
-    "oxfmt": "^0",
-    "oxlint": "^0"
-  },
   "engines": {
     "node": ">= 22"
-  },
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/antstanley/oidc-exchange.git",
-    "directory": "bindings/nodejs"
   },
   "packageManager": "pnpm@10.11.0"
 }

@@ -1,1 +1,15 @@
-{"name":"@oidc-exchange/win32-x64-msvc","version":"0.1.0","os":["win32"],"cpu":["x64"],"main":"oidc-exchange.win32-x64-msvc.node","files":["oidc-exchange.win32-x64-msvc.node"],"license":"MIT"}
+{
+  "name": "@oidc-exchange/win32-x64-msvc",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "oidc-exchange.win32-x64-msvc.node"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "oidc-exchange.win32-x64-msvc.node"
+}
