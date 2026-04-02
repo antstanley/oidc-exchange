@@ -11,7 +11,17 @@ Run oidc-exchange as a long-lived container in ECS, EKS, Cloud Run, or any conta
 
 A runnable example with Docker Compose and Kubernetes manifests is in [`examples/container/`](../../examples/container/).
 
-## Dockerfile
+## Using the prebuilt image
+
+Prebuilt Docker images are published to `ghcr.io/antstanley/oidc-exchange:latest`. You can use them directly instead of building from source:
+
+```bash
+docker pull ghcr.io/antstanley/oidc-exchange:latest
+```
+
+Skip the Dockerfile section below if you are using the prebuilt image.
+
+## Dockerfile (build from source)
 
 ```dockerfile
 FROM rust:1.85-slim AS builder

@@ -43,7 +43,7 @@ Without LMDB, SQLite handles both users and sessions.
 
 ## Prerequisites
 
-- A Linux server with oidc-exchange binary (see [build instructions](README.md#prerequisites))
+- A Linux server with the oidc-exchange binary — install via the [install script](README.md#installing), download a [prebuilt release](https://github.com/antstanley/oidc-exchange/releases), or [build from source](README.md#building-from-source)
 - A writable directory for the SQLite database file
 - (Optional) A writable directory for the LMDB environment
 

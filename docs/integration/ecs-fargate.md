@@ -72,10 +72,12 @@ All Fargate tasks share the same DynamoDB table and ElastiCache cluster.
 
 ### 1. Build and push the container image
 
-From the repository root:
+You can use the prebuilt Docker image (`ghcr.io/antstanley/oidc-exchange:latest`) or build from source. To use the prebuilt image, pull and re-tag it for ECR instead of running `docker build`.
+
+From the repository root (building from source):
 
 ```bash
-# Build the image
+# Build the image (or use: docker pull ghcr.io/antstanley/oidc-exchange:latest)
 docker build -t oidc-exchange -f examples/ecs-fargate/Dockerfile .
 
 # The Terraform config creates an ECR repository. If deploying for the first time,

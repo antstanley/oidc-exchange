@@ -30,7 +30,32 @@ All environments require:
 - A TOML configuration file (see [Configuration](#configuration))
 - At least one OIDC provider configured (Google, Apple, etc.)
 
-### Building
+### Installing
+
+Prebuilt binaries and Docker images are available so you do not need to compile from source.
+
+**Install script** (downloads the latest release binary for your platform):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+```
+
+**Docker:**
+
+```bash
+docker pull ghcr.io/antstanley/oidc-exchange:latest
+```
+
+**npm / pip:**
+
+```bash
+npm install @oidc-exchange/node   # Node.js
+pip install oidc-exchange          # Python
+```
+
+### Building from source
+
+If you prefer to compile from source:
 
 ```bash
 # Standard server/container binary

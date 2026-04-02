@@ -7,6 +7,8 @@ last_updated: 2026-03-26
 
 # Container Deployment Example
 
+> **Tip:** Prebuilt Docker images are available at `ghcr.io/antstanley/oidc-exchange:latest`. See the [Docker guide](https://github.com/antstanley/oidc-exchange/blob/main/apps/website/src/content/docs/guides/docker.md) for details.
+
 Generic container deployment with Docker Compose (for local development) and Kubernetes manifests for production-like environments. Uses DynamoDB Local for storage, which can be swapped for any supported backend.
 
 ## Prerequisites

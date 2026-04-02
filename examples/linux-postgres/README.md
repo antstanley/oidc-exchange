@@ -7,6 +7,8 @@ last_updated: 2026-03-26
 
 # Linux + PostgreSQL Example
 
+> **Tip:** Prebuilt Docker images are available at `ghcr.io/antstanley/oidc-exchange:latest`. See the [Docker guide](https://github.com/antstanley/oidc-exchange/blob/main/apps/website/src/content/docs/guides/docker.md) for details.
+
 This example shows how to run **oidc-exchange** on a Linux host with PostgreSQL as the backing store. Two deployment modes are provided:
 
 | Mode | Config file | What it runs |

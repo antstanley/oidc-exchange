@@ -7,6 +7,8 @@ last_updated: 2026-03-26
 
 # Linux + SQLite Example
 
+> **Tip:** Prebuilt Docker images are available at `ghcr.io/antstanley/oidc-exchange:latest`. See the [Docker guide](https://github.com/antstanley/oidc-exchange/blob/main/apps/website/src/content/docs/guides/docker.md) for details.
+
 The simplest deployment of oidc-exchange: no external services, everything on disk.
 Two modes are provided:
 

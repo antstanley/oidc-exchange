@@ -9,7 +9,21 @@ last_updated: 2026-03-26
 
 Run oidc-exchange directly on a Linux host behind a reverse proxy. This is the simplest deployment model for on-prem or single-server setups.
 
-## Build
+## Install
+
+The easiest way to get the binary is via the install script or a prebuilt Docker image:
+
+```bash
+# Install script (downloads the latest release binary)
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+
+# Or pull the Docker image
+docker pull ghcr.io/antstanley/oidc-exchange:latest
+```
+
+## Build from source
+
+If you prefer to compile from source:
 
 ```bash
 cargo build --release
