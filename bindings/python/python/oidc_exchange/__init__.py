@@ -20,7 +20,7 @@ class OidcExchange:
 
     async def handle_request(self, request):
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._inner.handle_request_sync, request)
 
     def asgi_app(self):

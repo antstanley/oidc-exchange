@@ -57,15 +57,19 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: false
+            artifact: oidc-exchange-linux-x64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
+            artifact: oidc-exchange-linux-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             use_cross: false
+            artifact: oidc-exchange-windows-x64.exe
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
+            artifact: oidc-exchange-darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -87,15 +91,16 @@ jobs:
             cargo build --release --target ${{ matrix.target }} --bin oidc-exchange
           fi
 
-      - name: Generate SHA256 checksum
+      - name: Rename and checksum
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           if [ "${{ runner.os }}" = "Windows" ]; then
-            sha256sum oidc-exchange.exe > oidc-exchange-${{ matrix.target }}.sha256
+            cp oidc-exchange.exe "${{ matrix.artifact }}"
           else
-            sha256sum oidc-exchange > oidc-exchange-${{ matrix.target }}.sha256
+            cp oidc-exchange "${{ matrix.artifact }}"
           fi
+          sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
 
       - name: Smoke test
         if: "!matrix.use_cross"
@@ -112,9 +117,8 @@ jobs:
         with:
           name: binary-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/oidc-exchange
-            target/${{ matrix.target }}/release/oidc-exchange.exe
-            target/${{ matrix.target }}/release/oidc-exchange-${{ matrix.target }}.sha256
+            target/${{ matrix.target }}/release/${{ matrix.artifact }}
+            target/${{ matrix.target }}/release/${{ matrix.artifact }}.sha256
 
   build-docker:
     name: Build Docker Image
@@ -340,7 +344,7 @@ jobs:
             ### npm
 
             ```bash
-            npm install @anthropic/oidc-exchange@${{ needs.validate.outputs.version }}
+            npm install @oidc-exchange/node@${{ needs.validate.outputs.version }}
             ```
 
             ### pip

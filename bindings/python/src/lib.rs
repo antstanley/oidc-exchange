@@ -86,6 +86,9 @@ impl OidcExchange {
         let result = PyDict::new_bound(py);
         result.set_item("status", response.status)?;
 
+        // Use a dict for headers. Note: duplicate header names (e.g. Set-Cookie)
+        // will be collapsed. For full multi-value header support, consumers should
+        // check the raw response. This covers the common case.
         let resp_headers = PyDict::new_bound(py);
         for (k, v) in &response.headers {
             resp_headers.set_item(k, v)?;

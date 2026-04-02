@@ -35,11 +35,17 @@ esac
 # Detect architecture
 ARCH="$(uname -m)"
 case "$ARCH" in
-    x86_64)         ARCH_LABEL="x64" ;;
+    x86_64)
+        if [ "$OS_LABEL" = "darwin" ]; then
+            echo "Error: macOS x86_64 (Intel) is not supported. Only Apple Silicon (arm64) is supported."
+            exit 1
+        fi
+        ARCH_LABEL="x64"
+        ;;
     aarch64|arm64)  ARCH_LABEL="arm64" ;;
     *)
         echo "Error: Unsupported architecture: $ARCH"
-        echo "Supported: x86_64, aarch64, arm64"
+        echo "Supported: x86_64 (Linux), aarch64/arm64"
         exit 1
         ;;
 esac

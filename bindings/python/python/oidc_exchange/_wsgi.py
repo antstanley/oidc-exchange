@@ -38,7 +38,16 @@ def make_wsgi_app(oidc: OidcExchange):
 
         response = oidc.handle_request_sync(request)
 
-        status_line = f"{response['status']} "
+        status_code = response["status"]
+        reason_phrases = {
+            200: "OK", 201: "Created", 204: "No Content",
+            301: "Moved Permanently", 302: "Found", 304: "Not Modified",
+            400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+            404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+            500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable",
+        }
+        reason = reason_phrases.get(status_code, "")
+        status_line = f"{status_code} {reason}"
         resp_headers = list(response["headers"].items())
 
         start_response(status_line, resp_headers)
