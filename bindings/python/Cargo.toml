@@ -1,0 +1,12 @@
+[package]
+name = "oidc-exchange-python"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "_oidc_exchange"
+crate-type = ["cdylib"]
+
+[dependencies]
+oidc-exchange-ffi = { path = "../../crates/ffi" }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }

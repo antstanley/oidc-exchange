@@ -8,6 +8,7 @@ members = [
     "crates/ffi",
     "crates/test-utils",
     "bindings/nodejs",
+    "bindings/python",
 ]
 
 [workspace.package]

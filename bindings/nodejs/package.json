@@ -1,0 +1,36 @@
+{
+  "name": "@oidc-exchange/node",
+  "version": "0.1.0",
+  "description": "Node.js bindings for oidc-exchange - OIDC token exchange service",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "oidc-exchange",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-apple-darwin"
+      ]
+    }
+  },
+  "files": ["index.js", "index.d.ts"],
+  "scripts": {
+    "build": "napi build --release",
+    "test": "node --test __tests__/index.test.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2"
+  },
+  "engines": {
+    "node": ">= 22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/antstanley/oidc-exchange.git",
+    "directory": "bindings/nodejs"
+  }
+}

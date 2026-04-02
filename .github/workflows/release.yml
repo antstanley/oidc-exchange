@@ -1,0 +1,356 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract and validate version
+        id: extract
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          VERSION="${REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$CARGO_VERSION" != "$VERSION" ]; then
+            echo "::error::Cargo.toml workspace version ($CARGO_VERSION) does not match tag ($VERSION)"
+            exit 1
+          fi
+
+          NODE_VERSION=$(jq -r '.version' bindings/nodejs/package.json)
+          if [ "$NODE_VERSION" != "$VERSION" ]; then
+            echo "::error::package.json version ($NODE_VERSION) does not match tag ($VERSION)"
+            exit 1
+          fi
+
+          PYTHON_VERSION=$(grep '^version' bindings/python/pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$PYTHON_VERSION" != "$VERSION" ]; then
+            echo "::error::pyproject.toml version ($PYTHON_VERSION) does not match tag ($VERSION)"
+            exit 1
+          fi
+
+          echo "All versions match: $VERSION"
+
+  build-binaries:
+    name: Build Binary (${{ matrix.target }})
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use_cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin oidc-exchange
+          else
+            cargo build --release --target ${{ matrix.target }} --bin oidc-exchange
+          fi
+
+      - name: Generate SHA256 checksum
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            sha256sum oidc-exchange.exe > oidc-exchange-${{ matrix.target }}.sha256
+          else
+            sha256sum oidc-exchange > oidc-exchange-${{ matrix.target }}.sha256
+          fi
+
+      - name: Smoke test
+        if: "!matrix.use_cross"
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./target/${{ matrix.target }}/release/oidc-exchange.exe --version
+          else
+            ./target/${{ matrix.target }}/release/oidc-exchange --version
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/oidc-exchange
+            target/${{ matrix.target }}/release/oidc-exchange.exe
+            target/${{ matrix.target }}/release/oidc-exchange-${{ matrix.target }}.sha256
+
+  build-docker:
+    name: Build Docker Image
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+            ${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  build-nodejs:
+    name: Build Node.js (${{ matrix.target }})
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @napi-rs/cli
+      - name: Install dependencies
+        working-directory: bindings/nodejs
+        run: npm install
+      - name: Build
+        working-directory: bindings/nodejs
+        run: napi build --release --target ${{ matrix.target }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nodejs-${{ matrix.target }}
+          path: bindings/nodejs/*.node
+
+  publish-nodejs:
+    name: Publish to npm
+    needs: build-nodejs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Download all Node.js artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nodejs-*
+          path: bindings/nodejs/artifacts
+          merge-multiple: true
+      - name: Install dependencies
+        working-directory: bindings/nodejs
+        run: npm install
+      - name: Publish
+        working-directory: bindings/nodejs
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  build-python:
+    name: Build Python (${{ matrix.target }})
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install maturin
+      - name: Build wheel
+        working-directory: bindings/python
+        run: maturin build --release --target ${{ matrix.target }}
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ matrix.target }}
+          path: target/wheels/*.whl
+
+  publish-python:
+    name: Publish to PyPI
+    needs: build-python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install twine
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-*
+          path: wheels
+          merge-multiple: true
+      - name: Publish to PyPI
+        run: twine upload wheels/*.whl
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+
+  create-release:
+    name: Create GitHub Release
+    needs:
+      - validate
+      - build-binaries
+      - build-docker
+      - publish-nodejs
+      - publish-python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" "$PREV_TAG"..HEAD)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)")
+          fi
+          {
+            echo "changelog<<EOF"
+            echo "$CHANGELOG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.validate.outputs.version }}
+          name: v${{ needs.validate.outputs.version }}
+          body: |
+            ## Changelog
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## Installation
+
+            ### Install Script
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
+            ```
+
+            ### Docker
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ needs.validate.outputs.version }}
+            ```
+
+            ### npm
+
+            ```bash
+            npm install @anthropic/oidc-exchange@${{ needs.validate.outputs.version }}
+            ```
+
+            ### pip
+
+            ```bash
+            pip install oidc-exchange==${{ needs.validate.outputs.version }}
+            ```
+          files: |
+            release-artifacts/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

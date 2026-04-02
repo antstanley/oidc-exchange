@@ -18,3 +18,4 @@ oidc-exchange-test-utils.workspace = true
 serde_json.workspace = true
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 pem = "3"
+tempfile = "3"
