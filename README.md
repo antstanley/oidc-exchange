@@ -1,6 +1,38 @@
 # oidc-exchange
 
+[![GitHub Release](https://img.shields.io/github/v/release/antstanley/oidc-exchange)](https://github.com/antstanley/oidc-exchange/releases)
+[![npm](https://img.shields.io/npm/v/@oidc-exchange/node)](https://www.npmjs.com/package/@oidc-exchange/node)
+[![PyPI](https://img.shields.io/pypi/v/oidc-exchange)](https://pypi.org/project/oidc-exchange/)
+[![Docker](https://img.shields.io/docker/v/antstanley/oidc-exchange?label=docker)](https://hub.docker.com/r/antstanley/oidc-exchange)
+
 A Rust service that validates ID tokens from third-party OIDC providers and exchanges them for self-issued access and refresh tokens. Built with hexagonal architecture for pluggable infrastructure, configurable via TOML, and deployable as a Lambda function or long-lived server from a single binary.
+
+## Install
+
+**One-line install script** (Linux/macOS, downloads the latest release binary):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+```
+
+**Docker:**
+
+```bash
+docker pull ghcr.io/antstanley/oidc-exchange:latest
+docker run -p 8080:8080 ghcr.io/antstanley/oidc-exchange:latest
+```
+
+**Node.js (npm):**
+
+```bash
+npm install @oidc-exchange/node
+```
+
+**Python (pip):**
+
+```bash
+pip install oidc-exchange
+```
 
 ## Why oidc-exchange?
 

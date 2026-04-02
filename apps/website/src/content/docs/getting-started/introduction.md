@@ -34,6 +34,8 @@ The diagram above shows the three participants in the exchange: your **User Appl
 - **Audit Trail** — syslog severity levels, configurable blocking threshold, CloudTrail Lake or SQS integration
 - **OpenTelemetry** — pluggable exporters (OTLP, X-Ray, stdout) via the `tracing` ecosystem
 - **Dual Runtime** — same binary runs as an axum server or AWS Lambda function
+- **Docker Images** — prebuilt images at `ghcr.io/antstanley/oidc-exchange` for instant container deployments
+- **Node.js and Python Bindings** — install via `npm install @oidc-exchange/node` or `pip install oidc-exchange` to embed the service in your existing stack
 - **Internal Admin API** — user CRUD and claims management with shared-secret authentication
 
 ## Next steps
