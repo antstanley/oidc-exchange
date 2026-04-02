@@ -1,7 +1,10 @@
-/* eslint-disable no-console */
-"use strict";
+import { createRequire } from "node:module";
+import { platform, arch } from "node:process";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const { platform, arch } = process;
+const require = createRequire(import.meta.url);
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PLATFORM_MAP = {
   "linux-x64": "@oidc-exchange/linux-x64-gnu",
@@ -20,9 +23,8 @@ if (packageName) {
   try {
     nativeBinding = require(packageName);
   } catch (_e) {
-    // Fall back to locally built .node file (development builds).
     try {
-      nativeBinding = require("./oidc-exchange.node");
+      nativeBinding = require(join(__dirname, "oidc-exchange.node"));
     } catch (e) {
       loadError = e;
     }
@@ -32,12 +34,8 @@ if (packageName) {
 }
 
 if (!nativeBinding) {
-  if (loadError) {
-    throw loadError;
-  }
+  if (loadError) throw loadError;
   throw new Error(`Failed to load native binding for platform: ${platformKey}`);
 }
 
-const { OidcExchange } = nativeBinding;
-
-module.exports.OidcExchange = OidcExchange;
+export const { OidcExchange } = nativeBinding;

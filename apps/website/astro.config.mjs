@@ -25,6 +25,7 @@ export default defineConfig({
 					label: 'Getting Started',
 					items: [
 						{ slug: 'getting-started/introduction' },
+						{ slug: 'getting-started/installation' },
 						{ slug: 'getting-started/quick-start' },
 						{ slug: 'getting-started/why-oidc-exchange' },
 					],
@@ -36,6 +37,9 @@ export default defineConfig({
 						{ slug: 'guides/providers' },
 						{ slug: 'guides/api-reference' },
 						{ slug: 'guides/client-integration' },
+						{ slug: 'guides/nodejs' },
+						{ slug: 'guides/python' },
+						{ slug: 'guides/docker' },
 					],
 				},
 				{

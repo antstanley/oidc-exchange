@@ -2,11 +2,15 @@
   "name": "oidc-exchange-express-example",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node --import tsx index.ts"
   },
   "dependencies": {
     "@oidc-exchange/node": "^0.1.0",
     "express": "^4"
+  },
+  "devDependencies": {
+    "tsx": "^4"
   }
 }

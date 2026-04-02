@@ -2,6 +2,7 @@
   "name": "oidc-exchange-serverless-example",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "dependencies": {
     "@oidc-exchange/lambda": "^0.1.0"
   }

@@ -95,22 +95,28 @@ jj git push --bookmark my-feature
 
 All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace -- -D warnings` with zero warnings before pushing.
 
-### Node.js
+### Node.js / TypeScript
 
 | Concern | Tool | Command |
 |---------|------|---------|
+| Language | TypeScript | All code must be TypeScript (`.ts`) |
+| Module system | ES Modules | All packages use `"type": "module"` |
 | Package manager | `pnpm` | `pnpm install` |
 | Formatting | `oxfmt` | `pnpm fmt` / `pnpm fmt:check` |
 | Linting | `oxlint` | `pnpm lint` |
 | Testing | `vitest` | `pnpm test` |
 
+**All JavaScript/Node.js code must be TypeScript.** No plain `.js` source files (except generated output). Use `.ts` for all source code.
+
+**All packages must use ES Modules exclusively.** Every `package.json` must include `"type": "module"`. Never use `require()` or `module.exports` — use `import`/`export` instead. The only exception is `createRequire()` from `node:module` for loading native `.node` addons.
+
 **Always use `pnpm`** — never `npm` or `yarn`. The `pnpm-lock.yaml` is the lockfile of record.
 
-**Always use `oxfmt`** for formatting JavaScript, TypeScript, JSON, and related files.
+**Always use `oxfmt`** for formatting TypeScript, JSON, and related files.
 
-**Always use `oxlint`** for linting JavaScript and TypeScript.
+**Always use `oxlint`** for linting TypeScript.
 
-**Always use `vitest`** for testing. Tests live in `__tests__/` directories or alongside source files with `.test.ts`/`.test.mjs` extensions.
+**Always use `vitest`** for testing. Tests live in `__tests__/` directories or alongside source files with `.test.ts` extensions.
 
 ### Python
 
@@ -233,6 +239,28 @@ These boundaries are enforced by the Cargo workspace. If `core` compiles, the do
 1. If the provider follows standard OIDC, it only needs a config entry — no code.
 2. If the provider has quirks (like Apple), add a module in `crates/providers/src/` implementing `IdentityProvider`.
 3. Add an adapter name and wire it into provider construction in `crates/server/src/bootstrap.rs`.
+
+## Documentation
+
+The canonical source for all documentation is the `docs/` directory at the repo root. The website at `apps/website/` reads from `docs/` via a symlink (`apps/website/src/content/docs` → `docs/`).
+
+**Always edit files in `docs/`** — never edit content directly in `apps/website/src/content/docs/`. Changes to `docs/` automatically appear on the website.
+
+### Structure
+
+```
+docs/
+├── getting-started/     # Introduction, installation, quick-start
+├── guides/              # Configuration, providers, API reference, Node.js, Python, Docker
+├── deployment/          # AWS Lambda, ECS Fargate, container, Linux server scenarios
+├── architecture/        # Architecture overview, adapter documentation
+├── contributing/        # Contributing guide (website version)
+└── superpowers/         # Internal design specs and implementation plans (not user-facing)
+```
+
+### Code examples in docs
+
+Code examples shown in documentation pages must match the actual code in the `examples/` directory. When updating an example, update both the `examples/` code and the corresponding documentation page.
 
 ## Code Standards
 

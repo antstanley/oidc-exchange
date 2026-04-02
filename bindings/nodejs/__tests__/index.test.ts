@@ -34,7 +34,7 @@ adapter = "noop"
 enabled = false
 `;
 
-let OidcExchange;
+let OidcExchange: any;
 
 beforeAll(async () => {
   execSync(`openssl genpkey -algorithm Ed25519 -out ${TEST_KEY_PATH}`);

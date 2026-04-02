@@ -16,10 +16,10 @@ import {
   isAlbEvent,
   isApiGatewayV1,
   isApiGatewayV2,
-} from "./adapters";
-import type { LambdaHandlerOptions } from "./types";
+} from "./adapters.js";
+import type { LambdaHandlerOptions } from "./types.js";
 
-export type { LambdaHandlerOptions } from "./types";
+export type { LambdaHandlerOptions } from "./types.js";
 
 type LambdaEvent = APIGatewayProxyEvent | APIGatewayProxyEventV2 | ALBEvent;
 type LambdaResult = APIGatewayProxyResult | APIGatewayProxyResultV2 | ALBResult;
