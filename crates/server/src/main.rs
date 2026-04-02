@@ -1,8 +1,15 @@
 use oidc_exchange::bootstrap;
 use oidc_exchange::telemetry;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("oidc-exchange {VERSION}");
+        return Ok(());
+    }
+
     // 1. Load config
     let config = bootstrap::load_config()?;
 
