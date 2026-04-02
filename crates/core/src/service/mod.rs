@@ -103,14 +103,14 @@ impl AppService {
         match self.audit.emit(&event).await {
             Ok(()) => Ok(()),
             Err(e) => {
-                // Always emit to stdout/stderr as fallback
+                // Always emit via tracing as fallback (captured by Lambda, CloudWatch, etc.)
                 let serialized = serde_json::to_string(&event)
                     .unwrap_or_else(|_| format!("{:?}", event));
 
                 if event.severity as u8 <= AuditSeverity::Error as u8 {
-                    eprintln!("{serialized}");
+                    tracing::error!(audit_fallback = true, "{serialized}");
                 } else {
-                    println!("{serialized}");
+                    tracing::info!(audit_fallback = true, "{serialized}");
                 }
 
                 // Parse blocking threshold from config
