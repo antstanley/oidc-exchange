@@ -5,11 +5,39 @@ description: Build and run oidc-exchange in 5 minutes.
 
 ## Prerequisites
 
-- Rust 1.75+
-- [cargo-nextest](https://nexte.st) for testing (optional)
 - An OIDC provider (e.g., a [Google OAuth client](https://console.cloud.google.com/apis/credentials))
 
-## Build
+## Install
+
+Choose one of the following methods:
+
+### Option 1: Install script (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+```
+
+### Option 2: Docker
+
+```bash
+docker pull ghcr.io/antstanley/oidc-exchange:latest
+```
+
+### Option 3: npm
+
+```bash
+npm install @oidc-exchange/node
+```
+
+### Option 4: pip
+
+```bash
+pip install oidc-exchange
+```
+
+### Option 5: Build from source
+
+Requires Rust 1.75+ and optionally [cargo-nextest](https://nexte.st) for testing.
 
 ```bash
 cargo build --release
@@ -71,9 +99,22 @@ openssl genpkey -algorithm ed25519 -out keys/ed25519.pem
 
 ## Run
 
+If you installed via the install script or built from source:
+
 ```bash
 GOOGLE_CLIENT_ID=your-id GOOGLE_CLIENT_SECRET=your-secret \
   ./target/release/oidc-exchange
+```
+
+If you are using Docker:
+
+```bash
+docker run -p 8080:8080 \
+  -v $(pwd)/config:/app/config:ro \
+  -v $(pwd)/keys:/app/keys:ro \
+  -e GOOGLE_CLIENT_ID=your-id \
+  -e GOOGLE_CLIENT_SECRET=your-secret \
+  ghcr.io/antstanley/oidc-exchange:latest
 ```
 
 ## Verify
