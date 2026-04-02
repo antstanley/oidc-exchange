@@ -394,4 +394,14 @@ impl SessionRepository for PostgresRepository {
 
         Ok(())
     }
+
+    #[instrument(skip(self))]
+    async fn cleanup_expired_sessions(&self) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM sessions WHERE expires_at < NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(Self::store_err)?;
+
+        Ok(result.rows_affected())
+    }
 }

@@ -23,4 +23,8 @@ pub trait SessionRepository: Send + Sync {
     async fn revoke_session(&self, token_hash: &str) -> Result<()>;
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
     async fn count_active_sessions(&self) -> Result<u64>;
+
+    /// Delete all sessions whose `expires_at` is in the past.
+    /// Returns the number of sessions deleted.
+    async fn cleanup_expired_sessions(&self) -> Result<u64>;
 }

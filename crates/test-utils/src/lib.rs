@@ -194,6 +194,14 @@ impl SessionRepository for MockRepository {
         state.sessions.retain(|_, s| s.user_id != user_id);
         Ok(())
     }
+
+    async fn cleanup_expired_sessions(&self) -> Result<u64> {
+        let mut state = self.state.lock().await;
+        let now = Utc::now();
+        let before = state.sessions.len();
+        state.sessions.retain(|_, s| s.expires_at > now);
+        Ok((before - state.sessions.len()) as u64)
+    }
 }
 
 // ---------------------------------------------------------------------------

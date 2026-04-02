@@ -197,6 +197,13 @@ impl SessionRepository for ValkeySessionRepository {
     }
 
     #[instrument(skip(self))]
+    async fn cleanup_expired_sessions(&self) -> Result<u64> {
+        // Valkey/Redis TTL handles expiration automatically.
+        // Keys with TTL are deleted by the server, so this is a no-op.
+        Ok(0)
+    }
+
+    #[instrument(skip(self))]
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
         let user_set_key = self.user_sessions_key(user_id);
 

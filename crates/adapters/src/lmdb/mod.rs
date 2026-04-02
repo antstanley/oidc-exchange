@@ -236,6 +236,72 @@ impl SessionRepository for LmdbSessionRepository {
     }
 
     #[instrument(skip(self))]
+    async fn cleanup_expired_sessions(&self) -> oidc_exchange_core::error::Result<u64> {
+        let env = self.env.clone();
+        let sessions_db = self.sessions;
+        let user_sessions_db = self.user_sessions;
+
+        tokio::task::spawn_blocking(move || {
+            let now = Utc::now();
+
+            let rtxn = env.read_txn().map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+            let mut to_delete: Vec<(String, String)> = Vec::new(); // (token_hash, user_id)
+            let iter = sessions_db.iter(&rtxn).map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+            for result in iter {
+                let (key, bytes) = result.map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+                if let Ok(session) = serde_json::from_slice::<Session>(bytes) {
+                    if session.expires_at <= now {
+                        to_delete.push((key.to_owned(), session.user_id.clone()));
+                    }
+                }
+            }
+            drop(rtxn);
+
+            if to_delete.is_empty() {
+                return Ok(0);
+            }
+
+            let deleted = to_delete.len() as u64;
+            let mut wtxn = env.write_txn().map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+            for (token_hash, user_id) in &to_delete {
+                sessions_db
+                    .delete(&mut wtxn, token_hash.as_str())
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+
+                let index_key = LmdbSessionRepository::user_session_key(user_id, token_hash);
+                user_sessions_db
+                    .delete(&mut wtxn, index_key.as_str())
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            }
+
+            wtxn.commit().map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+            Ok(deleted)
+        })
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?
+    }
+
+    #[instrument(skip(self))]
     async fn revoke_all_user_sessions(
         &self,
         user_id: &str,

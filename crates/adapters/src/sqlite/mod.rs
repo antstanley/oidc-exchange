@@ -443,6 +443,20 @@ impl SessionRepository for SqliteRepository {
 
         Ok(())
     }
+
+    #[instrument(skip(self))]
+    async fn cleanup_expired_sessions(&self) -> Result<u64> {
+        let now_str = Utc::now().to_rfc3339();
+        let result = sqlx::query("DELETE FROM sessions WHERE expires_at < ?1")
+            .bind(&now_str)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]

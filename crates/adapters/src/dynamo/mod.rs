@@ -341,6 +341,73 @@ impl SessionRepository for DynamoRepository {
         Ok(count)
     }
 
+    #[instrument(skip(self))]
+    async fn cleanup_expired_sessions(&self) -> Result<u64> {
+        // DynamoDB TTL handles cleanup automatically, but this provides
+        // a manual sweep for items where TTL hasn't fired yet.
+        let now = Utc::now();
+        let mut deleted: u64 = 0;
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("sk = :sk AND expires_at < :now")
+                .expression_attribute_values(":sk", AttributeValue::S("SESSION".to_string()))
+                .expression_attribute_values(":now", AttributeValue::S(now.to_rfc3339()))
+                .projection_expression("pk, sk");
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+            let items = result.items.unwrap_or_default();
+
+            for chunk in items.chunks(25) {
+                let delete_requests: Vec<_> = chunk
+                    .iter()
+                    .map(|item| {
+                        let pk = item.get("pk").cloned().unwrap_or_else(|| {
+                            AttributeValue::S("UNKNOWN".to_string())
+                        });
+                        let sk = item.get("sk").cloned().unwrap_or_else(|| {
+                            AttributeValue::S("UNKNOWN".to_string())
+                        });
+
+                        aws_sdk_dynamodb::types::WriteRequest::builder()
+                            .delete_request(
+                                aws_sdk_dynamodb::types::DeleteRequest::builder()
+                                    .key("pk", pk)
+                                    .key("sk", sk)
+                                    .build()
+                                    .expect("valid delete request"),
+                            )
+                            .build()
+                    })
+                    .collect();
+
+                deleted += delete_requests.len() as u64;
+
+                self.client
+                    .batch_write_item()
+                    .request_items(&self.table_name, delete_requests)
+                    .send()
+                    .await
+                    .map_err(Self::store_err)?;
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        Ok(deleted)
+    }
+
     #[instrument(skip(self), fields(user_id))]
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
         // Query GSI1 for all sessions belonging to this user
