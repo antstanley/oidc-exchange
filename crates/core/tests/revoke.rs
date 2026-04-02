@@ -195,3 +195,41 @@ async fn revoke_default_hint_treats_as_refresh_token() {
         "session should be removed when hint is None (defaults to refresh_token)"
     );
 }
+
+#[tokio::test]
+async fn revoke_forged_access_token_does_not_revoke_sessions() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    // Exchange to create a session
+    let _response = do_exchange(&svc).await;
+    let sessions = repo.get_all_sessions().await;
+    assert_eq!(sessions.len(), 1);
+    let user_id = sessions[0].user_id.clone();
+
+    // Craft a forged JWT with the real user's sub but an invalid signature
+    let forged_header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+    let forged_payload = URL_SAFE_NO_PAD.encode(
+        format!(r#"{{"sub":"{user_id}","iss":"https://auth.test.com","iat":0,"exp":9999999999}}"#)
+            .as_bytes(),
+    );
+    let forged_sig = URL_SAFE_NO_PAD.encode(&[0u8; 64]); // bogus signature
+    let forged_jwt = format!("{forged_header}.{forged_payload}.{forged_sig}");
+
+    // Revoke with the forged JWT
+    let revoke_req = RevokeRequest {
+        token: forged_jwt,
+        token_type_hint: Some("access_token".to_string()),
+    };
+    let result = svc.revoke(revoke_req).await;
+    assert!(result.is_ok(), "revoke should return Ok per RFC 7009");
+
+    // Sessions should NOT be revoked because the JWT signature is invalid
+    let sessions = repo.get_all_sessions().await;
+    assert_eq!(
+        sessions.len(),
+        1,
+        "sessions should NOT be revoked for a forged access token"
+    );
+}

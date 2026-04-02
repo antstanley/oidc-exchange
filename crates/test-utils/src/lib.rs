@@ -226,6 +226,15 @@ impl KeyManager for MockKeyManager {
         Ok(signature.to_bytes().to_vec())
     }
 
+    async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool> {
+        use ed25519_dalek::{Signature, Verifier};
+        let sig_bytes: [u8; 64] = signature.try_into().map_err(|_| Error::KeyError {
+            detail: format!("invalid Ed25519 signature length: expected 64, got {}", signature.len()),
+        })?;
+        let sig = Signature::from_bytes(&sig_bytes);
+        Ok(self.signing_key.verifying_key().verify(payload, &sig).is_ok())
+    }
+
     async fn public_jwk(&self) -> Result<serde_json::Value> {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;

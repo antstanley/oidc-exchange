@@ -41,6 +41,12 @@ impl KeyManager for NoopKeyManager {
         })
     }
 
+    async fn verify(&self, _payload: &[u8], _signature: &[u8]) -> Result<bool> {
+        Err(Error::KeyError {
+            detail: "NoopKeyManager: verification not available in admin-only mode".into(),
+        })
+    }
+
     async fn public_jwk(&self) -> Result<serde_json::Value> {
         Err(Error::KeyError {
             detail: "NoopKeyManager: JWKS not available in admin-only mode".into(),

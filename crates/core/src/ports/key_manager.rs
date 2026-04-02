@@ -7,6 +7,10 @@ pub trait KeyManager: Send + Sync {
     /// Sign a byte payload, return the signature
     async fn sign(&self, payload: &[u8]) -> Result<Vec<u8>>;
 
+    /// Verify a signature against a payload. Returns Ok(true) if valid,
+    /// Ok(false) if invalid, Err on infrastructure failure.
+    async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool>;
+
     /// Return the public key in JWK format for the JWKS endpoint
     async fn public_jwk(&self) -> Result<serde_json::Value>;
 

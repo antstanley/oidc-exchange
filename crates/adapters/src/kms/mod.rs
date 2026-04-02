@@ -178,6 +178,26 @@ impl KeyManager for KmsKeyManager {
         Ok(signature)
     }
 
+    async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool> {
+        let algorithm = self.signing_algorithm()?;
+
+        let result = self
+            .client
+            .verify()
+            .key_id(&self.key_id)
+            .signing_algorithm(algorithm)
+            .message_type(MessageType::Raw)
+            .message(Blob::new(payload))
+            .signature(Blob::new(signature))
+            .send()
+            .await
+            .map_err(|e| Error::KeyError {
+                detail: format!("KMS Verify failed: {e}"),
+            })?;
+
+        Ok(result.signature_valid())
+    }
+
     async fn public_jwk(&self) -> Result<serde_json::Value> {
         self.public_key
             .get_or_try_init(|| self.fetch_public_jwk())
