@@ -5,6 +5,7 @@ members = [
     "crates/adapters",
     "crates/providers",
     "crates/server",
+    "crates/ffi",
     "crates/test-utils",
 ]
 

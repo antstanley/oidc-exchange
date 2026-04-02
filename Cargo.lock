@@ -2580,6 +2580,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "oidc-exchange-ffi"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ed25519-dalek 2.2.0",
+ "http 1.4.0",
+ "http-body-util",
+ "oidc-exchange",
+ "oidc-exchange-core",
+ "oidc-exchange-test-utils",
+ "pem",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "oidc-exchange-providers"
 version = "0.1.0"
 dependencies = [

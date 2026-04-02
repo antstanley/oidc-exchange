@@ -1,0 +1,20 @@
+[package]
+name = "oidc-exchange-ffi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+oidc-exchange = { path = "../server" }
+oidc-exchange-core.workspace = true
+tokio.workspace = true
+axum = "0.8"
+http = "1"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tracing.workspace = true
+
+[dev-dependencies]
+oidc-exchange-test-utils.workspace = true
+serde_json.workspace = true
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
+pem = "3"
