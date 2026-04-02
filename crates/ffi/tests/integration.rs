@@ -19,6 +19,7 @@ fn minimal_config(key_path: &str, db_path: &str) -> String {
         r#"
 [server]
 issuer = "https://auth.test.com"
+role = "exchange"
 
 [registration]
 mode = "open"
@@ -127,7 +128,8 @@ fn test_invalid_config() {
 fn test_invalid_method() {
     let (exchange, _tmp) = setup();
 
-    match exchange.handle_request("NOTAMETHOD", "/health", vec![], vec![]) {
+    // HTTP method tokens cannot contain spaces; this triggers INVALID_METHOD.
+    match exchange.handle_request("NOT A METHOD", "/health", vec![], vec![]) {
         Err(err) => assert_eq!(err.code, "INVALID_METHOD"),
         Ok(_) => panic!("expected error for invalid method"),
     }
