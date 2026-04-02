@@ -1,0 +1,17 @@
+{
+  "name": "oidc-exchange-sveltekit-example",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "start": "node build"
+  },
+  "dependencies": {
+    "@oidc-exchange/node": "^0.1.0",
+    "@sveltejs/adapter-node": "^5",
+    "@sveltejs/kit": "^2",
+    "svelte": "^5",
+    "vite": "^6"
+  }
+}

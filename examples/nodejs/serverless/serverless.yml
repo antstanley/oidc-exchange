@@ -1,0 +1,14 @@
+service: oidc-exchange-serverless
+
+provider:
+  name: aws
+  runtime: nodejs22.x
+  region: us-east-1
+
+functions:
+  oidcExchange:
+    handler: handler.oidcExchange
+    events:
+      - http:
+          path: /auth/{proxy+}
+          method: any
