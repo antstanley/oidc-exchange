@@ -1,0 +1,15 @@
+[package]
+name = "oidc-exchange-nodejs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oidc-exchange-ffi = { path = "../../crates/ffi" }
+napi = { version = "2", features = ["async", "napi9"] }
+napi-derive = "2"
+
+[build-dependencies]
+napi-build = "2"
