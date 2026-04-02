@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Top-level application configuration, matching the TOML structure.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -18,24 +18,6 @@ pub struct AppConfig {
     pub internal_api: InternalApiConfig,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            registration: RegistrationConfig::default(),
-            token: TokenConfig::default(),
-            audit: AuditConfig::default(),
-            key_manager: KeyManagerConfig::default(),
-            repository: RepositoryConfig::default(),
-            session_repository: SessionRepositoryConfig::default(),
-            user_sync: UserSyncConfig::default(),
-            telemetry: TelemetryConfig::default(),
-            internal_api: InternalApiConfig::default(),
-            providers: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,22 +107,12 @@ pub struct SqsAuditConfig {
     pub region: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct KeyManagerConfig {
     pub adapter: String,
     pub kms: Option<KmsConfig>,
     pub local: Option<LocalKeyConfig>,
-}
-
-impl Default for KeyManagerConfig {
-    fn default() -> Self {
-        Self {
-            adapter: String::new(),
-            kms: None,
-            local: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -157,7 +129,7 @@ pub struct LocalKeyConfig {
     pub kid: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct RepositoryConfig {
     pub adapter: String,
@@ -166,33 +138,12 @@ pub struct RepositoryConfig {
     pub sqlite: Option<SqliteConfig>,
 }
 
-impl Default for RepositoryConfig {
-    fn default() -> Self {
-        Self {
-            adapter: String::new(),
-            dynamodb: None,
-            postgres: None,
-            sqlite: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct SessionRepositoryConfig {
     pub adapter: Option<String>,
     pub valkey: Option<ValkeyConfig>,
     pub lmdb: Option<LmdbConfig>,
-}
-
-impl Default for SessionRepositoryConfig {
-    fn default() -> Self {
-        Self {
-            adapter: None,
-            valkey: None,
-            lmdb: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -224,22 +175,12 @@ pub struct LmdbConfig {
     pub max_size_mb: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct UserSyncConfig {
     pub enabled: bool,
     pub adapter: Option<String>,
     pub webhook: Option<WebhookConfig>,
-}
-
-impl Default for UserSyncConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            adapter: None,
-            webhook: None,
-        }
-    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -285,7 +226,7 @@ impl Default for TelemetryConfig {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct InternalApiConfig {
     pub enabled: bool,
@@ -303,16 +244,6 @@ impl std::fmt::Debug for InternalApiConfig {
                 &self.shared_secret.as_ref().map(|_| "<redacted>"),
             )
             .finish()
-    }
-}
-
-impl Default for InternalApiConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            auth_method: None,
-            shared_secret: None,
-        }
     }
 }
 

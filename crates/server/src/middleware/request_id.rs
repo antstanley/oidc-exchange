@@ -15,7 +15,7 @@ pub async fn request_id_layer(request: Request<axum::body::Body>, next: Next) ->
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    tracing::Span::current().record("request_id", &request_id.as_str());
+    tracing::Span::current().record("request_id", request_id.as_str());
 
     let mut response = next.run(request).await;
     if let Ok(value) = request_id.parse() {

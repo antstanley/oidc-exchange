@@ -205,6 +205,7 @@ impl KeyManager for KmsKeyManager {
         &self.algorithm
     }
 
+    #[allow(clippy::misnamed_getters)] // field is `kid` (JWT Key ID), method is `key_id` per trait
     fn key_id(&self) -> &str {
         &self.kid
     }

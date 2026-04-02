@@ -55,7 +55,7 @@ fn resolve_template(template: &str, user: &User) -> Option<Value> {
     if trimmed.starts_with("{{") && trimmed.ends_with("}}") {
         let inner = trimmed[2..trimmed.len() - 2].trim();
         if let Some((path, default)) = parse_default_filter(inner) {
-            resolve_field(path.trim(), user).or_else(|| Some(Value::String(default)))
+            resolve_field(path.trim(), user).or(Some(Value::String(default)))
         } else {
             resolve_field(inner, user)
         }

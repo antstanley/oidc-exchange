@@ -1,3 +1,8 @@
+// PyO3's `?` operator on PyResult triggers clippy::useless_conversion
+// because From<PyErr> for PyErr is an identity conversion. This is a
+// known interaction between PyO3 proc macros and clippy.
+#![allow(clippy::useless_conversion)]
+
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -95,7 +100,7 @@ impl OidcExchange {
         result.set_item("headers", resp_headers)?;
         result.set_item("body", PyBytes::new_bound(py, &response.body))?;
 
-        Ok(result.into())
+        Ok(result.unbind())
     }
 
     /// Shutdown the instance (no-op, reserved for future use).

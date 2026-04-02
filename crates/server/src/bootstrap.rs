@@ -440,8 +440,8 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
                 .as_deref()
                 .and_then(|s| {
                     let s = s.trim();
-                    if s.ends_with('s') {
-                        s[..s.len() - 1].parse::<u64>().ok()
+                    if let Some(stripped) = s.strip_suffix('s') {
+                        stripped.parse::<u64>().ok()
                     } else {
                         s.parse::<u64>().ok()
                     }
