@@ -68,14 +68,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 5. Build router based on role
-    let mut app: Router<AppState> = Router::new()
-        .route("/health", axum::routing::get(routes::health::health_handler));
+    let mut app: Router<AppState> = Router::new();
 
     if role == "exchange" || role == "all" {
         app = app.merge(routes::public_routes());
     }
     if role == "admin" || role == "all" {
         app = app.merge(routes::internal_routes(state.clone()));
+        // Ensure /health is available even in admin-only mode
+        app = app.route("/health", axum::routing::get(routes::health::health_handler));
     }
 
     let app = app

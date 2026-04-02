@@ -12,6 +12,7 @@ use crate::state::AppState;
 
 pub fn public_routes() -> Router<AppState> {
     Router::new()
+        .route("/health", get(health::health_handler))
         .route("/token", post(token::token_handler))
         .route("/revoke", post(revoke::revoke_handler))
         .route("/keys", get(keys::keys_handler))
