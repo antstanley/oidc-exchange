@@ -366,28 +366,14 @@ async fn build_audit_log(
 ) -> Result<Box<dyn AuditLog>, Box<dyn std::error::Error>> {
     match config.audit.adapter.as_str() {
         "noop" | "" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
-        "cloudtrail" => {
-            let ct_cfg = config
-                .audit
-                .cloudtrail
-                .as_ref()
-                .ok_or_else(|| Error::ConfigError {
-                    detail:
-                        "audit.adapter is 'cloudtrail' but [audit.cloudtrail] section is missing"
-                            .into(),
-                })?;
-
-            let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .load()
-                .await;
-            let client = aws_sdk_cloudtraildata::Client::new(&sdk_config);
-
-            Ok(Box::new(
-                oidc_exchange_adapters::cloudtrail::CloudTrailAuditLog::new(
-                    client,
-                    ct_cfg.channel_arn.clone(),
-                ),
-            ))
+        "stdout" | "stderr" | "auto" => {
+            use oidc_exchange_adapters::stdout_audit::{OutputTarget, StdoutAuditLog};
+            let target = match config.audit.adapter.as_str() {
+                "stdout" => OutputTarget::Stdout,
+                "stderr" => OutputTarget::Stderr,
+                _ => OutputTarget::Auto,
+            };
+            Ok(Box::new(StdoutAuditLog::new(target)))
         }
         "sqs" => {
             let sqs_cfg = config

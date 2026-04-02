@@ -179,30 +179,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aws-sdk-cloudtraildata"
-version = "1.97.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057df576e8e232dd619b66361312f1feffce83b513cfeae060eafacebe62121b"
-dependencies = [
- "aws-credential-types",
- "aws-runtime",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-observability",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "aws-types",
- "bytes",
- "fastrand",
- "http 0.2.12",
- "http 1.4.0",
- "regex-lite",
- "tracing",
-]
-
-[[package]]
 name = "aws-sdk-dynamodb"
 version = "1.110.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2594,7 +2570,6 @@ name = "oidc-exchange"
 version = "0.1.0"
 dependencies = [
  "aws-config",
- "aws-sdk-cloudtraildata",
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
  "aws-sdk-sqs",
@@ -2625,7 +2600,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "aws-config",
- "aws-sdk-cloudtraildata",
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
  "aws-sdk-sqs",

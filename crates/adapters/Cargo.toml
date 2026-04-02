@@ -15,7 +15,6 @@ ed25519-dalek = { version = "3.0.0-pre.6", features = ["rand_core", "pkcs8", "pe
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 base64.workspace = true
 aws-sdk-dynamodb = "1"
-aws-sdk-cloudtraildata = "1"
 aws-sdk-kms = "1"
 rsa = "0.10.0-rc.1"
 p256 = { version = "0.14.0-rc.8", features = ["ecdsa"] }

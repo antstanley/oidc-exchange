@@ -1,4 +1,3 @@
-pub mod cloudtrail;
 pub mod dynamo;
 pub mod kms;
 pub mod lmdb;
@@ -9,5 +8,6 @@ pub mod postgres;
 pub mod shared;
 pub mod sqlite;
 pub mod sqs_audit;
+pub mod stdout_audit;
 pub mod valkey;
 pub mod webhook;

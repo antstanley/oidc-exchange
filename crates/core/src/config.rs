@@ -81,7 +81,6 @@ impl Default for TokenConfig {
 pub struct AuditConfig {
     pub adapter: String,
     pub blocking_threshold: String,
-    pub cloudtrail: Option<CloudTrailConfig>,
     pub sqs: Option<SqsAuditConfig>,
 }
 
@@ -90,15 +89,9 @@ impl Default for AuditConfig {
         Self {
             adapter: "noop".to_string(),
             blocking_threshold: "warning".to_string(),
-            cloudtrail: None,
             sqs: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CloudTrailConfig {
-    pub channel_arn: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -289,7 +282,7 @@ mod tests {
         // Audit defaults
         assert_eq!(config.audit.adapter, "noop");
         assert_eq!(config.audit.blocking_threshold, "warning");
-        assert!(config.audit.cloudtrail.is_none());
+        assert!(config.audit.sqs.is_none());
 
         // Telemetry defaults
         assert!(!config.telemetry.enabled);
@@ -327,11 +320,12 @@ org = "example"
 role = "admin"
 
 [audit]
-adapter = "cloudtrail"
+adapter = "sqs"
 blocking_threshold = "warning"
 
-[audit.cloudtrail]
-channel_arn = "arn:aws:cloudtrail:us-east-1:123456:channel/abc"
+[audit.sqs]
+queue_url = "https://sqs.us-east-1.amazonaws.com/123456789012/audit-events"
+region = "us-east-1"
 
 [key_manager]
 adapter = "kms"
@@ -397,11 +391,13 @@ scopes = ["openid", "email", "profile"]
         let claims = config.token.custom_claims.unwrap();
         assert_eq!(claims.get("org").unwrap(), "example");
 
-        assert_eq!(config.audit.adapter, "cloudtrail");
+        assert_eq!(config.audit.adapter, "sqs");
+        let sqs_cfg = config.audit.sqs.unwrap();
         assert_eq!(
-            config.audit.cloudtrail.unwrap().channel_arn,
-            "arn:aws:cloudtrail:us-east-1:123456:channel/abc"
+            sqs_cfg.queue_url,
+            "https://sqs.us-east-1.amazonaws.com/123456789012/audit-events"
         );
+        assert_eq!(sqs_cfg.region.as_deref(), Some("us-east-1"));
 
         let kms = config.key_manager.kms.unwrap();
         assert_eq!(kms.algorithm, "ECDSA_SHA_256");
