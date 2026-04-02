@@ -189,8 +189,6 @@ jobs:
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - run: pnpm install -g @napi-rs/cli
       - name: Install dependencies
         working-directory: bindings/nodejs
