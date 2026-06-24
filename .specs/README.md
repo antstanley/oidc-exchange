@@ -33,6 +33,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | Change spec | Status | Targets |
 |---|---|---|
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
+| [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
 
 ## Conventions
 
