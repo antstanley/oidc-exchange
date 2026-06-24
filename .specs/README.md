@@ -25,6 +25,15 @@ Start with the [architecture principles](architecture-principles.md), then the s
 | Admin UI | [admin-ui/](admin-ui/README.md) | the SvelteKit admin console |
 | Website | [website/](website/README.md) | the Astro/Starlight documentation site |
 
+## Change specs
+
+Proposed deltas to the canonical spec live under `changes/` as single documents
+(`YYYY-MM-DD-snake_case_title.md`) until they ship, then move to `changes/merged/`.
+
+| Change spec | Status | Targets |
+|---|---|---|
+| [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
+
 ## Conventions
 
 - Per-package specs may reference global specs; global specs never reference per-package ones.
