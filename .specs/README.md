@@ -35,6 +35,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
 | [changes/2026-06-24-cleanup_stale_references.md](changes/2026-06-24-cleanup_stale_references.md) | Proposed | docs/examples: remove stale cloudtrail/atproto references |
+| [changes/2026-06-24-add_local_enforcement_gates.md](changes/2026-06-24-add_local_enforcement_gates.md) | Proposed | tooling: pre-push hook, Python type checker, limit lints |
 
 ## Conventions
 
