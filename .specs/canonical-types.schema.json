@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oidc-exchange.dev/specs/canonical-types.schema.json",
+  "title": "oidc-exchange shared canonical types",
+  "description": "Repo-wide types referenced by more than one package. Package-specific entities live in that package's canonical-types.schema.json and $ref this file for shared primitives.",
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "description": "A prefixed ULID identifier, lowercase. Example: usr_01arz3ndektsv4rrffq69g5fav",
+      "minLength": 1
+    },
+    "Ulid": {
+      "type": "string",
+      "description": "A bare ULID (used for audit event ids).",
+      "minLength": 26,
+      "maxLength": 26
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 / ISO 8601 UTC timestamp."
+    },
+    "Email": {
+      "type": "string",
+      "format": "email"
+    },
+    "Url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "NonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "HttpRequest": {
+      "type": "object",
+      "description": "Transport-agnostic HTTP request handed to the FFI core by every binding.",
+      "required": ["method", "path", "headers"],
+      "properties": {
+        "method": { "$ref": "#/$defs/NonEmptyString", "description": "HTTP method, e.g. GET, POST." },
+        "path": { "type": "string", "description": "Request path including any query string." },
+        "headers": {
+          "type": "array",
+          "description": "Header name/value pairs. Repeated headers appear as repeated entries.",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "type": "string" }
+            }
+          }
+        },
+        "body": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Raw request body as bytes (modelled as base64 in JSON). Optional."
+        }
+      }
+    },
+    "HttpResponse": {
+      "type": "object",
+      "description": "Transport-agnostic HTTP response returned by the FFI core to every binding.",
+      "required": ["status", "headers", "body"],
+      "properties": {
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "type": "string" }
+            }
+          }
+        },
+        "body": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Raw response body as bytes (modelled as base64 in JSON)."
+        }
+      }
+    },
+    "OAuthErrorEnvelope": {
+      "type": "object",
+      "description": "RFC 6749 §5.2 error body returned by the public HTTP API.",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "string",
+          "enum": [
+            "invalid_grant",
+            "invalid_token",
+            "invalid_request",
+            "access_denied",
+            "unauthorized",
+            "unsupported_grant_type",
+            "server_error"
+          ]
+        },
+        "error_description": { "type": "string" }
+      }
+    }
+  }
+}
