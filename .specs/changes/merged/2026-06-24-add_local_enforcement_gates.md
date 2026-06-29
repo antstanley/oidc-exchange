@@ -1,6 +1,6 @@
 # Change: Add local enforcement gates for the development guidelines
 
-**Status:** Proposed · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Target:** Repo-wide (tooling)
+**Status:** Merged · **Date:** 2026-06-24 · **Merged:** 2026-06-29 · **Owner:** Ant Stanley · **Target:** Repo-wide (tooling)
 
 Add the enforcement mechanisms the development guidelines adopt as rules but do not yet wire up:
 a pre-push hook that runs the format/lint/test gate locally, a Python strict type checker
@@ -10,7 +10,7 @@ a pre-push hook that runs the format/lint/test gate locally, a Python strict typ
 
 ## Motivation
 
-The [development guidelines](../development-guidelines.md) adopt several disciplines whose
+The [development guidelines](../../development-guidelines.md) adopt several disciplines whose
 enforcement is currently CI-only or unenforced: there is no pre-push/pre-commit hook (failures
 surface only after a push reaches CI), no Python static type checker (only `ruff` and `pytest`
 run, so "type-annotate everything public" is unchecked), and the 70-lines-per-function and
@@ -26,7 +26,7 @@ true, catches violations before they reach a reviewer, and shortens the feedback
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/development-guidelines.md`](../development-guidelines.md) | Move the wired gates from Open questions into the Toolchain table / Repository hygiene as facts; keep only genuinely undecided items as Open questions |
+| [`.specs/development-guidelines.md`](../../development-guidelines.md) | Move the wired gates from Open questions into the Toolchain table / Repository hygiene as facts; keep only genuinely undecided items as Open questions |
 
 ---
 

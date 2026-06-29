@@ -1,6 +1,6 @@
 # Development Guidelines
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** Repo-wide
+**Status:** Implemented · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Scope:** Repo-wide
 
 The rules of the road for everyone — humans and agents — writing code in `oidc-exchange`.
 This page is canonical: a guideline here is a rule the repo adopts. It covers the toolchain,
@@ -27,6 +27,7 @@ in the global spec layer.
 | ruff | latest | `uv run ruff format .` and `uv run ruff check .` |
 | pydantic | latest | data models requiring validation |
 | pytest | latest | `uv run pytest` |
+| mypy | latest, strict | `uv run mypy` over `bindings/python`; runs in CI |
 | jujutsu (jj) | latest | sole VCS front end over a Git backend |
 | CI | GitHub Actions | `.github/workflows/ci.yml`: lint, test, nodejs-test, python-test |
 
@@ -291,6 +292,8 @@ The repo is jj-managed (`.jj/` over a Git backend).
   ([bindings/specs/05-distribution](bindings/specs/05-distribution.md)).
 - **CI is the enforcement gate** (`.github/workflows/ci.yml`): format-check, clippy, nextest,
   the napi build + vitest, and the maturin build + pytest run on every push and PR.
+- **The pre-push hook** runs format-check, lint, and the fast test tier for every language the change touches; CI re-runs the same plus the slow/integration tier. A failing hook blocks the push; do not bypass it. It is opt-in — activate it with `git config core.hooksPath .githooks` (see [CONTRIBUTING.md](../CONTRIBUTING.md)); note that `jj git push` does not run git hooks, so CI remains the backstop.
+- **The 70-lines-per-function and two-assertions-per-function limits stay review gates, not hard lints.** A clippy `too_many_lines` lint at threshold 70 was evaluated and declined: existing functions exceed it (up to 134 lines across core, adapters, and the server crate), so enabling it under `-D warnings` would break the build without a sanctioned refactor. Assertion density is not lintable off the shelf. Both stay reviewer-enforced.
 - **Generated native artifacts are not committed** — they are built per platform in CI.
 
 ## Guidelines for AI agents
@@ -354,14 +357,9 @@ A change is done when:
 - *Manual version parity, machine-checked.* **Versions are bumped by hand in three manifests
   and verified by the release `validate` job.** Keeps the bump explicit while preventing a
   mismatched publish.
+- *Local enforcement gates.* **A committed pre-push hook (wired via `core.hooksPath`), strict mypy in CI, and the size/assertion limits kept as documented review gates.** The hook runs the per-language format/lint/test gate before a push while CI remains the backstop (jj does not run it on `jj git push`); mypy strict type-checks `bindings/python` in CI; a clippy `too_many_lines` lint at 70 was declined because existing code exceeds it, so that limit and assertion density stay reviewer-enforced.
 
 ### Open questions
 
-- No pre-push/pre-commit git hook is wired; the format/lint/test gate runs only in CI today.
-  Adding a local hook (so failures surface before push) is open.
-- A Python static type checker (mypy/pyright in strict mode) is not configured — only `ruff`
-  and `pytest` run. Strict typing is an adopted rule without an enforcing gate yet.
-- The 70-lines-per-function and two-assertions-per-function limits are review gates, not
-  mechanically enforced; whether to add a lint for them is undecided.
 - `clippy` runs with `-D warnings` but no `clippy.toml` pedantic ruleset is committed; whether
   to enable pedantic-adjacent lints is open.
