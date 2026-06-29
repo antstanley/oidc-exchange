@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable, MutableMapping
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from oidc_exchange import OidcExchange
 
+# Minimal ASGI type aliases (scope/message are open string-keyed mappings per the
+# ASGI spec); kept local so the binding has no asgiref dependency.
+Scope = MutableMapping[str, Any]
+Message = MutableMapping[str, Any]
+Receive = Callable[[], Awaitable[Message]]
+Send = Callable[[Message], Awaitable[None]]
+ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
-def make_asgi_app(oidc: OidcExchange):
+
+def make_asgi_app(oidc: OidcExchange) -> ASGIApp:
     """Create an ASGI application from an OidcExchange instance."""
 
-    async def app(scope, receive, send):
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             return
 
@@ -22,7 +31,7 @@ def make_asgi_app(oidc: OidcExchange):
             if not message.get("more_body", False):
                 break
 
-        headers = {}
+        headers: dict[str, str] = {}
         for name, value in scope.get("headers", []):
             headers[name.decode("latin-1")] = value.decode("latin-1")
 
@@ -31,7 +40,7 @@ def make_asgi_app(oidc: OidcExchange):
         if query:
             path = f"{path}?{query.decode('latin-1')}"
 
-        request = {
+        request: dict[str, Any] = {
             "method": scope["method"],
             "path": path,
             "headers": headers,

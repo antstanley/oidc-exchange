@@ -25,6 +25,7 @@ dev = [
     "httpx>=0.27",
     "werkzeug>=3",
     "ruff>=0.11",
+    "mypy>=2.1.0",
 ]
 
 [tool.maturin]
@@ -38,6 +39,20 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+files = ["python"]
+
+# oidc_exchange._oidc_exchange is the compiled native extension (maturin builds it
+# from the Rust ffi crate). It ships no importable Python stub, so when the .so is
+# absent (type-check-only runs) mypy cannot resolve the import; the binding's typed
+# surface lives in the hand-curated __init__.pyi wrapper. Scoped to this one module
+# so the pure-Python sources stay strictly type-checked.
+[[tool.mypy.overrides]]
+module = ["oidc_exchange._oidc_exchange"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -103,6 +103,9 @@ jobs:
       - name: Build Python module
         working-directory: bindings/python
         run: uv run maturin develop
+      - name: Type-check
+        working-directory: bindings/python
+        run: uv run mypy python
       - name: Run tests
         working-directory: bindings/python
         run: uv run pytest tests/
