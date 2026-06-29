@@ -19,17 +19,19 @@ in the global spec layer.
 | cargo-nextest | latest | `cargo nextest run --workspace`; config in `.config/nextest.toml` |
 | TypeScript | strict mode, `.ts` only | every package is ESM (`"type": "module"`) |
 | pnpm | 10.x | `pnpm install`; `pnpm-lock.yaml` is the lockfile of record |
-| oxfmt | latest | `pnpm fmt` / `pnpm fmt:check` |
+| oxfmt | latest | `pnpm format` / `pnpm format:check` |
 | oxlint | latest | `pnpm lint` |
+| tsc / astro check / svelte-check | latest | `pnpm typecheck` per TS workspace (`tsc --noEmit` for the bindings; `astro check` / `svelte-check` for the apps) |
 | vitest | latest | `pnpm test` |
 | Python | 3.10+ (abi3) | bindings/python |
 | uv | latest | `uv sync`; never `pip` or manual virtualenvs |
 | ruff | latest | `uv run ruff format .` and `uv run ruff check .` |
 | pydantic | latest | data models requiring validation |
 | pytest | latest | `uv run pytest` |
-| mypy | latest, strict | `uv run mypy` over `bindings/python`; runs in CI |
+| pyright | latest, strict | `uv run pyright` over `bindings/python`; runs in CI |
 | jujutsu (jj) | latest | sole VCS front end over a Git backend |
-| CI | GitHub Actions | `.github/workflows/ci.yml`: lint, test, nodejs-test, python-test |
+| lefthook | latest | pre-push gate (`lefthook.yml`); `pnpm install` installs it, `lefthook run pre-push` runs it by hand |
+| CI | GitHub Actions | `.github/workflows/ci.yml`: lint, test, nodejs-test, python-test, web-apps |
 
 ## Tiger Style — the pervasive style
 
@@ -214,7 +216,7 @@ The repo is jj-managed (`.jj/` over a Git backend).
 
 ### Formatting and linting
 
-- `pnpm fmt` (oxfmt) and `pnpm lint` (oxlint) clean before pushing; warnings are errors.
+- `pnpm format` (oxfmt), `pnpm lint` (oxlint), and `pnpm typecheck` (tsc / `astro check` / `svelte-check`) clean before pushing.
 - All source is `.ts`; all packages are ESM (`"type": "module"`); `require()` only via
   `createRequire` for loading native `.node` addons.
 
@@ -292,7 +294,7 @@ The repo is jj-managed (`.jj/` over a Git backend).
   ([bindings/specs/05-distribution](bindings/specs/05-distribution.md)).
 - **CI is the enforcement gate** (`.github/workflows/ci.yml`): format-check, clippy, nextest,
   the napi build + vitest, and the maturin build + pytest run on every push and PR.
-- **The pre-push hook** runs format-check, lint, and the fast test tier for every language the change touches; CI re-runs the same plus the slow/integration tier. A failing hook blocks the push; do not bypass it. It is opt-in — activate it with `git config core.hooksPath .githooks` (see [CONTRIBUTING.md](../CONTRIBUTING.md)); note that `jj git push` does not run git hooks, so CI remains the backstop.
+- **The pre-push hook** (managed by [lefthook](https://lefthook.dev) via `lefthook.yml`) runs format-check, lint, typecheck, and the fast test tier for every language the change touches; CI re-runs the same plus the slow/integration tier. A failing hook blocks the push; do not bypass it. `pnpm install` installs it (the root `prepare` script runs `lefthook install`); run it by hand any time with `lefthook run pre-push` (see [CONTRIBUTING.md](../CONTRIBUTING.md)). Note that `jj git push` does not run git hooks, so CI remains the backstop.
 - **The 70-lines-per-function and two-assertions-per-function limits stay review gates, not hard lints.** A clippy `too_many_lines` lint at threshold 70 was evaluated and declined: existing functions exceed it (up to 134 lines across core, adapters, and the server crate), so enabling it under `-D warnings` would break the build without a sanctioned refactor. Assertion density is not lintable off the shelf. Both stay reviewer-enforced.
 - **Generated native artifacts are not committed** — they are built per platform in CI.
 
@@ -330,8 +332,8 @@ A change is done when:
 - Every new bound is a named constant in the relevant module.
 - Format, lint, and the test suite pass locally for every language the change touches:
   - Rust: `cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace`.
-  - TypeScript: `pnpm fmt:check`, `pnpm lint`, `pnpm test`.
-  - Python: `uv run ruff format --check .`, `uv run ruff check .`, `uv run pytest`.
+  - TypeScript: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test`.
+  - Python: `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyright`, `uv run pytest`.
 - If domain types changed, `canonical-types.schema.json` and the affected prose pages are
   updated together.
 - The change description states the *why* and what changed at the architecture level.
@@ -340,8 +342,9 @@ A change is done when:
 
 ### Assumptions
 
-- CI (`.github/workflows/ci.yml`) is the authoritative gate; a change that passes the four CI
-  jobs satisfies the mechanical part of the definition of done.
+- CI (`.github/workflows/ci.yml`) is the authoritative gate; a change that passes the five CI
+  jobs (lint, test, nodejs-test, python-test, web-apps) satisfies the mechanical part of the
+  definition of done.
 - Contributors run `jj`, not `git`, against the working copy.
 
 ### Decisions
@@ -349,15 +352,16 @@ A change is done when:
 - *Tiger Style.* **The repo adopts Tiger Style (safety > performance > DX).** The Rust core is
   already `Result`/`thiserror`-based and IO is isolated behind ports, so an errors-as-data,
   assert-heavily discipline fits the existing grain.
-- *Three toolchains, one CI.* **Rust (rustfmt/clippy/nextest), TS (oxfmt/oxlint/vitest+pnpm),
-  Python (ruff/pytest+uv) run as four CI jobs.** Each language uses its idiomatic tools; one
-  workflow enforces them.
+- *Three toolchains, one CI.* **Rust (rustfmt/clippy/nextest), TS (oxfmt/oxlint/tsc/vitest+pnpm),
+  Python (ruff/pyright/pytest+uv) run as CI jobs.** Each language uses its idiomatic tools; one
+  workflow enforces them. The Astro/SvelteKit apps add a `web-apps` job (oxlint/oxfmt + `astro
+  check`/`svelte-check`).
 - *jj as the front end.* **Jujutsu is the sole VCS interface over the Git backend.** Avoids the
   index/working-copy mismatch of mixing `git` commands into a jj working copy.
 - *Manual version parity, machine-checked.* **Versions are bumped by hand in three manifests
   and verified by the release `validate` job.** Keeps the bump explicit while preventing a
   mismatched publish.
-- *Local enforcement gates.* **A committed pre-push hook (wired via `core.hooksPath`), strict mypy in CI, and the size/assertion limits kept as documented review gates.** The hook runs the per-language format/lint/test gate before a push while CI remains the backstop (jj does not run it on `jj git push`); mypy strict type-checks `bindings/python` in CI; a clippy `too_many_lines` lint at 70 was declined because existing code exceeds it, so that limit and assertion density stay reviewer-enforced.
+- *Local enforcement gates.* **A [lefthook](https://lefthook.dev) pre-push hook (`lefthook.yml`, installed by `pnpm install`), strict pyright in CI, oxlint/oxfmt/tsc hygiene across the TS workspaces, and the size/assertion limits kept as documented review gates.** The hook runs the per-language format/lint/typecheck/fast-test gate before a push while CI remains the backstop (jj does not run git hooks on `jj git push`); pyright strict type-checks `bindings/python` in CI; the bindings and the Astro/SvelteKit apps gate on `pnpm lint`/`format:check`/`typecheck`; a clippy `too_many_lines` lint at 70 was declined because existing code exceeds it, so that limit and assertion density stay reviewer-enforced. This supersedes the earlier `core.hooksPath` shell-hook + mypy decision — see [changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md](changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md).
 
 ### Open questions
 

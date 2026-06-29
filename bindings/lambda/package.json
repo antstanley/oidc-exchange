@@ -17,9 +17,10 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "lint": "oxlint",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "tsc"
   },
   "dependencies": {

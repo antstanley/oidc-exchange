@@ -14,70 +14,70 @@
  *    same URL — browsers get HTML, agents get markdown.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { join, dirname, relative, extname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { join, dirname, relative, extname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function stripFrontmatter(content) {
-	if (!content.startsWith('---')) return content;
-	const end = content.indexOf('\n---', 3);
-	if (end === -1) return content;
-	return content.slice(end + 4).trim();
+  if (!content.startsWith("---")) return content;
+  const end = content.indexOf("\n---", 3);
+  if (end === -1) return content;
+  return content.slice(end + 4).trim();
 }
 
 /** Recursively find all files matching extensions in a directory. */
 function walkDir(dir, exts) {
-	const results = [];
-	for (const entry of readdirSync(dir)) {
-		const full = join(dir, entry);
-		const stat = statSync(full);
-		if (stat.isDirectory()) {
-			results.push(...walkDir(full, exts));
-		} else if (exts.includes(extname(full))) {
-			results.push(full);
-		}
-	}
-	return results;
+  const results = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    const stat = statSync(full);
+    if (stat.isDirectory()) {
+      results.push(...walkDir(full, exts));
+    } else if (exts.includes(extname(full))) {
+      results.push(full);
+    }
+  }
+  return results;
 }
 
 export default function markdownApi() {
-	let contentDir;
+  let contentDir;
 
-	return {
-		name: 'markdown-api',
-		hooks: {
-			'astro:config:setup': ({ addMiddleware, logger }) => {
-				addMiddleware({
-					entrypoint: new URL('../src/middleware-markdown.ts', import.meta.url).pathname,
-					order: 'pre',
-				});
-				logger.info('Markdown content negotiation middleware registered');
-			},
+  return {
+    name: "markdown-api",
+    hooks: {
+      "astro:config:setup": ({ addMiddleware, logger }) => {
+        addMiddleware({
+          entrypoint: new URL("../src/middleware-markdown.ts", import.meta.url).pathname,
+          order: "pre",
+        });
+        logger.info("Markdown content negotiation middleware registered");
+      },
 
-			'astro:config:done': ({ config }) => {
-				contentDir = fileURLToPath(new URL('src/content/docs/', config.root));
-			},
+      "astro:config:done": ({ config }) => {
+        contentDir = fileURLToPath(new URL("src/content/docs/", config.root));
+      },
 
-			'astro:build:done': ({ dir, logger }) => {
-				const outDir = fileURLToPath(dir);
-				const files = walkDir(contentDir, ['.md', '.mdx']);
-				let count = 0;
+      "astro:build:done": ({ dir, logger }) => {
+        const outDir = fileURLToPath(dir);
+        const files = walkDir(contentDir, [".md", ".mdx"]);
+        let count = 0;
 
-				for (const file of files) {
-					const rel = relative(contentDir, file);
-					const source = readFileSync(file, 'utf-8');
-					const markdown = stripFrontmatter(source);
+        for (const file of files) {
+          const rel = relative(contentDir, file);
+          const source = readFileSync(file, "utf-8");
+          const markdown = stripFrontmatter(source);
 
-					const outPath = rel.replace(/\.mdx$/, '.md');
-					const outFile = join(outDir, outPath);
+          const outPath = rel.replace(/\.mdx$/, ".md");
+          const outFile = join(outDir, outPath);
 
-					mkdirSync(dirname(outFile), { recursive: true });
-					writeFileSync(outFile, markdown, 'utf-8');
-					count++;
-				}
+          mkdirSync(dirname(outFile), { recursive: true });
+          writeFileSync(outFile, markdown, "utf-8");
+          count++;
+        }
 
-				logger.info(`Generated ${count} markdown files for agent consumption`);
-			},
-		},
-	};
+        logger.info(`Generated ${count} markdown files for agent consumption`);
+      },
+    },
+  };
 }

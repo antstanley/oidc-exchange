@@ -85,35 +85,30 @@ jj git push --bookmark my-feature
 
 ### Pre-push hook
 
-The repo ships an **opt-in** Git pre-push hook at `.githooks/pre-push`. It runs the
-project's quality gates (the same commands as CI) before a push, scoped where
-possible to only the language(s) whose files changed:
+Quality gates run before a push via [**lefthook**](https://lefthook.dev) (config in
+`lefthook.yml`). It runs the same commands as CI, scoped by glob to only the
+language(s) whose files are in the push:
 
-- **Rust** (changes under `crates/`, `bindings/*/src` Rust sources, or any
-  `Cargo.toml`/`Cargo.lock`) — `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace`
-- **Node** (changes under `bindings/nodejs` or `bindings/lambda`) — `pnpm fmt:check`, `pnpm lint`, `pnpm test` in `bindings/nodejs`
-- **Python** (changes under `bindings/python`) — `uv run ruff format --check .`, `uv run ruff check .`, `uv run pytest` in `bindings/python`
+- **Rust** (any `*.rs`, `Cargo.toml`, or `Cargo.lock`) — `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace`
+- **Node** (`bindings/nodejs`) / **Lambda** (`bindings/lambda`) — `pnpm lint`, `pnpm format:check`, `pnpm typecheck`, `pnpm test`
+- **Python** (`bindings/python`) — `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyright`, `uv run pytest`
+- **Website** (`apps/website`) / **Admin UI** (`apps/admin-ui`) — `pnpm lint`, `pnpm format:check`, `pnpm typecheck`
 
-On the first failing command it prints which gate failed and exits non-zero, so a
-broken push is blocked. When it can't work out what changed (for example a brand-new
-branch with no `origin/main` to compare against), it safely runs all three gates.
+A failing gate exits non-zero and blocks the push.
 
-**Activation (manual / not auto-enabled):**
+**Installation:** lefthook installs the git hook automatically when you run `pnpm install`
+(the root `prepare` script runs `lefthook install`). To (re)install or run it by hand:
 
 ```bash
-git config core.hooksPath .githooks
+lefthook install            # write .git/hooks/* from lefthook.yml
+lefthook run pre-push       # run the whole gate now, without pushing
 ```
-
-This points Git at the `.githooks/` directory instead of `.git/hooks`. The hook is
-**not** installed automatically — you must opt in with the command above.
 
 > **Important — `jj git push` does NOT run Git hooks.** Git only fires pre-push hooks
 > when you push through the **Git CLI / Git backend**, not when you push with
-> `jj git push`. The hook is therefore a Git-backend / manual-run convenience (you can
-> also run it by hand: `sh .githooks/pre-push </dev/null`, or
-> `PRE_PUSH_DRY_RUN=1 sh .githooks/pre-push </dev/null` to preview the commands
-> without executing them). **CI remains the authoritative backstop** for every push,
-> regardless of how you push.
+> `jj git push`. The hook is therefore a Git-backend / manual-run convenience — run
+> `lefthook run pre-push` by hand before a `jj git push`. **CI remains the
+> authoritative backstop** for every push, regardless of how you push.
 
 ## Language-Specific Standards
 
@@ -134,8 +129,9 @@ All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace 
 | Language | TypeScript | All code must be TypeScript (`.ts`) |
 | Module system | ES Modules | All packages use `"type": "module"` |
 | Package manager | `pnpm` | `pnpm install` |
-| Formatting | `oxfmt` | `pnpm fmt` / `pnpm fmt:check` |
+| Formatting | `oxfmt` | `pnpm format` / `pnpm format:check` |
 | Linting | `oxlint` | `pnpm lint` |
+| Type-checking | `tsc` / `astro check` / `svelte-check` | `pnpm typecheck` |
 | Testing | `vitest` | `pnpm test` |
 
 **All JavaScript/Node.js code must be TypeScript.** No plain `.js` source files (except generated output). Use `.ts` for all source code.
@@ -158,6 +154,7 @@ All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace 
 | Formatting | `ruff format` | `uv run ruff format .` |
 | Linting | `ruff check` | `uv run ruff check .` |
 | Type validation | `pydantic` | Use for data models requiring validation |
+| Type-checking | `pyright` | `uv run pyright` (strict) |
 | Testing | `pytest` | `uv run pytest` |
 
 **Always use `uv`** for Python package management — never `pip`, `pip install`, or manual virtualenvs. `uv` manages the virtualenv automatically.
@@ -303,11 +300,11 @@ Code examples shown in documentation pages must match the actual code in the `ex
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
 
-# Node.js
-cd bindings/nodejs && pnpm fmt && pnpm lint
+# Node.js / TypeScript (any workspace: bindings/nodejs, bindings/lambda, apps/*)
+cd bindings/nodejs && pnpm format && pnpm lint && pnpm typecheck
 
 # Python
-cd bindings/python && uv run ruff format . && uv run ruff check .
+cd bindings/python && uv run ruff format . && uv run ruff check . && uv run pyright
 ```
 
 All must pass with zero warnings/errors before pushing.

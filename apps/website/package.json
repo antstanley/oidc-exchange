@@ -1,14 +1,18 @@
 {
   "name": "website",
-  "type": "module",
   "version": "0.0.1",
+  "type": "module",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
     "serve": "node serve.mjs",
-    "astro": "astro"
+    "astro": "astro",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "typecheck": "astro check"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.38.2",
@@ -16,5 +20,11 @@
     "astro": "^6.0.1",
     "sharp": "^0.34.2",
     "svelte": "^5.55.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.4",
+    "oxfmt": "^0",
+    "oxlint": "^0",
+    "typescript": "^5"
   }
 }
