@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+  "overrides": [
+    {
+      // src/lib/index.ts is the SvelteKit `$lib` scaffold placeholder (a lone
+      // comment, no exports yet). Exempt only this file from unicorn/no-empty-file
+      // so the rest of the package lints under `oxlint --deny-warnings`.
+      "files": ["src/lib/index.ts"],
+      "rules": {
+        "unicorn/no-empty-file": "off"
+      }
+    }
+  ]
+}

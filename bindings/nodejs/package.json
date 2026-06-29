@@ -20,7 +20,7 @@
     "test": "vitest run",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

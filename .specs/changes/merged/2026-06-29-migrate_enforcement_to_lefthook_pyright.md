@@ -110,9 +110,13 @@ None.
   the trio is `lint` / `format` / `typecheck`.
 - *App typecheck.* **Framework-native** — `astro check` for the website, `svelte-check` for the
   admin UI; oxlint/oxfmt cover the loose `.ts`/`.js` (they do not parse `.astro`/`.svelte`).
+- *oxlint warnings are errors.* **`oxlint --deny-warnings`** on every workspace's `lint` script, so
+  a warning fails the gate. The two pre-existing benign warnings are exempted *per file, per rule*
+  via `.oxlintrc.json` overrides — `no-unused-vars` off for the napi-generated
+  `bindings/nodejs/index.js`, `unicorn/no-empty-file` off for the SvelteKit
+  `apps/admin-ui/src/lib/index.ts` scaffold placeholder — rather than disabling the rules globally
+  or ignoring the files wholesale.
 
 ### Open questions
 
-- Whether to deny oxlint warnings (`--deny-warnings`) is left open: the generated
-  `bindings/nodejs/index.js` and a SvelteKit scaffold placeholder each emit one benign warning, so
-  the gate keeps oxlint's default (warnings do not fail).
+- None.

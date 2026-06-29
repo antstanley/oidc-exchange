@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+  "overrides": [
+    {
+      // index.js is the napi-generated native loader (rebuilt by `napi build`); its
+      // `catch (_e)` deliberately drops the error to fall through to the next
+      // platform-package require. Exempt only this generated file from
+      // no-unused-vars so the rest of the package lints under `oxlint --deny-warnings`.
+      "files": ["index.js"],
+      "rules": {
+        "no-unused-vars": "off"
+      }
+    }
+  ]
+}

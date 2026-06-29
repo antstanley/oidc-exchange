@@ -9,7 +9,7 @@
     "preview": "astro preview",
     "serve": "node serve.mjs",
     "astro": "astro",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "typecheck": "astro check"

@@ -216,7 +216,10 @@ The repo is jj-managed (`.jj/` over a Git backend).
 
 ### Formatting and linting
 
-- `pnpm format` (oxfmt), `pnpm lint` (oxlint), and `pnpm typecheck` (tsc / `astro check` / `svelte-check`) clean before pushing.
+- `pnpm format` (oxfmt), `pnpm lint` (oxlint `--deny-warnings`, so warnings fail the gate), and
+  `pnpm typecheck` (tsc / `astro check` / `svelte-check`) clean before pushing. The only exemptions
+  are per-file `.oxlintrc.json` overrides for two generated/scaffold files (the napi-generated
+  `bindings/nodejs/index.js`; the SvelteKit `apps/admin-ui/src/lib/index.ts` placeholder).
 - All source is `.ts`; all packages are ESM (`"type": "module"`); `require()` only via
   `createRequire` for loading native `.node` addons.
 
