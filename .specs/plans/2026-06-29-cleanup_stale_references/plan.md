@@ -1,6 +1,6 @@
 # Plan: Remove stale CloudTrail and atproto-as-shipped references
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-06-24-cleanup_stale_references.md](../../changes/2026-06-24-cleanup_stale_references.md)
+**Status:** Accepted · **Layout:** kanban · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-06-24-cleanup_stale_references.md](../../changes/2026-06-24-cleanup_stale_references.md)
 
 Bring the non-spec prose docs, example configs, and inline comments into line with the
 implemented `noop`/`stdout`/`sqs` audit adapters and `oidc`/`apple` providers, then close the

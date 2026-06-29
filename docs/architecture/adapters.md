@@ -156,17 +156,14 @@ adapter = "noop"
 blocking_threshold = "warning"
 ```
 
-### CloudTrail Lake
+### Stdout/Stderr
 
-Send audit events to AWS CloudTrail Lake for long-term compliance storage and SQL-based querying.
+Audit events are emitted as structured JSON to the process output --- info-and-below to stdout, error-and-above to stderr.
 
 ```toml
 [audit]
-adapter = "cloudtrail"
+adapter = "stdout"
 blocking_threshold = "warning"
-
-[audit.cloudtrail]
-channel_arn = "arn:aws:cloudtrail:us-east-1:123456789:channel/my-channel"
 ```
 
 ### SQS

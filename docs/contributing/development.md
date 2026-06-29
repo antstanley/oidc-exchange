@@ -123,7 +123,7 @@ The codebase uses hexagonal architecture to make testing straightforward:
 | Crate | Package name | Purpose |
 |---|---|---|
 | `crates/core` | `oidc-exchange-core` | Domain types, port traits, service logic. Zero infrastructure dependencies. |
-| `crates/adapters` | `oidc-exchange-adapters` | Implementations of port traits for DynamoDB, KMS, CloudTrail, OIDC, webhooks. |
+| `crates/adapters` | `oidc-exchange-adapters` | Implementations of port traits for DynamoDB, KMS, SQS, OIDC, webhooks. |
 | `crates/providers` | `oidc-exchange-providers` | Non-standard identity provider modules (Apple). |
 | `crates/server` | `oidc-exchange` | HTTP layer (axum), middleware, telemetry, and the binary entrypoint. |
 | `crates/test-utils` | `oidc-exchange-test-utils` | Mock implementations of all ports. Dev-dependency only. |

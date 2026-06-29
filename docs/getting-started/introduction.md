@@ -31,7 +31,7 @@ The diagram above shows the three participants in the exchange: your **User Appl
 - **Hexagonal Architecture** — all infrastructure behind trait interfaces: database, key management, audit, user sync
 - **Registration Policy** — open or existing-users-only mode with optional email domain/subdomain allowlists
 - **Per-User Claims** — configurable custom JWT claims from TOML templates and per-user overrides via internal API
-- **Audit Trail** — syslog severity levels, configurable blocking threshold, CloudTrail Lake or SQS integration
+- **Audit Trail** — syslog severity levels, configurable blocking threshold, stdout/stderr or SQS integration
 - **OpenTelemetry** — pluggable exporters (OTLP, X-Ray, stdout) via the `tracing` ecosystem
 - **Dual Runtime** — same binary runs as an axum server or AWS Lambda function
 - **Docker Images** — prebuilt images at `ghcr.io/antstanley/oidc-exchange` for instant container deployments
