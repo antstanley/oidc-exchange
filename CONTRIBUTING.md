@@ -83,6 +83,38 @@ jj git push --bookmark my-feature
 - **Conflict markers in files** — jj allows conflicted states to exist in the working copy. Resolve conflicts, then `jj status` confirms resolution.
 - **`jj new` instead of `git commit`** — when your current change is ready, run `jj new` to start a fresh change on top of it.
 
+### Pre-push hook
+
+The repo ships an **opt-in** Git pre-push hook at `.githooks/pre-push`. It runs the
+project's quality gates (the same commands as CI) before a push, scoped where
+possible to only the language(s) whose files changed:
+
+- **Rust** (changes under `crates/`, `bindings/*/src` Rust sources, or any
+  `Cargo.toml`/`Cargo.lock`) — `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace`
+- **Node** (changes under `bindings/nodejs` or `bindings/lambda`) — `pnpm fmt:check`, `pnpm lint`, `pnpm test` in `bindings/nodejs`
+- **Python** (changes under `bindings/python`) — `uv run ruff format --check .`, `uv run ruff check .`, `uv run pytest` in `bindings/python`
+
+On the first failing command it prints which gate failed and exits non-zero, so a
+broken push is blocked. When it can't work out what changed (for example a brand-new
+branch with no `origin/main` to compare against), it safely runs all three gates.
+
+**Activation (manual / not auto-enabled):**
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This points Git at the `.githooks/` directory instead of `.git/hooks`. The hook is
+**not** installed automatically — you must opt in with the command above.
+
+> **Important — `jj git push` does NOT run Git hooks.** Git only fires pre-push hooks
+> when you push through the **Git CLI / Git backend**, not when you push with
+> `jj git push`. The hook is therefore a Git-backend / manual-run convenience (you can
+> also run it by hand: `sh .githooks/pre-push </dev/null`, or
+> `PRE_PUSH_DRY_RUN=1 sh .githooks/pre-push </dev/null` to preview the commands
+> without executing them). **CI remains the authoritative backstop** for every push,
+> regardless of how you push.
+
 ## Language-Specific Standards
 
 ### Rust
