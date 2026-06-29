@@ -1,6 +1,6 @@
 # Plan: Add local enforcement gates for the development guidelines
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-06-24-add_local_enforcement_gates.md](../../changes/2026-06-24-add_local_enforcement_gates.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-06-24-add_local_enforcement_gates.md](../../changes/merged/2026-06-24-add_local_enforcement_gates.md)
 
 Wire the enforcement mechanisms the development guidelines adopt as rules but do not yet
 mechanise: a committed pre-push hook that runs the format/lint/test gate locally, a Python
@@ -15,7 +15,7 @@ task is reviewed *through* them, so it lands last.
 
 ## Source and definition-of-done baseline
 
-- **Spec.** The change spec [.specs/changes/2026-06-24-add_local_enforcement_gates.md](../../changes/2026-06-24-add_local_enforcement_gates.md)
+- **Spec.** The change spec [.specs/changes/2026-06-24-add_local_enforcement_gates.md](../../changes/merged/2026-06-24-add_local_enforcement_gates.md)
   (Motivation, Proposed changes, Implementation notes, Merge plan). It targets one canonical
   page, [.specs/development-guidelines.md](../../development-guidelines.md) (Toolchain table,
   Repository hygiene, Open questions).
