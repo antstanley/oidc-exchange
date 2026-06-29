@@ -39,6 +39,16 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | [changes/2026-06-29-add_npm_trusted_publishing.md](changes/2026-06-29-add_npm_trusted_publishing.md) | Proposed | distribution: npm publish job, platform packages, OIDC trusted publishing |
 | [changes/2026-06-29-add_pypi_trusted_publishing.md](changes/2026-06-29-add_pypi_trusted_publishing.md) | Proposed | distribution: PyPI publish job, abi3/manylinux wheels, OIDC trusted publishing |
 
+## Plans
+
+Implementation plans (dependency-ordered task graphs with definitions of done) live under
+`plans/` as folders (`YYYY-MM-DD-snake_case_title/`), each a `plan.md` plus a kanban board of
+task files.
+
+| Plan | Status | Builds |
+|---|---|---|
+| [plans/2026-06-29-cleanup_stale_references/plan.md](plans/2026-06-29-cleanup_stale_references/plan.md) | Draft | docs/examples/config sweep of stale cloudtrail/atproto references + 06-configuration Open-question removal + merge housekeeping |
+
 ## Conventions
 
 - Per-package specs may reference global specs; global specs never reference per-package ones.
