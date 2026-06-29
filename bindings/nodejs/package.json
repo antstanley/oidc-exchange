@@ -16,7 +16,7 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "napi build --release",
+    "build": "napi build --release --dts index.generated.d.ts",
     "test": "vitest run",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",

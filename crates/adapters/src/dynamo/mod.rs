@@ -239,7 +239,7 @@ impl UserRepository for DynamoRepository {
         }
 
         // Sort by created_at descending
-        all_users.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        all_users.sort_by_key(|b| std::cmp::Reverse(b.created_at));
 
         // Apply offset and limit
         let start = offset as usize;

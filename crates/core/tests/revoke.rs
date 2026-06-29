@@ -235,7 +235,7 @@ async fn revoke_forged_access_token_does_not_revoke_sessions() {
         format!(r#"{{"sub":"{user_id}","iss":"https://auth.test.com","iat":0,"exp":9999999999}}"#)
             .as_bytes(),
     );
-    let forged_sig = URL_SAFE_NO_PAD.encode(&[0u8; 64]); // bogus signature
+    let forged_sig = URL_SAFE_NO_PAD.encode([0u8; 64]); // bogus signature
     let forged_jwt = format!("{forged_header}.{forged_payload}.{forged_sig}");
 
     // Revoke with the forged JWT
