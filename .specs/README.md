@@ -34,7 +34,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 |---|---|---|
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
-| [changes/2026-06-24-cleanup_stale_references.md](changes/2026-06-24-cleanup_stale_references.md) | Proposed | docs/examples: remove stale cloudtrail/atproto references |
+| [changes/merged/2026-06-24-cleanup_stale_references.md](changes/merged/2026-06-24-cleanup_stale_references.md) | Merged | docs/examples: remove stale cloudtrail/atproto references |
 | [changes/2026-06-24-add_local_enforcement_gates.md](changes/2026-06-24-add_local_enforcement_gates.md) | Proposed | tooling: pre-push hook, Python type checker, limit lints |
 | [changes/2026-06-29-add_npm_trusted_publishing.md](changes/2026-06-29-add_npm_trusted_publishing.md) | Proposed | distribution: npm publish job, platform packages, OIDC trusted publishing |
 | [changes/2026-06-29-add_pypi_trusted_publishing.md](changes/2026-06-29-add_pypi_trusted_publishing.md) | Proposed | distribution: PyPI publish job, abi3/manylinux wheels, OIDC trusted publishing |
@@ -47,7 +47,7 @@ task files.
 
 | Plan | Status | Builds |
 |---|---|---|
-| [plans/2026-06-29-cleanup_stale_references/plan.md](plans/2026-06-29-cleanup_stale_references/plan.md) | Draft | docs/examples/config sweep of stale cloudtrail/atproto references + 06-configuration Open-question removal + merge housekeeping |
+| [plans/2026-06-29-cleanup_stale_references/plan.md](plans/2026-06-29-cleanup_stale_references/plan.md) | Done | docs/examples/config sweep of stale cloudtrail/atproto references + 06-configuration Open-question removal + merge housekeeping |
 
 ## Conventions
 

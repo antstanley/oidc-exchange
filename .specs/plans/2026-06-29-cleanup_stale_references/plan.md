@@ -1,6 +1,6 @@
 # Plan: Remove stale CloudTrail and atproto-as-shipped references
 
-**Status:** Accepted · **Layout:** kanban · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-06-24-cleanup_stale_references.md](../../changes/2026-06-24-cleanup_stale_references.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-06-24-cleanup_stale_references.md](../../changes/merged/2026-06-24-cleanup_stale_references.md)
 
 Bring the non-spec prose docs, example configs, and inline comments into line with the
 implemented `noop`/`stdout`/`sqs` audit adapters and `oidc`/`apple` providers, then close the
@@ -13,7 +13,7 @@ merge-plan housekeeping that the sweep unblocks.
 
 ## Source and definition-of-done baseline
 
-- **Spec.** The change spec [2026-06-24-cleanup_stale_references.md](../../changes/2026-06-24-cleanup_stale_references.md)
+- **Spec.** The change spec [2026-06-24-cleanup_stale_references.md](../../changes/merged/2026-06-24-cleanup_stale_references.md)
   (Motivation, Affected spec pages, Proposed changes, Implementation notes, Merge plan). The one
   canonical page it touches is [service/specs/06-configuration.md](../../service/specs/06-configuration.md)
   §Open questions. The implemented adapters/providers it aligns docs to are recorded in

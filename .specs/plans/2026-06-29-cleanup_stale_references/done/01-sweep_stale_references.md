@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [01-sweep_stale_references-certificate.md](01-sweep_stale_references-certificate.md)
 
-**Implements:** [changes/2026-06-24-cleanup_stale_references.md](../../../changes/2026-06-24-cleanup_stale_references.md) §Implementation notes 1–5; aligns to [service/specs/06-configuration.md](../../../service/specs/06-configuration.md) §`[audit]` and §`[providers.<name>]` and [service/specs/00-overview.md](../../../service/specs/00-overview.md) (atproto not implemented)
+**Implements:** [changes/merged/2026-06-24-cleanup_stale_references.md](../../../changes/merged/2026-06-24-cleanup_stale_references.md) §Implementation notes 1–5; aligns to [service/specs/06-configuration.md](../../../service/specs/06-configuration.md) §`[audit]` and §`[providers.<name>]` and [service/specs/00-overview.md](../../../service/specs/00-overview.md) (atproto not implemented)
 **Depends on:** —
 **Produces:** docs, example configs, the `aws-web` CDK example, and `README.md` carry no stale `cloudtrail` audit-adapter or atproto-as-shipped references; every example `[audit]` block selects a real `noop`/`stdout`/`sqs` adapter, and atproto reads as planned everywhere it appears
 **Pointers:** `docs/deployment/aws-lambda.md:86`, `docs/guides/configuration.md:104`, `docs/guides/providers.md:116`, `docs/architecture/adapters.md:159`, `docs/architecture/overview.md:15`, `examples/aws-web/config/oidc-exchange.toml:26`, `examples/aws-web/infra/lib/stack.ts:4`, `README.md:65`

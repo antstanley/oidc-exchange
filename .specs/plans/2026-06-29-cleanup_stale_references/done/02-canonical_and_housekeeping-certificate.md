@@ -1,7 +1,7 @@
 # Done Certificate — Task 02: canonical Open-question removal and merge-plan housekeeping
 
 **Task:** [02-canonical_and_housekeeping.md](02-canonical_and_housekeeping.md) · **Plan:** [plan.md](../plan.md)
-**State:** Authored 2026-06-29 — unverified   <!-- validator sets: Validated YYYY-MM-DD -->
+**State:** Validated 2026-06-29
 
 > This certificate is a verification protocol for Task 02. A validating agent discharges it:
 > for each obligation, collect the named evidence, run the named checks, set the Status, then
@@ -36,7 +36,7 @@ names (a file read, a grep result, a path check) — not by assertion.
     `### Open questions` heading remains with a single `- None.` (no dangling empty heading); diff the
     page against its pre-task version and confirm the only changes are the Date and the Open-question
     block.
-  - *Status:* ☐ unverified
+  - *Status:* SATISFIED
 
 - **O2 — The change spec is moved and re-stamped as Merged.**
   - *Claim:* the change spec now lives at `.specs/changes/merged/2026-06-24-cleanup_stale_references.md`
@@ -45,7 +45,7 @@ names (a file read, a grep result, a path check) — not by assertion.
     exists and read its header line for `**Status:** Merged` and `**Merged:** 2026-06-29`; confirm
     `.specs/changes/2026-06-24-cleanup_stale_references.md` (the un-merged path) no longer exists
     (`test ! -e`); run `jj st` and confirm the rename is tracked (no stray duplicate).
-  - *Status:* ☐ unverified
+  - *Status:* SATISFIED
 
 - **O3 — `.specs/README.md` reflects the merge, with no link left at the old path.**
   - *Claim:* the Change specs table row reads `Merged` and links to `changes/merged/...`; no `.specs`
@@ -59,7 +59,7 @@ names (a file read, a grep result, a path check) — not by assertion.
   - *Checks:* confirm the plan's own `Source spec` link (and any task `Implements` link) to the change
     spec still resolves after the move — they should now include the `merged/` segment or be
     acknowledged in O3's grep as intentionally pointing at the new path.
-  - *Status:* ☐ unverified
+  - *Status:* SATISFIED
 
 - **O4 — Meets the repo definition of done for a docs change.**
   - *Claim:* the edited Markdown is well-formed, all touched links resolve, and the change is
@@ -69,7 +69,7 @@ names (a file read, a grep result, a path check) — not by assertion.
     moved/edited pages are in the docs tree; the `.specs/` pages are not part of the site, so a link
     check suffices for them); resolve each link touched in O1–O3 by path and confirm the target file
     exists. (No code, no tests, no Rust — those DoD rows do not apply.)
-  - *Status:* ☐ unverified
+  - *Status:* SATISFIED
 
 - **O5 — Reviewable: Merged header, clean canonical page, and a resolving README link (Reviewable).**
   - *Claim:* a reviewer can open the moved change spec and see the Merged header, grep
@@ -79,7 +79,7 @@ names (a file read, a grep result, a path check) — not by assertion.
     (expect Merged header); run `rg -n 'cloudtrail' .specs/service/specs/06-configuration.md` (expect
     no Open-question hit); follow the `.specs/README.md` Change specs row link and confirm it resolves
     to the `changes/merged/` path.
-  - *Status:* ☐ unverified
+  - *Status:* SATISFIED
 
 ## Regression check
 
@@ -87,10 +87,11 @@ This task edits only `.specs/` documents (one canonical page, one change spec, o
 no runtime code or call paths.
 
 - Other rows of the `.specs/README.md` Change specs table are unchanged (only the
-  `cleanup_stale_references` row's Status/link move) → expect the other five rows byte-for-byte
-  identical : ☐ (PRESERVED / REGRESSION)
-- 06-configuration's body outside the Date line and the Open-questions block is unchanged → expect
-  the `[audit]` / `[providers.<name>]` enumerations and all other sections intact : ☐ (PRESERVED / REGRESSION)
+  `cleanup_stale_references` row's Status/link move) → diff shows only row 37 changed; the other
+  five rows are byte-for-byte identical : PRESERVED
+- 06-configuration's body outside the Date line and the Open-questions block is unchanged → diff
+  shows only line 3 (Date) and the single Open-question bullet → `- None.`; all other sections
+  (including the `[audit]` noop/stdout/sqs and `[providers.<name>]` oidc/apple enumerations) intact : PRESERVED
 
 ## Residue
 
@@ -104,6 +105,6 @@ Notes for the validator, not obligations:
 ## Conclusion
 
 <!-- Validator derives this from the obligation statuses and the regression check, per the rubric. -->
-VERDICT: ☐ (DONE | PARTIAL | NOT_DONE)
-CONFIDENCE: ☐ (high | medium | low)
-SUMMARY: ☐ <one sentence deriving the verdict from the statuses>
+VERDICT: DONE
+CONFIDENCE: high
+SUMMARY: All five obligations SATISFIED — the resolved Open question is gone from 06-configuration with Date bumped to 2026-06-29 (O1), the change spec is moved to changes/merged/ with Status Merged + Merged 2026-06-29 and no copy at the old path (O2), .specs/README.md's table row reads Merged and links to changes/merged/ with no resolvable non-plan-folder link left at the old path (O3), the Markdown is well-formed with links resolving (O4), and the moved spec + clean canonical page + resolving README link are reviewer-confirmable (O5); regression PRESERVED; orchestrator re-points the plan-folder links to changes/merged/ during folding.

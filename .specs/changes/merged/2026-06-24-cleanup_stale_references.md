@@ -1,6 +1,6 @@
 # Change: Remove stale CloudTrail and atproto-as-shipped references
 
-**Status:** Proposed · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Target:** docs/, examples/, config
+**Status:** Merged · **Date:** 2026-06-24 · **Merged:** 2026-06-29 · **Owner:** Ant Stanley · **Target:** docs/, examples/, config
 
 Sweep the prose docs, example configs, and inline comments for references that no longer match
 the code: the removed CloudTrail audit adapter (`adapter = "cloudtrail"`), audit adapters that

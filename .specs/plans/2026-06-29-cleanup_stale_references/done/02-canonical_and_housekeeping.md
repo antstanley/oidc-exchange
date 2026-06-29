@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [02-canonical_and_housekeeping-certificate.md](02-canonical_and_housekeeping-certificate.md)
 
-**Implements:** [changes/2026-06-24-cleanup_stale_references.md](../../../changes/2026-06-24-cleanup_stale_references.md) §Proposed changes (06-configuration Open question removal) and §Merge plan; edits [service/specs/06-configuration.md](../../../service/specs/06-configuration.md) §Open questions
+**Implements:** [changes/merged/2026-06-24-cleanup_stale_references.md](../../../changes/merged/2026-06-24-cleanup_stale_references.md) §Proposed changes (06-configuration Open question removal) and §Merge plan; edits [service/specs/06-configuration.md](../../../service/specs/06-configuration.md) §Open questions
 **Depends on:** 01
 **Produces:** the resolved Open question is gone from 06-configuration with a bumped Date, and the change spec is marked Merged, moved to `changes/merged/`, and re-pointed in `.specs/README.md`
 **Pointers:** `.specs/service/specs/06-configuration.md:3` (Date), `.specs/service/specs/06-configuration.md:122` (Open questions), `.specs/changes/2026-06-24-cleanup_stale_references.md:3` (Status), `.specs/README.md:33` (Change specs table)
