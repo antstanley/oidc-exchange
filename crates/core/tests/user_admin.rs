@@ -236,8 +236,8 @@ async fn admin_set_claims_replaces_entirely() {
         .expect("get claims should succeed");
     assert_eq!(claims.get("c"), Some(&json!(3)));
     assert_eq!(claims.len(), 1);
-    assert!(claims.get("a").is_none());
-    assert!(claims.get("b").is_none());
+    assert!(!claims.contains_key("a"));
+    assert!(!claims.contains_key("b"));
 }
 
 // ─── Test 5: Clear claims ───────────────────────────────────────────────────

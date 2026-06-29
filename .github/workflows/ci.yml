@@ -55,7 +55,12 @@ jobs:
         run: pnpm fmt:check
       - name: Build native module
         working-directory: bindings/nodejs
-        run: napi build --release
+        # Redirect napi's auto-generated .d.ts to a throwaway file so it never
+        # overwrites the hand-curated index.d.ts. napi rebuilds the .d.ts from
+        # proc-macro output, which is empty when the crate is restored from the
+        # build cache instead of recompiled — that produced a non-module
+        # index.d.ts and broke the Lambda adapter's `tsc` build below.
+        run: napi build --release --dts index.generated.d.ts
       - name: Run tests
         working-directory: bindings/nodejs
         run: pnpm test

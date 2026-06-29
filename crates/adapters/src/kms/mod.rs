@@ -311,11 +311,11 @@ mod tests {
         let x_len = jwk["x"].as_str().unwrap().len();
         let y_len = jwk["y"].as_str().unwrap().len();
         assert!(
-            x_len >= 42 && x_len <= 44,
+            (42..=44).contains(&x_len),
             "x should be ~43 base64url chars, got {x_len}"
         );
         assert!(
-            y_len >= 42 && y_len <= 44,
+            (42..=44).contains(&y_len),
             "y should be ~43 base64url chars, got {y_len}"
         );
     }

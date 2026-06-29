@@ -153,7 +153,7 @@ impl UserRepository for MockRepository {
     async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
         let state = self.state.lock().await;
         let mut users: Vec<User> = state.users.values().cloned().collect();
-        users.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        users.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         let start = offset as usize;
         let end = std::cmp::min(start + limit as usize, users.len());
         if start >= users.len() {

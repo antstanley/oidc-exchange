@@ -59,6 +59,11 @@ bower_components
 # Compiled binary addons (https://nodejs.org/api/addons.html)
 build/Release
 
+# napi-rs build outputs (the native binary and the throwaway generated .d.ts;
+# the hand-curated bindings/nodejs/index.d.ts is the source of truth)
+*.node
+index.generated.d.ts
+
 # Dependency directories
 node_modules/
 jspm_packages/
