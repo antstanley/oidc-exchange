@@ -18,14 +18,17 @@
   "scripts": {
     "build": "napi build --release --dts index.generated.d.ts",
     "test": "vitest run",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check",
-    "lint": "oxlint"
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint --deny-warnings",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2",
+    "@types/node": "^22",
     "oxfmt": "^0",
     "oxlint": "^0",
+    "typescript": "^5",
     "vitest": "^3"
   },
   "napi": {

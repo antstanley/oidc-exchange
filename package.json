@@ -1,4 +1,14 @@
 {
   "private": true,
-  "packageManager": "pnpm@10.11.0"
+  "packageManager": "pnpm@10.11.0",
+  "scripts": {
+    "prepare": "lefthook install",
+    "lint": "pnpm -r --no-bail lint",
+    "format": "pnpm -r format",
+    "format:check": "pnpm -r --no-bail format:check",
+    "typecheck": "pnpm -r --no-bail typecheck"
+  },
+  "devDependencies": {
+    "lefthook": "^2.1.9"
+  }
 }

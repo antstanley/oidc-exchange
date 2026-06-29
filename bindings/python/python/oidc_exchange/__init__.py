@@ -1,3 +1,5 @@
+from typing import Any
+
 from oidc_exchange._oidc_exchange import OidcExchange as _OidcExchange
 
 try:
@@ -12,29 +14,29 @@ except ImportError:
 
 
 class OidcExchange:
-    def __init__(self, *, config=None, config_string=None):
+    def __init__(self, *, config: str | None = None, config_string: str | None = None) -> None:
         self._inner = _OidcExchange(config=config, config_string=config_string)
 
-    def handle_request_sync(self, request):
+    def handle_request_sync(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._inner.handle_request_sync(request)
 
-    async def handle_request(self, request):
+    async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         import asyncio
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._inner.handle_request_sync, request)
 
-    def asgi_app(self):
+    def asgi_app(self) -> Any:
         if make_asgi_app is None:
             raise NotImplementedError("ASGI adapter will be implemented in Task 4.2")
         return make_asgi_app(self)
 
-    def wsgi_app(self):
+    def wsgi_app(self) -> Any:
         if make_wsgi_app is None:
             raise NotImplementedError("WSGI adapter will be implemented in Task 4.2")
         return make_wsgi_app(self)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self._inner.shutdown()
 
 

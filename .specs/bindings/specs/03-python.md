@@ -1,6 +1,6 @@
 # Python Binding (`oidc-exchange`)
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** bindings/python
+**Status:** Implemented · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Scope:** bindings/python
 
 A PyO3 native extension wrapping [`crates/ffi`](01-ffi-core.md), built with maturin and
 published to PyPI as `oidc-exchange`. The native module is `oidc_exchange._oidc_exchange`; a
@@ -12,7 +12,7 @@ thin Python package wraps it and adds ASGI/WSGI adapters.
 - Offer both a synchronous and an async request method.
 - Provide ASGI and WSGI applications mountable in FastAPI/Starlette and Flask/Django.
 
-## API (`python/oidc_exchange/__init__.pyi`)
+## API (`python/oidc_exchange/__init__.py`)
 
 ```python
 class OidcExchange:
@@ -37,8 +37,9 @@ response `dict` is `{ "status", "headers": dict[str,str], "body": bytes }`.
   the adapter factories. `_asgi.py` (`make_asgi_app`) collects the request body from `receive`,
   builds the request dict, awaits `handle_request`, and emits ASGI start+body messages.
   `_wsgi.py` (`make_wsgi_app`) reads `wsgi.input` and `HTTP_*` environ, calls
-  `handle_request_sync`, and returns the status line, headers, and body. `py.typed` +
-  `__init__.pyi` provide PEP 561 typing.
+  `handle_request_sync`, and returns the status line, headers, and body. PEP 561 typing comes
+  from `py.typed` plus the inline annotations on the (strictly pyright-checked) `__init__.py`;
+  the native module's typed surface is the hand-curated `_oidc_exchange.pyi` stub.
 
 ## Distribution
 

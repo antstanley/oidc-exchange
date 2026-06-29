@@ -52,7 +52,10 @@ jobs:
         run: pnpm lint
       - name: Check formatting
         working-directory: bindings/nodejs
-        run: pnpm fmt:check
+        run: pnpm format:check
+      - name: Type-check
+        working-directory: bindings/nodejs
+        run: pnpm typecheck
       - name: Build native module
         working-directory: bindings/nodejs
         # Redirect napi's auto-generated .d.ts to a throwaway file so it never
@@ -72,7 +75,10 @@ jobs:
         run: pnpm lint
       - name: Check Lambda adapter formatting
         working-directory: bindings/lambda
-        run: pnpm fmt:check
+        run: pnpm format:check
+      - name: Type-check Lambda adapter
+        working-directory: bindings/lambda
+        run: pnpm typecheck
       - name: Build Lambda adapter
         working-directory: bindings/lambda
         run: pnpm build
@@ -103,6 +109,39 @@ jobs:
       - name: Build Python module
         working-directory: bindings/python
         run: uv run maturin develop
+      - name: Type-check
+        working-directory: bindings/python
+        run: uv run pyright
       - name: Run tests
         working-directory: bindings/python
         run: uv run pytest tests/
+
+  web-apps:
+    name: Web Apps (lint, format, typecheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - name: Install dependencies
+        run: pnpm install
+      - name: Website — lint
+        working-directory: apps/website
+        run: pnpm lint
+      - name: Website — format check
+        working-directory: apps/website
+        run: pnpm format:check
+      - name: Website — type-check
+        working-directory: apps/website
+        run: pnpm typecheck
+      - name: Admin UI — lint
+        working-directory: apps/admin-ui
+        run: pnpm lint
+      - name: Admin UI — format check
+        working-directory: apps/admin-ui
+        run: pnpm format:check
+      - name: Admin UI — type-check
+        working-directory: apps/admin-ui
+        run: pnpm typecheck

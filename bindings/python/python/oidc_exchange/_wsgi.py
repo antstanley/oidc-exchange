@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from oidc_exchange import OidcExchange
 
+# Minimal WSGI type aliases (PEP 3333); kept local so the binding has no
+# external typing dependency. start_response is called with a status line and a
+# list of header pairs and its return value is unused here.
+WSGIEnvironment = dict[str, Any]
+StartResponse = Callable[[str, list[tuple[str, str]]], object]
+WSGIApp = Callable[[WSGIEnvironment, StartResponse], Iterable[bytes]]
 
-def make_wsgi_app(oidc: OidcExchange):
+
+def make_wsgi_app(oidc: OidcExchange) -> WSGIApp:
     """Create a WSGI application from an OidcExchange instance."""
 
-    def app(environ, start_response):
+    def app(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         content_length = int(environ.get("CONTENT_LENGTH") or 0)
         body = environ["wsgi.input"].read(content_length) if content_length > 0 else b""
 
-        headers = {}
+        headers: dict[str, str] = {}
         for key, value in environ.items():
             if key.startswith("HTTP_"):
                 header_name = key[5:].replace("_", "-").lower()
@@ -30,7 +38,7 @@ def make_wsgi_app(oidc: OidcExchange):
         if query:
             path = f"{path}?{query}"
 
-        request = {
+        request: dict[str, Any] = {
             "method": environ["REQUEST_METHOD"],
             "path": path,
             "headers": headers,

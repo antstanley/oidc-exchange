@@ -1,0 +1,56 @@
+# lefthook — local quality gates.  Docs: https://lefthook.dev
+#
+# Replaces the previous .githooks/pre-push shell hook. On every push lefthook runs
+# the same per-language format / lint / typecheck / fast-test gate as CI, scoped by
+# glob so only the language(s) whose files are in the push run, and fails the push
+# on the first failing gate.
+#
+# Install (writes .git/hooks/*):  `pnpm install` runs `lefthook install` via the
+# root prepare script — or run `lefthook install` directly. Run the whole gate by
+# hand any time with `lefthook run pre-push`.
+#
+# IMPORTANT (jj): `jj git push` does NOT run git hooks — only pushes through the
+# git CLI / git backend fire them. The hook is therefore a git-backend / manual-run
+# convenience; CI remains the authoritative backstop regardless of how you push.
+
+pre-push:
+  parallel: true
+  commands:
+    # Rust — runs at the repo root whenever any Rust source or Cargo manifest is
+    # pushed (this also covers the napi/PyO3 binding crates under bindings/*/src).
+    rust:
+      glob: "**/{*.rs,Cargo.toml,Cargo.lock}"
+      run: cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo nextest run --workspace
+
+    # Node binding (@oidc-exchange/node).
+    node:
+      root: "bindings/nodejs/"
+      glob: "{*.ts,*.js,*.d.ts,__tests__/**,package.json,tsconfig.json}"
+      run: pnpm lint && pnpm format:check && pnpm typecheck && pnpm test
+
+    # Lambda adapter (@oidc-exchange/lambda).
+    lambda:
+      root: "bindings/lambda/"
+      glob: "{src/**,__tests__/**,package.json,tsconfig.json}"
+      run: pnpm lint && pnpm format:check && pnpm typecheck && pnpm test
+
+    # Python binding (oidc-exchange on PyPI). pyright replaces mypy as the strict
+    # type checker; ruff + pytest are unchanged.
+    python:
+      root: "bindings/python/"
+      glob: "{python/**,tests/**,pyproject.toml}"
+      run: uv run ruff format --check . && uv run ruff check . && uv run pyright && uv run pytest
+
+    # Docs website (Astro). oxlint/oxfmt cover the loose .ts/.js; `astro check`
+    # type-checks the project (.astro, content collections, TS).
+    website:
+      root: "apps/website/"
+      glob: "{src/**,integrations/**,astro.config.mjs,package.json,tsconfig.json}"
+      run: pnpm lint && pnpm format:check && pnpm typecheck
+
+    # Admin UI (SvelteKit). oxlint/oxfmt cover the .ts; `svelte-check` type-checks
+    # the .svelte components.
+    admin-ui:
+      root: "apps/admin-ui/"
+      glob: "{src/**,svelte.config.js,vite.config.ts,package.json,tsconfig.json}"
+      run: pnpm lint && pnpm format:check && pnpm typecheck
