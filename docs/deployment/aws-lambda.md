@@ -15,7 +15,7 @@ A complete CDK example is in `examples/aws-web/infra/`. The key resources are:
 |----------|---------|
 | DynamoDB table | User and session storage (single-table design, on-demand billing) |
 | KMS key (ECC_NIST_P256) | JWT signing — keys never leave KMS |
-| CloudTrail Lake event data store | Audit trail (optional) |
+| SQS queue | Audit trail (optional) |
 | Lambda function (`provided.al2023`) | The oidc-exchange binary |
 | API Gateway HTTP API | Routes traffic to Lambda |
 
@@ -84,11 +84,11 @@ adapter = "dynamodb"
 table_name = "oidc-exchange"
 
 [audit]
-adapter = "cloudtrail"
+adapter = "sqs"
 blocking_threshold = "error"
 
-[audit.cloudtrail]
-channel_arn = "${CLOUDTRAIL_CHANNEL_ARN}"
+[audit.sqs]
+queue_url = "${AUDIT_QUEUE_URL}"
 
 [providers.google]
 adapter = "oidc"
@@ -114,7 +114,7 @@ aws lambda create-function \
   --role arn:aws:iam::123456789012:role/oidc-exchange-role \
   --memory-size 256 \
   --timeout 29 \
-  --environment "Variables={OIDC_EXCHANGE_ENV=lambda,GOOGLE_CLIENT_ID=...,GOOGLE_CLIENT_SECRET=...,KMS_KEY_ARN=...,CLOUDTRAIL_CHANNEL_ARN=...}"
+  --environment "Variables={OIDC_EXCHANGE_ENV=lambda,GOOGLE_CLIENT_ID=...,GOOGLE_CLIENT_SECRET=...,KMS_KEY_ARN=...,AUDIT_QUEUE_URL=...}"
 ```
 
 Or use the CDK stack in `examples/aws-web/infra/` for a fully automated deployment:
@@ -161,7 +161,7 @@ The Lambda execution role needs:
 }
 ```
 
-Plus `kms:Sign`, `kms:GetPublicKey` on the signing key, and optionally `cloudtrail-data:PutAuditEvents` on the CloudTrail channel.
+Plus `kms:Sign`, `kms:GetPublicKey` on the signing key, and optionally `sqs:SendMessage` on the audit queue.
 
 ## Cold start considerations
 

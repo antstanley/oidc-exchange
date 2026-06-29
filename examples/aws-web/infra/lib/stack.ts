@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as kms from 'aws-cdk-lib/aws-kms';
-import * as cloudtrail from 'aws-cdk-lib/aws-cloudtrail';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -42,32 +42,10 @@ export class OidcExchangeExampleStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // ── CloudTrail Lake (L1 constructs) ─────────────────────────────
-    const eventDataStore = new cloudtrail.CfnEventDataStore(this, 'AuditEventDataStore', {
-      name: 'oidc-exchange-example-audit',
-      retentionPeriod: 30,
-      advancedEventSelectors: [
-        {
-          name: 'CustomAuditEvents',
-          fieldSelectors: [
-            {
-              field: 'eventCategory',
-              equalTo: ['ActivityAuditLog'],
-            },
-          ],
-        },
-      ],
-    });
-
-    const channel = new cloudtrail.CfnChannel(this, 'AuditChannel', {
-      name: 'oidc-exchange-example-audit',
-      source: 'Custom',
-      destinations: [
-        {
-          type: 'EVENT_DATA_STORE',
-          location: eventDataStore.attrEventDataStoreArn,
-        },
-      ],
+    // ── SQS Audit Queue ─────────────────────────────────────────────
+    const auditQueue = new sqs.Queue(this, 'AuditQueue', {
+      queueName: 'oidc-exchange-example-audit',
+      retentionPeriod: cdk.Duration.days(14),
     });
 
     // ── Auth Lambda (Rust / provided.al2023) ────────────────────────
@@ -80,7 +58,7 @@ export class OidcExchangeExampleStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         KMS_KEY_ID: key.keyArn,
-        CLOUDTRAIL_CHANNEL_ARN: channel.attrChannelArn,
+        AUDIT_QUEUE_URL: auditQueue.queueUrl,
         GOOGLE_CLIENT_ID: props.googleClientId,
         GOOGLE_CLIENT_SECRET: props.googleClientSecret,
         // ISSUER_URL and AUDIENCE_URL are set after API Gateway creation
@@ -91,13 +69,7 @@ export class OidcExchangeExampleStack extends cdk.Stack {
 
     table.grantReadWriteData(authFunction);
     key.grant(authFunction, 'kms:Sign', 'kms:GetPublicKey');
-
-    authFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['cloudtrail-data:PutAuditEvents'],
-        resources: [channel.attrChannelArn],
-      })
-    );
+    auditQueue.grantSendMessages(authFunction);
 
     // ── Demo App Lambda (Node.js / SvelteKit) ───────────────────────
     const webAdapterLayer = lambda.LayerVersion.fromLayerVersionArn(

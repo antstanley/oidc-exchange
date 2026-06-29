@@ -113,7 +113,7 @@ Every provider block follows this general structure:
 
 ```toml
 [providers.<name>]
-adapter = "<adapter_type>"    # "oidc", "apple", or "atproto"
+adapter = "<adapter_type>"    # "oidc" or "apple"  (atproto is planned)
 # ... adapter-specific fields
 ```
 

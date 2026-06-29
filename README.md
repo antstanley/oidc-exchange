@@ -62,7 +62,7 @@ Writing token validation and JWT issuance from scratch is straightforward until 
 
 - **Provider quirks handled** — Apple requires generating a per-request ES256 client JWT instead of using a static client secret. Standard OIDC libraries don't account for this. oidc-exchange does.
 - **Security defaults** — refresh tokens are stored hashed (SHA-256), access tokens are short-lived, registration policy enforcement and domain allowlists are built in.
-- **Audit trail included** — every token exchange, revocation, and user event can be logged to CloudTrail Lake with syslog severity levels. Adding this after the fact is painful.
+- **Audit trail included** — every token exchange, revocation, and user event can be logged with syslog severity levels (stdout/stderr, with an SQS adapter for durable pipelines). Adding this after the fact is painful.
 - **Hexagonal architecture** — swapping DynamoDB for Postgres or KMS for Vault means implementing a trait, not rewriting the service.
 
 ### When to use something else
@@ -81,7 +81,7 @@ oidc-exchange is not a general-purpose authorization server. Choose a different 
 - **Hexagonal Architecture** — all infrastructure behind trait interfaces: database, key management, audit, user sync
 - **Registration Policy** — open or existing-users-only mode with optional email domain/subdomain allowlists
 - **Per-User Claims** — configurable custom JWT claims from TOML templates and per-user overrides via internal API
-- **Audit Trail** — syslog severity levels, configurable blocking threshold, CloudTrail Lake integration, stdout/stderr fallback
+- **Audit Trail** — syslog severity levels, configurable blocking threshold, stdout/stderr sinks with an SQS adapter for durable pipelines
 - **OpenTelemetry** — pluggable exporters (OTLP, X-Ray, stdout) via `tracing` ecosystem
 - **Dual Runtime** — same binary runs as an axum server or AWS Lambda function
 - **Internal Admin API** — user CRUD and claims management with shared-secret authentication
@@ -91,8 +91,8 @@ oidc-exchange is not a general-purpose authorization server. Choose a different 
 ```
 crates/
 ├── core/           # Domain types, port traits, service logic (zero infra deps)
-├── adapters/       # DynamoDB, KMS, CloudTrail, OIDC, webhook implementations
-├── providers/      # Non-standard provider modules (Apple, atproto)
+├── adapters/       # DynamoDB, KMS, SQS, OIDC, webhook implementations
+├── providers/      # Non-standard provider modules (Apple; atproto planned)
 ├── server/         # Axum routes, middleware, telemetry, bootstrap
 └── test-utils/     # Mock implementations for all ports
 ```
@@ -103,7 +103,7 @@ crates/
 |------|---------|----------|
 | `Repository` | User and session storage | DynamoDB |
 | `KeyManager` | JWT signing | Local (Ed25519), AWS KMS |
-| `AuditLog` | Compliance event logging | CloudTrail Lake, Noop |
+| `AuditLog` | Compliance event logging | Noop, Stdout/Stderr, SQS |
 | `IdentityProvider` | OIDC provider interaction | Standard OIDC, Apple |
 | `UserSync` | Bidirectional user sync | Webhook, Noop |
 

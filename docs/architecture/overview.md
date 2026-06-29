@@ -12,8 +12,8 @@ The project is a Cargo workspace with five crates:
 ```
 crates/
 ├── core/           # Domain types, port traits, service logic (zero infra deps)
-├── adapters/       # DynamoDB, KMS, CloudTrail, OIDC, webhook implementations
-├── providers/      # Non-standard provider modules (Apple, atproto)
+├── adapters/       # DynamoDB, KMS, SQS, OIDC, webhook implementations
+├── providers/      # Non-standard provider modules (Apple; atproto planned)
 ├── server/         # Axum routes, middleware, telemetry, bootstrap
 └── test-utils/     # Mock implementations for all ports
 ```
@@ -21,8 +21,8 @@ crates/
 | Crate | Package name | Purpose |
 |---|---|---|
 | `crates/core` | `oidc-exchange-core` | Domain types, port traits, and service logic. Zero infrastructure dependencies --- only std, serde, thiserror, async-trait, and tracing. |
-| `crates/adapters` | `oidc-exchange-adapters` | Implementations of port traits for DynamoDB, PostgreSQL, SQLite, Valkey, LMDB, KMS, CloudTrail, SQS, standard OIDC, and webhooks. |
-| `crates/providers` | `oidc-exchange-providers` | Non-standard identity provider modules (Apple, atproto) that need custom logic beyond the generic OIDC adapter. |
+| `crates/adapters` | `oidc-exchange-adapters` | Implementations of port traits for DynamoDB, PostgreSQL, SQLite, Valkey, LMDB, KMS, SQS, standard OIDC, and webhooks. |
+| `crates/providers` | `oidc-exchange-providers` | Non-standard identity provider modules (Apple; atproto planned) that need custom logic beyond the generic OIDC adapter. |
 | `crates/server` | `oidc-exchange` | HTTP layer (axum), middleware, telemetry setup, configuration loading, and the binary entrypoint. |
 | `crates/test-utils` | `oidc-exchange-test-utils` | In-memory mock implementations of all ports. Dev-dependency only. |
 
@@ -69,8 +69,8 @@ Ports are async trait interfaces defined in `crates/core/src/ports/`. They defin
 | User and session storage | `Repository` | CRUD for users, store/retrieve/revoke refresh token sessions | DynamoDB, PostgreSQL, SQLite |
 | Session-only storage | `SessionRepository` | Optional override for session operations only | Valkey, LMDB |
 | Key management | `KeyManager` | JWT signing and public key export | Local (Ed25519/ECDSA), AWS KMS (ECC_NIST_P256) |
-| Audit logging | `AuditLog` | Compliance and security event recording | Noop, CloudTrail Lake, SQS |
-| Identity provider | `IdentityProvider` | Code exchange, ID token validation, revocation | Standard OIDC, Apple, atproto |
+| Audit logging | `AuditLog` | Compliance and security event recording | Noop, Stdout/Stderr, SQS |
+| Identity provider | `IdentityProvider` | Code exchange, ID token validation, revocation | Standard OIDC, Apple, atproto (planned) |
 | User sync | `UserSync` | Notify external systems of user lifecycle events | Webhook, Noop |
 
 All ports return `Result<T>` using a domain-specific error type. Adapters map their internal errors (AWS SDK errors, database errors, HTTP errors) into domain errors at the boundary. No adapter-specific types leak into the core.

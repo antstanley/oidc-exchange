@@ -14,7 +14,7 @@ API Gateway (HTTP API)
   |                            |
   |                            +-- DynamoDB (sessions, clients, tokens)
   |                            +-- KMS (ECDSA P-256 signing key)
-  |                            +-- CloudTrail Lake (audit events)
+  |                            +-- SQS (audit events)
   |
   +-- /{proxy+}       -->  Demo App Lambda (SvelteKit, Node.js)
   +-- $default        -->  Demo App Lambda
@@ -91,7 +91,7 @@ cd examples/aws-web/infra
 npx cdk destroy
 ```
 
-This removes all AWS resources created by the stack (DynamoDB table, KMS key, Lambdas, API Gateway, CloudTrail Lake).
+This removes all AWS resources created by the stack (DynamoDB table, KMS key, Lambdas, API Gateway, SQS audit queue).
 
 ## Local Development
 

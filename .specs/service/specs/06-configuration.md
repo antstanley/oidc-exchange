@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
+**Status:** Implemented · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
 
 One TOML file drives the whole service. `AppConfig` (and its nested structs) in
 `crates/core/src/config.rs` deserializes it; every section uses `#[serde(default)]`, so any
@@ -121,6 +121,4 @@ retries? }`. The `secret` is redacted in `Debug`.
 
 ### Open questions
 
-- The committed default lists only `noop`/`stdout`/`sqs` audit adapters; older docs mention a
-  `cloudtrail`/`file`/`webhook` audit adapter that no longer exists. Doc and example configs
-  should be swept for stale `adapter = "cloudtrail"` references.
+- None.

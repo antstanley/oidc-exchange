@@ -101,14 +101,11 @@ max_size_mb = 64
 
 # ─── Audit logging ────────────────────────────────────────────────
 [audit]
-adapter = "noop"                       # "noop", "cloudtrail", or "sqs"
+adapter = "noop"                       # "noop", "stdout", or "sqs"
 # Severity threshold for blocking. If the audit provider fails and the
 # event's severity is at or above this threshold, the operation fails.
 # Severities (RFC 5424): emergency, alert, critical, error, warning, notice, info, debug
 blocking_threshold = "warning"
-
-[audit.cloudtrail]
-channel_arn = "arn:aws:cloudtrail:us-east-1:123456789:channel/my-channel"
 
 # SQS adapter — send audit events to an SQS queue (e.g., for Firehose → S3/Iceberg pipeline)
 [audit.sqs]
@@ -157,9 +154,7 @@ team_id = "${APPLE_TEAM_ID}"
 key_id = "${APPLE_KEY_ID}"
 private_key_path = "/secrets/apple.p8"
 
-[providers.atproto]
-adapter = "atproto"
-client_id = "https://example.com/oauth/client-metadata.json"
+# atproto is a planned provider — see .specs/changes/2026-06-24-add_atproto_provider.md
 ```
 
 ## Environment variable overrides

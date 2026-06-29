@@ -24,11 +24,11 @@ adapter = "dynamodb"
 table_name = "${TABLE_NAME}"
 
 [audit]
-adapter = "cloudtrail"
+adapter = "sqs"
 blocking_threshold = "warning"
 
-[audit.cloudtrail]
-channel_arn = "${CLOUDTRAIL_CHANNEL_ARN}"
+[audit.sqs]
+queue_url = "${AUDIT_QUEUE_URL}"
 
 [telemetry]
 enabled = true
