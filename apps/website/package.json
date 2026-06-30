@@ -26,5 +26,8 @@
     "oxfmt": "^0",
     "oxlint": "^1",
     "typescript": "^6"
+  },
+  "engines": {
+    "node": ">= 24.18.0"
   }
 }
