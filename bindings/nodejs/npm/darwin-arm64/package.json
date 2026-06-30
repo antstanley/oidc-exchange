@@ -2,6 +2,11 @@
   "name": "@oidc-exchange/darwin-arm64",
   "version": "0.1.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/antstanley/oidc-exchange.git",
+    "directory": "bindings/nodejs/npm/darwin-arm64"
+  },
   "files": [
     "oidc-exchange.darwin-arm64.node"
   ],

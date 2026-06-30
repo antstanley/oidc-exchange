@@ -2,10 +2,10 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [03-canonical_edits_and_merge-certificate.md](03-canonical_edits_and_merge-certificate.md)
 
-**Implements:** [.specs/changes/2026-06-29-add_npm_trusted_publishing.md](../../../changes/2026-06-29-add_npm_trusted_publishing.md) §Proposed changes (all four blocks) and §Merge plan; edits [.specs/bindings/specs/05-distribution.md](../../../bindings/specs/05-distribution.md) (Release pipeline, Artifacts, Assumptions / Decisions) and [.specs/bindings/specs/02-nodejs.md](../../../bindings/specs/02-nodejs.md) (Distribution).
+**Implements:** [.specs/changes/merged/2026-06-29-add_npm_trusted_publishing.md](../../../changes/merged/2026-06-29-add_npm_trusted_publishing.md) §Proposed changes (all four blocks) and §Merge plan; edits [.specs/bindings/specs/05-distribution.md](../../../bindings/specs/05-distribution.md) (Release pipeline, Artifacts, Assumptions / Decisions) and [.specs/bindings/specs/02-nodejs.md](../../../bindings/specs/02-nodejs.md) (Distribution).
 **Depends on:** 01, 02
 **Produces:** the canonical pages describe the shipped pipeline — 05-distribution.md's Release-pipeline prose names the `build-nodejs` → `publish-npm` pair and trusted publishing, its Artifacts row lists `@oidc-exchange/node` + the four platform packages with "OIDC trusted publishing, provenance", and its Assumptions/Decisions drop npm from the repository-secrets assumption and add an npm-trusted-publishing Decision; 02-nodejs.md's Distribution notes the `optionalDependencies` + `napi artifacts` mechanism; the change spec is flipped to `Merged`, stamped, and moved to `.specs/changes/merged/`; `.specs/README.md`'s Changes and Plans tables are updated.
-**Pointers:** `.specs/bindings/specs/05-distribution.md:14` (Artifacts npm row), `:41` (Release-pipeline `build-nodejs`/`publish-nodejs` sentence), `:56` (secrets assumption), `:60` (Decisions); `.specs/bindings/specs/02-nodejs.md:42` (Distribution); `.specs/changes/2026-06-29-add_npm_trusted_publishing.md` (Status/Merged stamp + move); `.specs/README.md:40` (Changes row), `:49` (Plans table).
+**Pointers:** `.specs/bindings/specs/05-distribution.md:14` (Artifacts npm row), `:41` (Release-pipeline `build-nodejs`/`publish-nodejs` sentence), `:56` (secrets assumption), `:60` (Decisions); `.specs/bindings/specs/02-nodejs.md:42` (Distribution); `.specs/changes/merged/2026-06-29-add_npm_trusted_publishing.md` (Status/Merged stamp + move); `.specs/README.md:40` (Changes row), `:49` (Plans table).
 
 ## Steps
 

@@ -1,6 +1,6 @@
 # Plan: Publish `@oidc-exchange/node` to npm via trusted publishing
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-06-29-add_npm_trusted_publishing.md](../../changes/2026-06-29-add_npm_trusted_publishing.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-06-29-add_npm_trusted_publishing.md](../../changes/merged/2026-06-29-add_npm_trusted_publishing.md)
 
 Ship `@oidc-exchange/node` together with its four platform packages through a hardened npm
 publish job authenticated by GitHub OIDC trusted publishing (no `NPM_TOKEN`), with provenance.
@@ -17,7 +17,7 @@ manifest and workflow they describe exist.
 
 ## Source and definition-of-done baseline
 
-- **Spec.** The change spec [.specs/changes/2026-06-29-add_npm_trusted_publishing.md](../../changes/2026-06-29-add_npm_trusted_publishing.md)
+- **Spec.** The change spec [.specs/changes/merged/2026-06-29-add_npm_trusted_publishing.md](../../changes/merged/2026-06-29-add_npm_trusted_publishing.md)
   (Motivation, Proposed changes, Implementation notes, Merge plan). It targets two canonical
   pages — [.specs/bindings/specs/05-distribution.md](../../bindings/specs/05-distribution.md)
   (Release pipeline, Artifacts, Assumptions / Decisions) and

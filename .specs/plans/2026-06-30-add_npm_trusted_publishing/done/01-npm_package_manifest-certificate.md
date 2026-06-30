@@ -1,7 +1,7 @@
 # Done Certificate — Task 01: npm package manifest
 
 **Task:** [01-npm_package_manifest.md](01-npm_package_manifest.md) · **Plan:** [plan.md](../plan.md)
-**State:** Authored 2026-06-30 — unverified   <!-- validator sets: Validated YYYY-MM-DD -->
+**State:** Validated 2026-06-30 — VERDICT: DONE
 
 > This certificate is a verification protocol for Task 01. A validating agent discharges it:
 > for each obligation, collect the named evidence, run the named checks, set the Status, then
@@ -37,7 +37,11 @@ names (a file location, a command result, or a parsed manifest) — not by asser
     `bindings/nodejs/.npmrc` and confirm the literal line `ignore-scripts=true`.
   - *Checks:* confirm `version` values equal `jq -r '.version' bindings/nodejs/package.json` exactly
     (no `^`/`~` range — the change spec pins to the workspace version).
-  - *Status:* ☐ unverified
+  - *Result:* `jq '{version, optionalDependencies, publishConfig}'` returned all four
+    `@oidc-exchange/{darwin-arm64, linux-arm64-gnu, linux-x64-gnu, win32-x64-msvc}` keys, each
+    the bare string `"0.1.0"` (no `^`/`~`) equal to root `.version` `0.1.0`; `publishConfig` =
+    `{access:"public", provenance:true}`. `bindings/nodejs/.npmrc` is exactly `ignore-scripts=true`.
+  - *Status:* ☑ SATISFIED
 
 - **O2 — optionalDependencies keys exactly match the loader keys and platform-package names.**
   - *Claim:* the four `optionalDependencies` keys are exactly the `@oidc-exchange/<triple>` names
@@ -48,7 +52,11 @@ names (a file location, a command result, or a parsed manifest) — not by asser
     sets of `{linux-x64-gnu, linux-arm64-gnu, win32-x64-msvc, darwin-arm64}`.
   - *Checks:* negative space — a key not matching a real platform package or loader value, or a
     missing target, is a defect; confirm the intersection is exactly four with no remainder.
-  - *Status:* ☐ unverified
+  - *Result:* PLATFORM_MAP values (`index.js:9-14`), `npm/*/.name`, and `optionalDependencies`
+    keys are three identical sets of exactly `{darwin-arm64, linux-arm64-gnu, linux-x64-gnu,
+    win32-x64-msvc}` — cardinality 4, no typo, no missing target, no extra. Ordering differs
+    (alphabetical vs platform-order) but is semantically irrelevant for object keys.
+  - *Status:* ☑ SATISFIED
 
 - **O3 — Packed payload is still exactly the curated wrappers.**
   - *Claim:* `npm pack --dry-run` (or `pnpm pack`) of the root shows the tarball payload is exactly
@@ -56,14 +64,18 @@ names (a file location, a command result, or a parsed manifest) — not by asser
   - *Evidence to collect:* run `npm pack --dry-run` in `bindings/nodejs` (or `pnpm pack`) and read
     the file list — expect only `index.js`, `index.d.ts`, and `package.json`; confirm no `.node`,
     `src/`, or generated file is pulled in.
-  - *Status:* ☐ unverified
+  - *Result:* `npm pack --dry-run` reported `total files: 3` — exactly `index.d.ts` (718B),
+    `index.js` (1.1kB), `package.json` (1.4kB). No `.node`, no `src/`, no generated file.
+  - *Status:* ☑ SATISFIED
 
 - **O4 — Version parity holds across the platform packages.**
   - *Claim:* each `npm/<triple>/package.json` `version` equals the root `version`.
   - *Evidence to collect:* `jq -r '.version' bindings/nodejs/package.json` and
     `jq -r '.version' bindings/nodejs/npm/*/package.json` — expect every value identical; the
     release `validate` job (`.github/workflows/release.yml`) is therefore not regressed.
-  - *Status:* ☐ unverified
+  - *Result:* root `.version` = `0.1.0`; all four `npm/*/package.json` `.version` = `0.1.0`
+    (the platform manifests are absent from the diff, i.e. untouched). Parity holds.
+  - *Status:* ☑ SATISFIED
 
 - **O5 — Meets the repo definition of done for what the task touches.**
   - *Claim:* format and lint pass for the touched Node package; no `.ts` source changed so type/test
@@ -72,7 +84,11 @@ names (a file location, a command result, or a parsed manifest) — not by asser
     `pnpm -C bindings/nodejs format:check` and `pnpm -C bindings/nodejs lint` — expect clean;
     confirm via `jj diff --name-only` that no `.ts`/`.rs` source changed (only `package.json`,
     `.npmrc`, and possibly `pnpm-lock.yaml` / platform `package.json`).
-  - *Status:* ☐ unverified
+  - *Result:* `pnpm -C bindings/nodejs format:check` exit 0 ("All matched files use the correct
+    format"); `pnpm -C bindings/nodejs lint` exit 0. `jj diff --name-only` lists only
+    `bindings/nodejs/.npmrc` and `bindings/nodejs/package.json` — no `.ts`/`.rs` source changed,
+    so typecheck/test gates are unaffected.
+  - *Status:* ☑ SATISFIED
 
 - **O6 — Reviewable: a reviewer confirms the manifest and unchanged payload (Reviewable).**
   - *Claim:* a reviewer reads the updated `package.json` + new `.npmrc`, runs `npm pack --dry-run`
@@ -81,15 +97,19 @@ names (a file location, a command result, or a parsed manifest) — not by asser
   - *Evidence to collect:* read the diff of `package.json` and the new `.npmrc`; run
     `npm pack --dry-run` (payload check) and `npx publint` in `bindings/nodejs` — expect publint to
     report no errors against the manifest.
-  - *Status:* ☐ unverified
+  - *Result:* diff of `package.json` (+`publishConfig`, +`optionalDependencies`) and new `.npmrc`
+    read; `npm pack --dry-run` payload unchanged (3 files, O3); `npx publint` exit 0 — no errors,
+    only one non-blocking Suggestion on the pre-existing `repository.url` field (not touched by
+    this task). Four `optionalDependencies` match the loader/platform names (O2); provenance set.
+  - *Status:* ☑ SATISFIED
 
 ## Regression check
 
 - The release `validate` job reads `bindings/nodejs/package.json` `.version`; adding
   `optionalDependencies`/`publishConfig` keys must not change `.version`. Trace: `validate` →
-  `jq -r '.version' bindings/nodejs/package.json` still returns the parity version : ☐ (PRESERVED / REGRESSION)
+  `jq -r '.version' bindings/nodejs/package.json` still returns the parity version : ☑ PRESERVED (`.version` still `0.1.0`)
 - The `index.js` loader `require`s the `optionalDependencies` names at runtime; adding them as
-  declared deps must not change the loader. Confirm `index.js` is byte-unchanged : ☐ (PRESERVED / REGRESSION)
+  declared deps must not change the loader. Confirm `index.js` is byte-unchanged : ☑ PRESERVED (absent from `jj diff --name-only`)
 
 ## Residue
 
@@ -100,6 +120,6 @@ names (a file location, a command result, or a parsed manifest) — not by asser
 ## Conclusion
 
 <!-- Validator derives this from the obligation statuses and the regression check, per the rubric. -->
-VERDICT: ☐ (DONE | PARTIAL | NOT_DONE)
-CONFIDENCE: ☐ (high | medium | low)
-SUMMARY: ☐
+VERDICT: DONE
+CONFIDENCE: high
+SUMMARY: O1–O6 all SATISFIED with collected evidence (manifest parsed, four optionalDependencies keys exactly match PLATFORM_MAP and the npm/* package names pinned at 0.1.0, publishConfig + ignore-scripts present, `npm pack` payload still the 3 curated files, version parity holds, format/lint/publint all exit 0); both regression traces (`validate` job `.version`, `index.js` loader) PRESERVED.

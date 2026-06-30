@@ -202,38 +202,87 @@ jobs:
           name: nodejs-${{ matrix.target }}
           path: bindings/nodejs/*.node
 
-  publish-nodejs:
+  publish-npm:
     name: Publish to npm
     needs: build-nodejs
+    # Only this job is granted OIDC token-minting rights, so publish
+    # credentials are never exposed to build or runtime code.
+    permissions:
+      id-token: write
+      contents: read
+    environment: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: 22
+          # >= 24.8.0 ships an npm new enough for OIDC trusted publishing.
+          node-version: "24.8.0"
           registry-url: https://registry.npmjs.org
-      - name: Download all Node.js artifacts
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - name: Install napi CLI
+        run: pnpm add -g @napi-rs/cli
+
+      - name: Download Node.js artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: nodejs-*
           path: bindings/nodejs/artifacts
           merge-multiple: true
-      - name: Install dependencies
+
+      - name: Distribute binaries into platform packages
         working-directory: bindings/nodejs
-        run: npm install
+        run: napi artifacts
+
+      - name: Verify every platform binary is present
+        working-directory: bindings/nodejs
+        run: |
+          set -euo pipefail
+          missing=0
+          for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+            node_file="npm/${pkg}/oidc-exchange.${pkg}.node"
+            if [ -f "${node_file}" ]; then
+              echo "ok: ${node_file}"
+            else
+              echo "::error::missing native binary: ${node_file}"
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::one or more platform packages are missing their .node binary; aborting publish"
+            exit 1
+          fi
+
+      - name: Validate package metadata (publint)
+        working-directory: bindings/nodejs
+        run: npx --yes publint
+
+      - name: Validate type definitions (arethetypeswrong)
+        working-directory: bindings/nodejs
+        run: npx --yes @arethetypeswrong/cli --pack
+
+      - name: Publish platform packages
+        working-directory: bindings/nodejs
+        # No auth token env: authentication is GitHub OIDC trusted publishing.
+        run: |
+          set -euo pipefail
+          for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+            echo "publishing @oidc-exchange/${pkg}"
+            npm publish --provenance --access public --ignore-scripts "npm/${pkg}"
+          done
+
       - name: Publish @oidc-exchange/node
         working-directory: bindings/nodejs
-        run: pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public --ignore-scripts
+
       - name: Build and publish @oidc-exchange/lambda
         working-directory: bindings/lambda
+        # pnpm publish rewrites the workspace: protocol dependency and, like the
+        # steps above, authenticates via OIDC trusted publishing (no token).
         run: |
-          pnpm install
+          pnpm install --ignore-scripts --no-frozen-lockfile
           pnpm build
-          pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          pnpm publish --provenance --access public --no-git-checks --ignore-scripts
 
   build-python:
     name: Build Python (${{ matrix.target }})
@@ -296,7 +345,7 @@ jobs:
       - validate
       - build-binaries
       - build-docker
-      - publish-nodejs
+      - publish-npm
       - publish-python
     runs-on: ubuntu-latest
     steps:

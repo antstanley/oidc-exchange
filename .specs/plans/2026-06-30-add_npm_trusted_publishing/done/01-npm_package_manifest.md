@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [01-npm_package_manifest-certificate.md](01-npm_package_manifest-certificate.md)
 
-**Implements:** [.specs/changes/2026-06-29-add_npm_trusted_publishing.md](../../../changes/2026-06-29-add_npm_trusted_publishing.md) §Implementation notes 1 & 2 (root `optionalDependencies` + `publishConfig`; `.npmrc` `ignore-scripts`); satisfies the [.specs/bindings/specs/02-nodejs.md](../../../bindings/specs/02-nodejs.md) §Distribution `optionalDependencies` fact recorded in task 03.
+**Implements:** [.specs/changes/merged/2026-06-29-add_npm_trusted_publishing.md](../../../changes/merged/2026-06-29-add_npm_trusted_publishing.md) §Implementation notes 1 & 2 (root `optionalDependencies` + `publishConfig`; `.npmrc` `ignore-scripts`); satisfies the [.specs/bindings/specs/02-nodejs.md](../../../bindings/specs/02-nodejs.md) §Distribution `optionalDependencies` fact recorded in task 03.
 **Depends on:** —
 **Produces:** `bindings/nodejs/package.json` declares `@oidc-exchange/{linux-x64-gnu,linux-arm64-gnu,win32-x64-msvc,darwin-arm64}` as `optionalDependencies` pinned to the workspace version and adds `"publishConfig": { "provenance": true, "access": "public" }`, keeping `files` as `index.js` + `index.d.ts`; `bindings/nodejs/.npmrc` sets `ignore-scripts=true`; the four `npm/<triple>/package.json` versions stay equal to the root version (parity preserved).
 **Pointers:** `bindings/nodejs/package.json:11` (`files`), `:34` (`napi` block — the four targets that name the platform packages); `bindings/nodejs/npm/*/package.json` (existing `version: 0.1.0`, `os`/`cpu`/`main`); `bindings/nodejs/index.js:9` (`PLATFORM_MAP` — the exact `optionalDependencies` names must match these keys); new file `bindings/nodejs/.npmrc`.

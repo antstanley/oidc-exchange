@@ -15,6 +15,10 @@
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "napi build --release --dts index.generated.d.ts",
     "test": "vitest run",
@@ -30,6 +34,12 @@
     "oxlint": "^1.71.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"
+  },
+  "optionalDependencies": {
+    "@oidc-exchange/darwin-arm64": "0.1.0",
+    "@oidc-exchange/linux-arm64-gnu": "0.1.0",
+    "@oidc-exchange/linux-x64-gnu": "0.1.0",
+    "@oidc-exchange/win32-x64-msvc": "0.1.0"
   },
   "napi": {
     "binaryName": "oidc-exchange",

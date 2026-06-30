@@ -2,6 +2,11 @@
   "name": "@oidc-exchange/linux-x64-gnu",
   "version": "0.1.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/antstanley/oidc-exchange.git",
+    "directory": "bindings/nodejs/npm/linux-x64-gnu"
+  },
   "files": [
     "oidc-exchange.linux-x64-gnu.node"
   ],
