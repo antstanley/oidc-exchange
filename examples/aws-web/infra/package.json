@@ -6,12 +6,12 @@
     "cdk": "cdk"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.244.0",
+    "aws-cdk-lib": "^2.260.0",
     "constructs": "^10.6.0"
   },
   "devDependencies": {
-    "aws-cdk": "^2.1113.0",
-    "tsx": "^4.21.0",
-    "typescript": "^6.0.2"
+    "aws-cdk": "^2.1128.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
   }
 }
