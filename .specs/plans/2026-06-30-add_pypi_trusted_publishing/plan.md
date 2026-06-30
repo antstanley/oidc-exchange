@@ -1,6 +1,6 @@
 # Plan: Publish `oidc-exchange` wheels to PyPI via trusted publishing
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-06-29-add_pypi_trusted_publishing.md](../../changes/2026-06-29-add_pypi_trusted_publishing.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-06-29-add_pypi_trusted_publishing.md](../../changes/merged/2026-06-29-add_pypi_trusted_publishing.md)
 
 Ship `oidc-exchange` to PyPI as `abi3` `manylinux_2_28` / macOS / Windows wheels plus an sdist,
 through a publish job authenticated by GitHub OIDC PyPI Trusted Publishing (no `PYPI_TOKEN`). The
@@ -18,7 +18,7 @@ manifest and workflow they describe exist.
 
 ## Source and definition-of-done baseline
 
-- **Spec.** The change spec [.specs/changes/2026-06-29-add_pypi_trusted_publishing.md](../../changes/2026-06-29-add_pypi_trusted_publishing.md)
+- **Spec.** The change spec [.specs/changes/merged/2026-06-29-add_pypi_trusted_publishing.md](../../changes/merged/2026-06-29-add_pypi_trusted_publishing.md)
   (Motivation, Proposed changes, Implementation notes, Merge plan). It targets two canonical
   pages — [.specs/bindings/specs/05-distribution.md](../../bindings/specs/05-distribution.md)
   (Release pipeline, Assumptions / Decisions) and

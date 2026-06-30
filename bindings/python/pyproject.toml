@@ -29,7 +29,7 @@ dev = [
 ]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 python-source = "python"
 module-name = "oidc_exchange._oidc_exchange"
 

@@ -2,10 +2,10 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [03-canonical_edits_and_merge-certificate.md](03-canonical_edits_and_merge-certificate.md)
 
-**Implements:** [.specs/changes/2026-06-29-add_pypi_trusted_publishing.md](../../../changes/2026-06-29-add_pypi_trusted_publishing.md) §Proposed changes (all three blocks) and §Merge plan; edits [.specs/bindings/specs/05-distribution.md](../../../bindings/specs/05-distribution.md) (Release pipeline, Assumptions / Decisions) and [.specs/bindings/specs/03-python.md](../../../bindings/specs/03-python.md) (Distribution).
+**Implements:** [.specs/changes/merged/2026-06-29-add_pypi_trusted_publishing.md](../../../changes/merged/2026-06-29-add_pypi_trusted_publishing.md) §Proposed changes (all three blocks) and §Merge plan; edits [.specs/bindings/specs/05-distribution.md](../../../bindings/specs/05-distribution.md) (Release pipeline, Assumptions / Decisions) and [.specs/bindings/specs/03-python.md](../../../bindings/specs/03-python.md) (Distribution).
 **Depends on:** 01, 02
 **Produces:** the canonical pages describe the shipped pipeline — 05-distribution.md's Release-pipeline prose names the `build-python` (manylinux abi3 wheels + sdist) → `publish-pypi` (trusted publishing) pair, and its Assumptions/Decisions drop PyPI from the repository-secrets assumption and add a PyPI-trusted-publishing Decision; 03-python.md's Distribution records the `pyo3/abi3-py310` maturin feature and the manylinux_2_28 build with an sdist; the change spec is flipped to `Merged`, stamped, and moved to `.specs/changes/merged/`; `.specs/README.md`'s Changes and Plans tables are updated.
-**Pointers:** `.specs/bindings/specs/05-distribution.md:15` (Artifacts PyPI wheels row), `:42` (Release-pipeline `build-python`/`publish-python` sentence), `:56` (secrets assumption), `:62` (Decisions); `.specs/bindings/specs/03-python.md:44`-`:48` (Distribution paragraph); `.specs/changes/2026-06-29-add_pypi_trusted_publishing.md` (Status/Merged stamp + move); `.specs/README.md:41` (Changes row), `:49`-`:53` (Plans table).
+**Pointers:** `.specs/bindings/specs/05-distribution.md:15` (Artifacts PyPI wheels row), `:42` (Release-pipeline `build-python`/`publish-python` sentence), `:56` (secrets assumption), `:62` (Decisions); `.specs/bindings/specs/03-python.md:44`-`:48` (Distribution paragraph); `.specs/changes/merged/2026-06-29-add_pypi_trusted_publishing.md` (Status/Merged stamp + move); `.specs/README.md:41` (Changes row), `:49`-`:53` (Plans table).
 
 ## Steps
 

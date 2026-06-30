@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [01-pyproject_abi3_manifest-certificate.md](01-pyproject_abi3_manifest-certificate.md)
 
-**Implements:** [.specs/changes/2026-06-29-add_pypi_trusted_publishing.md](../../../changes/2026-06-29-add_pypi_trusted_publishing.md) §Implementation notes 1 (set the maturin `abi3-py310` feature; confirm `Cargo.toml` parity); satisfies the [.specs/bindings/specs/03-python.md](../../../bindings/specs/03-python.md) §Distribution `abi3-py310` fact recorded in task 03.
+**Implements:** [.specs/changes/merged/2026-06-29-add_pypi_trusted_publishing.md](../../../changes/merged/2026-06-29-add_pypi_trusted_publishing.md) §Implementation notes 1 (set the maturin `abi3-py310` feature; confirm `Cargo.toml` parity); satisfies the [.specs/bindings/specs/03-python.md](../../../bindings/specs/03-python.md) §Distribution `abi3-py310` fact recorded in task 03.
 **Depends on:** —
 **Produces:** `bindings/python/pyproject.toml` `[tool.maturin]` declares `features = ["pyo3/extension-module", "pyo3/abi3-py310"]` so the abi3 contract is explicit at the maturin level (not only in `Cargo.toml`), and a local `maturin build` emits a single `cp310-abi3` wheel; `bindings/python/Cargo.toml`'s `pyo3` features are confirmed to enable the same `abi3-py310` (they already do); `pyproject.toml` `version` is unchanged so version parity with `Cargo.toml` / `bindings/nodejs/package.json` holds.
 **Pointers:** `bindings/python/pyproject.toml:31`-`:34` (`[tool.maturin]` block — `features`, `python-source`, `module-name`); `bindings/python/Cargo.toml:12` (`pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }` — already abi3); `bindings/python/pyproject.toml:7` (`version` — must stay parity-aligned).

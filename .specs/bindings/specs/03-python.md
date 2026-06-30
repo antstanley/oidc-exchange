@@ -1,6 +1,6 @@
 # Python Binding (`oidc-exchange`)
 
-**Status:** Implemented · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Scope:** bindings/python
+**Status:** Implemented · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Scope:** bindings/python
 
 A PyO3 native extension wrapping [`crates/ffi`](01-ffi-core.md), built with maturin and
 published to PyPI as `oidc-exchange`. The native module is `oidc_exchange._oidc_exchange`; a
@@ -43,8 +43,10 @@ response `dict` is `{ "status", "headers": dict[str,str], "body": bytes }`.
 
 ## Distribution
 
-maturin, `abi3` stable ABI targeting Python 3.10+ — one wheel per platform works across 3.10–
-3.13. Platforms: `manylinux_2_28_{x86_64,aarch64}`, `win_amd64`, `macosx_11_0_arm64`. See
+maturin, `abi3` stable ABI targeting Python 3.10+ — `pyproject.toml` enables the
+`pyo3/abi3-py310` feature so one wheel per platform works across 3.10–3.13. Linux wheels are
+built in a `manylinux_2_28` container; platforms: `manylinux_2_28_{x86_64,aarch64}`,
+`win_amd64`, `macosx_11_0_arm64`. An sdist is published alongside the wheels. See
 [05-distribution.md](05-distribution.md).
 
 ## Tests

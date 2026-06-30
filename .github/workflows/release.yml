@@ -223,6 +223,14 @@ jobs:
       - name: Install napi CLI
         run: pnpm add -g @napi-rs/cli
 
+      - name: Sync platform package versions to the release version
+        working-directory: bindings/nodejs
+        # Stamp the root package.json version into every npm/<triple>/package.json
+        # and the root optionalDependencies, so a version bump never leaves a
+        # platform package (or the optionalDependencies pin) at a stale version
+        # and re-publishing an already-published version cannot happen.
+        run: napi version
+
       - name: Download Node.js artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -285,59 +293,78 @@ jobs:
           pnpm publish --provenance --access public --no-git-checks --ignore-scripts
 
   build-python:
-    name: Build Python (${{ matrix.target }})
+    name: Build Python (${{ matrix.target || matrix.command }})
     needs: validate
     strategy:
+      fail-fast: false
       matrix:
         include:
+          # Linux: manylinux_2_28 abi3 wheels built inside the maturin Docker image.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            command: build
+            args: --release --out dist
+            manylinux: "2_28"
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+            command: build
+            args: --release --out dist
+            manylinux: "2_28"
+          # macOS / Windows: native abi3 wheels (manylinux does not apply).
           - target: aarch64-apple-darwin
             os: macos-latest
+            command: build
+            args: --release --out dist
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            command: build
+            args: --release --out dist
+          # Source distribution (built once, target/manylinux irrelevant).
+          - os: ubuntu-latest
+            command: sdist
+            args: --out dist
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Build with maturin
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.10"
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - name: Build wheel
-        working-directory: bindings/python
-        run: uvx maturin build --release --target ${{ matrix.target }}
-      - name: Upload wheel
+          command: ${{ matrix.command }}
+          args: ${{ matrix.args }}
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: bindings/python
+        env:
+          # Pin the macOS wheel platform tag to macosx_11_0_arm64 (the platform the
+          # spec claims); inert on the Linux and Windows matrix legs.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+      - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: python-${{ matrix.target }}
-          path: target/wheels/*.whl
+          name: wheels-${{ matrix.target || matrix.command }}
+          path: bindings/python/dist/*
 
-  publish-python:
+  publish-pypi:
     name: Publish to PyPI
-    needs: build-python
+    needs: [build-python]
+    # Only this job is granted OIDC token-minting rights, so publish
+    # credentials are never exposed to build or runtime code.
+    permissions:
+      id-token: write
+    environment: pypi
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.10"
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - name: Download all wheel artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: python-*
-          path: wheels
+          pattern: wheels-*
+          path: dist
           merge-multiple: true
       - name: Publish to PyPI
-        run: uvx twine upload wheels/*.whl
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        # No password/token: authentication is PyPI Trusted Publishing via OIDC.
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          packages-dir: dist/
 
   create-release:
     name: Create GitHub Release
@@ -346,7 +373,7 @@ jobs:
       - build-binaries
       - build-docker
       - publish-npm
-      - publish-python
+      - publish-pypi
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
