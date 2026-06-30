@@ -2,3 +2,7 @@ packages:
   - "bindings/nodejs"
   - "bindings/lambda"
   - "apps/*"
+allowBuilds:
+  esbuild: true
+  lefthook: true
+  sharp: true
