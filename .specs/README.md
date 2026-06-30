@@ -50,6 +50,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 |---|---|---|
 | [plans/2026-06-29-cleanup_stale_references/plan.md](plans/2026-06-29-cleanup_stale_references/plan.md) | Done | docs/examples/config sweep of stale cloudtrail/atproto references + 06-configuration Open-question removal + merge housekeeping |
 | [plans/2026-06-29-add_local_enforcement_gates/plan.md](plans/2026-06-29-add_local_enforcement_gates/plan.md) | Done | [changes/merged/2026-06-24-add_local_enforcement_gates.md](changes/merged/2026-06-24-add_local_enforcement_gates.md) |
+| [plans/2026-06-30-add_npm_trusted_publishing/plan.md](plans/2026-06-30-add_npm_trusted_publishing/plan.md) | Draft | [changes/2026-06-29-add_npm_trusted_publishing.md](changes/2026-06-29-add_npm_trusted_publishing.md) |
 
 ## Conventions
 
