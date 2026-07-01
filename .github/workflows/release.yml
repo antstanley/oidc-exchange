@@ -279,7 +279,9 @@ jobs:
 
       - name: Validate type definitions (arethetypeswrong)
         working-directory: bindings/nodejs
-        run: npx --yes @arethetypeswrong/cli --pack
+        # --profile esm-only: the package is ESM-only (node22+); CJS consumers are
+        # unsupported, so the CjsResolvesToEsm resolution is not a failure here.
+        run: npx --yes @arethetypeswrong/cli --pack --profile esm-only
 
       - name: Publish platform packages
         working-directory: bindings/nodejs
