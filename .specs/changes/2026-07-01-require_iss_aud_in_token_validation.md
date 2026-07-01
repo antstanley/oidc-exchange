@@ -36,6 +36,7 @@ sign-in is denied under an allowlist. Finally, `nbf` is never validated
 
 | Canonical page                                                                         | Nature of change                                                                                                                                                                                                                                                                                                                             |
 | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md)       | Extend the `IdentityClaims` field list under `Token types` with the new optional `is_private_email` field.                                                                                                                                                                                                                                     |
 | [`.specs/service/specs/05-provider-system.md`](../service/specs/05-provider-system.md) | Tighten the `OidcProvider behaviour` validation description (required claims, `nbf`, alg inference); add Apple claim-coercion note, including the surfaced `is_private_email` field; add a required-claims Decision. The existing _Algorithm from the JWK_ Decision already states the desired end-state — the code, not the spec, diverges — so the delta only sharpens the behaviour prose. |
 
 [02-ports-and-adapters.md](../service/specs/02-ports-and-adapters.md) is unaffected: no
@@ -46,13 +47,23 @@ port signature changes. The outbound-HTTP fixes to the same code paths are split
 
 ## Proposed changes
 
+### `.specs/service/specs/01-domain-model.md` → Token types (`domain/token.rs`) (Modify)
+
+The `IdentityClaims` bullet currently reads "verified claims from a provider ID token:
+`subject`, optional `email`, `email_verified`, `name`, and `raw_claims`." Merged form:
+
+> - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
+>   `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag; `None`
+>   for other providers), and `raw_claims`.
+
 ### `.specs/service/specs/05-provider-system.md` → OidcProvider behaviour (Modify)
 
 > - `validate_id_token` decodes the JWT header, fetches the issuer's JWKS through the cached
 >   `JwksCache`, and validates the signature using the **algorithm from the JWK** (not the
->   untrusted header). Validation requires the `exp`, `iss`, and `aud` claims to be
->   **present** (`set_required_spec_claims`) and to match the configured issuer and
->   `client_id`; `nbf` is validated when present. A token missing `iss` or `aud` — e.g. a
+>   untrusted header), returning `IdentityClaims`. Validation requires the `exp`, `iss`,
+>   and `aud` claims to be **present** (`set_required_spec_claims`) and to match the
+>   configured issuer and `client_id`; `nbf` is validated when present. A token missing
+>   `iss` or `aud` — e.g. a
 >   provider access token presented as an ID token — is rejected.
 > - When the matched JWK carries no `alg`, the algorithm is inferred from the key type:
 >   `kty: EC` by `crv` (P-256 → ES256, P-384 → ES384), `kty: OKP` → EdDSA, `kty: RSA` →
@@ -127,13 +138,15 @@ provider leaves it null). Folds into the existing `IdentityClaims` definition in
 
 ## Merge plan
 
-1. Apply the three `Proposed changes` blocks to
+1. Apply the `IdentityClaims` `Proposed changes` block to
+   [01-domain-model.md](../service/specs/01-domain-model.md); bump its `**Date:**`.
+2. Apply the three `Proposed changes` blocks for
    [05-provider-system.md](../service/specs/05-provider-system.md); bump its `**Date:**`.
-2. Fold the `Type changes` fragment into
+3. Fold the `Type changes` fragment into
    [`canonical-types.schema.json`](../service/specs/canonical-types.schema.json)
    (`$defs/IdentityClaims`).
-3. Flip `**Status:**` to `Merged`, stamp `**Merged:**`, move to `.specs/changes/merged/`.
-4. Update `.specs/README.md`.
+4. Flip `**Status:**` to `Merged`, stamp `**Merged:**`, move to `.specs/changes/merged/`.
+5. Update `.specs/README.md`.
 
 ---
 

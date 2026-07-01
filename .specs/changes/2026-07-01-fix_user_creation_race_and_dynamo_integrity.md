@@ -41,15 +41,63 @@ suspend racing a claims patch can be silently reverted to `active`.
 
 | Canonical page                                                                               | Nature of change                                                                                                    |
 | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md)             | Uniqueness assumption already stated; the `User` struct listing gains the `version` field                                                                                       |
-| [`.specs/service/specs/08-persistence.md`](../service/specs/08-persistence.md)               | DynamoDB section: uniqueness-guard item, transactional `create_user`, guard-based `get_user_by_external_id` (GSI1 user entry retired), guard delete on user deletion, batch-delete retry, version-conditional `update_user`; SQL: partial unique index excluding deleted rows |
+| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md)             | Assumptions bullet reworded: at most one **non-deleted** user per `(provider, external_id)`; the `User` struct listing gains the `version` field; Deleted lifecycle prose gains the freed-identity claim |
+| [`.specs/service/specs/08-persistence.md`](../service/specs/08-persistence.md)               | DynamoDB section: uniqueness-guard item, transactional `create_user`, guard-based `get_user_by_external_id` (GSI1 user entry retired — the provider-prefix sentence is rewritten for the guard item), guard delete on user deletion, batch-delete retry (replacing the `cleanup_expired_sessions` no-op-cost sentence), version-conditional `update_user`. PostgreSQL / SQLite section: partial unique index excluding deleted rows, deleted rows excluded from lookup, `version` column |
 | [`.specs/service/specs/02-ports-and-adapters.md`](../service/specs/02-ports-and-adapters.md) | `UserRepository` contract: `create_user` conflict semantics; version-based `update_user` atomicity; deletion frees the external id                                              |
-| [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md)           | Exchange step 3: conflict on JIT create → re-lookup and continue                                                    |
-| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md)                     | Error mapping table: `Conflict` → 409                                                                               |
+| [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md)           | Exchange step 3: conflict on JIT create → re-lookup and continue; `UserCreated` audited only on the winning create                                                              |
+| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md)                     | Error mapping table: `Conflict` → 409 `conflict`                                                                    |
+| [`.specs/service/specs/canonical-types.schema.json`](../service/specs/canonical-types.schema.json) | `$defs.User` gains required `version`                                                                          |
+| [`.specs/canonical-types.schema.json`](../canonical-types.schema.json)                       | `$defs.OAuthErrorEnvelope` `error` enum gains `conflict`                                                            |
+| [`schemas/dynamodb/table-design.json`](../../schemas/dynamodb/table-design.json)             | Guard item added; the User item's GSI1 entry retired; `get_user_by_external_id` access pattern rewritten            |
+| [`schemas/datamodel.schema.json`](../../schemas/datamodel.schema.json)                       | `definitions.User` gains required `version` — the adapter-agnostic logical model that 08-persistence.md declares canonical-types mirrors |
 
 ---
 
 ## Proposed changes
+
+### `.specs/service/specs/01-domain-model.md` → Entities → User (Modify)
+
+The struct listing gains `version`, and the paragraph below it gains the store-managed
+sentence:
+
+> ```rust
+> struct User {
+>     id: String,                       // "usr_…"
+>     external_id: String,              // provider sub / DID
+>     provider: String,                 // "google", "apple"
+>     email: Option<String>,
+>     display_name: Option<String>,
+>     metadata: HashMap<String, Value>, // extensible sync data
+>     claims: HashMap<String, Value>,   // per-user private claims merged into the access JWT
+>     status: UserStatus,
+>     version: u64,                     // optimistic-concurrency counter; 1 on create
+>     created_at: DateTime<Utc>,
+>     updated_at: DateTime<Utc>,
+> }
+> ```
+>
+> `version` is store-managed, never caller-supplied: `create_user` writes `1`, every
+> `update_user` increments it, and the write is conditioned on the version that was read
+> (see [08-persistence.md](08-persistence.md)). It appears in neither `NewUser` nor
+> `UserPatch`.
+
+### `.specs/service/specs/01-domain-model.md` → Lifecycles → User status (Modify)
+
+The `Deleted` bullet keeps its "row is kept" claim and gains the counter-balancing
+freed-identity claim:
+
+> - **Deleted** — soft delete via `UserPatch { status: Deleted }`; the service revokes all
+>   the user's sessions on delete. The row is kept, but the identity is freed:
+>   `get_user_by_external_id` no longer returns the deleted user, and a later first login
+>   for the same `(provider, external_id)` re-registers as a brand-new user with no claims
+>   or sessions carried over.
+
+### `.specs/service/specs/01-domain-model.md` → Assumptions (Modify)
+
+> - At most one **non-deleted** user exists per `(provider, external_id)`; provider
+>   namespacing prevents cross-provider subject collisions. Deleting a user frees the
+>   identity for re-registration — the deleted record is retained but no longer occupies
+>   the key.
 
 ### `.specs/service/specs/08-persistence.md` → DynamoDB (Modify)
 
@@ -58,6 +106,16 @@ suspend racing a claims patch can be silently reverted to `active`.
 > | User                  | `USER#<id>`                    | `PROFILE` | —                | —                      |
 > | User uniqueness guard | `EXT#<provider>#<external_id>` | `UNIQUE`  | —                | —                      |
 > | Session               | `SESSION#<refresh_token_hash>` | `SESSION` | `USER#<user_id>` | `SESSION#<created_at>` |
+>
+> Access patterns:
+>
+> | Operation | DynamoDB call |
+> |---|---|
+> | `get_user_by_id` | `GetItem` on `USER#<id>` / `PROFILE` |
+> | `get_user_by_external_id` | two strongly consistent `GetItem`s: `EXT#<provider>#<external_id>` / `UNIQUE`, then `USER#<user_id>` / `PROFILE` |
+> | `get_session_by_refresh_token` | `GetItem` on `SESSION#<hash>` |
+> | `revoke_all_user_sessions` | `Query` GSI1 `USER#<user_id>` then `BatchWrite` deletes (unprocessed items retried) |
+> | `count_by_status` / `count_active_sessions` | table scans / counts |
 >
 > `create_user` is a `TransactWriteItems` of two puts: the user item and a uniqueness-guard
 > item keyed on the external identity, each conditioned on `attribute_not_exists(pk)`. The
@@ -70,9 +128,8 @@ suspend racing a claims patch can be silently reverted to `active`.
 >
 > `delete_user` (the `Deleted` transition) deletes the guard item in the same
 > `TransactWriteItems` as the status write, freeing the external id: a later first login for
-> the same subject re-registers as a brand-new user rather than finding the deleted row. The
-> SQL backends match by making the unique index partial (`WHERE status != 'deleted'`) and
-> excluding deleted rows from `get_user_by_external_id`.
+> the same subject re-registers as a brand-new user rather than finding the deleted row.
+> (The SQL backends match; see the PostgreSQL / SQLite block below.)
 >
 > `revoke_all_user_sessions` and `cleanup_expired_sessions` retry any `unprocessed_items`
 > returned by `BatchWriteItem` with exponential backoff until the batch drains or a bounded
@@ -84,6 +141,56 @@ suspend racing a claims patch can be silently reverted to `active`.
 > counting as the migration default `1`), incrementing `version` on every write and retrying
 > the read-modify-write on condition failure; a lost update cannot silently revert a
 > concurrent status change.
+
+Two sentences in the section's closing paragraph become false once the above merges and
+are rewritten. "The GSI1 user key includes the provider prefix so the same external id
+from two providers does not collide" (the GSI1 user entry is retired) and
+"`cleanup_expired_sessions` is a no-op cost there" (it now drains `BatchWriteItem`
+retries) become:
+
+> `metadata` and `claims` are stored as DynamoDB maps; `created_at`/`updated_at`/`expires_at`
+> are ISO-8601 strings. Sessions carry a numeric `ttl` (epoch seconds) so DynamoDB expires
+> them natively — `cleanup_expired_sessions` batch-deletes whatever TTL has not yet reaped,
+> retrying unprocessed items as above, so a successful return means every expired session
+> found is gone. The guard item's `pk` (`EXT#<provider>#<external_id>`) includes the
+> provider prefix so the same external id from two providers does not collide.
+
+### `.specs/service/specs/08-persistence.md` → PostgreSQL / SQLite (Modify)
+
+In the PostgreSQL section, the sentence "indexes cover `(external_id, provider)` and
+`sessions.user_id`" becomes:
+
+> `users` carries a `version BIGINT NOT NULL DEFAULT 1` column backing version-conditional
+> `update_user`; indexes cover `sessions.user_id` and — as a **partial unique index**
+> excluding deleted rows
+> (`CREATE UNIQUE INDEX … ON users (external_id, provider) WHERE status != 'deleted'`) —
+> `(external_id, provider)`, so at most one non-deleted user exists per identity while a
+> deleted identity is free to re-register. A unique violation on insert maps to
+> `Error::Conflict`. `get_user_by_external_id` filters `status != 'deleted'`, so a deleted
+> row is never returned to the exchange flow — matching DynamoDB, where the guard item is
+> gone.
+
+The SQLite section gains:
+
+> The same `version` column, partial unique index, and deleted-row exclusion as PostgreSQL
+> apply; SQLite's unique-violation code maps to `Error::Conflict`.
+
+### `schemas/dynamodb/table-design.json` (Modify)
+
+The physical-layout sidecar referenced by 08-persistence.md changes in three places:
+
+> - `item_schemas.User` loses its `GSI1pk` / `GSI1sk` keys (the `EXT#…` / `USER` entry is
+>   retired) and gains `"version": "N"` in `attributes`.
+> - A new `item_schemas.UserUniquenessGuard` entry: `pk` = `EXT#<provider>#<external_id>`,
+>   `sk` = `UNIQUE`, attributes `{ "user_id": "S" }`, no GSI keys.
+> - `access_patterns.get_user_by_external_id` becomes two strongly consistent `GetItem`s
+>   (`EXT#<provider>#<external_id>` / `UNIQUE` → `USER#<user_id>` / `PROFILE`) instead of
+>   the GSI1 `Query`; GSI1 serves only session lookups.
+
+Note for the merger: the sidecar's *current* User `GSI1pk` is `EXT#<external_id>` — it
+lacks the provider prefix that 08-persistence.md documents. This pre-existing divergence
+disappears with the retirement (the guard item's `pk` carries the provider prefix), but do
+not expect the deleted keys to match the spec page's wording.
 
 ### `.specs/service/specs/02-ports-and-adapters.md` → Port traits → UserRepository (Modify)
 
@@ -99,10 +206,16 @@ suspend racing a claims patch can be silently reverted to `active`.
 
 ### `.specs/service/specs/03-service-flows.md` → Token exchange (Modify)
 
-> 3. … Otherwise (`mode == "open"`) → `create_user(NewUser{…})`; if creation returns
->    `Conflict` (a concurrent first login won the race), re-run
+> 3. … Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`);
+>    if creation returns `Conflict` (a concurrent first login won the race), re-run
 >    `get_user_by_external_id` and continue with the existing user, re-applying the
->    suspended-status check.
+>    suspended-status check. The losing racer emits no `UserCreated` event — the winning
+>    create already audited it — and the flow otherwise proceeds as for a found user.
+
+The "(audited `UserCreated`)" annotation is retained deliberately:
+[2026-07-01-wire_audit_event_emission.md](2026-07-01-wire_audit_event_emission.md) also
+touches this bullet, and the two deltas compose only if this block keeps the annotation
+in place.
 
 ### `.specs/service/specs/04-http-api.md` → Error mapping (Modify)
 
@@ -113,13 +226,17 @@ suspend racing a claims patch can be silently reverted to `active`.
 ## Type changes
 
 `User` gains a monotonically increasing `version` counter for optimistic concurrency, in
-`canonical-types.schema.json` (`$defs.User`) and the `01-domain-model.md` struct listing:
+the service `canonical-types.schema.json` (`$defs.User`) and the `01-domain-model.md`
+struct listing:
 
 ```json
-"version": {
-  "type": "integer",
-  "minimum": 1,
-  "description": "Optimistic-concurrency counter; starts at 1 on create, incremented by every update_user."
+{
+  "$comment": "Fragment for 2026-07-01-fix_user_creation_race_and_dynamo_integrity. Folds into .specs/service/specs/canonical-types.schema.json $defs.User on merge.",
+  "version": {
+    "type": "integer",
+    "minimum": 1,
+    "description": "Optimistic-concurrency counter; starts at 1 on create, incremented by every update_user."
+  }
 }
 ```
 
@@ -127,6 +244,38 @@ suspend racing a claims patch can be silently reverted to `active`.
 `NewUser` and `UserPatch` are unchanged. Migration default is `1`: SQL backends add
 `ALTER TABLE users ADD COLUMN version BIGINT NOT NULL DEFAULT 1`; Dynamo treats a missing
 attribute as `1` at read time.
+
+The same property (identical shape) also folds into `definitions.User` in
+[`schemas/datamodel.schema.json`](../../schemas/datamodel.schema.json), joining its
+`required` list — 08-persistence.md declares that logical model the cross-adapter source of
+truth which canonical-types mirrors, and the mirror claim only survives the merge if both
+files gain `version`.
+
+The new 409 wire code `conflict` (04-http-api.md error-mapping row) must also join the
+closed `error` enum of the repo-wide `OAuthErrorEnvelope`
+([`.specs/canonical-types.schema.json`](../canonical-types.schema.json)) — without this
+the envelope's schema rejects the new body:
+
+```json
+{
+  "$comment": "Fragment for 2026-07-01-fix_user_creation_race_and_dynamo_integrity. Folds into the repo-wide .specs/canonical-types.schema.json $defs.OAuthErrorEnvelope on merge.",
+  "properties": {
+    "error": {
+      "type": "string",
+      "enum": [
+        "invalid_grant",
+        "invalid_token",
+        "invalid_request",
+        "access_denied",
+        "unauthorized",
+        "unsupported_grant_type",
+        "conflict",
+        "server_error"
+      ]
+    }
+  }
+}
+```
 
 `Error::Conflict` is a new error-enum variant in `crates/core/src/error.rs`, not a
 canonical type.
@@ -136,7 +285,8 @@ canonical type.
 ## Implementation notes
 
 1. Add `Error::Conflict { detail }` to `crates/core/src/error.rs`; map it in
-   `crates/server/src/error.rs:51-108` (409) and any FFI error tables.
+   `crates/server/src/error.rs:51-108` (409, wire code `conflict` — see Type changes for
+   the envelope-enum addition) and any FFI error tables.
 2. `crates/adapters/src/postgres/mod.rs` / `sqlite/mod.rs` `create_user` — inspect the
    `sqlx` database error for a unique-violation code (Postgres `23505`; SQLite `2067`) and
    return `Conflict` instead of `StoreError`.
@@ -189,13 +339,20 @@ canonical type.
 
 ## Merge plan
 
-1. Apply the 08, 02, 03, and 04 blocks to their canonical pages; add `version` to the
-   `User` struct listing in 01; bump each page's `**Date:**`.
-2. Update `schemas/dynamodb/table-design.json` with the guard item and the retired GSI1
-   user entry.
-3. Add `version` to `User` in `canonical-types.schema.json` (see Type changes).
-4. Flip `**Status:**` to `Merged`, stamp `**Merged:**`, move to `.specs/changes/merged/`.
-5. Update `.specs/README.md`.
+1. Apply the 01, 08, 02, 03, and 04 blocks to their canonical pages; bump each page's
+   `**Date:**`.
+2. Apply the `schemas/dynamodb/table-design.json` block: add the `UserUniquenessGuard`
+   item schema, retire the User item's GSI1 entry, and rewrite the
+   `get_user_by_external_id` access pattern.
+3. Fold the first Type-changes fragment into `$defs.User` in
+   `.specs/service/specs/canonical-types.schema.json` (add `version` to `properties` and
+   `required`), and the same property into `definitions.User` in
+   `schemas/datamodel.schema.json` (`properties` + `required`).
+4. Fold the second Type-changes fragment into
+   `$defs.OAuthErrorEnvelope.properties.error.enum` in the repo-wide
+   `.specs/canonical-types.schema.json` (add `conflict`).
+5. Flip `**Status:**` to `Merged`, stamp `**Merged:**`, move to `.specs/changes/merged/`.
+6. Update `.specs/README.md`.
 
 ---
 
@@ -215,7 +372,14 @@ canonical type.
   external identity is the standard single-table uniqueness pattern.
 - _Conflict is a first-class port error._ **Adapters map native uniqueness violations to
   `Error::Conflict`.** String-matching `StoreError` details in core would couple the service
-  to driver messages.
+  to driver messages. Its 409 wire code `conflict` is added to the closed `error` enum of
+  the repo-wide `OAuthErrorEnvelope` (see Type changes) — RFC 6749 permits extension codes,
+  but the canonical enum must name every code the API can emit.
+- _The losing racer does not audit `UserCreated`._ **When JIT creation returns `Conflict`,
+  the flow re-looks-up and continues without emitting `UserCreated`.** Exactly one create
+  happened, so exactly one event is emitted — by the winner. Composes with
+  [2026-07-01-wire_audit_event_emission.md](2026-07-01-wire_audit_event_emission.md), which
+  wires the annotation's emission.
 - _External-id lookup via the guard._ **`get_user_by_external_id` on Dynamo is two strongly
   consistent `GetItem`s (guard → profile), retiring the GSI1 user entry.** The guard item
   must exist for uniqueness anyway; reading it removes GSI eventual-consistency lag from the

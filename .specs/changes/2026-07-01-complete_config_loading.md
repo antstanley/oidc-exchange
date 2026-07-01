@@ -36,8 +36,9 @@ bad config fails closed.
 
 | Canonical page                                                                     | Nature of change                                                                                                                                                |
 | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md) | Loading order already reads correctly for the end state (spec is ahead of the code). Add fail-closed placeholder wording and a new "Validation at load" section |
-| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md)           | Bootstrap step 2 already reads correctly. Modify the internal-auth paragraph (`enabled` gate, non-empty secret) and note validation in the bootstrap sequence   |
+| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md) | Loading order already reads correctly for the end state (spec is ahead of the code). Add fail-closed placeholder wording, a new "Validation at load" section, and modify `Sections → [internal_api]` (`enabled` gate semantics, non-empty secret) |
+| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md)           | Bootstrap step 2 already reads correctly. Modify the Routes → Internal heading, the Service-roles table (`admin`/`all` rows), and the internal-auth paragraph to carry the `internal_api.enabled` gate; note validation in the bootstrap sequence |
+| [`.specs/bindings/specs/01-ffi-core.md`](../bindings/specs/01-ffi-core.md)         | Modify Responsibilities: config supplied through `new`/`from_file` passes the same load-time validation as the server, rejected as `FfiError` at construction   |
 
 ---
 
@@ -79,7 +80,32 @@ bad config fails closed.
 > (`shared_secret`), `shared_secret` (redacted in `Debug`; must be non-empty when the internal
 > API is served).
 
+### `.specs/service/specs/04-http-api.md` → Routes → Internal (Modify)
+
+The heading currently reads "### Internal (mounted for roles `admin` and `all`, behind Bearer
+auth)" with no preamble. Reword the heading and open the section with a mounting condition:
+
+> ### Internal (mounted for roles `admin` and `all` only when `internal_api.enabled = true`, behind Bearer auth)
+>
+> These routes are mounted only when `internal_api.enabled = true` and `server.role` is
+> `admin` or `all`; with the flag false (the default) no internal routes exist regardless of
+> role. When mounted they sit behind Bearer auth (see Middleware stack).
+
+### `.specs/service/specs/04-http-api.md` → Service roles (Modify)
+
+The roles table currently reads `admin` → "`/internal/*` + `/health`" and `all` → "all of the
+above". Amend the Routes cells to carry the `internal_api.enabled` condition:
+
+> | Role | Routes | Adapters built |
+> |---|---|---|
+> | `exchange` | public + `/health` | user repo, session repo, key manager, providers, audit; user-sync → noop |
+> | `admin` | `/internal/*` (only when `internal_api.enabled = true`) + `/health` | user repo, session repo, audit, user-sync; key manager → noop, no providers |
+> | `all` | all of the above (`/internal/*` only when `internal_api.enabled = true`) | all |
+
 ### `.specs/service/specs/04-http-api.md` → Middleware stack (Modify)
+
+The internal-auth paragraph currently reads "Internal routes additionally pass through
+**internal auth** … missing/wrong/unconfigured → `401`." Replace it with:
 
 > Internal routes mount only when `internal_api.enabled = true` and the role is `admin` or
 > `all`; with the flag false no internal routes are mounted regardless of role, so an
@@ -95,6 +121,19 @@ bad config fails closed.
 >    `config/{OIDC_EXCHANGE_ENV}.toml` if set, apply `OIDC_EXCHANGE__{section}__{key}` env
 >    overrides, resolve `${VAR}` placeholders, then validate (role, TTLs, allowlist, internal
 >    API secret) ([06-configuration.md](06-configuration.md)).
+
+### `.specs/bindings/specs/01-ffi-core.md` → Responsibilities (Modify)
+
+The first bullet currently reads "Build an `AppService` and axum `Router` from a TOML config
+(re-using `crates/server`'s bootstrap), and own the tokio `Runtime` that drives them."
+Replace it with:
+
+> - Build an `AppService` and axum `Router` from a TOML config (re-using `crates/server`'s
+>   bootstrap), and own the tokio `Runtime` that drives them. Config supplied through `new`
+>   (inline string) or `from_file` passes the same load-time validation as the server's
+>   `load_config` (role, TTLs, allowlist, internal-API secret —
+>   [06-configuration.md](../../service/specs/06-configuration.md) → Validation at load);
+>   invalid config is rejected as an `FfiError` at construction, never at request time.
 
 ---
 

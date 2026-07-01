@@ -23,7 +23,7 @@ No exchange, refresh, revocation, registration denial, or admin operation emits 
 The supporting plumbing is dead too. The `AuditContext` middleware extracts
 `X-Forwarded-For`/`User-Agent`/`X-Device-Id` that nothing consumes; `exchange.rs` hardcodes
 `device_id`/`user_agent`/`ip_address` to `None` in stored sessions, and `create_audit_event`
-does the same for events. And the two real adapters undermine the design that spec 07 records:
+hardcodes the event's `ip_address`/`user_agent` to `None`. And the two real adapters undermine the design that spec 07 records:
 `stdout_audit` uses `println!`/`eprintln!`, which panic on write errors (EPIPE from a restarted
 log collector) instead of returning `Err` for the threshold logic to judge, and `sqs_audit`
 detects FIFO queues with a substring `contains(".fifo")` where spec 07 says suffix.
@@ -34,35 +34,54 @@ detects FIFO queues with a substring `contains(".fifo")` where spec 07 says suff
 
 | Canonical page                                                                                 | Nature of change                                                                                                                                                                                                                                |
 | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md)               | Session section: `device_id`/`user_agent`/`ip_address` are populated from the request context, no longer `None` at issuance; removes the Open question about wiring the audit-context values into the stored session                            |
 | [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md)             | Page already describes the rejection-branch auditing and blocking algorithm as the target state; merge adds the success-path and admin event names, the client-context wording, and removes the `Unauthorized` vs `UserSuspended` Open question |
 | [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md)                       | Middleware stack: note the `AuditContext` extension is consumed by the `/token` and `/revoke` handlers                                                                                                                                          |
-| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md)             | `[audit]` section: add the `emit_threshold` key — the severity floor for emitting events at all, separate from `blocking_threshold`                                                                                                            |
-| [`.specs/service/specs/07-telemetry-and-audit.md`](../service/specs/07-telemetry-and-audit.md) | Page already describes emit-gating and `.fifo` suffix detection as the target state; merge adds only the adapter write-failure sentence                                                                                                         |
+| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md)             | `[audit]` section: add the `emit_threshold` key — the severity floor for emitting events at all, separate from `blocking_threshold` — and add its `info` default to the Defaults summary table                                                 |
+| [`.specs/service/specs/07-telemetry-and-audit.md`](../service/specs/07-telemetry-and-audit.md) | Audit section: merge adds the `emit_threshold` pre-dispatch filter, the adapter write-failure sentence, and the FIFO `message_group_id`/deduplication detail                                                                                    |
 
 ---
 
 ## Proposed changes
 
+### `.specs/service/specs/01-domain-model.md` → Entities → Session (Modify)
+
+> The raw refresh token exists only in memory during issuance and in the response to the
+> client. Only the hash is stored. `device_id`, `user_agent`, and `ip_address` are populated
+> from the request context: the audit-context middleware captures them at the HTTP edge and
+> the exchange flow threads them into the stored session.
+
+### `.specs/service/specs/01-domain-model.md` → Open questions (Remove)
+
+Remove the resolved item:
+
+> - `Session.device_id` / `user_agent` / `ip_address` exist on the entity and in the store
+>   schemas but are written as `None` at issuance; wiring the audit-context values into the
+>   stored session is unresolved.
+
 ### `.specs/service/specs/03-service-flows.md` → Token exchange (Modify)
 
 > `ExchangeRequest` carries the client context (`ip_address`, `user_agent`, `device_id`)
-> extracted by the server's audit-context middleware; the stored session and every audit event
-> in the flow record it. A suspended user audits `UserSuspended` (warning, failure); the
+> extracted by the server's audit-context middleware; the stored session records all three,
+> and every audit event in the flow records the `ip_address` and `user_agent` (the
+> `AuditEvent` shape carries no `device_id`). A suspended user audits `UserSuspended` (warning, failure); the
 > registration-policy denials audit `RegistrationDenied` (warning, failure); a created user
 > audits `UserCreated` (notice, success); a successful exchange audits `TokenExchange` (info,
 > success) after the token response is assembled.
 
 ### `.specs/service/specs/03-service-flows.md` → Token refresh (Modify)
 
-> `RefreshRequest` carries the same client context. A suspended user audits `UserSuspended`; a
+> `RefreshRequest` carries the same client context; audit events in the flow record its
+> `ip_address` and `user_agent`. A suspended user audits `UserSuspended`; a
 > successful refresh audits `TokenRefresh` (info, success). Unknown or expired tokens return
 > `InvalidToken` and audit `ValidationFailed` (debug, failure) — an abuse-detection signal
-> that the default `[audit] emit_threshold` of `informational` suppresses; lowering the
+> that the default `[audit] emit_threshold` of `info` suppresses; lowering the
 > threshold to `debug` enables it.
 
 ### `.specs/service/specs/03-service-flows.md` → Revocation (Modify)
 
-> `RevokeRequest` carries the same client context. The access-token path audits
+> `RevokeRequest` carries the same client context; audit events in the flow record its
+> `ip_address` and `user_agent`. The access-token path audits
 > `AllSessionsRevoked` when signature verification succeeds; the refresh-token path audits
 > `TokenRevocation` when a session was actually revoked. Failed verification and unknown
 > tokens emit nothing, matching RFC 7009's silence.
@@ -75,24 +94,35 @@ detects FIFO queues with a substring `contains(".fifo")` where spec 07 says suff
 > operation in `detail`. Read-only operations (get, list, stats, get-claims) are not audited.
 > Audit failures follow `emit_audit`'s blocking rules, unlike best-effort user sync.
 
+### `.specs/service/specs/03-service-flows.md` → Open questions (Remove)
+
+Remove the resolved item:
+
+> - Suspended-user exchange is rejected, but whether an audit `Unauthorized` vs `UserSuspended`
+>   event type is emitted in every rejection branch is worth confirming against the handlers.
+
 ### `.specs/service/specs/04-http-api.md` → Middleware stack (Modify)
 
 > 2. **Audit context** (`middleware/audit_context.rs`) — extract `X-Forwarded-For`,
 >    `User-Agent`, `X-Device-Id` into an `AuditContext` request extension, which the `/token`
->    and `/revoke` handlers pass into the core request structs so sessions and audit events
->    carry the client context.
+>    and `/revoke` handlers pass into the core request structs so the stored session records
+>    `ip_address`/`user_agent`/`device_id` and audit events record `ip_address`/`user_agent`.
 
 ### `.specs/service/specs/06-configuration.md` → Sections → `[audit]` (Modify)
 
 > `adapter` (`noop` | `stdout` | `sqs`, default `noop`), `blocking_threshold` (syslog severity
-> name, default `warning`), `emit_threshold` (RFC 5424 severity name, default `informational`)
+> name, default `warning`), `emit_threshold` (syslog severity name, default `info`)
 > — events with a severity strictly less severe than the threshold are not emitted at all,
 > independently of the blocking decision — optional `[audit.sqs] { queue_url, region }`.
+
+### `.specs/service/specs/06-configuration.md` → Defaults summary (Modify)
+
+> | `audit.adapter` / `blocking_threshold` / `emit_threshold` | `noop` / `warning` / `info` |
 
 ### `.specs/service/specs/07-telemetry-and-audit.md` → Audit (Modify)
 
 > Before dispatching to any adapter, `emit_audit` applies the `[audit] emit_threshold` filter:
-> events strictly less severe than the configured threshold (default `informational`) are
+> events strictly less severe than the configured threshold (default `info`) are
 > dropped outright, so `ValidationFailed` (debug) stays silent unless the threshold is
 > lowered. The `stdout_audit` adapter writes with locked handles; a write failure (e.g. EPIPE
 > from a restarted log collector) returns `AuditError` and flows through `emit_audit`'s
@@ -104,9 +134,11 @@ detects FIFO queues with a substring `contains(".fifo")` where spec 07 says suff
 
 ## Type changes
 
-None. `Session` and `AuditEvent` already carry `device_id`/`user_agent`/`ip_address` in the
-canonical schema; the core request structs are not canonical entities. No `AuditEventType`
-variant is added or removed — `SessionRevoked` stays reserved.
+None. `Session` already carries `device_id`/`user_agent`/`ip_address` and `AuditEvent`
+already carries `ip_address`/`user_agent` in the canonical schema — `AuditEvent` has no
+`device_id` field and this change does not add one; the core request structs are not
+canonical entities. No `AuditEventType` variant is added or removed — `SessionRevoked` stays
+reserved.
 
 ---
 
@@ -125,7 +157,7 @@ variant is added or removed — `SessionRevoked` stays reserved.
    (`UserSuspended`), `:50` (`TokenRefresh`); `revoke.rs:20` (`AllSessionsRevoked`), `:28`/`:34`
    (`TokenRevocation`); `crates/core/src/service/user_admin.rs:14`, `:33`, `:74`, `:120`,
    `:152`, `:173` (admin mutations).
-4. Add `emit_threshold: String` (default `"informational"`) to `AuditConfig`
+4. Add `emit_threshold: String` (default `"info"`) to `AuditConfig`
    (`crates/core/src/config.rs:81`); at the top of `AppService::emit_audit`
    (`crates/core/src/service/mod.rs:102`), parse it with the existing `parse_severity` and
    return `Ok(())` before any adapter dispatch when the event's severity is strictly less
@@ -145,8 +177,9 @@ variant is added or removed — `SessionRevoked` stays reserved.
 ## Merge plan
 
 1. Apply each `Proposed changes` block to its canonical page; bump each page's `**Date:**`.
-2. Remove the `Unauthorized` vs `UserSuspended` Open question from 03-service-flows (resolved
-   by the Decision below).
+2. Apply the two Open-question `Remove` blocks: 01-domain-model's session client-context
+   wiring item and 03-service-flows' `Unauthorized` vs `UserSuspended` item (both resolved by
+   the Decisions below).
 3. No schema change.
 4. Flip `**Status:**` to `Merged`, stamp `**Merged:**`, move to `.specs/changes/merged/`.
 5. Update `.specs/README.md`.
@@ -164,6 +197,9 @@ variant is added or removed — `SessionRevoked` stays reserved.
 
 ### Decisions
 
+- _Device id stays on the session._ **Audit events record `ip_address`/`user_agent` only;
+  `device_id` is stored on the session.** The canonical `AuditEvent` shape has no `device_id`
+  field and this change wires emission, it does not reshape events.
 - _Suspended exchange audits `UserSuspended`, not `Unauthorized`._ **Every suspension
   rejection — exchange and refresh — emits the `UserSuspended` event type.** Resolves the
   03-service-flows Open question with one unambiguous event name.
@@ -177,7 +213,7 @@ variant is added or removed — `SessionRevoked` stays reserved.
   ULID deduplication id already carries the exactly-once semantics.
 - _Failed refreshes audit `ValidationFailed`, behind an emit threshold._ **Unknown/expired
   refresh attempts emit `ValidationFailed` at `debug`, and a new `[audit] emit_threshold`
-  (default `informational`) filters emission.** The abuse-detection signal is one config knob
+  (default `info`) filters emission.** The abuse-detection signal is one config knob
   away without making the default pipeline noisy.
 - _`SessionRevoked` stays reserved._ **The unused `AuditEventType` variant is kept.**
   Single-session revocation may yet need it, and dropping it churns the schema for no gain.
