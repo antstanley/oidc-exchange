@@ -36,3 +36,7 @@ minimumReleaseAgeExclude:
   - '@astrojs/compiler-binding@0.3.0'
   - '@astrojs/compiler-rs@0.3.0'
   - astro@7.0.4
+  # First-party packages published by this repo's own release pipeline: always
+  # freshly published, so the minimum-release-age policy must not gate them (it
+  # would keep them out of the lockfile and break the frozen-lockfile CI check).
+  - '@oidc-exchange/*'
