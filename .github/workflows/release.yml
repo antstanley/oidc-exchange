@@ -352,10 +352,16 @@ jobs:
         run: |
           set -euo pipefail
           for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
-            echo "publishing @oidc-exchange/${pkg}"
-            # ./ prefix: publish the local directory. A bare "npm/<pkg>" is read by
-            # npm as a github owner/repo shorthand and it tries to git-clone it.
-            npm publish --provenance --access public --ignore-scripts "./npm/${pkg}"
+            name="@oidc-exchange/${pkg}"
+            ver=$(node -p "require('./npm/${pkg}/package.json').version")
+            if npm view "${name}@${ver}" version >/dev/null 2>&1; then
+              echo "${name}@${ver} already published; skipping"
+            else
+              echo "publishing ${name}@${ver}"
+              # ./ prefix: publish the local directory. A bare "npm/<pkg>" is read
+              # by npm as a github owner/repo shorthand and it tries to git-clone it.
+              npm publish --provenance --access public --ignore-scripts "./npm/${pkg}"
+            fi
           done
 
       - name: Publish @oidc-exchange/node
@@ -363,7 +369,14 @@ jobs:
         # BOOTSTRAP: token auth for the first publish (see above).
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public --ignore-scripts
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./package.json').version")
+          if npm view "@oidc-exchange/node@${ver}" version >/dev/null 2>&1; then
+            echo "@oidc-exchange/node@${ver} already published; skipping"
+          else
+            npm publish --provenance --access public --ignore-scripts
+          fi
 
       - name: Build and publish @oidc-exchange/lambda
         working-directory: bindings/lambda
@@ -372,9 +385,15 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          pnpm install --ignore-scripts --no-frozen-lockfile
-          pnpm build
-          pnpm publish --provenance --access public --no-git-checks --ignore-scripts
+          set -euo pipefail
+          ver=$(node -p "require('./package.json').version")
+          if npm view "@oidc-exchange/lambda@${ver}" version >/dev/null 2>&1; then
+            echo "@oidc-exchange/lambda@${ver} already published; skipping"
+          else
+            pnpm install --ignore-scripts --no-frozen-lockfile
+            pnpm build
+            pnpm publish --provenance --access public --no-git-checks --ignore-scripts
+          fi
 
   build-python:
     name: Build Python (${{ matrix.target || matrix.command }})
