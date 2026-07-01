@@ -1,8 +1,10 @@
 {
   "private": true,
+  "type": "module",
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "prepare": "lefthook install",
+    "bump-version": "node scripts/bump-version.js",
     "lint": "pnpm -r --no-bail lint",
     "format": "pnpm -r format",
     "format:check": "pnpm -r --no-bail format:check",
