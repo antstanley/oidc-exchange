@@ -168,12 +168,17 @@ jobs:
     name: Build Node.js (${{ matrix.target }})
     needs: validate
     strategy:
+      # One leg failing must not cancel the others (each produces a platform
+      # binary the publish job needs).
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            # Native arm64 runner: napi build compiles the aarch64 module and its
+            # native deps (e.g. ring) without a cross toolchain.
+            os: ubuntu-24.04-arm
           - target: x86_64-pc-windows-msvc
             os: windows-latest
           - target: aarch64-apple-darwin
@@ -378,6 +383,9 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           packages-dir: dist/
+          # Idempotent re-runs: skip files already uploaded for this version
+          # (e.g. re-running a release whose npm half failed) instead of erroring.
+          skip-existing: true
 
   create-release:
     name: Create GitHub Release
