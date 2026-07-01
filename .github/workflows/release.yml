@@ -341,7 +341,11 @@ jobs:
         # unsupported, so the CjsResolvesToEsm resolution is not a failure here.
         run: npx --yes @arethetypeswrong/cli --pack --profile esm-only
 
-      - name: Publish platform packages
+      # Publishes are STAGED (npm stage publish), not direct: CI uploads to npm's
+      # staging area and the release is approved out-of-band (npm stage approve or
+      # the npmjs staged-packages UI) before it goes live. This lets the trusted
+      # publisher be restricted to stage-publish only.
+      - name: Stage platform packages
         working-directory: bindings/nodejs
         # BOOTSTRAP: NPM_TOKEN authenticates the first publish (the packages do
         # not exist yet, so trusted publishing cannot be configured). --provenance
@@ -357,14 +361,14 @@ jobs:
             if npm view "${name}@${ver}" version >/dev/null 2>&1; then
               echo "${name}@${ver} already published; skipping"
             else
-              echo "publishing ${name}@${ver}"
-              # ./ prefix: publish the local directory. A bare "npm/<pkg>" is read
+              echo "staging ${name}@${ver}"
+              # ./ prefix: stage the local directory. A bare "npm/<pkg>" is read
               # by npm as a github owner/repo shorthand and it tries to git-clone it.
-              npm publish --provenance --access public --ignore-scripts "./npm/${pkg}"
+              npm stage publish --provenance --access public --ignore-scripts "./npm/${pkg}"
             fi
           done
 
-      - name: Publish @oidc-exchange/node
+      - name: Stage @oidc-exchange/node
         working-directory: bindings/nodejs
         # BOOTSTRAP: token auth for the first publish (see above).
         env:
@@ -375,13 +379,14 @@ jobs:
           if npm view "@oidc-exchange/node@${ver}" version >/dev/null 2>&1; then
             echo "@oidc-exchange/node@${ver} already published; skipping"
           else
-            npm publish --provenance --access public --ignore-scripts
+            npm stage publish --provenance --access public --ignore-scripts
           fi
 
-      - name: Build and publish @oidc-exchange/lambda
+      - name: Build and stage @oidc-exchange/lambda
         working-directory: bindings/lambda
-        # BOOTSTRAP: token auth for the first publish (see above). pnpm publish
-        # rewrites the workspace: protocol dependency; --provenance attests via OIDC.
+        # BOOTSTRAP: token auth for the first publish (see above). pnpm has no
+        # stage command, and lambda has a workspace:^ dep npm can't rewrite, so
+        # pnpm pack (which rewrites it to a real version) then stage the tarball.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -392,8 +397,17 @@ jobs:
           else
             pnpm install --ignore-scripts --no-frozen-lockfile
             pnpm build
-            pnpm publish --provenance --access public --no-git-checks --ignore-scripts
+            pnpm pack --pack-destination "${RUNNER_TEMP}"
+            npm stage publish --provenance --access public --ignore-scripts \
+              "${RUNNER_TEMP}/oidc-exchange-lambda-${ver}.tgz"
           fi
+
+      - name: List pending staged packages (approve these to go live)
+        # Staged packages are not live until approved (npm stage approve <id> or
+        # the npmjs staged-packages UI). This surfaces what this run staged.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm stage list || true
 
   build-python:
     name: Build Python (${{ matrix.target || matrix.command }})
