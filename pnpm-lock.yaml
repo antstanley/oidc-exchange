@@ -145,17 +145,17 @@ importers:
         version: 4.1.9(@types/node@26.0.1)(vite@8.1.1(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(yaml@2.9.0))
     optionalDependencies:
       '@oidc-exchange/darwin-arm64':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@oidc-exchange/linux-arm64-gnu':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@oidc-exchange/linux-x64-gnu':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       '@oidc-exchange/win32-x64-msvc':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
 
 packages:
 
@@ -1337,23 +1337,23 @@ packages:
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
 
-  '@oidc-exchange/darwin-arm64@0.1.0':
-    resolution: {integrity: sha512-CSjmvDLSHc0SGxXklnfZuAxUZGQGoRmuSqLDMUShtArRHU3cRHkSM5YiEFrKQrb2qjI875YOqwXgA0HFECl/Jw==}
+  '@oidc-exchange/darwin-arm64@0.1.1':
+    resolution: {integrity: sha512-yEWJnND9kmqPe36i8yP9+2kfcj7D66j3SVbqetcXubJH24rkfenVnE8ANgo1CPQ359J0Sg+6RMRPZbL1QXg6gA==}
     cpu: [arm64]
     os: [darwin]
 
-  '@oidc-exchange/linux-arm64-gnu@0.1.0':
-    resolution: {integrity: sha512-35p6OST4KEiMKOOuE4X+V/jpof2tsOpdSPrdD+GGUQgWtxK1Esa0MZSV5beN2cSrGD/UZnVHAB8r9tIEzY8zkg==}
+  '@oidc-exchange/linux-arm64-gnu@0.1.1':
+    resolution: {integrity: sha512-03xn7ZPYLsu+IkWgipWF+Dt2qg67XQf126S4oT5nTmGuxNq5ezisrZ0zt50RMSrTth4tz3G5/srZRbw3l2AgYg==}
     cpu: [arm64]
     os: [linux]
 
-  '@oidc-exchange/linux-x64-gnu@0.1.0':
-    resolution: {integrity: sha512-ZNLb2W24zeZU+ncHm4APnpy16wUjdZfrh4HGJ5+k1GBFYNZiPLzdLEx3KWFyucmGHhQUtExdpjEhiLsyI4OltQ==}
+  '@oidc-exchange/linux-x64-gnu@0.1.1':
+    resolution: {integrity: sha512-YxmtEvESGPzRQsToF/xMGHfEWXEOAP4Rw40q0eyZRJKIFEsjR25AVr04xYFm1aKeEvVTkcugcbh1fwRW+xPVzw==}
     cpu: [x64]
     os: [linux]
 
-  '@oidc-exchange/win32-x64-msvc@0.1.0':
-    resolution: {integrity: sha512-yeRs9qkForM7cmXVhTi102HWS1zhMX0AtqR2SUAVuZVBz7tTmkfhJ3Dr1Bcc6F7exBz0kKdIx0VaC7f82wkXgQ==}
+  '@oidc-exchange/win32-x64-msvc@0.1.1':
+    resolution: {integrity: sha512-Q+AdyKACFFwPBHcfilhfqDwHI09SQsvcEKMB//BCVpheRt8xX+ipJ6C4l48qyHztIGcGU9z9lTcr4qw9AC4nEg==}
     cpu: [x64]
     os: [win32]
 
@@ -5687,16 +5687,16 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 27.0.0
 
-  '@oidc-exchange/darwin-arm64@0.1.0':
+  '@oidc-exchange/darwin-arm64@0.1.1':
     optional: true
 
-  '@oidc-exchange/linux-arm64-gnu@0.1.0':
+  '@oidc-exchange/linux-arm64-gnu@0.1.1':
     optional: true
 
-  '@oidc-exchange/linux-x64-gnu@0.1.0':
+  '@oidc-exchange/linux-x64-gnu@0.1.1':
     optional: true
 
-  '@oidc-exchange/win32-x64-msvc@0.1.0':
+  '@oidc-exchange/win32-x64-msvc@0.1.1':
     optional: true
 
   '@oslojs/encoding@1.1.0': {}
