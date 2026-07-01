@@ -347,12 +347,8 @@ jobs:
       # publisher be restricted to stage-publish only.
       - name: Stage platform packages
         working-directory: bindings/nodejs
-        # BOOTSTRAP: NPM_TOKEN authenticates the first publish (the packages do
-        # not exist yet, so trusted publishing cannot be configured). --provenance
-        # still attests via the OIDC id-token. Remove this env once the packages
-        # exist and their npm trusted publishers are configured.
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Auth is GitHub OIDC trusted publishing (id-token: write + registry-url);
+        # no token. --provenance attests the build to the source commit.
         run: |
           set -euo pipefail
           for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
@@ -370,9 +366,6 @@ jobs:
 
       - name: Stage @oidc-exchange/node
         working-directory: bindings/nodejs
-        # BOOTSTRAP: token auth for the first publish (see above).
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           ver=$(node -p "require('./package.json').version")
@@ -384,11 +377,9 @@ jobs:
 
       - name: Build and stage @oidc-exchange/lambda
         working-directory: bindings/lambda
-        # BOOTSTRAP: token auth for the first publish (see above). pnpm has no
-        # stage command, and lambda has a workspace:^ dep npm can't rewrite, so
-        # pnpm pack (which rewrites it to a real version) then stage the tarball.
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # pnpm has no stage command, and lambda has a workspace:^ dep npm can't
+        # rewrite, so pnpm pack (which rewrites it to a real version) then stage
+        # the tarball. Auth is OIDC trusted publishing (no token).
         run: |
           set -euo pipefail
           ver=$(node -p "require('./package.json').version")
@@ -405,8 +396,6 @@ jobs:
       - name: List pending staged packages (approve these to go live)
         # Staged packages are not live until approved (npm stage approve <id> or
         # the npmjs staged-packages UI). This surfaces what this run staged.
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm stage list || true
 
   build-python:
