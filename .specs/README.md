@@ -65,6 +65,19 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-06-29-add_local_enforcement_gates/plan.md](plans/2026-06-29-add_local_enforcement_gates/plan.md) | Done | [changes/merged/2026-06-24-add_local_enforcement_gates.md](changes/merged/2026-06-24-add_local_enforcement_gates.md) |
 | [plans/2026-06-30-add_npm_trusted_publishing/plan.md](plans/2026-06-30-add_npm_trusted_publishing/plan.md) | Done | [changes/merged/2026-06-29-add_npm_trusted_publishing.md](changes/merged/2026-06-29-add_npm_trusted_publishing.md) |
 | [plans/2026-06-30-add_pypi_trusted_publishing/plan.md](plans/2026-06-30-add_pypi_trusted_publishing/plan.md) | Done | [changes/merged/2026-06-29-add_pypi_trusted_publishing.md](changes/merged/2026-06-29-add_pypi_trusted_publishing.md) |
+| [plans/2026-07-02-complete_config_loading/plan.md](plans/2026-07-02-complete_config_loading/plan.md) | Draft | [changes/2026-07-01-complete_config_loading.md](changes/2026-07-01-complete_config_loading.md) |
+| [plans/2026-07-02-fix_kms_ecdsa_and_jwk_encoding/plan.md](plans/2026-07-02-fix_kms_ecdsa_and_jwk_encoding/plan.md) | Draft | [changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md](changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md) |
+| [plans/2026-07-02-valkey_session_store_conformance/plan.md](plans/2026-07-02-valkey_session_store_conformance/plan.md) | Draft | [changes/2026-07-01-valkey_session_store_conformance.md](changes/2026-07-01-valkey_session_store_conformance.md) |
+| [plans/2026-07-02-release_gil_in_python_binding/plan.md](plans/2026-07-02-release_gil_in_python_binding/plan.md) | Draft | [changes/2026-07-01-release_gil_in_python_binding.md](changes/2026-07-01-release_gil_in_python_binding.md) |
+| [plans/2026-07-02-require_iss_aud_in_token_validation/plan.md](plans/2026-07-02-require_iss_aud_in_token_validation/plan.md) | Draft | [changes/2026-07-01-require_iss_aud_in_token_validation.md](changes/2026-07-01-require_iss_aud_in_token_validation.md) |
+| [plans/2026-07-02-harden_outbound_provider_http/plan.md](plans/2026-07-02-harden_outbound_provider_http/plan.md) | Draft | [changes/2026-07-01-harden_outbound_provider_http.md](changes/2026-07-01-harden_outbound_provider_http.md) |
+| [plans/2026-07-02-fix_user_creation_race_and_dynamo_integrity/plan.md](plans/2026-07-02-fix_user_creation_race_and_dynamo_integrity/plan.md) | Draft | [changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md) |
+| [plans/2026-07-02-run_postgres_migrations_on_startup/plan.md](plans/2026-07-02-run_postgres_migrations_on_startup/plan.md) | Draft | [changes/2026-07-01-run_postgres_migrations_on_startup.md](changes/2026-07-01-run_postgres_migrations_on_startup.md) |
+| [plans/2026-07-02-enforce_user_lifecycle_transitions/plan.md](plans/2026-07-02-enforce_user_lifecycle_transitions/plan.md) | Draft | [changes/2026-07-01-enforce_user_lifecycle_transitions.md](changes/2026-07-01-enforce_user_lifecycle_transitions.md) |
+| [plans/2026-07-02-wire_audit_event_emission/plan.md](plans/2026-07-02-wire_audit_event_emission/plan.md) | Draft | [changes/2026-07-01-wire_audit_event_emission.md](changes/2026-07-01-wire_audit_event_emission.md) |
+| [plans/2026-07-02-webhook_user_sync_conformance/plan.md](plans/2026-07-02-webhook_user_sync_conformance/plan.md) | Draft | [changes/2026-07-01-webhook_user_sync_conformance.md](changes/2026-07-01-webhook_user_sync_conformance.md) |
+| [plans/2026-07-02-server_error_handling_and_shutdown/plan.md](plans/2026-07-02-server_error_handling_and_shutdown/plan.md) | Draft | [changes/2026-07-01-server_error_handling_and_shutdown.md](changes/2026-07-01-server_error_handling_and_shutdown.md) |
+| [plans/2026-07-02-implement_lambda_runtime/plan.md](plans/2026-07-02-implement_lambda_runtime/plan.md) | Draft | [changes/2026-07-01-implement_lambda_runtime.md](changes/2026-07-01-implement_lambda_runtime.md) |
 
 ## Conventions
 
