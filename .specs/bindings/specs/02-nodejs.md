@@ -1,6 +1,6 @@
 # Node.js Binding (`@oidc-exchange/node`)
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** bindings/nodejs
+**Status:** Implemented · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Scope:** bindings/nodejs
 
 A napi-rs native module wrapping [`crates/ffi`](01-ffi-core.md). Published as
 `@oidc-exchange/node` (ESM, `"type": "module"`).
@@ -45,6 +45,11 @@ loader that maps `{platform, arch}` to one of the optional platform packages (or
 binary for each is shipped as an optional dependency package under `npm/`:
 `@oidc-exchange/{linux-x64-gnu,linux-arm64-gnu,win32-x64-msvc,darwin-arm64}`. See
 [05-distribution.md](05-distribution.md).
+
+The root `package.json` declares the four platform packages as `optionalDependencies` pinned to
+the workspace version; `napi artifacts` copies each built `.node` into its `npm/<triple>` package
+at release time. npm installs only the entry matching the host `{os, cpu}`; the `index.js` loader
+resolves that package, falling back to a co-located `oidc-exchange.node`.
 
 ## Tests
 

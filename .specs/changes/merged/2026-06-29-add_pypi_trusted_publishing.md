@@ -1,6 +1,6 @@
 # Change: Publish `oidc-exchange` wheels to PyPI via trusted publishing
 
-**Status:** Proposed · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Target:** bindings/python, .github/workflows
+**Status:** Merged · **Date:** 2026-06-29 · **Merged:** 2026-06-30 · **Owner:** Ant Stanley · **Target:** bindings/python, .github/workflows
 
 Add a dedicated PyPI publish job to `release.yml` that builds `abi3` manylinux / macOS / Windows
 wheels plus an sdist for `oidc-exchange` and uploads them with **PyPI Trusted Publishing** (GitHub
@@ -11,8 +11,8 @@ OIDC, no `PYPI_TOKEN`).
 ## Motivation
 
 The canonical spec describes wheels the build does not produce.
-[`03-python.md`](../bindings/specs/03-python.md) and
-[`05-distribution.md`](../bindings/specs/05-distribution.md) state "`abi3` stable ABI targeting
+[`03-python.md`](../../bindings/specs/03-python.md) and
+[`05-distribution.md`](../../bindings/specs/05-distribution.md) state "`abi3` stable ABI targeting
 Python 3.10+ — one wheel per platform works across 3.10–3.13" on
 "`manylinux_2_28_{x86_64,aarch64}`, `win_amd64`, `macosx_11_0_arm64`". The code does neither:
 `bindings/python/pyproject.toml` enables only `pyo3/extension-module` (no `abi3`/`abi3-py310`
@@ -31,9 +31,9 @@ Trusted Publishing issues short-lived OIDC credentials per run via
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/bindings/specs/05-distribution.md`](../bindings/specs/05-distribution.md) → Release pipeline | `build-python` builds `abi3` manylinux wheels + sdist; `publish-pypi` uses trusted publishing |
-| [`.specs/bindings/specs/05-distribution.md`](../bindings/specs/05-distribution.md) → Assumptions / Decisions | Replace "PyPI credentials configured as secrets" with OIDC trusted publishing |
-| [`.specs/bindings/specs/03-python.md`](../bindings/specs/03-python.md) → Distribution | Note `pyproject.toml` enables the `abi3-py310` feature; manylinux build via maturin |
+| [`.specs/bindings/specs/05-distribution.md`](../../bindings/specs/05-distribution.md) → Release pipeline | `build-python` builds `abi3` manylinux wheels + sdist; `publish-pypi` uses trusted publishing |
+| [`.specs/bindings/specs/05-distribution.md`](../../bindings/specs/05-distribution.md) → Assumptions / Decisions | Replace "PyPI credentials configured as secrets" with OIDC trusted publishing |
+| [`.specs/bindings/specs/03-python.md`](../../bindings/specs/03-python.md) → Distribution | Note `pyproject.toml` enables the `abi3-py310` feature; manylinux build via maturin |
 
 ---
 

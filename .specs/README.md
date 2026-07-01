@@ -37,8 +37,8 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | [changes/merged/2026-06-24-cleanup_stale_references.md](changes/merged/2026-06-24-cleanup_stale_references.md) | Merged | docs/examples: remove stale cloudtrail/atproto references |
 | [changes/merged/2026-06-24-add_local_enforcement_gates.md](changes/merged/2026-06-24-add_local_enforcement_gates.md) | Merged | tooling: pre-push hook, Python type checker, limit lints |
 | [changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md](changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md) | Merged | tooling: lefthook hook, pyright, TS workspace lint/format/typecheck |
-| [changes/2026-06-29-add_npm_trusted_publishing.md](changes/2026-06-29-add_npm_trusted_publishing.md) | Proposed | distribution: npm publish job, platform packages, OIDC trusted publishing |
-| [changes/2026-06-29-add_pypi_trusted_publishing.md](changes/2026-06-29-add_pypi_trusted_publishing.md) | Proposed | distribution: PyPI publish job, abi3/manylinux wheels, OIDC trusted publishing |
+| [changes/merged/2026-06-29-add_npm_trusted_publishing.md](changes/merged/2026-06-29-add_npm_trusted_publishing.md) | Merged | distribution: npm publish job, platform packages, OIDC trusted publishing |
+| [changes/merged/2026-06-29-add_pypi_trusted_publishing.md](changes/merged/2026-06-29-add_pypi_trusted_publishing.md) | Merged | distribution: PyPI publish job, abi3/manylinux wheels, OIDC trusted publishing |
 
 ## Plans
 
@@ -50,6 +50,8 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 |---|---|---|
 | [plans/2026-06-29-cleanup_stale_references/plan.md](plans/2026-06-29-cleanup_stale_references/plan.md) | Done | docs/examples/config sweep of stale cloudtrail/atproto references + 06-configuration Open-question removal + merge housekeeping |
 | [plans/2026-06-29-add_local_enforcement_gates/plan.md](plans/2026-06-29-add_local_enforcement_gates/plan.md) | Done | [changes/merged/2026-06-24-add_local_enforcement_gates.md](changes/merged/2026-06-24-add_local_enforcement_gates.md) |
+| [plans/2026-06-30-add_npm_trusted_publishing/plan.md](plans/2026-06-30-add_npm_trusted_publishing/plan.md) | Done | [changes/merged/2026-06-29-add_npm_trusted_publishing.md](changes/merged/2026-06-29-add_npm_trusted_publishing.md) |
+| [plans/2026-06-30-add_pypi_trusted_publishing/plan.md](plans/2026-06-30-add_pypi_trusted_publishing/plan.md) | Done | [changes/merged/2026-06-29-add_pypi_trusted_publishing.md](changes/merged/2026-06-29-add_pypi_trusted_publishing.md) |
 
 ## Conventions
 

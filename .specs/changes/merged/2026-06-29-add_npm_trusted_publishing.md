@@ -1,6 +1,6 @@
 # Change: Publish `@oidc-exchange/node` to npm via trusted publishing
 
-**Status:** Proposed · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Target:** bindings/nodejs, .github/workflows
+**Status:** Merged · **Date:** 2026-06-29 · **Merged:** 2026-06-30 · **Owner:** Ant Stanley · **Target:** bindings/nodejs, .github/workflows
 
 Add a dedicated, hardened npm publish job to `release.yml` that ships `@oidc-exchange/node`
 together with its four platform packages, authenticated by GitHub OIDC **trusted publishing**
@@ -12,8 +12,8 @@ together with its four platform packages, authenticated by GitHub OIDC **trusted
 ## Motivation
 
 The canonical spec already describes a working napi-rs distribution that the pipeline does not
-deliver. [`05-distribution.md`](../bindings/specs/05-distribution.md) lists the npm artifact as
-"`@oidc-exchange/node` (+ platform packages)", and [`02-nodejs.md`](../bindings/specs/02-nodejs.md)
+deliver. [`05-distribution.md`](../../bindings/specs/05-distribution.md) lists the npm artifact as
+"`@oidc-exchange/node` (+ platform packages)", and [`02-nodejs.md`](../../bindings/specs/02-nodejs.md)
 records "Optional-dependency native packages — per-platform `.node` binaries ship as
 optionalDependencies". Neither is true on `main`: the `publish-nodejs` job publishes only the
 root package, the four `npm/<triple>` platform packages are never published and never receive
@@ -34,10 +34,10 @@ restricted GitHub Environment, and validate the package with `publint` and
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/bindings/specs/05-distribution.md`](../bindings/specs/05-distribution.md) → Release pipeline | Replace the single `publish-nodejs` step with a `build-nodejs` → `publish-npm` pair; describe trusted publishing |
-| [`.specs/bindings/specs/05-distribution.md`](../bindings/specs/05-distribution.md) → Artifacts | Note provenance and the published platform-package set |
-| [`.specs/bindings/specs/05-distribution.md`](../bindings/specs/05-distribution.md) → Assumptions / Decisions | Replace "npm credentials configured as secrets" with OIDC trusted publishing |
-| [`.specs/bindings/specs/02-nodejs.md`](../bindings/specs/02-nodejs.md) → Distribution | Note `package.json` carries `optionalDependencies` for the platform packages, populated by `napi artifacts` |
+| [`.specs/bindings/specs/05-distribution.md`](../../bindings/specs/05-distribution.md) → Release pipeline | Replace the single `publish-nodejs` step with a `build-nodejs` → `publish-npm` pair; describe trusted publishing |
+| [`.specs/bindings/specs/05-distribution.md`](../../bindings/specs/05-distribution.md) → Artifacts | Note provenance and the published platform-package set |
+| [`.specs/bindings/specs/05-distribution.md`](../../bindings/specs/05-distribution.md) → Assumptions / Decisions | Replace "npm credentials configured as secrets" with OIDC trusted publishing |
+| [`.specs/bindings/specs/02-nodejs.md`](../../bindings/specs/02-nodejs.md) → Distribution | Note `package.json` carries `optionalDependencies` for the platform packages, populated by `napi artifacts` |
 
 ---
 

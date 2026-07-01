@@ -2,6 +2,11 @@
   "name": "@oidc-exchange/win32-x64-msvc",
   "version": "0.1.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/antstanley/oidc-exchange.git",
+    "directory": "bindings/nodejs/npm/win32-x64-msvc"
+  },
   "files": [
     "oidc-exchange.win32-x64-msvc.node"
   ],
