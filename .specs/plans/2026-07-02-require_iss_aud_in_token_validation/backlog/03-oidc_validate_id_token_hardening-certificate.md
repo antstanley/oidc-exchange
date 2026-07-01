@@ -10,14 +10,16 @@
 
 ## Definition
 
-DONE(Task 03) ≡ every obligation O1…O5 below holds, each backed by the evidence the obligation
+DONE(Task 03) ≡ every obligation O1…O6 below holds, each backed by the evidence the obligation
 names — not by assertion.
 
 ## Premises
 
 - **P1 — Goal.** The generic OIDC adapter rejects `iss`/`aud`-omitting and future-`nbf` tokens,
-  infers the alg from the JWK's `kty`/`crv` when `alg` is absent, and coerces `email_verified`.
-- **P2 — Obligations.** Done iff O1…O5 all hold; O5 is the Reviewable item.
+  infers the alg from the JWK's `kty`/`crv` when `alg` is absent, and coerces `email_verified`;
+  and the `05-provider-system.md` §"OidcProvider behaviour" + §Decisions *Required spec claims*
+  prose is moved to its merged form alongside the code change.
+- **P2 — Obligations.** Done iff O1…O6 all hold; O6 is the Reviewable item.
 - **P3 — Invariants.** Must not break the existing valid-token path in `validate_id_token`
   (`crates/adapters/src/oidc/mod.rs`), the `JwksCache` fetch/decode, the `sub` extraction, or the
   behaviour for JWKs that *do* carry a recognised `alg` string.
@@ -42,14 +44,20 @@ names — not by assertion.
   - *Checks:* resolve `coerce_bool` to `oidc_exchange_adapters::shared::claims::coerce_bool` (task 01), not a local helper.
   - *Status:* ☐ unverified
 
-- **O4 — Meets the repo definition of done.**
+- **O4 — `05-provider-system.md` prose moved to its merged form alongside the code.**
+  - *Claim:* §"OidcProvider behaviour" replaces the single `validate_id_token` bullet with the two-bullet merged form (required `exp`/`iss`/`aud` presence via `set_required_spec_claims`, `nbf`-when-present, and JWK `kty`/`crv` alg inference with the alg-less-key reject), §Decisions carries the *Required spec claims* entry, and the page `**Date:**` is bumped.
+  - *Evidence to collect:* read `.specs/service/specs/05-provider-system.md`; confirm the §"OidcProvider behaviour" bullets and the §Decisions *Required spec claims* entry match the change spec's Proposed-changes blocks, and that `**Date:**` was bumped from `2026-06-24`.
+  - *Checks:* confirm the §"Tiers, Tier 2 Apple" Apple-coercion note (task 04's block) and the `**Date:**` value are consistent — both tasks set the same date; a divergent date or a missing Apple note signals a merge that dropped one edit.
+  - *Status:* ☐ unverified
+
+- **O5 — Meets the repo definition of done.**
   - *Claim:* tests pass, lint/format clean, new bounds named, ≥2 assertions per touched function.
   - *Evidence to collect:* run `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, and `cargo nextest run --workspace` (from `.specs/development-guidelines.md` §Definition of done) — expect all clean.
   - *Status:* ☐ unverified
 
-- **O5 — Reviewable: the OIDC tests show every new case behaves as specified (Reviewable).**
-  - *Claim:* a reviewer runs the `oidc/mod.rs` tests and sees the missing-`iss`/`aud`, future-`nbf`, alg-less RSA/EC, and string-`email_verified` cases behave as specified.
-  - *Evidence to collect:* run `cargo nextest run -p oidc-exchange-adapters` filtered to the `oidc` tests; observe each named case PASS.
+- **O6 — Reviewable: the OIDC tests show every new case behaves as specified (Reviewable).**
+  - *Claim:* a reviewer runs the `oidc/mod.rs` tests and sees the missing-`iss`/`aud`, future-`nbf`, alg-less RSA/EC, and string-`email_verified` cases behave as specified, and confirms 05-provider-system.md §"OidcProvider behaviour" + §Decisions *Required spec claims* match the merged form.
+  - *Evidence to collect:* run `cargo nextest run -p oidc-exchange-adapters` filtered to the `oidc` tests; observe each named case PASS; open 05-provider-system.md and confirm the behaviour bullets and the Decision.
   - *Status:* ☐ unverified
 
 ## Regression check

@@ -1,6 +1,6 @@
 # Plan: Webhook user-sync conformance (JIT notify, 2xx-only, bounded backoff)
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-webhook_user_sync_conformance.md](../../changes/2026-07-01-webhook_user_sync_conformance.md)
+**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-webhook_user_sync_conformance.md](../../changes/2026-07-01-webhook_user_sync_conformance.md)
 
 This plan brings the user-sync path into line with its canonical contract along three axes, sequenced so the feature that adds request-path latency lands last, once its worst case is bounded. First it hardens the webhook adapter: delivery counts only a 2xx as success and stops following redirects so the HMAC-signed body is never re-POSTed cross-host (task 01), and the retry backoff is capped per attempt so a large `retries` cannot sleep for hours or overflow the shift (task 02). Then it clamps `[user_sync.webhook].retries` at config load so a misconfiguration cannot bypass the adapter bound (task 03). Finally it wires the JIT `notify_user_created` into the exchange flow — awaited, best-effort, like the admin flows — reviewed through the two adapter bounds and the config clamp that make its added `/token` latency acceptable (task 04). Four thin vertical slices, each provable with a `wiremock` or unit test.
 

@@ -1,6 +1,6 @@
 # Plan: Require iss/aud presence and fix claim handling in ID-token validation
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-require_iss_aud_in_token_validation.md](../../changes/2026-07-01-require_iss_aud_in_token_validation.md)
+**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-require_iss_aud_in_token_validation.md](../../changes/2026-07-01-require_iss_aud_in_token_validation.md)
 
 This plan hardens ID-token validation in both identity providers so a provider-signed JWT that omits `iss` or `aud` is rejected (closing the cross-token-type confusion class), validates `nbf` when present, infers the signing algorithm from the JWK when it carries no `alg`, coerces Apple's bool-or-string `email_verified`/`is_private_email`, and surfaces `is_private_email` as a first-class `IdentityClaims` field. The decomposition puts two enablers first — a shared bool-or-string coercion helper (01) that both `validate_id_token` bodies call, and the `IdentityClaims.is_private_email` domain-type change (02) with its schema/prose and every constructor updated — then the two provider hardening slices that are reviewed through them: the generic OIDC adapter (03, which also gains alg-inference) and the Apple provider (04, which also populates `is_private_email`). Ordering leads with the enablers so each provider slice lands against a compiling helper and field and can be reviewed end to end.
 
@@ -30,8 +30,8 @@ The dependency table is the **source of truth**; the Mermaid graph visualizes it
 |---|---|---|---|
 | 01 · shared bool coercion | — | — | a `coerce_bool` helper in `adapters/shared` that maps JSON bool or `"true"`/`"false"` strings to `Option<bool>`, with unit tests |
 | 02 · identity_claims is_private_email | — | — | `IdentityClaims` carries `is_private_email: Option<bool>`; schema and 01-domain-model prose updated; every constructor compiles with the new field |
-| 03 · oidc validate hardening | 01, 02 | build | the generic OIDC adapter rejects `iss`/`aud`-omitting and future-`nbf` tokens, infers alg from the JWK's `kty`/`crv` when `alg` is absent, and coerces `email_verified` |
-| 04 · apple validate hardening | 01, 02 | build | the Apple provider rejects `iss`/`aud`-omitting and future-`nbf` tokens, coerces `email_verified`, and populates `is_private_email` from bool-or-string |
+| 03 · oidc validate hardening | 01, 02 | build | the generic OIDC adapter rejects `iss`/`aud`-omitting and future-`nbf` tokens, infers alg from the JWK's `kty`/`crv` when `alg` is absent, and coerces `email_verified`; plus 05-provider-system.md §"OidcProvider behaviour" + §Decisions *Required spec claims* updated to the merged form |
+| 04 · apple validate hardening | 01, 02 | build | the Apple provider rejects `iss`/`aud`-omitting and future-`nbf` tokens, coerces `email_verified`, and populates `is_private_email` from bool-or-string; plus 05-provider-system.md §"Tiers, Tier 2 Apple" updated with the Apple coercion note |
 
 Edge kinds: 03 and 04 both take a **build** edge from 01 (their `validate_id_token` bodies call the shared `coerce_bool`) and from 02 (they construct `IdentityClaims`, which now carries `is_private_email`, and 04 populates it).
 
@@ -63,6 +63,7 @@ Edge kinds: 03 and 04 both take a **build** edge from 01 (their `validate_id_tok
 - *Enablers before providers.* **The coercion helper (01) and the `is_private_email` field (02) are separate tasks scheduled ahead of the provider slices.** Both are reviewed-through by 03 and 04; landing them first keeps each provider slice a thin, compiling, end-to-end-reviewable change rather than bundling a domain-type migration into a validation fix.
 - *One hardening task per provider.* **The required-claims, `nbf`, alg-inference (OIDC only), and coercion changes are grouped per provider (03, 04) rather than split by concern.** They all edit the same `validate_id_token` body in one crate; splitting by concern would force overlapping edits to the same ~40-line region across tasks. Each task's DoD stays at ~5 acceptance items.
 - *RSA without `alg` means RS256.* **An alg-less `kty: RSA` JWK is treated as RS256** (task 03), matching the change spec's decision: the RSA family is not distinguishable from key parameters alone and the untrusted header must not decide; RS256 is Azure AD's actual signing algorithm.
+- *Affected prose moves with its code, not deferred to merge.* **Each affected canonical page is updated during the build by the task that realises its behaviour** — mirroring task 02, which applies the 01-domain-model bullet and the schema fragment. The three `05-provider-system.md` Proposed-changes blocks are split by ownership: task 03 applies §"OidcProvider behaviour" (required claims, `nbf`, alg inference) and the §Decisions *Required spec claims* Add; task 04 applies §"Tiers, Tier 2 Apple" (bool-or-string coercion, first-class `is_private_email`). Both bump the page `**Date:**` to `2026-07-02`; because the two edits touch different sections and set an identical `**Date:**` line, they merge cleanly even though 03 and 04 are otherwise independent. The change spec's Merge plan then only flips Status and moves the change file — the page prose is already in place.
 
 **Open questions**
 

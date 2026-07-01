@@ -10,14 +10,16 @@
 
 ## Definition
 
-DONE(Task 04) ≡ every obligation O1…O5 below holds, each backed by the evidence the obligation
+DONE(Task 04) ≡ every obligation O1…O6 below holds, each backed by the evidence the obligation
 names — not by assertion.
 
 ## Premises
 
 - **P1 — Goal.** The Apple provider rejects `iss`/`aud`-omitting and future-`nbf` tokens, coerces
-  `email_verified` via the shared helper, and populates `is_private_email` from bool-or-string coercion.
-- **P2 — Obligations.** Done iff O1…O5 all hold; O5 is the Reviewable item.
+  `email_verified` via the shared helper, and populates `is_private_email` from bool-or-string coercion;
+  and the `05-provider-system.md` §"Tiers, Tier 2 Apple" prose gains the Apple coercion note alongside
+  the code change.
+- **P2 — Obligations.** Done iff O1…O6 all hold; O6 is the Reviewable item.
 - **P3 — Invariants.** Must not break the existing Apple valid-token path in `validate_id_token`
   (`crates/providers/src/apple.rs`), the existing alg-reject at `:249-259`, the `JwksCache` fetch,
   or the `sub` extraction.
@@ -41,14 +43,20 @@ names — not by assertion.
   - *Evidence to collect:* enumerate the new tests in the `apple.rs` test module (using `generate_es256_test_keys`); confirm each rejection path asserts `Err` and each coercion asserts the expected `Some(_)`.
   - *Status:* ☐ unverified
 
-- **O4 — Meets the repo definition of done.**
+- **O4 — `05-provider-system.md` §"Tiers, Tier 2 Apple" gains the Apple-coercion note alongside the code.**
+  - *Claim:* the Tier 2 Apple description carries the bool-or-string coercion note for `email_verified` and `is_private_email`, states `is_private_email` is a first-class `Option<bool>` populated only by the Apple provider, and the page `**Date:**` is bumped.
+  - *Evidence to collect:* read `.specs/service/specs/05-provider-system.md`; confirm the Tier 2 Apple coercion note matches the change spec's §"Tiers, Tier 2 Apple" Proposed-changes block, and that `**Date:**` was bumped from `2026-06-24`.
+  - *Checks:* confirm the §"OidcProvider behaviour" + §Decisions *Required spec claims* edits (task 03's blocks) and the `**Date:**` value are consistent — both tasks set the same date; a divergent date or a missing behaviour/Decision block signals a merge that dropped one edit.
+  - *Status:* ☐ unverified
+
+- **O5 — Meets the repo definition of done.**
   - *Claim:* tests pass, lint/format clean, new bounds named, ≥2 assertions per touched function.
   - *Evidence to collect:* run `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, and `cargo nextest run --workspace` (from `.specs/development-guidelines.md` §Definition of done) — expect all clean.
   - *Status:* ☐ unverified
 
-- **O5 — Reviewable: the Apple tests show every new case behaves as specified (Reviewable).**
-  - *Claim:* a reviewer runs the `apple.rs` tests and sees the missing-`iss`/`aud`, future-`nbf`, string-`email_verified`, and string/bool-`is_private_email` cases behave as specified.
-  - *Evidence to collect:* run `cargo nextest run -p oidc-exchange-providers` filtered to the `apple` tests; observe each named case PASS.
+- **O6 — Reviewable: the Apple tests show every new case behaves as specified (Reviewable).**
+  - *Claim:* a reviewer runs the `apple.rs` tests and sees the missing-`iss`/`aud`, future-`nbf`, string-`email_verified`, and string/bool-`is_private_email` cases behave as specified, and confirms 05-provider-system.md §"Tiers, Tier 2 Apple" carries the Apple coercion note.
+  - *Evidence to collect:* run `cargo nextest run -p oidc-exchange-providers` filtered to the `apple` tests; observe each named case PASS; open 05-provider-system.md and confirm the Apple coercion note.
   - *Status:* ☐ unverified
 
 ## Regression check

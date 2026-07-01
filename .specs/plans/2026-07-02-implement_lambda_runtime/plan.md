@@ -1,6 +1,6 @@
 # Plan: Implement Lambda runtime mode in the server binary
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-implement_lambda_runtime.md](../../changes/2026-07-01-implement_lambda_runtime.md)
+**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-implement_lambda_runtime.md](../../changes/2026-07-01-implement_lambda_runtime.md)
 
 Make the `oidc-exchange` server binary actually run as an AWS Lambda: when `AWS_LAMBDA_RUNTIME_API`
 is present, serve the same axum router through `lambda_http` instead of logging "not yet
