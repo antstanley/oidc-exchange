@@ -192,7 +192,10 @@ jobs:
       - run: pnpm add -g @napi-rs/cli
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: pnpm install
+        # --no-frozen-lockfile: the root optionalDependencies point at the
+        # @oidc-exchange/<triple> platform packages that THIS pipeline publishes,
+        # so they are not resolvable at build time; a frozen install would fail.
+        run: pnpm install --no-frozen-lockfile
       - name: Build
         working-directory: bindings/nodejs
         run: napi build --release --target ${{ matrix.target }}
@@ -271,7 +274,12 @@ jobs:
 
       - name: Publish platform packages
         working-directory: bindings/nodejs
-        # No auth token env: authentication is GitHub OIDC trusted publishing.
+        # BOOTSTRAP: NPM_TOKEN authenticates the first publish (the packages do
+        # not exist yet, so trusted publishing cannot be configured). --provenance
+        # still attests via the OIDC id-token. Remove this env once the packages
+        # exist and their npm trusted publishers are configured.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
@@ -281,12 +289,17 @@ jobs:
 
       - name: Publish @oidc-exchange/node
         working-directory: bindings/nodejs
+        # BOOTSTRAP: token auth for the first publish (see above).
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --ignore-scripts
 
       - name: Build and publish @oidc-exchange/lambda
         working-directory: bindings/lambda
-        # pnpm publish rewrites the workspace: protocol dependency and, like the
-        # steps above, authenticates via OIDC trusted publishing (no token).
+        # BOOTSTRAP: token auth for the first publish (see above). pnpm publish
+        # rewrites the workspace: protocol dependency; --provenance attests via OIDC.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           pnpm install --ignore-scripts --no-frozen-lockfile
           pnpm build
