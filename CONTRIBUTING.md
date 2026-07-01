@@ -334,6 +334,100 @@ adding unnecessary load during token storms.
 
 Prefix with a type when it helps clarity: `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`.
 
+## Releasing
+
+Releases are cut by pushing a Git tag. Pushing `vX.Y.Z` triggers
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds every
+artifact and publishes to npm, PyPI, and the container registries via OIDC **trusted
+publishing** — there are no long-lived registry tokens in the repo.
+
+### What gets published
+
+| Artifact | Registry | Notes |
+|----------|----------|-------|
+| `@oidc-exchange/node` + 4 platform binaries (`@oidc-exchange/{darwin-arm64,linux-arm64-gnu,linux-x64-gnu,win32-x64-msvc}`) | npm | trusted publishing, **staged** (needs manual approval) |
+| `@oidc-exchange/lambda` | npm | trusted publishing, staged |
+| `oidc-exchange` (abi3 wheels + sdist) | PyPI | trusted publishing |
+| `antstanley80/oidc-exchange` | Docker Hub + `ghcr.io` | multi-arch (amd64 + arm64) |
+
+### Step 1 — bump the version
+
+Every manifest must agree on the version or the release workflow's `validate` job aborts.
+Use the bump script rather than editing by hand:
+
+```bash
+pnpm bump-version 0.1.2      # or: node scripts/bump-version.js 0.1.2
+```
+
+It updates, in lockstep:
+
+- `Cargo.toml` (workspace version) and regenerates `Cargo.lock`
+- `bindings/python/pyproject.toml` and regenerates `bindings/python/uv.lock`
+- `bindings/nodejs/package.json` (version + the four `@oidc-exchange/*` `optionalDependencies`)
+- `bindings/nodejs/npm/<triple>/package.json` (all four platform packages)
+- `bindings/lambda/package.json` (version + the `@oidc-exchange/node` peer floor)
+
+It deliberately does **not** touch `pnpm-lock.yaml`, and it does **not** commit, tag, or
+push — see steps 2, 3, and 5.
+
+### Step 2 — land the bump on `main`
+
+```bash
+jj describe -m "release: v0.1.2"
+jj bookmark set release/v0.1.2
+jj git push --bookmark release/v0.1.2
+```
+
+Open a PR and merge it to `main`. Version bumps go through a PR like any other change — CI
+must be green first.
+
+### Step 3 — tag the release
+
+Tag the **merged** commit on `main` and push the tag. jj has no native tag command, so this
+is the one sanctioned use of the Git CLI (or create the tag from the GitHub Releases UI):
+
+```bash
+jj git fetch                        # pull the merged main
+git tag v0.1.2 <merge-commit-sha>   # the squash-merge commit on main
+git push origin v0.1.2
+```
+
+Pushing the tag starts the release workflow. Its `validate` job re-checks that `Cargo.toml`,
+`bindings/nodejs/package.json`, and `bindings/python/pyproject.toml` all equal `0.1.2`; a
+mismatch aborts before anything publishes.
+
+### Step 4 — approve the staged npm packages
+
+npm publishing is **staged**: the workflow uploads the packages but does not make them
+public. Approve them to finish the npm release:
+
+```bash
+npm stage list
+npm stage approve <id>              # or approve from the npmjs.com UI
+```
+
+PyPI and the container images publish without a manual step.
+
+### Step 5 — refresh `pnpm-lock.yaml`
+
+The four `@oidc-exchange/*` platform packages are **self-published**: they cannot enter
+`pnpm-lock.yaml` until they exist on npm, which is why the bump script leaves the lockfile
+alone. Once step 4 makes them public:
+
+```bash
+pnpm install                             # resolves the new platform packages into the lock
+CI=true pnpm install --frozen-lockfile   # verify it matches (the check CI runs)
+```
+
+Commit the refreshed `pnpm-lock.yaml` and PR it to `main`.
+
+### Re-running a release
+
+The workflow is idempotent. Its preflight queries npm, PyPI, and `ghcr.io` for the target
+version and skips the build+publish job for any artifact already published, so a re-run
+after a partial failure only does the outstanding work instead of failing on a
+duplicate-version push.
+
 ## Running the Full Stack Locally
 
 The `examples/aws-web/` directory contains a complete demo application (SvelteKit + CDK). For local development without AWS:
