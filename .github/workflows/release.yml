@@ -205,7 +205,9 @@ jobs:
         run: pnpm install --no-frozen-lockfile
       - name: Build
         working-directory: bindings/nodejs
-        run: napi build --release --target ${{ matrix.target }}
+        # --platform: emit oidc-exchange.<triple>.node so each artifact is uniquely
+        # named and `napi artifacts` can distribute it into its npm/<triple> package.
+        run: napi build --release --platform --target ${{ matrix.target }}
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
