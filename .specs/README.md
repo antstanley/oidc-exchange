@@ -34,6 +34,19 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 |---|---|---|
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
+| [changes/2026-07-01-require_iss_aud_in_token_validation.md](changes/2026-07-01-require_iss_aud_in_token_validation.md) | Proposed | service: require `iss`/`aud` presence, `nbf`, JWK alg inference, Apple `email_verified` coercion |
+| [changes/2026-07-01-harden_outbound_provider_http.md](changes/2026-07-01-harden_outbound_provider_http.md) | Proposed | service: shared HTTP client + timeouts, JWKS status/rotation handling, token-endpoint and discovery error checks |
+| [changes/2026-07-01-wire_audit_event_emission.md](changes/2026-07-01-wire_audit_event_emission.md) | Proposed | service: `emit_audit` call sites in every flow, client-context plumbing, stdout/SQS audit hardening |
+| [changes/2026-07-01-server_error_handling_and_shutdown.md](changes/2026-07-01-server_error_handling_and_shutdown.md) | Proposed | service: revoke 503 on backend failure, `server_error` logging, per-request span, graceful shutdown |
+| [changes/2026-07-01-complete_config_loading.md](changes/2026-07-01-complete_config_loading.md) | Proposed | service: config overlay merge, env overrides, fail-closed `${VAR}` placeholders, startup validation |
+| [changes/2026-07-01-implement_lambda_runtime.md](changes/2026-07-01-implement_lambda_runtime.md) | Proposed | service: serve the axum router via `lambda_http` in Lambda mode |
+| [changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md](changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md) | Proposed | service: KMS ES* DER→raw JWS signatures, RFC 7518 JWK `n`/`e`, ES512 JWK |
+| [changes/2026-07-01-run_postgres_migrations_on_startup.md](changes/2026-07-01-run_postgres_migrations_on_startup.md) | Proposed | service: execute Postgres `MIGRATIONS` in `create_pool` |
+| [changes/2026-07-01-valkey_session_store_conformance.md](changes/2026-07-01-valkey_session_store_conformance.md) | Proposed | service: Valkey session count, atomic TTL'd writes, expired-index cleanup |
+| [changes/2026-07-01-enforce_user_lifecycle_transitions.md](changes/2026-07-01-enforce_user_lifecycle_transitions.md) | Proposed | service: lifecycle enforcement in admin updates, session revocation on delete, 4xx on unknown id |
+| [changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md) | Proposed | service: `(provider, external_id)` uniqueness on DynamoDB, JIT-create race, batch-write retry, update concurrency |
+| [changes/2026-07-01-webhook_user_sync_conformance.md](changes/2026-07-01-webhook_user_sync_conformance.md) | Proposed | service: JIT `user.created` webhook, 2xx-only delivery, redirect and backoff limits |
+| [changes/2026-07-01-release_gil_in_python_binding.md](changes/2026-07-01-release_gil_in_python_binding.md) | Proposed | bindings: release the GIL around the blocking FFI call |
 | [changes/merged/2026-06-24-cleanup_stale_references.md](changes/merged/2026-06-24-cleanup_stale_references.md) | Merged | docs/examples: remove stale cloudtrail/atproto references |
 | [changes/merged/2026-06-24-add_local_enforcement_gates.md](changes/merged/2026-06-24-add_local_enforcement_gates.md) | Merged | tooling: pre-push hook, Python type checker, limit lints |
 | [changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md](changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md) | Merged | tooling: lefthook hook, pyright, TS workspace lint/format/typecheck |
