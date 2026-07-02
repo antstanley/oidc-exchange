@@ -1,6 +1,6 @@
 # Plan: Release the GIL around the blocking FFI call in the Python binding
 
-**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-release_gil_in_python_binding.md](../../changes/2026-07-01-release_gil_in_python_binding.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-release_gil_in_python_binding.md](../../changes/2026-07-01-release_gil_in_python_binding.md)
 
 The change makes the PyO3 binding's `handle_request_sync` release the GIL around the blocking
 FFI `handle_request` call, so the executor thread no longer freezes the asyncio event loop and
