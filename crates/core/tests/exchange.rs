@@ -266,6 +266,7 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
             email: Some("user@other.com".to_string()),
             email_verified: Some(true),
             name: Some("Test User".to_string()),
+            is_private_email: None,
             raw_claims: HashMap::new(),
         })
         .await;
@@ -310,6 +311,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email: Some("user@sub.example.com".to_string()),
                 email_verified: Some(true),
                 name: None,
+                is_private_email: None,
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -335,6 +337,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email: Some("user@a.b.example.com".to_string()),
                 email_verified: Some(true),
                 name: None,
+                is_private_email: None,
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -360,6 +363,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email: Some("user@example.com".to_string()),
                 email_verified: Some(true),
                 name: None,
+                is_private_email: None,
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -390,6 +394,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email: Some("user@notexample.com".to_string()),
                 email_verified: Some(true),
                 name: None,
+                is_private_email: None,
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -503,6 +508,7 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
             email: None,
             email_verified: None,
             name: Some("No Email User".to_string()),
+            is_private_email: None,
             raw_claims: HashMap::new(),
         })
         .await;

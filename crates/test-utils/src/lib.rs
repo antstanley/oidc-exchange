@@ -416,6 +416,7 @@ impl MockIdentityProvider {
             email: Some("test@example.com".to_string()),
             email_verified: Some(true),
             name: Some("Test User".to_string()),
+            is_private_email: None,
             raw_claims: HashMap::new(),
         };
 
@@ -453,6 +454,7 @@ impl IdentityProvider for MockIdentityProvider {
             email: Some("test@example.com".to_string()),
             email_verified: Some(true),
             name: Some("Test User".to_string()),
+            is_private_email: None,
             raw_claims: HashMap::new(),
         }))
     }

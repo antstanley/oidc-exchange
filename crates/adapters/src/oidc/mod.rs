@@ -159,6 +159,7 @@ impl IdentityProvider for OidcProvider {
             email: claims["email"].as_str().map(String::from),
             email_verified: claims["email_verified"].as_bool(),
             name: claims["name"].as_str().map(String::from),
+            is_private_email: None,
             raw_claims: claims
                 .as_object()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())

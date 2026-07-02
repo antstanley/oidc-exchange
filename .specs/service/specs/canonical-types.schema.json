@@ -99,6 +99,10 @@
         "email": { "type": ["string", "null"], "format": "email" },
         "email_verified": { "type": ["boolean", "null"] },
         "name": { "type": ["string", "null"] },
+        "is_private_email": {
+          "type": ["boolean", "null"],
+          "description": "Apple private-relay flag, coerced bool-or-string like email_verified; null for non-Apple providers."
+        },
         "raw_claims": { "type": "object", "additionalProperties": true }
       }
     },

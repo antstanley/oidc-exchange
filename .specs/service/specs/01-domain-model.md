@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -74,7 +74,8 @@ edge but they are not threaded into the stored session).
 - **`ProviderTokens`** — what a provider returns from code exchange: `id_token`, optional
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
-  `email`, `email_verified`, `name`, and `raw_claims`.
+  `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag; `None`
+  for other providers), and `raw_claims`.
 
 ### AuditEvent (`domain/audit.rs`)
 
