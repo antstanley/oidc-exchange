@@ -62,6 +62,19 @@ impl PostgresRepository {
     }
 }
 
+/// Postgres SQLSTATE for a unique-constraint violation (`unique_violation`), per
+/// <https://www.postgresql.org/docs/current/errcodes-appendix.html>.
+const PG_UNIQUE_VIOLATION_CODE: &str = "23505";
+
+/// True when `err` is a Postgres unique-constraint violation, decided by the driver's
+/// structured SQLSTATE code (not a substring match on the error message) so callers can
+/// distinguish "already registered" from any other insert failure.
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|db_err| db_err.code())
+        .is_some_and(|code| code == PG_UNIQUE_VIOLATION_CODE)
+}
+
 pub async fn create_pool(
     url: &str,
     max_connections: u32,
@@ -223,7 +236,18 @@ impl UserRepository for PostgresRepository {
         .bind(now)
         .fetch_one(&self.pool)
         .await
-        .map_err(Self::store_err)?;
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                Error::Conflict {
+                    detail: format!(
+                        "user already exists for external_id={} provider={}",
+                        user.external_id, user.provider
+                    ),
+                }
+            } else {
+                Self::store_err(e)
+            }
+        })?;
 
         row_to_user(&row)
     }
@@ -491,6 +515,48 @@ mod tests {
         PostgresRepository::new(pool)
     }
 
+    /// A [`PostgresRepository`] backed by a fresh, private Postgres schema named
+    /// `schema_name` (selected via `search_path`), so this test's rows and DDL cannot
+    /// race or corrupt the shared `public` scratch schema — or each other — the way two
+    /// concurrent [`create_test_repo`] resets can (`cargo nextest` runs `#[ignore]`d
+    /// tests as separate, potentially concurrent OS processes). `create_test_repo`'s
+    /// advisory lock only serializes its own reset window, not a whole test's lifetime,
+    /// so any test doing more than a quick read/write against the shared schema — most
+    /// of all, one that drops a table — needs this instead. Every caller below passes a
+    /// distinct `schema_name` so the tests below cannot race one another either.
+    async fn create_isolated_schema_repo(schema_name: &str) -> PostgresRepository {
+        let bootstrap_pool = create_pool(&test_database_url(), 1)
+            .await
+            .expect("failed to connect to test Postgres instance for schema bootstrap");
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+            .execute(&bootstrap_pool)
+            .await
+            .expect("drop isolated test schema");
+        sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
+            .execute(&bootstrap_pool)
+            .await
+            .expect("create isolated test schema");
+        bootstrap_pool.close().await;
+
+        let options: sqlx::postgres::PgConnectOptions = test_database_url()
+            .parse()
+            .expect("parse test database url");
+        let options = options.options([("search_path", schema_name)]);
+
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("connect with isolated schema search_path");
+
+        sqlx::raw_sql(MIGRATIONS)
+            .execute(&pool)
+            .await
+            .expect("run migrations in isolated schema");
+
+        PostgresRepository::new(pool)
+    }
+
     #[tokio::test]
     #[ignore] // Requires a live Postgres: see `test_database_url`.
     async fn create_user_round_trips_initial_version() {
@@ -552,5 +618,136 @@ mod tests {
             .expect("legacy user should be found");
         assert_eq!(user.version, INITIAL_USER_VERSION);
         assert_eq!(user.external_id, "legacy-ext");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn create_user_duplicate_external_id_returns_conflict() {
+        let repo = create_isolated_schema_repo("oidc_adapter_test_duplicate_conflict").await;
+
+        let new_user = NewUser {
+            external_id: "google|pg_dup_test".to_string(),
+            provider: "google".to_string(),
+            email: Some("pg_dup@example.com".to_string()),
+            display_name: None,
+        };
+        repo.create_user(&new_user)
+            .await
+            .expect("first create_user should succeed");
+
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("second create_user with the same (external_id, provider) should fail");
+        match err {
+            Error::Conflict { detail } => {
+                assert!(
+                    !detail.is_empty(),
+                    "Conflict detail should describe the collision"
+                );
+            }
+            other => panic!("expected Error::Conflict, got {other:?}"),
+        }
+    }
+
+    /// Negative-space: an insert failure that is *not* a unique-constraint violation must
+    /// still map to `Error::StoreError`, not be misclassified as `Conflict`. Runs against
+    /// [`create_isolated_schema_repo`] rather than the shared `public` scratch schema,
+    /// since it drops the `users` table entirely (not just rows) to force a non-unique
+    /// failure, which would otherwise break any other test process concurrently using
+    /// `public.users`.
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn create_user_non_unique_failure_maps_to_store_error() {
+        let repo = create_isolated_schema_repo("oidc_adapter_test_store_error_isolated").await;
+
+        // Drop the tables out from under `create_user` so the insert fails for a reason
+        // other than a unique-constraint violation (`undefined_table`, SQLSTATE `42P01`).
+        sqlx::query("DROP TABLE IF EXISTS sessions")
+            .execute(&repo.pool)
+            .await
+            .expect("drop sessions table");
+        sqlx::query("DROP TABLE IF EXISTS users")
+            .execute(&repo.pool)
+            .await
+            .expect("drop users table");
+
+        let err = repo
+            .create_user(&NewUser {
+                external_id: "google|pg_store_error_test".to_string(),
+                provider: "google".to_string(),
+                email: None,
+                display_name: None,
+            })
+            .await
+            .expect_err("insert against a missing table should fail");
+        match err {
+            Error::StoreError { detail } => {
+                assert!(
+                    !detail.is_empty(),
+                    "StoreError detail should describe the failure"
+                );
+            }
+            other => panic!("expected Error::StoreError, got {other:?}"),
+        }
+    }
+
+    /// [`is_unique_violation`] must decide from the driver's structured SQLSTATE code, not
+    /// a substring of the error message: a genuine unique-constraint violation reads `true`
+    /// off code `23505`, and a differently-coded failure (here, a `NOT NULL` violation)
+    /// reads `false`.
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn is_unique_violation_reads_structured_code_not_message() {
+        let repo = create_isolated_schema_repo("oidc_adapter_test_unique_violation_code").await;
+
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO users (id, external_id, provider, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'active', $4, $4)",
+        )
+        .bind("usr_pg_unique_probe")
+        .bind("google|pg_unique_probe")
+        .bind("google")
+        .bind(now)
+        .execute(&repo.pool)
+        .await
+        .expect("seed row for unique-violation probe");
+
+        let unique_violation_err = sqlx::query(
+            "INSERT INTO users (id, external_id, provider, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'active', $4, $4)",
+        )
+        .bind("usr_pg_unique_probe_2")
+        .bind("google|pg_unique_probe")
+        .bind("google")
+        .bind(now)
+        .execute(&repo.pool)
+        .await
+        .expect_err("duplicate (external_id, provider) insert should fail");
+        assert!(
+            is_unique_violation(&unique_violation_err),
+            "a genuine unique-constraint violation should be classified as such"
+        );
+        let code = unique_violation_err
+            .as_database_error()
+            .and_then(|e| e.code())
+            .expect("database error should carry a structured code");
+        assert_eq!(code, PG_UNIQUE_VIOLATION_CODE);
+
+        let not_null_violation_err = sqlx::query(
+            "INSERT INTO users (id, external_id, provider, status, created_at, updated_at) \
+             VALUES ($1, NULL, $2, 'active', $3, $3)",
+        )
+        .bind("usr_pg_not_null_probe")
+        .bind("google")
+        .bind(now)
+        .execute(&repo.pool)
+        .await
+        .expect_err("NULL into a NOT NULL column should fail");
+        assert!(
+            !is_unique_violation(&not_null_violation_err),
+            "a NOT NULL violation must not be misclassified as a unique violation"
+        );
     }
 }

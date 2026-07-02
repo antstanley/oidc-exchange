@@ -43,8 +43,10 @@ counter that `create_user` writes as `1` and every read carries through unchange
 migration DDL adds the column with an idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS`
 step alongside the inline `CREATE TABLE`, so a `users` table that predates the column gets
 it and an existing row reads back as `1`. Indexes cover `(external_id, provider)` and
-`sessions.user_id`. `create_pool(url, max_connections)` builds the connection pool.
-Implements both repository traits.
+`sessions.user_id`. A unique violation on insert (SQLSTATE `23505`) maps to
+`Error::Conflict` rather than `Error::StoreError`, so a racing duplicate `create_user` is
+distinguishable from an infrastructure failure. `create_pool(url, max_connections)` builds
+the connection pool. Implements both repository traits.
 
 ## SQLite (`adapters/sqlite`)
 
@@ -52,8 +54,11 @@ Single-file `sqlx` store with WAL mode and foreign-key enforcement; `metadata`/`
 as JSON `TEXT`. `users` carries the same store-managed `version INTEGER NOT NULL DEFAULT 1`
 column as PostgreSQL; `create_pool(path)` runs the inline DDL and then an idempotent
 `ALTER TABLE` step (SQLite's `ADD COLUMN` has no `IF NOT EXISTS` form) that adds the column
-to a `users` table that predates it, defaulting existing rows to `1`. Implements both
-repository traits — the zero-dependency single-host option.
+to a `users` table that predates it, defaulting existing rows to `1`. The same
+`(external_id, provider)` unique index applies, and SQLite's unique-violation extended
+result code (`2067`, `SQLITE_CONSTRAINT_UNIQUE`) maps to `Error::Conflict` the same way as
+Postgres's `23505`. Implements both repository traits — the zero-dependency single-host
+option.
 
 ## Session-only stores
 

@@ -112,6 +112,19 @@ async fn ensure_version_column(pool: &SqlitePool) -> std::result::Result<(), Err
     Ok(())
 }
 
+/// SQLite extended result code for a unique-constraint violation
+/// (`SQLITE_CONSTRAINT_UNIQUE`), per <https://www.sqlite.org/rescode.html#constraint_unique>.
+const SQLITE_UNIQUE_VIOLATION_CODE: &str = "2067";
+
+/// True when `err` is a SQLite unique-constraint violation, decided by the driver's
+/// structured extended result code (not a substring match on the error message) so callers
+/// can distinguish "already registered" from any other insert failure.
+fn is_unique_violation(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|db_err| db_err.code())
+        .is_some_and(|code| code == SQLITE_UNIQUE_VIOLATION_CODE)
+}
+
 fn status_to_str(status: &UserStatus) -> &'static str {
     match status {
         UserStatus::Active => "active",
@@ -267,8 +280,19 @@ impl UserRepository for SqliteRepository {
         .bind(&now_str)
         .execute(&self.pool)
         .await
-        .map_err(|e| Error::StoreError {
-            detail: e.to_string(),
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                Error::Conflict {
+                    detail: format!(
+                        "user already exists for external_id={} provider={}",
+                        user.external_id, user.provider
+                    ),
+                }
+            } else {
+                Error::StoreError {
+                    detail: e.to_string(),
+                }
+            }
         })?;
 
         Ok(User {
@@ -805,6 +829,127 @@ mod tests {
             version_columns.len(),
             1,
             "version column should not be duplicated by repeated migration runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_user_duplicate_external_id_returns_conflict() {
+        let repo = create_test_repo().await;
+
+        let new_user = NewUser {
+            external_id: "google|dup_test".to_string(),
+            provider: "google".to_string(),
+            email: Some("dup@example.com".to_string()),
+            display_name: None,
+        };
+        repo.create_user(&new_user)
+            .await
+            .expect("first create_user should succeed");
+
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("second create_user with the same (external_id, provider) should fail");
+        match err {
+            Error::Conflict { detail } => {
+                assert!(
+                    !detail.is_empty(),
+                    "Conflict detail should describe the collision"
+                );
+            }
+            other => panic!("expected Error::Conflict, got {other:?}"),
+        }
+    }
+
+    /// Negative-space: an insert failure that is *not* a unique-constraint violation must
+    /// still map to `Error::StoreError`, not be misclassified as `Conflict`.
+    #[tokio::test]
+    async fn create_user_non_unique_failure_maps_to_store_error() {
+        let repo = create_test_repo().await;
+
+        // Drop the table out from under `create_user` so the insert fails for a reason
+        // other than a unique-constraint violation ("no such table", SQLite primary
+        // result code `SQLITE_ERROR`).
+        sqlx::query("DROP TABLE users")
+            .execute(&repo.pool)
+            .await
+            .expect("drop users table");
+
+        let err = repo
+            .create_user(&NewUser {
+                external_id: "google|store_error_test".to_string(),
+                provider: "google".to_string(),
+                email: None,
+                display_name: None,
+            })
+            .await
+            .expect_err("insert against a missing table should fail");
+        match err {
+            Error::StoreError { detail } => {
+                assert!(
+                    !detail.is_empty(),
+                    "StoreError detail should describe the failure"
+                );
+            }
+            other => panic!("expected Error::StoreError, got {other:?}"),
+        }
+    }
+
+    /// [`is_unique_violation`] must decide from the driver's structured extended result
+    /// code, not a substring of the error message: a genuine unique-constraint violation
+    /// reads `true` off code `2067`, and a differently-coded failure (here, a `NOT NULL`
+    /// violation) reads `false`.
+    #[tokio::test]
+    async fn is_unique_violation_reads_structured_code_not_message() {
+        let repo = create_test_repo().await;
+
+        let now_str = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, external_id, provider, status, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
+        )
+        .bind("usr_unique_probe")
+        .bind("google|unique_probe")
+        .bind("google")
+        .bind(&now_str)
+        .execute(&repo.pool)
+        .await
+        .expect("seed row for unique-violation probe");
+
+        let unique_violation_err = sqlx::query(
+            "INSERT INTO users (id, external_id, provider, status, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
+        )
+        .bind("usr_unique_probe_2")
+        .bind("google|unique_probe")
+        .bind("google")
+        .bind(&now_str)
+        .execute(&repo.pool)
+        .await
+        .expect_err("duplicate (external_id, provider) insert should fail");
+        assert!(
+            is_unique_violation(&unique_violation_err),
+            "a genuine unique-constraint violation should be classified as such"
+        );
+        let code = unique_violation_err
+            .as_database_error()
+            .and_then(|e| e.code())
+            .expect("database error should carry a structured code");
+        assert_eq!(code, SQLITE_UNIQUE_VIOLATION_CODE);
+
+        let not_null_violation_err = sqlx::query(
+            "INSERT INTO users (id, external_id, provider, status, created_at, updated_at) \
+             VALUES (?1, NULL, ?2, 'active', ?3, ?3)",
+        )
+        .bind("usr_not_null_probe")
+        .bind("google")
+        .bind(&now_str)
+        .execute(&repo.pool)
+        .await
+        .expect_err("NULL into a NOT NULL column should fail");
+        assert!(
+            !is_unique_violation(&not_null_violation_err),
+            "a NOT NULL violation must not be misclassified as a unique violation"
         );
     }
 }
