@@ -16,7 +16,7 @@ jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 base64.workspace = true
 aws-sdk-dynamodb = "1"
 aws-sdk-kms = "1"
-rsa = "0.10.0-rc.1"
+rsa = { version = "0.10.0-rc.1", features = ["sha2"] }
 p256 = { version = "0.14.0-rc.8", features = ["ecdsa"] }
 p384 = "0.14.0-rc.1"
 p521 = { version = "0.14.0-rc.1", features = ["ecdsa"] }
@@ -36,4 +36,4 @@ oidc-exchange-test-utils.workspace = true
 wiremock = "0.6"
 tempfile = "3"
 rand.workspace = true
-rsa = "0.10.0-rc.1"
+rsa = { version = "0.10.0-rc.1", features = ["sha2"] }

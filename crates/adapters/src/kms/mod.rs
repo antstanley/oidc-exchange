@@ -5,7 +5,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::KeyManager;
-use rsa::pkcs8::DecodePublicKey;
+use rsa::pkcs8::{AssociatedOid, DecodePublicKey};
+use rsa::signature::digest::Digest;
+use rsa::signature::Verifier as _;
 use rsa::traits::PublicKeyParts;
 
 /// AWS KMS-backed key manager that uses the KMS Sign API for JWT signing.
@@ -14,8 +16,10 @@ pub struct KmsKeyManager {
     key_id: String,
     algorithm: String,
     kid: String,
-    /// Cached public key JWK (fetched once from KMS GetPublicKey)
-    public_key: tokio::sync::OnceCell<serde_json::Value>,
+    /// Cached public key material, fetched once from KMS `GetPublicKey`: the
+    /// raw SPKI DER bytes (consumed by local `verify`, never re-fetched) and
+    /// the JWK JSON derived from them (served at `/keys`).
+    public_key: tokio::sync::OnceCell<(Vec<u8>, serde_json::Value)>,
 }
 
 impl KmsKeyManager {
@@ -52,8 +56,11 @@ impl KmsKeyManager {
         }
     }
 
-    /// Fetch the public key from KMS and build an RFC 7517 compliant JWK.
-    async fn fetch_public_jwk(&self) -> Result<serde_json::Value> {
+    /// Fetch the public key from KMS once and build both the raw SPKI DER
+    /// (consumed by local `verify`) and its RFC 7517 compliant JWK. This is
+    /// the single `GetPublicKey` call the adapter makes; `verify` never
+    /// triggers a second one.
+    async fn fetch_public_key_material(&self) -> Result<(Vec<u8>, serde_json::Value)> {
         let resp = self
             .client
             .get_public_key()
@@ -69,9 +76,12 @@ impl KmsKeyManager {
             .ok_or_else(|| Error::KeyError {
                 detail: "KMS GetPublicKey response missing public_key field".to_string(),
             })?
-            .as_ref();
+            .as_ref()
+            .to_vec();
 
-        parse_spki_to_jwk(public_key_der, &self.algorithm, &self.kid)
+        let jwk = parse_spki_to_jwk(&public_key_der, &self.algorithm, &self.kid)?;
+
+        Ok((public_key_der, jwk))
     }
 }
 
@@ -252,6 +262,127 @@ fn parse_spki_to_jwk(spki_der: &[u8], algorithm: &str, kid: &str) -> Result<serd
     }
 }
 
+/// Verify an RSASSA-PKCS1-v1.5 (RS*) signature locally against a DER-encoded
+/// SPKI public key. An SPKI that fails to parse is a key-material error; a
+/// signature that fails to parse or fails cryptographic verification is
+/// simply an invalid signature (`Ok(false)`), never an error.
+fn verify_rsa_pkcs1v15<D>(spki_der: &[u8], payload: &[u8], signature: &[u8]) -> Result<bool>
+where
+    D: Digest + AssociatedOid,
+{
+    let public_key =
+        rsa::RsaPublicKey::from_public_key_der(spki_der).map_err(|e| Error::KeyError {
+            detail: format!("failed to parse RSA public key DER for local verify: {e}"),
+        })?;
+    let verifying_key = rsa::pkcs1v15::VerifyingKey::<D>::new(public_key);
+
+    let Ok(parsed_signature) = rsa::pkcs1v15::Signature::try_from(signature) else {
+        return Ok(false);
+    };
+
+    Ok(verifying_key.verify(payload, &parsed_signature).is_ok())
+}
+
+/// Verify an RSASSA-PSS (PS*) signature locally against a DER-encoded SPKI
+/// public key. Same error/false split as [`verify_rsa_pkcs1v15`].
+fn verify_rsa_pss<D>(spki_der: &[u8], payload: &[u8], signature: &[u8]) -> Result<bool>
+where
+    D: Digest + rsa::signature::digest::FixedOutputReset,
+{
+    let public_key =
+        rsa::RsaPublicKey::from_public_key_der(spki_der).map_err(|e| Error::KeyError {
+            detail: format!("failed to parse RSA public key DER for local verify: {e}"),
+        })?;
+    let verifying_key = rsa::pss::VerifyingKey::<D>::new(public_key);
+
+    let Ok(parsed_signature) = rsa::pss::Signature::try_from(signature) else {
+        return Ok(false);
+    };
+
+    Ok(verifying_key.verify(payload, &parsed_signature).is_ok())
+}
+
+/// Verify a raw `r || s` ES256 signature locally against a DER-encoded SPKI
+/// public key. The signature bytes are consumed directly in JWS raw form via
+/// `ecdsa::Signature::from_slice` — no raw→DER conversion is performed
+/// anywhere in this adapter. Same error/false split as
+/// [`verify_rsa_pkcs1v15`]: an unparseable SPKI is a key-material error, an
+/// unparseable or cryptographically invalid signature is `Ok(false)`.
+fn verify_ecdsa_p256(spki_der: &[u8], payload: &[u8], signature: &[u8]) -> Result<bool> {
+    use p256::pkcs8::DecodePublicKey as _;
+
+    let verifying_key =
+        p256::ecdsa::VerifyingKey::from_public_key_der(spki_der).map_err(|e| Error::KeyError {
+            detail: format!("failed to parse ES256 public key DER for local verify: {e}"),
+        })?;
+
+    let Ok(parsed_signature) = p256::ecdsa::Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+
+    Ok(verifying_key.verify(payload, &parsed_signature).is_ok())
+}
+
+/// Verify a raw `r || s` ES384 signature locally. See [`verify_ecdsa_p256`].
+fn verify_ecdsa_p384(spki_der: &[u8], payload: &[u8], signature: &[u8]) -> Result<bool> {
+    use p384::pkcs8::DecodePublicKey as _;
+
+    let verifying_key =
+        p384::ecdsa::VerifyingKey::from_public_key_der(spki_der).map_err(|e| Error::KeyError {
+            detail: format!("failed to parse ES384 public key DER for local verify: {e}"),
+        })?;
+
+    let Ok(parsed_signature) = p384::ecdsa::Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+
+    Ok(verifying_key.verify(payload, &parsed_signature).is_ok())
+}
+
+/// Verify a raw `r || s` ES512 signature locally. See [`verify_ecdsa_p256`].
+fn verify_ecdsa_p521(spki_der: &[u8], payload: &[u8], signature: &[u8]) -> Result<bool> {
+    use p521::pkcs8::DecodePublicKey as _;
+
+    let verifying_key =
+        p521::ecdsa::VerifyingKey::from_public_key_der(spki_der).map_err(|e| Error::KeyError {
+            detail: format!("failed to parse ES512 public key DER for local verify: {e}"),
+        })?;
+
+    let Ok(parsed_signature) = p521::ecdsa::Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+
+    Ok(verifying_key.verify(payload, &parsed_signature).is_ok())
+}
+
+/// Verify a signature locally against the cached SPKI, dispatching on the
+/// configured algorithm. RS*/PS* use `rsa` `pkcs1v15`/`pss` with the matching
+/// `sha2` digest; ES256/384/512 use the curve's `ecdsa::VerifyingKey`
+/// consuming the raw `r || s` wire form directly. An unsupported algorithm is
+/// a key-material error, not a silent `false`, so the match stays exhaustive
+/// over every algorithm string this adapter is configured with.
+fn verify_locally(
+    spki_der: &[u8],
+    algorithm: &str,
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<bool> {
+    match algorithm {
+        "RS256" => verify_rsa_pkcs1v15::<rsa::sha2::Sha256>(spki_der, payload, signature),
+        "RS384" => verify_rsa_pkcs1v15::<rsa::sha2::Sha384>(spki_der, payload, signature),
+        "RS512" => verify_rsa_pkcs1v15::<rsa::sha2::Sha512>(spki_der, payload, signature),
+        "PS256" => verify_rsa_pss::<rsa::sha2::Sha256>(spki_der, payload, signature),
+        "PS384" => verify_rsa_pss::<rsa::sha2::Sha384>(spki_der, payload, signature),
+        "PS512" => verify_rsa_pss::<rsa::sha2::Sha512>(spki_der, payload, signature),
+        "ES256" => verify_ecdsa_p256(spki_der, payload, signature),
+        "ES384" => verify_ecdsa_p384(spki_der, payload, signature),
+        "ES512" => verify_ecdsa_p521(spki_der, payload, signature),
+        other => Err(Error::KeyError {
+            detail: format!("unsupported algorithm for local verify: {other}"),
+        }),
+    }
+}
+
 #[async_trait]
 impl KeyManager for KmsKeyManager {
     async fn sign(&self, payload: &[u8]) -> Result<Vec<u8>> {
@@ -297,30 +428,23 @@ impl KeyManager for KmsKeyManager {
     }
 
     async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool> {
-        let algorithm = self.signing_algorithm()?;
+        // No KMS Verify round-trip: check the signature in-process against
+        // the SPKI already fetched (and cached) for the JWK. `sign` already
+        // produces the raw `r || s` JWS wire form for ES*, so this consumes
+        // it directly with no raw→DER conversion anywhere in the adapter.
+        let (spki_der, _jwk) = self
+            .public_key
+            .get_or_try_init(|| self.fetch_public_key_material())
+            .await?;
 
-        let result = self
-            .client
-            .verify()
-            .key_id(&self.key_id)
-            .signing_algorithm(algorithm)
-            .message_type(MessageType::Raw)
-            .message(Blob::new(payload))
-            .signature(Blob::new(signature))
-            .send()
-            .await
-            .map_err(|e| Error::KeyError {
-                detail: format!("KMS Verify failed: {e}"),
-            })?;
-
-        Ok(result.signature_valid())
+        verify_locally(spki_der, &self.algorithm, payload, signature)
     }
 
     async fn public_jwk(&self) -> Result<serde_json::Value> {
         self.public_key
-            .get_or_try_init(|| self.fetch_public_jwk())
+            .get_or_try_init(|| self.fetch_public_key_material())
             .await
-            .cloned()
+            .map(|(_spki_der, jwk)| jwk.clone())
     }
 
     fn algorithm(&self) -> &str {
@@ -685,6 +809,315 @@ mod tests {
 
         let result = signature_to_jws_form("ES256", der).expect("ES256 conversion should succeed");
         assert_eq!(result.len(), RAW_SIG_LEN_ES256);
+    }
+
+    // --- Local verify: accept a validly-signed payload, reject tampering,
+    // with no KMS client involved at all (`verify_locally` is a pure
+    // function over a locally-generated key and SPKI). ---
+
+    /// XOR-ing the final byte of a signature is enough to invalidate any of
+    /// the signature schemes exercised below (fixed-width raw ECDSA,
+    /// PKCS#1 v1.5, or PSS) without needing scheme-specific knowledge of the
+    /// encoding.
+    fn tamper_last_byte(bytes: &[u8]) -> Vec<u8> {
+        let mut tampered = bytes.to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xFF;
+        tampered
+    }
+
+    macro_rules! rsa_pkcs1v15_verify_test {
+        ($test_name:ident, $alg:literal, $digest:ty) => {
+            #[test]
+            fn $test_name() {
+                use rsa::pkcs1v15::SigningKey;
+                use rsa::pkcs8::EncodePublicKey;
+                use rsa::signature::{SignatureEncoding, Signer};
+
+                let private_key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048)
+                    .expect("RSA key generation should succeed");
+                let spki_der = private_key
+                    .to_public_key()
+                    .to_public_key_der()
+                    .expect("DER encoding should work");
+
+                let signing_key = SigningKey::<$digest>::new(private_key);
+                let payload = concat!("payload for ", $alg, " local verify").as_bytes();
+                let signature: rsa::pkcs1v15::Signature = signing_key.sign(payload);
+                let sig_bytes = signature.to_vec();
+
+                assert!(
+                    verify_locally(spki_der.as_ref(), $alg, payload, &sig_bytes)
+                        .expect("verify must not error for well-formed input"),
+                    concat!("a validly signed ", $alg, " payload must verify")
+                );
+                assert!(
+                    !verify_locally(
+                        spki_der.as_ref(),
+                        $alg,
+                        payload,
+                        &tamper_last_byte(&sig_bytes)
+                    )
+                    .expect("verify must not error for a tampered signature"),
+                    concat!("a tampered ", $alg, " signature must not verify")
+                );
+                assert!(
+                    !verify_locally(
+                        spki_der.as_ref(),
+                        $alg,
+                        b"a different payload entirely",
+                        &sig_bytes
+                    )
+                    .expect("verify must not error for a mismatched payload"),
+                    concat!(
+                        "a ",
+                        $alg,
+                        " signature must not verify against a different payload"
+                    )
+                );
+            }
+        };
+    }
+
+    macro_rules! rsa_pss_verify_test {
+        ($test_name:ident, $alg:literal, $digest:ty) => {
+            #[test]
+            fn $test_name() {
+                use rsa::pkcs8::EncodePublicKey;
+                use rsa::pss::SigningKey;
+                use rsa::signature::{RandomizedSigner, SignatureEncoding};
+
+                let private_key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048)
+                    .expect("RSA key generation should succeed");
+                let spki_der = private_key
+                    .to_public_key()
+                    .to_public_key_der()
+                    .expect("DER encoding should work");
+
+                let signing_key = SigningKey::<$digest>::new(private_key);
+                let payload = concat!("payload for ", $alg, " local verify").as_bytes();
+                let signature: rsa::pss::Signature =
+                    signing_key.sign_with_rng(&mut rand::rng(), payload);
+                let sig_bytes = signature.to_vec();
+
+                assert!(
+                    verify_locally(spki_der.as_ref(), $alg, payload, &sig_bytes)
+                        .expect("verify must not error for well-formed input"),
+                    concat!("a validly signed ", $alg, " payload must verify")
+                );
+                assert!(
+                    !verify_locally(
+                        spki_der.as_ref(),
+                        $alg,
+                        payload,
+                        &tamper_last_byte(&sig_bytes)
+                    )
+                    .expect("verify must not error for a tampered signature"),
+                    concat!("a tampered ", $alg, " signature must not verify")
+                );
+                assert!(
+                    !verify_locally(
+                        spki_der.as_ref(),
+                        $alg,
+                        b"a different payload entirely",
+                        &sig_bytes
+                    )
+                    .expect("verify must not error for a mismatched payload"),
+                    concat!(
+                        "a ",
+                        $alg,
+                        " signature must not verify against a different payload"
+                    )
+                );
+            }
+        };
+    }
+
+    macro_rules! ecdsa_verify_test {
+        ($test_name:ident, $alg:literal, $curve_crate:ident) => {
+            #[test]
+            fn $test_name() {
+                use $curve_crate::ecdsa::{signature::Signer, Signature, SigningKey};
+                use $curve_crate::elliptic_curve::Generate;
+                use $curve_crate::pkcs8::EncodePublicKey;
+
+                let signing_key = SigningKey::generate();
+                let public_key = signing_key.verifying_key();
+                let spki_der = $curve_crate::PublicKey::from(public_key)
+                    .to_public_key_der()
+                    .expect("DER encoding should work");
+
+                let payload = concat!("payload for ", $alg, " local verify").as_bytes();
+                let signature: Signature = signing_key.sign(payload);
+                let sig_bytes = signature.to_vec();
+
+                assert!(
+                    verify_locally(spki_der.as_ref(), $alg, payload, &sig_bytes)
+                        .expect("verify must not error for well-formed input"),
+                    concat!("a validly signed ", $alg, " payload must verify")
+                );
+                assert!(
+                    !verify_locally(
+                        spki_der.as_ref(),
+                        $alg,
+                        payload,
+                        &tamper_last_byte(&sig_bytes)
+                    )
+                    .expect("verify must not error for a tampered signature"),
+                    concat!("a tampered ", $alg, " signature must not verify")
+                );
+                assert!(
+                    !verify_locally(
+                        spki_der.as_ref(),
+                        $alg,
+                        b"a different payload entirely",
+                        &sig_bytes
+                    )
+                    .expect("verify must not error for a mismatched payload"),
+                    concat!(
+                        "a ",
+                        $alg,
+                        " signature must not verify against a different payload"
+                    )
+                );
+            }
+        };
+    }
+
+    rsa_pkcs1v15_verify_test!(
+        test_verify_locally_rs256_accepts_valid_and_rejects_tampering,
+        "RS256",
+        rsa::sha2::Sha256
+    );
+    rsa_pkcs1v15_verify_test!(
+        test_verify_locally_rs384_accepts_valid_and_rejects_tampering,
+        "RS384",
+        rsa::sha2::Sha384
+    );
+    rsa_pkcs1v15_verify_test!(
+        test_verify_locally_rs512_accepts_valid_and_rejects_tampering,
+        "RS512",
+        rsa::sha2::Sha512
+    );
+    rsa_pss_verify_test!(
+        test_verify_locally_ps256_accepts_valid_and_rejects_tampering,
+        "PS256",
+        rsa::sha2::Sha256
+    );
+    rsa_pss_verify_test!(
+        test_verify_locally_ps384_accepts_valid_and_rejects_tampering,
+        "PS384",
+        rsa::sha2::Sha384
+    );
+    rsa_pss_verify_test!(
+        test_verify_locally_ps512_accepts_valid_and_rejects_tampering,
+        "PS512",
+        rsa::sha2::Sha512
+    );
+    ecdsa_verify_test!(
+        test_verify_locally_es256_accepts_valid_and_rejects_tampering,
+        "ES256",
+        p256
+    );
+    ecdsa_verify_test!(
+        test_verify_locally_es384_accepts_valid_and_rejects_tampering,
+        "ES384",
+        p384
+    );
+    ecdsa_verify_test!(
+        test_verify_locally_es512_accepts_valid_and_rejects_tampering,
+        "ES512",
+        p521
+    );
+
+    #[test]
+    fn test_verify_locally_unsupported_algorithm_is_key_error() {
+        let result = verify_locally(&[0u8; 32], "EdDSA", b"payload", b"signature");
+        assert!(
+            result.is_err(),
+            "an unsupported algorithm must be rejected, not silently treated as false"
+        );
+        assert!(
+            matches!(result, Err(Error::KeyError { .. })),
+            "must surface as a KeyError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_locally_unparseable_spki_is_key_error() {
+        let garbage_spki = vec![0xFFu8; 8];
+
+        let rsa_result = verify_locally(&garbage_spki, "RS256", b"payload", b"signature");
+        assert!(
+            rsa_result.is_err(),
+            "unparseable RSA SPKI key material must be a KeyError, not Ok(false)"
+        );
+        assert!(matches!(rsa_result, Err(Error::KeyError { .. })));
+
+        let ec_result = verify_locally(&garbage_spki, "ES256", b"payload", b"signature");
+        assert!(
+            ec_result.is_err(),
+            "unparseable EC SPKI key material must be a KeyError, not Ok(false)"
+        );
+        assert!(matches!(ec_result, Err(Error::KeyError { .. })));
+    }
+
+    #[test]
+    fn test_verify_locally_malformed_signature_bytes_returns_false_not_error() {
+        use p256::ecdsa::SigningKey;
+        use p256::elliptic_curve::Generate;
+        use p256::pkcs8::EncodePublicKey;
+
+        let signing_key = SigningKey::generate();
+        let public_key = signing_key.verifying_key();
+        let spki_der = p256::PublicKey::from(public_key)
+            .to_public_key_der()
+            .expect("DER encoding should work");
+
+        // Ten bytes is not the fixed 64-byte ES256 raw r||s width: this must
+        // be treated as an invalid signature, not a parse error or a panic.
+        let too_short_signature = vec![0u8; 10];
+        let result = verify_locally(spki_der.as_ref(), "ES256", b"payload", &too_short_signature)
+            .expect("a malformed signature must not surface as an error");
+        assert!(!result, "a wrong-length signature must not verify");
+    }
+
+    #[tokio::test]
+    async fn test_public_key_cache_fetches_shared_material_only_once() {
+        let cell: tokio::sync::OnceCell<(Vec<u8>, serde_json::Value)> =
+            tokio::sync::OnceCell::new();
+        let fetch_count = std::sync::atomic::AtomicUsize::new(0);
+
+        let fetch = || async {
+            fetch_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<(Vec<u8>, serde_json::Value), Error>((
+                vec![1, 2, 3, 4],
+                serde_json::json!({ "kty": "EC" }),
+            ))
+        };
+
+        // Mirrors how `verify` and `public_jwk` both read through the same
+        // `public_key` cell in `KmsKeyManager`: the second caller must not
+        // trigger a second KMS `GetPublicKey` call.
+        let first = cell
+            .get_or_try_init(fetch)
+            .await
+            .expect("first fetch should succeed");
+        let first_spki = first.0.clone();
+        let second = cell
+            .get_or_try_init(fetch)
+            .await
+            .expect("second fetch should succeed");
+
+        assert_eq!(
+            fetch_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the fetch closure must run exactly once no matter how many callers read the cell"
+        );
+        assert_eq!(
+            second.0, first_spki,
+            "verify and public_jwk must observe the exact same cached SPKI bytes"
+        );
     }
 
     #[tokio::test]
