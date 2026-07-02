@@ -1,6 +1,6 @@
 # Plan: Valkey session store — SessionRepository contract conformance
 
-**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-valkey_session_store_conformance.md](../../changes/2026-07-01-valkey_session_store_conformance.md)
+**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-valkey_session_store_conformance.md](../../changes/2026-07-01-valkey_session_store_conformance.md)
 
 This plan brings the Valkey `SessionRepository` (`crates/adapters/src/valkey/mod.rs`) into line
 with the port contract the other four session backends honor, in four reviewable slices. It

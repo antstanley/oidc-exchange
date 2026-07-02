@@ -1,10 +1,17 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fred::prelude::*;
+use fred::types::ExpireOptions;
 use oidc_exchange_core::domain::Session;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::SessionRepository;
 use tracing::instrument;
+
+/// The minimum TTL, in seconds, a session may be stored with. `store_refresh_token` computes
+/// `ttl_seconds` from `expires_at - now`; a value below this floor means `expires_at` is not
+/// strictly in the future, so the write is rejected before any key is created (no immortal or
+/// already-expired Valkey key is ever written).
+const SESSION_TTL_SECONDS_MIN: i64 = 1;
 
 pub struct ValkeySessionRepository {
     client: fred::clients::Client,
@@ -29,13 +36,38 @@ impl ValkeySessionRepository {
     fn user_sessions_key(&self, user_id: &str) -> String {
         format!("{}user_sessions:{}", self.key_prefix, user_id)
     }
+
+    fn active_sessions_key(&self) -> String {
+        format!("{}active_sessions", self.key_prefix)
+    }
 }
 
 #[async_trait]
 impl SessionRepository for ValkeySessionRepository {
     #[instrument(skip(self))]
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
+        // Compute TTL from expires_at first and reject before issuing any write: a session
+        // whose expires_at is not strictly in the future would otherwise leave a TTL-less (or
+        // already-dead) hash behind.
+        let ttl_seconds = (session.expires_at - Utc::now()).num_seconds();
+        if ttl_seconds < SESSION_TTL_SECONDS_MIN {
+            return Err(Error::StoreError {
+                detail: format!(
+                    "refusing to store session with non-future expires_at (ttl_seconds={ttl_seconds})"
+                ),
+            });
+        }
+        debug_assert!(ttl_seconds >= SESSION_TTL_SECONDS_MIN);
+
         let key = self.session_key(&session.refresh_token_hash);
+        let user_sessions_key = self.user_sessions_key(&session.user_id);
+        let active_sessions_key = self.active_sessions_key();
+
+        assert!(!key.is_empty(), "session key must not be empty");
+        assert!(
+            !user_sessions_key.is_empty(),
+            "user_sessions key must not be empty"
+        );
 
         let fields: Vec<(&str, String)> = vec![
             ("user_id", session.user_id.clone()),
@@ -48,34 +80,55 @@ impl SessionRepository for ValkeySessionRepository {
             ("created_at", session.created_at.to_rfc3339()),
         ];
 
-        self.client
-            .hset::<(), _, _>(&key, fields)
+        // Batch the hash write, both TTLs, the user-set membership, and the counter INCR into
+        // a single pipeline so a crash between commands can never leave a TTL-less hash, a
+        // half-written index, or a missed count.
+        let pipeline = self.client.pipeline();
+        let _: () = pipeline
+            .hset(&key, fields)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        let _: () = pipeline
+            .expire(&key, ttl_seconds, None)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        let _: () = pipeline
+            .sadd(&user_sessions_key, &session.refresh_token_hash)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        // Bootstrap the set's TTL on its first-ever member (NX: only when the set currently
+        // has no expiry — SADD above may have just created it with none), then only-extend on
+        // every write (GT: Valkey treats "no expiry" as infinite for GT, so GT alone would
+        // never TTL a brand-new set). Together these give "TTL bumped to the greatest member
+        // expiry" without a concurrent shorter-lived write ever shortening the set's life.
+        let _: () = pipeline
+            .expire(&user_sessions_key, ttl_seconds, Some(ExpireOptions::NX))
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        let _: () = pipeline
+            .expire(&user_sessions_key, ttl_seconds, Some(ExpireOptions::GT))
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        let _: () = pipeline
+            .incr(&active_sessions_key)
             .await
             .map_err(|e| Error::StoreError {
                 detail: e.to_string(),
             })?;
 
-        // Compute TTL from expires_at
-        let ttl_seconds = (session.expires_at - Utc::now()).num_seconds();
-        if ttl_seconds > 0 {
-            self.client
-                .expire::<(), _>(&key, ttl_seconds, None)
-                .await
-                .map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
-        }
-
-        // Track this session in the user's session set
-        self.client
-            .sadd::<(), _, _>(
-                self.user_sessions_key(&session.user_id),
-                &session.refresh_token_hash,
-            )
-            .await
-            .map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+        pipeline.all::<()>().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -232,5 +285,189 @@ impl SessionRepository for ValkeySessionRepository {
             })?;
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests (require a live Valkey/Redis)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Env var carrying the Valkey/Redis URL used by the `#[ignore]`d tests below; defaults to
+    /// a local server, matching how the DynamoDB Local tests hardcode their endpoint.
+    fn valkey_test_url() -> String {
+        std::env::var("VALKEY_TEST_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string())
+    }
+
+    /// Builds a repository against a unique `key_prefix` per call so concurrent/successive test
+    /// runs never collide and self-clean (a fresh prefix has no pre-existing keys).
+    async fn create_test_repo() -> ValkeySessionRepository {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let prefix = format!(
+            "oidc_exchange_test:{}:{}:",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos(),
+        );
+        let prefix = format!("{prefix}{n}:");
+
+        ValkeySessionRepository::new(&valkey_test_url(), prefix)
+            .await
+            .expect("connect to local Valkey (VALKEY_TEST_URL or redis://localhost:6379)")
+    }
+
+    fn sample_session(user_id: &str, hash: &str, ttl_seconds: i64) -> Session {
+        let now = Utc::now();
+        Session {
+            user_id: user_id.to_string(),
+            refresh_token_hash: hash.to_string(),
+            provider: "google".to_string(),
+            expires_at: now + chrono::Duration::seconds(ttl_seconds),
+            device_id: Some("device-1".to_string()),
+            user_agent: Some("test-agent".to_string()),
+            ip_address: Some("10.0.0.1".to_string()),
+            created_at: now,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn store_refresh_token_writes_ttld_hash_set_member_and_counter() {
+        let repo = create_test_repo().await;
+        let session = sample_session("usr_1", "hash_abc", 3600);
+
+        repo.store_refresh_token(&session)
+            .await
+            .expect("store_refresh_token");
+
+        let key = repo.session_key(&session.refresh_token_hash);
+        let user_set_key = repo.user_sessions_key(&session.user_id);
+        let counter_key = repo.active_sessions_key();
+
+        let hash_ttl: i64 = repo.client.ttl(&key).await.expect("ttl on session hash");
+        assert!(
+            hash_ttl > 0 && hash_ttl <= 3600,
+            "session hash TTL should be positive and bounded by the stored TTL, got {hash_ttl}"
+        );
+
+        let members: Vec<String> = repo
+            .client
+            .smembers(&user_set_key)
+            .await
+            .expect("smembers on user set");
+        assert!(
+            members.contains(&session.refresh_token_hash),
+            "user set should contain the stored session's hash"
+        );
+
+        let set_ttl: i64 = repo
+            .client
+            .ttl(&user_set_key)
+            .await
+            .expect("ttl on user set");
+        assert!(
+            set_ttl > 0 && set_ttl <= 3600,
+            "user set TTL should be bumped to a positive value, got {set_ttl}"
+        );
+
+        let counter: u64 = repo.client.get(&counter_key).await.expect("get counter");
+        assert_eq!(counter, 1, "counter should read 1 after one store");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn store_refresh_token_set_ttl_only_extends() {
+        let repo = create_test_repo().await;
+        let user_id = "usr_2";
+
+        let long_session = sample_session(user_id, "hash_long", 3600);
+        repo.store_refresh_token(&long_session)
+            .await
+            .expect("store long-lived session");
+
+        let user_set_key = repo.user_sessions_key(user_id);
+        let ttl_after_long: i64 = repo
+            .client
+            .ttl(&user_set_key)
+            .await
+            .expect("ttl after long-lived write");
+
+        // A second store for the same user with a much shorter TTL must not shorten the
+        // already-longer set TTL (EXPIRE ... GT is only-extend).
+        let short_session = sample_session(user_id, "hash_short", 5);
+        repo.store_refresh_token(&short_session)
+            .await
+            .expect("store short-lived session");
+
+        let ttl_after_short: i64 = repo
+            .client
+            .ttl(&user_set_key)
+            .await
+            .expect("ttl after short-lived write");
+
+        assert!(
+            ttl_after_short > 5,
+            "GT bump must not shorten the set TTL down to the shorter write's TTL, got {ttl_after_short}"
+        );
+        assert!(
+            ttl_after_short <= ttl_after_long,
+            "set TTL should never exceed the longest TTL ever applied (allowing for clock drift), \
+             got before={ttl_after_long} after={ttl_after_short}"
+        );
+
+        let counter: u64 = repo
+            .client
+            .get(&repo.active_sessions_key())
+            .await
+            .expect("get counter");
+        assert_eq!(counter, 2, "counter should read 2 after two stores");
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn store_refresh_token_rejects_non_future_expiry() {
+        let repo = create_test_repo().await;
+
+        // expires_at at "now" (ttl_seconds == 0, below the floor of 1).
+        let at_now = sample_session("usr_3", "hash_at_now", 0);
+        let err = repo
+            .store_refresh_token(&at_now)
+            .await
+            .expect_err("expires_at at now should be rejected");
+        assert!(matches!(err, Error::StoreError { .. }));
+
+        // expires_at in the past.
+        let in_past = sample_session("usr_3", "hash_in_past", -60);
+        let err = repo
+            .store_refresh_token(&in_past)
+            .await
+            .expect_err("expires_at in the past should be rejected");
+        assert!(matches!(err, Error::StoreError { .. }));
+
+        let key = repo.session_key(&at_now.refresh_token_hash);
+        let exists: bool = repo
+            .client
+            .exists(&key)
+            .await
+            .expect("exists on session hash");
+        assert!(!exists, "rejected session must not create a hash key");
+
+        let counter_key = repo.active_sessions_key();
+        let counter_exists: bool = repo
+            .client
+            .exists(&counter_key)
+            .await
+            .expect("exists on counter key");
+        assert!(
+            !counter_exists,
+            "rejected session must not increment (or create) the counter"
+        );
     }
 }
