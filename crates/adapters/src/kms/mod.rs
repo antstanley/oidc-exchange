@@ -79,6 +79,84 @@ impl KmsKeyManager {
 /// Base64urlUInt encoding is never an empty string.
 const ZERO_VALUE_OCTET: [u8; 1] = [0u8];
 
+/// Raw `r || s` byte length of a JWS ES256 signature (RFC 7518 §3.4): two
+/// concatenated 32-byte P-256 field elements.
+const RAW_SIG_LEN_ES256: usize = 64;
+
+/// Raw `r || s` byte length of a JWS ES384 signature: two concatenated
+/// 48-byte P-384 field elements.
+const RAW_SIG_LEN_ES384: usize = 96;
+
+/// Raw `r || s` byte length of a JWS ES512 signature: two concatenated
+/// 66-byte P-521 field elements.
+const RAW_SIG_LEN_ES512: usize = 132;
+
+/// The expected raw `r || s` signature width for a JWS ES* algorithm, or
+/// `None` for an algorithm that isn't ECDSA (RS*/PS* signatures have no
+/// fixed width — it tracks the RSA key size).
+fn ecdsa_raw_signature_len(algorithm: &str) -> Option<usize> {
+    match algorithm {
+        "ES256" => Some(RAW_SIG_LEN_ES256),
+        "ES384" => Some(RAW_SIG_LEN_ES384),
+        "ES512" => Some(RAW_SIG_LEN_ES512),
+        _ => None,
+    }
+}
+
+/// Convert a KMS-returned DER-encoded `Ecdsa-Sig-Value` into the raw
+/// fixed-width `r || s` form JWS ES* signatures require (RFC 7515 §3 / RFC
+/// 7518 §3.4). `algorithm` selects the curve (and therefore the field width)
+/// and must be one of `ES256`/`ES384`/`ES512`.
+fn der_to_raw_ecdsa(der_signature: &[u8], algorithm: &str) -> Result<Vec<u8>> {
+    let raw = match algorithm {
+        "ES256" => p256::ecdsa::Signature::from_der(der_signature)
+            .map_err(|e| Error::KeyError {
+                detail: format!("failed to parse ES256 DER signature from KMS: {e}"),
+            })?
+            .to_vec(),
+        "ES384" => p384::ecdsa::Signature::from_der(der_signature)
+            .map_err(|e| Error::KeyError {
+                detail: format!("failed to parse ES384 DER signature from KMS: {e}"),
+            })?
+            .to_vec(),
+        "ES512" => p521::ecdsa::Signature::from_der(der_signature)
+            .map_err(|e| Error::KeyError {
+                detail: format!("failed to parse ES512 DER signature from KMS: {e}"),
+            })?
+            .to_vec(),
+        other => {
+            return Err(Error::KeyError {
+                detail: format!("der_to_raw_ecdsa called with a non-ECDSA algorithm: {other}"),
+            });
+        }
+    };
+
+    let expected_len = ecdsa_raw_signature_len(algorithm).unwrap_or_else(|| {
+        unreachable!("der_to_raw_ecdsa only reaches here for ES256/ES384/ES512")
+    });
+    assert_eq!(
+        raw.len(),
+        expected_len,
+        "DER->raw ECDSA conversion for {algorithm} must yield the fixed raw r||s width"
+    );
+
+    Ok(raw)
+}
+
+/// Convert a raw KMS `Sign` response body into JWS wire-form signature
+/// bytes. ES256/ES384/ES512 signatures are DER-encoded by KMS and are
+/// converted here to the raw fixed-width `r || s` form JWS requires; RS*/PS*
+/// signatures are already JWS-ready and pass through byte-identical.
+fn signature_to_jws_form(algorithm: &str, kms_signature: Vec<u8>) -> Result<Vec<u8>> {
+    match algorithm {
+        "ES256" | "ES384" | "ES512" => der_to_raw_ecdsa(&kms_signature, algorithm),
+        "RS256" | "RS384" | "RS512" | "PS256" | "PS384" | "PS512" => Ok(kms_signature),
+        other => Err(Error::KeyError {
+            detail: format!("unsupported KMS signing algorithm for signature encoding: {other}"),
+        }),
+    }
+}
+
 /// Coordinate byte length of a NIST P-256 point (RFC 7518 §6.2.1.2/6.2.1.3),
 /// used to size the `x`/`y` split of a SEC1 uncompressed EC point.
 const EC_COORD_LEN_P256: usize = 32;
@@ -199,8 +277,23 @@ impl KeyManager for KmsKeyManager {
             })?
             .as_ref()
             .to_vec();
+        assert!(
+            !signature.is_empty(),
+            "KMS Sign response signature must not be empty"
+        );
 
-        Ok(signature)
+        let converted = signature_to_jws_form(&self.algorithm, signature)?;
+
+        if let Some(expected_len) = ecdsa_raw_signature_len(&self.algorithm) {
+            assert_eq!(
+                converted.len(),
+                expected_len,
+                "sign() must return the fixed raw r||s width for {}",
+                self.algorithm
+            );
+        }
+
+        Ok(converted)
     }
 
     async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool> {
@@ -478,6 +571,120 @@ mod tests {
     fn test_parse_spki_unsupported_algorithm() {
         let result = parse_spki_to_jwk(&[0u8; 32], "EdDSA", "kid");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_der_to_raw_ecdsa_es256_round_trips_and_is_fixed_width() {
+        use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+        use p256::elliptic_curve::Generate;
+
+        let signing_key = SigningKey::generate();
+        let signature: Signature = signing_key.sign(b"payload for ES256");
+        let (expected_r, expected_s) = signature.split_bytes();
+        let der = signature.to_der();
+
+        let raw = der_to_raw_ecdsa(der.as_bytes(), "ES256").expect("DER->raw should succeed");
+
+        assert_eq!(
+            raw.len(),
+            RAW_SIG_LEN_ES256,
+            "ES256 raw signature must be exactly 64 bytes"
+        );
+        assert_eq!(&raw[..32], expected_r.as_slice(), "r must round-trip");
+        assert_eq!(&raw[32..], expected_s.as_slice(), "s must round-trip");
+    }
+
+    #[test]
+    fn test_der_to_raw_ecdsa_es384_round_trips_and_is_fixed_width() {
+        use p384::ecdsa::{signature::Signer, Signature, SigningKey};
+        use p384::elliptic_curve::Generate;
+
+        let signing_key = SigningKey::generate();
+        let signature: Signature = signing_key.sign(b"payload for ES384");
+        let (expected_r, expected_s) = signature.split_bytes();
+        let der = signature.to_der();
+
+        let raw = der_to_raw_ecdsa(der.as_bytes(), "ES384").expect("DER->raw should succeed");
+
+        assert_eq!(
+            raw.len(),
+            RAW_SIG_LEN_ES384,
+            "ES384 raw signature must be exactly 96 bytes"
+        );
+        assert_eq!(&raw[..48], expected_r.as_slice(), "r must round-trip");
+        assert_eq!(&raw[48..], expected_s.as_slice(), "s must round-trip");
+    }
+
+    #[test]
+    fn test_der_to_raw_ecdsa_es512_round_trips_and_is_fixed_width() {
+        use p521::ecdsa::{signature::Signer, Signature, SigningKey};
+        use p521::elliptic_curve::Generate;
+
+        let signing_key = SigningKey::generate();
+        let signature: Signature = signing_key.sign(b"payload for ES512");
+        let (expected_r, expected_s) = signature.split_bytes();
+        let der = signature.to_der();
+
+        let raw = der_to_raw_ecdsa(der.as_bytes(), "ES512").expect("DER->raw should succeed");
+
+        assert_eq!(
+            raw.len(),
+            RAW_SIG_LEN_ES512,
+            "ES512 raw signature must be exactly 132 bytes"
+        );
+        assert_eq!(&raw[..66], expected_r.as_slice(), "r must round-trip");
+        assert_eq!(&raw[66..], expected_s.as_slice(), "s must round-trip");
+    }
+
+    #[test]
+    fn test_der_to_raw_ecdsa_malformed_der_is_key_error() {
+        // Not a valid ASN.1 SEQUENCE at all.
+        let malformed = vec![0xFFu8; 8];
+        let result = der_to_raw_ecdsa(&malformed, "ES256");
+        assert!(
+            result.is_err(),
+            "malformed DER must be rejected, not panic or produce garbage bytes"
+        );
+        assert!(
+            matches!(result, Err(Error::KeyError { .. })),
+            "must surface as a KeyError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_der_to_raw_ecdsa_truncated_der_is_key_error() {
+        // A syntactically-plausible but truncated DER SEQUENCE header with no
+        // integer contents.
+        let truncated = vec![0x30u8, 0x06, 0x02, 0x01, 0x01];
+        let result = der_to_raw_ecdsa(&truncated, "ES384");
+        assert!(result.is_err(), "truncated DER must be rejected, not panic");
+        assert!(matches!(result, Err(Error::KeyError { .. })));
+    }
+
+    #[test]
+    fn test_signature_to_jws_form_passes_rsa_and_pss_through_unchanged() {
+        let fake_pkcs1v15_sig = vec![0xAB; 256]; // stand-in for a 2048-bit RSA signature
+        for alg in ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"] {
+            let result = signature_to_jws_form(alg, fake_pkcs1v15_sig.clone())
+                .unwrap_or_else(|e| panic!("{alg} must pass through, got error {e:?}"));
+            assert_eq!(
+                result, fake_pkcs1v15_sig,
+                "{alg} signature bytes must be byte-identical to the KMS response"
+            );
+        }
+    }
+
+    #[test]
+    fn test_signature_to_jws_form_converts_es_algorithms() {
+        use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+        use p256::elliptic_curve::Generate;
+
+        let signing_key = SigningKey::generate();
+        let signature: Signature = signing_key.sign(b"payload");
+        let der = signature.to_der().as_bytes().to_vec();
+
+        let result = signature_to_jws_form("ES256", der).expect("ES256 conversion should succeed");
+        assert_eq!(result.len(), RAW_SIG_LEN_ES256);
     }
 
     #[tokio::test]
