@@ -365,12 +365,10 @@ async fn build_user_repository(
                             .into(),
                 }
             })?;
-            // TODO(task 04): drive `run_migrations` from `pg_cfg.run_migrations` once the
-            // config field lands; hard-coded `true` keeps the workspace compiling meanwhile.
             let pool = oidc_exchange_adapters::postgres::create_pool(
                 &pg_cfg.url,
                 pg_cfg.max_connections.unwrap_or(5),
-                true,
+                pg_cfg.run_migrations.unwrap_or(true),
             )
             .await?;
             Ok(Box::new(
@@ -427,12 +425,10 @@ async fn build_session_repository(
                             .into(),
                 }
             })?;
-            // TODO(task 04): drive `run_migrations` from `pg_cfg.run_migrations` once the
-            // config field lands; hard-coded `true` keeps the workspace compiling meanwhile.
             let pool = oidc_exchange_adapters::postgres::create_pool(
                 &pg_cfg.url,
                 pg_cfg.max_connections.unwrap_or(5),
-                true,
+                pg_cfg.run_migrations.unwrap_or(true),
             )
             .await?;
             Ok(Box::new(
@@ -1394,5 +1390,128 @@ mod build_router_tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let json = body_to_json(response.into_body()).await;
         assert_eq!(json["error_description"], "internal API not configured");
+    }
+}
+
+/// Exercises `build_user_repository`/`build_session_repository`'s `postgres` arms end to
+/// end — through the same `AppConfig` plumbing a real bootstrap uses — rather than calling
+/// `oidc_exchange_adapters::postgres::create_pool` directly (which the adapter's own gated
+/// suite already covers). This is the layer that changed in this task: reading
+/// `pg_cfg.run_migrations` out of config and threading it into `create_pool`, for both the
+/// user and session pools.
+#[cfg(test)]
+mod postgres_bootstrap_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use oidc_exchange_core::config::PostgresConfig;
+    use oidc_exchange_core::domain::{NewUser, Session};
+    use uuid::Uuid;
+
+    /// An `AppConfig` whose user repository (and, since `session_repository.adapter` is
+    /// left unset, the session repository via its documented fallback) both target
+    /// Postgres at `url`, with `run_migrations` left as given.
+    fn postgres_config(url: &str, run_migrations: Option<bool>) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.repository.adapter = "postgres".to_string();
+        config.repository.postgres = Some(PostgresConfig {
+            url: url.to_string(),
+            max_connections: None,
+            run_migrations,
+        });
+        config
+    }
+
+    /// Gated on `DATABASE_URL` (skips cleanly, not a failure, when unset, so
+    /// `cargo nextest run --workspace` stays green without a live database configured).
+    ///
+    /// Manual boot check when `DATABASE_URL` is unset: start Postgres (e.g.
+    /// `docker compose -f examples/linux-postgres/docker-compose.yml up -d`), point
+    /// `[repository.postgres].url` at it with `repository.adapter = "postgres"` and no
+    /// `[session_repository]` override, boot the server against a fresh database, and
+    /// confirm a request that touches the repository (e.g. registering a user) succeeds
+    /// instead of 500ing; then set `run_migrations = false` against that same
+    /// already-migrated database and confirm startup still connects and serves requests.
+    ///
+    /// With `run_migrations` left absent, both `build_user_repository` and
+    /// `build_session_repository` must leave a fresh database serviceable: the DDL is
+    /// idempotent, so the session pool's migration run is a no-op over what the user
+    /// pool already created.
+    #[tokio::test]
+    async fn postgres_bootstrap_migrates_both_pools_and_is_serviceable_on_startup() {
+        let Ok(base_url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping postgres_bootstrap_migrates_both_pools_and_is_serviceable_on_startup: \
+                 DATABASE_URL is not set"
+            );
+            return;
+        };
+
+        let config = postgres_config(&base_url, None);
+
+        // Build and exercise the user pool alone first, before the session pool is built,
+        // so a wiring regression confined to `build_user_repository` (e.g. a hard-coded
+        // `false` slipping back in) cannot be masked by the session pool's migration also
+        // creating the `users` table as a side effect.
+        let user_repo = build_user_repository(&config)
+            .await
+            .expect("build_user_repository must connect and migrate a fresh database");
+
+        let external_id = format!("bootstrap-test|{}", Uuid::new_v4());
+        let created = user_repo
+            .create_user(&NewUser {
+                external_id: external_id.clone(),
+                provider: "bootstrap-test".to_string(),
+                email: Some(format!("{external_id}@example.com")),
+                display_name: None,
+            })
+            .await
+            .expect("create_user must succeed once bootstrap has migrated the user pool");
+        let fetched = user_repo
+            .get_user_by_id(&created.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("the user created through the bootstrap-built repository must round-trip");
+        assert_eq!(fetched.id, created.id, "round-tripped user id must match");
+        assert_eq!(
+            fetched.external_id, external_id,
+            "round-tripped user external_id must match"
+        );
+
+        let session_repo = build_session_repository(&config).await.expect(
+            "build_session_repository must connect and migrate (a no-op the second time) \
+                 the same database",
+        );
+
+        let now = Utc::now();
+        let refresh_token_hash = format!("bootstrap-test-hash-{}", Uuid::new_v4());
+        let session = Session {
+            user_id: created.id.clone(),
+            refresh_token_hash: refresh_token_hash.clone(),
+            provider: "bootstrap-test".to_string(),
+            expires_at: now + Duration::hours(1),
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: now,
+        };
+        session_repo.store_refresh_token(&session).await.expect(
+            "store_refresh_token must succeed once bootstrap has migrated the session pool",
+        );
+        let fetched_session = session_repo
+            .get_session_by_refresh_token(&refresh_token_hash)
+            .await
+            .expect("get_session_by_refresh_token")
+            .expect(
+                "the session stored through the bootstrap-built session repository must \
+                 round-trip",
+            );
+        assert_eq!(
+            fetched_session.user_id, created.id,
+            "round-tripped session user_id must match"
+        );
+        assert_eq!(
+            fetched_session.refresh_token_hash, refresh_token_hash,
+            "round-tripped session refresh_token_hash must match"
+        );
     }
 }
