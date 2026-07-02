@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
-use config::{Config, Environment, File, FileFormat};
+use config::{Config, Environment, File, FileFormat, Value, ValueKind};
 use tower_http::catch_panic::CatchPanicLayer;
 
 use oidc_exchange_core::config::{AppConfig, ProviderConfig};
@@ -39,6 +39,13 @@ const ENV_OVERRIDE_PREFIX: &str = "OIDC_EXCHANGE";
 /// addresses `providers.my_idp`).
 const ENV_OVERRIDE_SEPARATOR: &str = "__";
 
+/// Upper bound, in bytes, on how far the placeholder resolver scans past a
+/// `${` opener looking for its closing `}` before giving up and treating the
+/// `${` as ordinary text. Environment variable names are short; this bounds
+/// the scan so a stray `${` inside free-form config text (e.g. a URL query
+/// string) can never force an unbounded scan.
+const PLACEHOLDER_NAME_LEN_MAX: usize = 256;
+
 /// Load configuration from config files on disk, using the `OIDC_EXCHANGE_ENV`
 /// environment variable to select the environment-specific config file, and
 /// `OIDC_EXCHANGE__{section}__{key}` environment variables to override the
@@ -59,6 +66,10 @@ pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 /// 3. `OIDC_EXCHANGE__{section}__{key}` environment variables, applied on top
 ///    of the merged TOML and reaching every path including map-valued
 ///    sections.
+/// 4. `${VAR_NAME}` placeholders anywhere in the merged config are resolved
+///    from the environment; an unset variable is a fail-closed `ConfigError`
+///    naming it, and `$${` escapes to a literal `${` rather than opening a
+///    placeholder (see [`resolve_placeholders`]).
 ///
 /// With no files present and no overriding environment variables, the
 /// deserialized result is `AppConfig::default()` (every field carries
@@ -86,7 +97,8 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
             .try_parsing(true),
     );
 
-    let merged = builder.build()?;
+    let mut merged = builder.build()?;
+    resolve_placeholders(&mut merged.cache)?;
     let config: AppConfig = merged.try_deserialize()?;
     Ok(config)
 }
@@ -95,6 +107,115 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
 pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let config: AppConfig = toml::from_str(toml_str)?;
     Ok(config)
+}
+
+// ---------------------------------------------------------------------------
+// Placeholder resolution
+// ---------------------------------------------------------------------------
+
+/// Recursively walk every string value in a merged `config::Value` tree,
+/// resolving `${VAR}` placeholders from the environment in place.
+///
+/// Fails closed: a placeholder naming an unset environment variable aborts
+/// the whole resolution with `Error::ConfigError` — the literal placeholder
+/// text must never survive into a live secret. `$${` is the escape for a
+/// literal `${`; the escaped text is never looked up in the environment.
+fn resolve_placeholders(value: &mut Value) -> Result<(), Error> {
+    match &mut value.kind {
+        ValueKind::String(s) => {
+            *s = resolve_placeholders_in_str(s)?;
+        }
+        ValueKind::Table(table) => {
+            for nested in table.values_mut() {
+                resolve_placeholders(nested)?;
+            }
+        }
+        ValueKind::Array(items) => {
+            for item in items.iter_mut() {
+                resolve_placeholders(item)?;
+            }
+        }
+        // Non-string scalars (bool, numbers, nil) carry no placeholders.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Resolve every `${VAR}` placeholder and `$${` escape inside a single
+/// string, returning the rewritten string.
+fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut i = 0;
+
+    // Bounded by `bytes.len()`, not recursive: each iteration consumes at
+    // least one byte (asserted below), so the loop always terminates.
+    while i < bytes.len() {
+        let before = i;
+
+        // Escape: `$${` rewrites to a literal `${` and is never treated as a
+        // placeholder opener, even for the `{` it consumes.
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'$') && bytes.get(i + 2) == Some(&b'{') {
+            output.push_str("${");
+            i += 3;
+            debug_assert!(i > before, "escape branch must consume input");
+            continue;
+        }
+
+        // Placeholder open: `${NAME}`.
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
+            if let Some((name, consumed)) = scan_placeholder_name(&input[i + 2..]) {
+                let resolved = std::env::var(name).map_err(|_| Error::ConfigError {
+                    detail: format!(
+                        "config placeholder '${{{name}}}' references unset environment \
+                         variable '{name}'"
+                    ),
+                })?;
+                output.push_str(&resolved);
+                i += 2 + consumed;
+                debug_assert!(i > before, "placeholder branch must consume input");
+                continue;
+            }
+        }
+
+        // Ordinary text: copy one full UTF-8 scalar value forward. `i` is
+        // guaranteed to sit on a char boundary here because every branch
+        // above only ever advances `i` past whole ASCII marker sequences.
+        let ch = input[i..]
+            .chars()
+            .next()
+            .expect("non-empty remainder has a leading char");
+        output.push(ch);
+        i += ch.len_utf8();
+        debug_assert!(i > before, "ordinary-text branch must consume input");
+    }
+
+    assert!(
+        i == bytes.len(),
+        "resolver must consume the whole input, not overrun or stop short"
+    );
+    Ok(output)
+}
+
+/// Scan forward from just past a `${` opener for its closing `}`, bounded by
+/// [`PLACEHOLDER_NAME_LEN_MAX`]. Returns the placeholder name and the number
+/// of bytes consumed (name plus the closing brace), or `None` when no `}` is
+/// found within the bound — in which case the `${` is left as ordinary text
+/// rather than treated as a malformed placeholder.
+fn scan_placeholder_name(rest: &str) -> Option<(&str, usize)> {
+    let bytes = rest.as_bytes();
+    let scan_bound = bytes.len().min(PLACEHOLDER_NAME_LEN_MAX);
+    let close = bytes[..scan_bound].iter().position(|&b| b == b'}')?;
+    let consumed = close + 1;
+    debug_assert!(
+        consumed <= PLACEHOLDER_NAME_LEN_MAX + 1,
+        "consumed byte count must stay within the declared scan bound"
+    );
+    debug_assert!(
+        &rest[close..consumed] == "}",
+        "must stop exactly on the closing brace"
+    );
+    Some((&rest[..close], consumed))
 }
 
 // ---------------------------------------------------------------------------
@@ -807,5 +928,181 @@ mod load_config_tests {
         assert_eq!(config.server.port, 9090);
         // Set by the OIDC_EXCHANGE__ env var, on top of the overlay and default.
         assert_eq!(config.server.host, "203.0.113.5");
+    }
+
+    // -----------------------------------------------------------------
+    // Placeholder resolution
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn set_var_placeholder_resolves_to_its_environment_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("INTERNAL_API_SECRET", "super-secret-value")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("super-secret-value")
+        );
+        assert_ne!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("${INTERNAL_API_SECRET}"),
+            "the literal placeholder must never survive resolution"
+        );
+    }
+
+    #[test]
+    fn unset_var_placeholder_fails_closed_and_produces_no_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        );
+        // Make sure the variable really is unset for this process (nextest
+        // runs each test in its own process, so this cannot race a sibling
+        // test that sets the same name).
+        std::env::remove_var("INTERNAL_API_SECRET");
+
+        let result = load_config_from_dir(dir_str(dir.path()));
+
+        let err = result.expect_err("an unset placeholder variable must fail closed, not load");
+        assert!(
+            err.to_string().contains("INTERNAL_API_SECRET"),
+            "the error must name the missing variable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn escaped_placeholder_yields_literal_dollar_brace_without_env_lookup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "$${LITERAL_NOT_A_VAR}"
+            "#,
+        );
+        // LITERAL_NOT_A_VAR is deliberately left unset: if `$${` were ever
+        // treated as a placeholder opener instead of an escape, resolution
+        // would fail closed here instead of loading.
+        std::env::remove_var("LITERAL_NOT_A_VAR");
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("${LITERAL_NOT_A_VAR}")
+        );
+        assert_ne!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("$${LITERAL_NOT_A_VAR}"),
+            "the escape's leading '$$' must be collapsed to a single '$'"
+        );
+    }
+
+    #[test]
+    fn value_without_a_placeholder_is_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "plain-value.example.com"
+            "#,
+        );
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(config.server.host, "plain-value.example.com");
+        assert_eq!(config.server.port, AppConfig::default().server.port);
+    }
+
+    #[test]
+    fn placeholder_inside_a_nested_map_valued_section_resolves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [providers.google]
+                adapter = "oidc"
+                client_secret = "${GOOGLE_CLIENT_SECRET}"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("GOOGLE_CLIENT_SECRET", "nested-secret")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        let google = config
+            .providers
+            .get("google")
+            .expect("google provider present");
+        assert_eq!(google.adapter, "oidc");
+        assert_eq!(
+            google.extra.get("client_secret").and_then(|v| v.as_str()),
+            Some("nested-secret")
+        );
+    }
+
+    /// End-to-end reviewability case: a set variable resolves, an unset one
+    /// aborts naming itself, and the escape produces a literal — the exact
+    /// scenario in the task's Definition of done.
+    #[test]
+    fn set_unset_and_escaped_placeholders_together_match_reviewable_scenario() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${SET_VAR}"
+                auth_method = "${UNSET_VAR}"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("SET_VAR", "resolved-value")]);
+        std::env::remove_var("UNSET_VAR");
+
+        let err = load_config_from_dir(dir_str(dir.path()))
+            .expect_err("UNSET_VAR must fail the whole load closed");
+        assert!(
+            err.to_string().contains("UNSET_VAR"),
+            "the error must name the unset variable, got: {err}"
+        );
+
+        // Replace the unset placeholder with the escape form and reload —
+        // the set variable still resolves and the escape becomes a literal.
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${SET_VAR}"
+                auth_method = "$${LITERAL}"
+            "#,
+        );
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("resolved-value")
+        );
+        assert_eq!(
+            config.internal_api.auth_method.as_deref(),
+            Some("${LITERAL}")
+        );
     }
 }
