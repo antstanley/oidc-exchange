@@ -19,12 +19,8 @@ pub fn user_to_item(user: &User) -> HashMap<String, AttributeValue> {
     );
     item.insert("sk".to_string(), AttributeValue::S("PROFILE".to_string()));
 
-    // GSI1 — lookup by provider + external_id
-    item.insert(
-        "GSI1pk".to_string(),
-        AttributeValue::S(format!("EXT#{}#{}", user.provider, user.external_id)),
-    );
-    item.insert("GSI1sk".to_string(), AttributeValue::S("USER".to_string()));
+    // No GSI1 entry: lookup by provider + external_id goes through the uniqueness-guard
+    // item (see `guard_to_item`) instead, so GSI1 serves only session lookups.
 
     // Data attributes
     item.insert("id".to_string(), AttributeValue::S(user.id.clone()));
@@ -509,11 +505,14 @@ mod tests {
             &format!("USER#{}", user.id)
         );
         assert_eq!(item.get("sk").unwrap().as_s().unwrap(), "PROFILE");
-        assert_eq!(
-            item.get("GSI1pk").unwrap().as_s().unwrap(),
-            &format!("EXT#{}#{}", user.provider, user.external_id)
+        assert!(
+            !item.contains_key("GSI1pk"),
+            "User item must not carry a GSI1pk — lookup goes through the uniqueness guard"
         );
-        assert_eq!(item.get("GSI1sk").unwrap().as_s().unwrap(), "USER");
+        assert!(
+            !item.contains_key("GSI1sk"),
+            "User item must not carry a GSI1sk — lookup goes through the uniqueness guard"
+        );
     }
 
     #[test]

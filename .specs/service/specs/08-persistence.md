@@ -13,16 +13,19 @@ Single-table design with one global secondary index (`GSI1`). Keys `pk`/`sk`, GS
 
 | Item | pk | sk | GSI1pk | GSI1sk |
 |---|---|---|---|---|
-| User | `USER#<id>` | `PROFILE` | `EXT#<provider>#<external_id>` | `USER` |
+| User | `USER#<id>` | `PROFILE` | — | — |
 | User uniqueness guard | `EXT#<provider>#<external_id>` | `UNIQUE` | — | — |
 | Session | `SESSION#<refresh_token_hash>` | `SESSION` | `USER#<user_id>` | `SESSION#<created_at>` |
+
+GSI1 is retired for the User item and serves only session lookups (`list_user_sessions`,
+`revoke_all_user_sessions`); a user is never looked up through GSI1.
 
 Access patterns:
 
 | Operation | DynamoDB call |
 |---|---|
 | `get_user_by_id` | `GetItem` on `USER#<id>` / `PROFILE` |
-| `get_user_by_external_id` | `Query` GSI1 `EXT#<provider>#<external_id>` |
+| `get_user_by_external_id` | two strongly consistent `GetItem`s: the guard (`EXT#<provider>#<external_id>` / `UNIQUE`) to resolve `user_id`, then `USER#<user_id>` / `PROFILE` |
 | `get_session_by_refresh_token` | `GetItem` on `SESSION#<hash>` |
 | `revoke_all_user_sessions` | `Query` GSI1 `USER#<user_id>` then `BatchWrite` deletes (unprocessed items retried) |
 | `count_by_status` / `count_active_sessions` | table scans / counts |
@@ -33,8 +36,9 @@ natively — `cleanup_expired_sessions` batch-deletes whatever TTL has not yet r
 any `BatchWriteItem` `unprocessed_items` with capped exponential backoff until the batch drains
 or a bounded retry budget is exhausted (then error), so a successful return means every expired
 session found is gone. `revoke_all_user_sessions` retries the same way, so a successful return
-means every targeted session item was deleted. The GSI1 user key includes the provider prefix
-so the same external id from two providers does not collide.
+means every targeted session item was deleted. The provider prefix that keeps the same external
+id from two providers from colliding now lives on the guard item's `pk` (`EXT#<provider>#<external_id>`),
+since the User item no longer carries a GSI1 key.
 
 `create_user` is a `TransactWriteItems` of two `Put`s — the user item and a uniqueness-guard
 item (`EXT#<provider>#<external_id>` / `UNIQUE`, attribute `user_id`) — each conditioned on
@@ -44,9 +48,10 @@ means the guard already existed (a racing duplicate `create_user`) and is mapped
 `Error::Conflict`; any other transaction failure (e.g. a missing table, throttling) maps to
 `Error::StoreError`. Guard items for users written before this invariant existed are backfilled
 by `DynamoRepository::backfill_uniqueness_guards`, a one-off, idempotent migration step (each
-write conditioned on `attribute_not_exists(pk)`, so re-running after a partial failure is safe)
-that must complete before `get_user_by_external_id` reads through the guard instead of GSI1 — a
-guard-less pre-existing user would otherwise become invisible to that lookup.
+write conditioned on `attribute_not_exists(pk)`, so re-running after a partial failure is safe).
+Deployments must run that backfill to completion — leaving no user unguarded — before deploying
+this guard-based `get_user_by_external_id`; a guard-less pre-existing user is invisible to it
+even though its profile item still exists.
 
 ## PostgreSQL (`adapters/postgres`)
 

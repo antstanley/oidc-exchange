@@ -16,7 +16,9 @@ use oidc_exchange_core::domain::{
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
-use schema::{guard_to_item, item_to_session, item_to_user, session_to_item, user_to_item};
+use schema::{
+    guard_pk, guard_to_item, item_to_session, item_to_user, session_to_item, user_to_item, GUARD_SK,
+};
 
 /// DynamoDB cancellation-reason code reported for a failed `attribute_not_exists(pk)`
 /// condition inside a `TransactWriteItems` call — the signal that a `create_user` lost a
@@ -97,9 +99,9 @@ impl DynamoRepository {
     /// before the guard existed.
     ///
     /// **Ordering constraint:** this must run to completion — with no user left
-    /// unguarded — before `get_user_by_external_id` is switched to resolve through the
-    /// guard item instead of the GSI1 query; a guard-less pre-existing user would
-    /// otherwise become invisible to that lookup.
+    /// unguarded — before a deployment starts using [`DynamoRepository::get_user_by_external_id`],
+    /// which resolves purely through the guard item (GSI1 no longer carries a User entry); a
+    /// guard-less pre-existing user would otherwise become invisible to that lookup.
     ///
     /// Idempotent and safe to re-run after a partial failure: each guard write is
     /// conditioned on `attribute_not_exists(pk)`, so a user that already has a guard
@@ -208,31 +210,60 @@ impl UserRepository for DynamoRepository {
         }
     }
 
+    /// Resolves a user by `(provider, external_id)` in two strongly-consistent `GetItem`s
+    /// through the uniqueness-guard item: first `EXT#<provider>#<external_id>` / `UNIQUE` to
+    /// learn the owning `user_id`, then `USER#<user_id>` / `PROFILE` for the profile. GSI1 no
+    /// longer carries a User entry — it serves only session lookups.
+    ///
+    /// **Precondition:** every existing user must have a guard item before this ships, i.e.
+    /// [`DynamoRepository::backfill_uniqueness_guards`] must have run to completion; a
+    /// guard-less pre-existing user would otherwise be invisible to this lookup even though
+    /// its profile item still exists.
     #[instrument(skip(self), fields(external_id, provider))]
     async fn get_user_by_external_id(
         &self,
         external_id: &str,
         provider: &str,
     ) -> Result<Option<User>> {
-        let result = self
+        let guard = self
             .client
-            .query()
+            .get_item()
             .table_name(&self.table_name)
-            .index_name(GSI1_NAME)
-            .key_condition_expression("GSI1pk = :pk AND GSI1sk = :sk")
-            .expression_attribute_values(
-                ":pk",
-                AttributeValue::S(format!("EXT#{provider}#{external_id}")),
-            )
-            .expression_attribute_values(":sk", AttributeValue::S("USER".to_string()))
-            .limit(1)
+            .key("pk", AttributeValue::S(guard_pk(provider, external_id)))
+            .key("sk", AttributeValue::S(GUARD_SK.to_string()))
+            .consistent_read(true)
             .send()
             .await
             .map_err(Self::store_err)?;
 
-        match result.items {
-            Some(items) if !items.is_empty() => Ok(Some(item_to_user(&items[0])?)),
-            _ => Ok(None),
+        let Some(guard_item) = guard.item else {
+            return Ok(None);
+        };
+
+        let user_id = guard_item
+            .get("user_id")
+            .and_then(|v| v.as_s().ok())
+            .ok_or_else(|| Error::StoreError {
+                detail: format!(
+                    "guard item EXT#{provider}#{external_id}/UNIQUE is missing its user_id \
+                     attribute"
+                ),
+            })?;
+
+        let profile = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(format!("USER#{user_id}")))
+            .key("sk", AttributeValue::S("PROFILE".to_string()))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(Self::store_err)?;
+
+        match profile.item {
+            Some(item) => Ok(Some(item_to_user(&item)?)),
+            None => Ok(None),
         }
     }
 
@@ -1335,6 +1366,79 @@ mod tests {
         assert_eq!(
             untouched_guard.get("user_id").and_then(|v| v.as_s().ok()),
             Some(&created.id)
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn get_user_by_external_id_resolves_through_guard_then_profile() {
+        let table_name = "oidc-exchange-test-guard-lookup";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        // Create via the normal transactional path (task 06), which writes both the
+        // profile item and the uniqueness-guard item in one transaction.
+        let created = repo
+            .create_user(&NewUser {
+                external_id: "google|guard_lookup_test".to_string(),
+                provider: "google".to_string(),
+                email: Some("guard_lookup@example.com".to_string()),
+                display_name: Some("Guard Lookup".to_string()),
+            })
+            .await
+            .expect("create_user");
+
+        // The lookup must resolve the guard item to a user_id, then read the profile at
+        // USER#<id>/PROFILE, and return the same user that was created.
+        let found = repo
+            .get_user_by_external_id("google|guard_lookup_test", "google")
+            .await
+            .expect("get_user_by_external_id")
+            .expect("user should be found via the guard");
+        assert_eq!(found.id, created.id);
+        assert_eq!(found.external_id, "google|guard_lookup_test");
+        assert_eq!(found.provider, "google");
+        assert_eq!(found.email.as_deref(), Some("guard_lookup@example.com"));
+        assert_eq!(found.display_name.as_deref(), Some("Guard Lookup"));
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn get_user_by_external_id_with_no_guard_item_returns_none() {
+        let table_name = "oidc-exchange-test-guard-lookup-miss";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        // Create an unrelated user so the table is non-empty, but never a guard for the
+        // identity being looked up.
+        repo.create_user(&NewUser {
+            external_id: "google|some_other_identity".to_string(),
+            provider: "google".to_string(),
+            email: None,
+            display_name: None,
+        })
+        .await
+        .expect("create_user for unrelated identity");
+
+        // No guard item exists for this (provider, external_id) pair, so the lookup must
+        // return `None` rather than an error or an arbitrary user.
+        let missing = repo
+            .get_user_by_external_id("google|no_such_identity", "google")
+            .await
+            .expect("get_user_by_external_id should not error on a missing guard");
+        assert!(
+            missing.is_none(),
+            "lookup for an identity with no guard item must return None"
         );
 
         // Clean up
