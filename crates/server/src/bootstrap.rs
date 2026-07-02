@@ -365,9 +365,12 @@ async fn build_user_repository(
                             .into(),
                 }
             })?;
+            // TODO(task 04): drive `run_migrations` from `pg_cfg.run_migrations` once the
+            // config field lands; hard-coded `true` keeps the workspace compiling meanwhile.
             let pool = oidc_exchange_adapters::postgres::create_pool(
                 &pg_cfg.url,
                 pg_cfg.max_connections.unwrap_or(5),
+                true,
             )
             .await?;
             Ok(Box::new(
@@ -424,9 +427,12 @@ async fn build_session_repository(
                             .into(),
                 }
             })?;
+            // TODO(task 04): drive `run_migrations` from `pg_cfg.run_migrations` once the
+            // config field lands; hard-coded `true` keeps the workspace compiling meanwhile.
             let pool = oidc_exchange_adapters::postgres::create_pool(
                 &pg_cfg.url,
                 pg_cfg.max_connections.unwrap_or(5),
+                true,
             )
             .await?;
             Ok(Box::new(

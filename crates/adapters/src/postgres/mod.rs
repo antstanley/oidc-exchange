@@ -115,14 +115,28 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
         .is_some_and(|code| code == PG_UNIQUE_VIOLATION_CODE)
 }
 
+/// Builds the Postgres connection pool and, unless `run_migrations` is `false`, executes the
+/// adapter's idempotent [`MIGRATIONS`] DDL before returning — mirroring the SQLite adapter's
+/// `create_pool`. `MIGRATIONS` is a multi-statement block, which Postgres refuses to accept as
+/// a single prepared statement, so migrations run via `sqlx::raw_sql`'s simple-query protocol
+/// rather than `sqlx::query`. With `run_migrations = false`, `create_pool` only connects —
+/// for locked-down deployments where the app role has no DDL rights and migrations are applied
+/// out-of-band.
 pub async fn create_pool(
     url: &str,
     max_connections: u32,
+    run_migrations: bool,
 ) -> std::result::Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new()
+    let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .connect(url)
-        .await
+        .await?;
+
+    if run_migrations {
+        sqlx::raw_sql(MIGRATIONS).execute(&pool).await?;
+    }
+
+    Ok(pool)
 }
 
 fn status_to_str(status: &UserStatus) -> &'static str {
@@ -533,7 +547,8 @@ mod tests {
     const TEST_SCHEMA_ADVISORY_LOCK_KEY: i64 = 8_675_309;
 
     async fn create_test_repo() -> PostgresRepository {
-        let pool = create_pool(&test_database_url(), 5)
+        // Migrations are run explicitly below (after the schema reset), so connect only.
+        let pool = create_pool(&test_database_url(), 5, false)
             .await
             .expect("failed to connect to test Postgres instance");
 
@@ -589,7 +604,9 @@ mod tests {
     /// of all, one that drops a table — needs this instead. Every caller below passes a
     /// distinct `schema_name` so the tests below cannot race one another either.
     async fn create_isolated_schema_repo(schema_name: &str) -> PostgresRepository {
-        let bootstrap_pool = create_pool(&test_database_url(), 1)
+        // Only used to drop/create the isolated schema against the default search_path;
+        // migrations run afterwards against that schema via `search_path`, so skip them here.
+        let bootstrap_pool = create_pool(&test_database_url(), 1, false)
             .await
             .expect("failed to connect to test Postgres instance for schema bootstrap");
         sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
@@ -1068,6 +1085,114 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::Relaxed),
             winning_attempt,
             "should stop retrying as soon as an attempt succeeds, not keep spinning"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // `create_pool` migrate-on-startup behaviour
+    // -----------------------------------------------------------------
+
+    /// Appends a `search_path` connection option to `base_url` so a pool built from the
+    /// returned URL operates entirely inside `schema_name`, isolated from `public` and from
+    /// every other test's schema. Uses `?options=-c search_path=...` (URL-encoded), the query
+    /// form `sqlx::postgres::PgConnectOptions` parses into the same libpq startup option that
+    /// [`create_isolated_schema_repo`] sets programmatically via `.options(...)`.
+    fn url_with_search_path(base_url: &str, schema_name: &str) -> String {
+        let separator = if base_url.contains('?') { '&' } else { '?' };
+        format!("{base_url}{separator}options=-c%20search_path%3D{schema_name}")
+    }
+
+    /// Drops and recreates `schema_name` against `base_url` (default search_path), so each
+    /// caller below starts from a guaranteed-empty schema regardless of what a previous test
+    /// run left behind. Connects with `run_migrations = false` since this only manages the
+    /// schema itself, not its tables.
+    async fn reset_schema(base_url: &str, schema_name: &str) {
+        let pool = create_pool(base_url, 1, false)
+            .await
+            .expect("failed to connect to DATABASE_URL for schema bootstrap");
+        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("drop test schema");
+        sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
+            .execute(&pool)
+            .await
+            .expect("create test schema");
+        pool.close().await;
+    }
+
+    /// Gated on `DATABASE_URL` (skips cleanly, rather than failing, when unset, so
+    /// `cargo nextest run --workspace` stays green without a live database configured).
+    /// Proves both halves of the migrate-on-startup contract in one run against a real
+    /// Postgres instance: `create_pool(url, n, true)` alone — no explicit `raw_sql(MIGRATIONS)`
+    /// call, unlike every other test in this module — leaves a fresh schema able to serve
+    /// `create_user`/`get_user_by_id`; `create_pool(url, n, false)` against a separate fresh
+    /// schema is negative-space coverage that the migration is genuinely conditional, not
+    /// always-on — it must leave the `users`/`sessions` tables absent.
+    #[tokio::test]
+    async fn create_pool_migrates_on_startup_and_run_migrations_false_stays_bare() {
+        let Ok(base_url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping create_pool_migrates_on_startup_and_run_migrations_false_stays_bare: \
+                 DATABASE_URL is not set"
+            );
+            return;
+        };
+
+        // `run_migrations = true`, alone, must leave a working schema.
+        let migrated_schema = "oidc_adapter_test_migrate_on_startup_true";
+        reset_schema(&base_url, migrated_schema).await;
+        let migrated_url = url_with_search_path(&base_url, migrated_schema);
+        let pool = create_pool(&migrated_url, 2, true)
+            .await
+            .expect("create_pool(url, n, true) should connect and migrate a fresh schema");
+        let repo = PostgresRepository::new(pool);
+
+        let created = repo
+            .create_user(&NewUser {
+                external_id: "google|pg_migrate_on_startup_test".to_string(),
+                provider: "google".to_string(),
+                email: Some("migrate_on_startup@example.com".to_string()),
+                display_name: None,
+            })
+            .await
+            .expect("create_user should succeed once create_pool alone has migrated the schema");
+        let fetched = repo
+            .get_user_by_id(&created.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("the created user must round-trip");
+        assert_eq!(fetched.id, created.id, "round-tripped user id must match");
+        assert_eq!(
+            fetched.external_id, created.external_id,
+            "round-tripped user external_id must match"
+        );
+
+        // `run_migrations = false`, against a separate fresh schema, must leave it bare.
+        let bare_schema = "oidc_adapter_test_migrate_on_startup_false";
+        reset_schema(&base_url, bare_schema).await;
+        let bare_url = url_with_search_path(&base_url, bare_schema);
+        let bare_pool = create_pool(&bare_url, 2, false)
+            .await
+            .expect("create_pool(url, n, false) should still connect without migrating");
+
+        let row = sqlx::query(
+            "SELECT to_regclass('users')::text AS users_reg, \
+                    to_regclass('sessions')::text AS sessions_reg",
+        )
+        .fetch_one(&bare_pool)
+        .await
+        .expect("probing for the tables should succeed even though neither exists");
+        let users_reg: Option<String> = row.try_get("users_reg").expect("users_reg column");
+        let sessions_reg: Option<String> =
+            row.try_get("sessions_reg").expect("sessions_reg column");
+        assert!(
+            users_reg.is_none(),
+            "run_migrations = false must not create the users table"
+        );
+        assert!(
+            sessions_reg.is_none(),
+            "run_migrations = false must not create the sessions table"
         );
     }
 }

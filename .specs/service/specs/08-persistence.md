@@ -85,8 +85,14 @@ step alongside the inline `CREATE TABLE`, so a `users` table that predates the c
 it and an existing row reads back as `1`. Indexes cover `(external_id, provider)` and
 `sessions.user_id`. A unique violation on insert (SQLSTATE `23505`) maps to
 `Error::Conflict` rather than `Error::StoreError`, so a racing duplicate `create_user` is
-distinguishable from an infrastructure failure. `create_pool(url, max_connections)` builds
-the connection pool. Implements both repository traits.
+distinguishable from an infrastructure failure. `create_pool(url, max_connections,
+run_migrations)` builds the connection pool and, unless `run_migrations` is `false`, executes
+the adapter's idempotent migrations (`CREATE TABLE IF NOT EXISTS …`, run via sqlx's raw
+simple-query path since the migration DDL is multi-statement) before returning — like
+SQLite, a fresh database is ready to serve after startup with no external migration step.
+With `run_migrations = false`, `create_pool` only connects, leaving DDL to an out-of-band
+process — for locked-down deployments where the app role has no DDL rights. Implements both
+repository traits.
 
 The `(external_id, provider)` index is a *partial* unique index, `WHERE status !=
 'deleted'`: uniqueness is enforced only among live users, so a soft-deleted row frees its
