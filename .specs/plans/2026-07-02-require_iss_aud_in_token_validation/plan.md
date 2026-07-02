@@ -1,6 +1,6 @@
 # Plan: Require iss/aud presence and fix claim handling in ID-token validation
 
-**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-require_iss_aud_in_token_validation.md](../../changes/2026-07-01-require_iss_aud_in_token_validation.md)
+**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-require_iss_aud_in_token_validation.md](../../changes/2026-07-01-require_iss_aud_in_token_validation.md)
 
 This plan hardens ID-token validation in both identity providers so a provider-signed JWT that omits `iss` or `aud` is rejected (closing the cross-token-type confusion class), validates `nbf` when present, infers the signing algorithm from the JWK when it carries no `alg`, coerces Apple's bool-or-string `email_verified`/`is_private_email`, and surfaces `is_private_email` as a first-class `IdentityClaims` field. The decomposition puts two enablers first — a shared bool-or-string coercion helper (01) that both `validate_id_token` bodies call, and the `IdentityClaims.is_private_email` domain-type change (02) with its schema/prose and every constructor updated — then the two provider hardening slices that are reviewed through them: the generic OIDC adapter (03, which also gains alg-inference) and the Apple provider (04, which also populates `is_private_email`). Ordering leads with the enablers so each provider slice lands against a compiling helper and field and can be reviewed end to end.
 
