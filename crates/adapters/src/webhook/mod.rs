@@ -148,6 +148,7 @@ mod tests {
             metadata: HashMap::new(),
             claims: HashMap::new(),
             status: oidc_exchange_core::domain::user::UserStatus::Active,
+            version: oidc_exchange_core::domain::user::INITIAL_USER_VERSION,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

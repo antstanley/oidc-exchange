@@ -10,7 +10,7 @@
     },
     "User": {
       "type": "object",
-      "required": ["id", "external_id", "provider", "metadata", "claims", "status", "created_at", "updated_at"],
+      "required": ["id", "external_id", "provider", "metadata", "claims", "status", "version", "created_at", "updated_at"],
       "properties": {
         "id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
         "external_id": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "Provider sub claim or DID." },
@@ -20,6 +20,7 @@
         "metadata": { "type": "object", "additionalProperties": true, "description": "Extensible sync/profile data; readable by claim templates." },
         "claims": { "type": "object", "additionalProperties": true, "description": "Per-user private claims merged into the access token JWT." },
         "status": { "$ref": "#/$defs/UserStatus" },
+        "version": { "type": "integer", "minimum": 1, "description": "Optimistic-concurrency counter; starts at 1 on create, incremented by every update_user." },
         "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
         "updated_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
       }

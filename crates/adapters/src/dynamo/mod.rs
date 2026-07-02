@@ -7,7 +7,9 @@ use aws_sdk_dynamodb::types::AttributeValue;
 use chrono::Utc;
 use tracing::instrument;
 
-use oidc_exchange_core::domain::{NewUser, Session, User, UserPatch, UserStatus};
+use oidc_exchange_core::domain::{
+    NewUser, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
+};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
@@ -94,6 +96,7 @@ impl UserRepository for DynamoRepository {
             metadata: HashMap::new(),
             claims: HashMap::new(),
             status: UserStatus::Active,
+            version: INITIAL_USER_VERSION,
             created_at: now,
             updated_at: now,
         };
@@ -628,6 +631,7 @@ mod tests {
         assert_eq!(created.provider, "google");
         assert_eq!(created.email.as_deref(), Some("alice@example.com"));
         assert_eq!(created.status, UserStatus::Active);
+        assert_eq!(created.version, INITIAL_USER_VERSION);
 
         // Get user by ID
         let fetched = repo
@@ -637,6 +641,7 @@ mod tests {
             .expect("user should exist");
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.external_id, "google|user123");
+        assert_eq!(fetched.version, created.version);
 
         // Get user by external ID
         let fetched_ext = repo

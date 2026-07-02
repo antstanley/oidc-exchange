@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use chrono::{DateTime, Utc};
-use oidc_exchange_core::domain::{Session, User, UserStatus};
+use oidc_exchange_core::domain::{Session, User, UserStatus, INITIAL_USER_VERSION};
 use oidc_exchange_core::error::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -64,6 +64,11 @@ pub fn user_to_item(user: &User) -> HashMap<String, AttributeValue> {
     );
 
     item.insert(
+        "version".to_string(),
+        AttributeValue::N(user.version.to_string()),
+    );
+
+    item.insert(
         "created_at".to_string(),
         AttributeValue::S(user.created_at.to_rfc3339()),
     );
@@ -85,6 +90,7 @@ pub fn item_to_user(item: &HashMap<String, AttributeValue>) -> Result<User> {
         metadata: get_json_map(item, "metadata")?,
         claims: get_json_map(item, "claims")?,
         status: string_to_status(&get_s(item, "status")?)?,
+        version: get_version_or_default(item)?,
         created_at: parse_datetime(&get_s(item, "created_at")?)?,
         updated_at: parse_datetime(&get_s(item, "updated_at")?)?,
     })
@@ -196,6 +202,23 @@ fn get_s_opt(item: &HashMap<String, AttributeValue>, key: &str) -> Option<String
         .map(|s| s.to_string())
 }
 
+/// Reads the `version` attribute, treating a missing attribute (an item written before
+/// the field existed) as [`INITIAL_USER_VERSION`] — the migration default.
+fn get_version_or_default(item: &HashMap<String, AttributeValue>) -> Result<u64> {
+    match item.get("version") {
+        Some(v) => v
+            .as_n()
+            .map_err(|_| Error::StoreError {
+                detail: "invalid attribute: version".to_string(),
+            })?
+            .parse::<u64>()
+            .map_err(|e| Error::StoreError {
+                detail: format!("invalid version: {e}"),
+            }),
+        None => Ok(INITIAL_USER_VERSION),
+    }
+}
+
 fn get_json_map(
     item: &HashMap<String, AttributeValue>,
     key: &str,
@@ -265,6 +288,7 @@ mod tests {
             metadata,
             claims,
             status: UserStatus::Active,
+            version: 3,
             created_at: now,
             updated_at: now,
         }
@@ -298,6 +322,7 @@ mod tests {
         assert_eq!(user.metadata, restored.metadata);
         assert_eq!(user.claims, restored.claims);
         assert_eq!(user.status, restored.status);
+        assert_eq!(user.version, restored.version);
         // Datetime round-trip may lose sub-nanosecond precision, compare timestamps
         assert_eq!(
             user.created_at.timestamp_millis(),
@@ -321,6 +346,7 @@ mod tests {
             metadata: HashMap::new(),
             claims: HashMap::new(),
             status: UserStatus::Suspended,
+            version: INITIAL_USER_VERSION,
             created_at: now,
             updated_at: now,
         };
@@ -334,6 +360,49 @@ mod tests {
         assert!(restored.metadata.is_empty());
         assert!(restored.claims.is_empty());
         assert_eq!(UserStatus::Suspended, restored.status);
+        assert_eq!(INITIAL_USER_VERSION, restored.version);
+    }
+
+    #[test]
+    fn user_item_has_version_attribute() {
+        let user = sample_user();
+        let item = user_to_item(&user);
+
+        let version = item.get("version").expect("item should have version");
+        let version_val: u64 = version
+            .as_n()
+            .expect("version should be N")
+            .parse()
+            .expect("version should be a valid u64");
+        assert_eq!(version_val, user.version);
+    }
+
+    #[test]
+    fn item_to_user_missing_version_defaults_to_initial_version() {
+        let user = sample_user();
+        let mut item = user_to_item(&user);
+        item.remove("version");
+
+        let restored = item_to_user(&item).expect("should parse user from item");
+        assert_eq!(restored.version, INITIAL_USER_VERSION);
+        // Sanity: every other field still round-trips even without the version attribute.
+        assert_eq!(restored.id, user.id);
+    }
+
+    /// Negative-space: a `version` attribute present but not a DynamoDB `N` (number) is a
+    /// distinct failure from "missing" and must be rejected, not silently defaulted.
+    #[test]
+    fn item_to_user_non_numeric_version_returns_error() {
+        let user = sample_user();
+        let mut item = user_to_item(&user);
+        item.insert(
+            "version".to_string(),
+            AttributeValue::S("not-a-number".to_string()),
+        );
+
+        let result = item_to_user(&item);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("version"));
     }
 
     #[test]

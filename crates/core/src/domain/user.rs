@@ -4,6 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// The `version` value every `create_user` writes, and the value a read of a
+/// pre-migration row/item (one with no `version` attribute/column) defaults to.
+pub const INITIAL_USER_VERSION: u64 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// Internal ID, e.g., "usr_01ARZ3NDEK..."
@@ -20,6 +24,9 @@ pub struct User {
     /// Per-user private claims added to access token JWT
     pub claims: HashMap<String, Value>,
     pub status: UserStatus,
+    /// Store-managed optimistic-concurrency counter; never caller-supplied.
+    /// `create_user` writes [`INITIAL_USER_VERSION`]; every `update_user` increments it.
+    pub version: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

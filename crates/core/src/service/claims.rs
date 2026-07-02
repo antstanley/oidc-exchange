@@ -135,6 +135,7 @@ mod tests {
             metadata: HashMap::new(),
             claims: HashMap::new(),
             status: crate::domain::UserStatus::Active,
+            version: crate::domain::INITIAL_USER_VERSION,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

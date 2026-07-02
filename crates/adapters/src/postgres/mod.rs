@@ -21,9 +21,14 @@ CREATE TABLE IF NOT EXISTS users (
     metadata        JSONB NOT NULL DEFAULT '{}',
     claims          JSONB NOT NULL DEFAULT '{}',
     status          TEXT NOT NULL DEFAULT 'active',
+    version         BIGINT NOT NULL DEFAULT 1,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- `CREATE TABLE IF NOT EXISTS` above only covers fresh databases; a `users` table that
+-- predates the `version` column needs this explicit, idempotent step.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_id_provider ON users (external_id, provider);
 
@@ -115,6 +120,9 @@ fn row_to_user(row: &sqlx::postgres::PgRow) -> Result<User> {
             row.try_get::<&str, _>("status")
                 .map_err(PostgresRepository::store_err)?,
         )?,
+        version: row
+            .try_get::<i64, _>("version")
+            .map_err(PostgresRepository::store_err)? as u64,
         created_at: row
             .try_get("created_at")
             .map_err(PostgresRepository::store_err)?,
@@ -406,5 +414,143 @@ impl SessionRepository for PostgresRepository {
             .map_err(Self::store_err)?;
 
         Ok(result.rows_affected())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests (require a live PostgreSQL instance)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oidc_exchange_core::domain::INITIAL_USER_VERSION;
+
+    /// `postgres://…` URL for a scratch database, overridable via
+    /// `POSTGRES_TEST_URL`. Start one with:
+    /// `docker run -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16`.
+    fn test_database_url() -> String {
+        std::env::var("POSTGRES_TEST_URL")
+            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string())
+    }
+
+    /// Session-scoped Postgres advisory lock key used to serialize the schema
+    /// reset (`DROP`/`CREATE TABLE`) in [`create_test_repo`]. `cargo nextest`
+    /// runs `#[ignore]`d tests as separate OS processes, and both Postgres
+    /// tests below share the one scratch database, so without this lock their
+    /// concurrent `DROP TABLE` / `CREATE TABLE IF NOT EXISTS` calls can race
+    /// (observed as duplicate-key errors on `pg_type`). The value is
+    /// arbitrary; it only needs to be a stable constant shared by every
+    /// caller of `create_test_repo`.
+    const TEST_SCHEMA_ADVISORY_LOCK_KEY: i64 = 8_675_309;
+
+    async fn create_test_repo() -> PostgresRepository {
+        let pool = create_pool(&test_database_url(), 5)
+            .await
+            .expect("failed to connect to test Postgres instance");
+
+        // Advisory locks are session-scoped, so the lock/unlock pair and the
+        // schema reset in between must all run on the same connection rather
+        // than through the pool (which could hand different queries to
+        // different connections).
+        let mut conn = pool
+            .acquire()
+            .await
+            .expect("acquire dedicated schema-setup connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(TEST_SCHEMA_ADVISORY_LOCK_KEY)
+            .execute(&mut *conn)
+            .await
+            .expect("acquire test schema lock");
+
+        // Fresh scratch schema per run so the unique index / version DEFAULT can be
+        // exercised without state left over from a previous run.
+        sqlx::query("DROP TABLE IF EXISTS sessions")
+            .execute(&mut *conn)
+            .await
+            .expect("drop sessions");
+        sqlx::query("DROP TABLE IF EXISTS users")
+            .execute(&mut *conn)
+            .await
+            .expect("drop users");
+        // `MIGRATIONS` contains multiple statements, which Postgres refuses to
+        // accept as a single prepared statement (`sqlx::query`); `raw_sql` sends
+        // it unprepared instead, the way a migration runner would.
+        sqlx::raw_sql(MIGRATIONS)
+            .execute(&mut *conn)
+            .await
+            .expect("run migrations");
+
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(TEST_SCHEMA_ADVISORY_LOCK_KEY)
+            .execute(&mut *conn)
+            .await
+            .expect("release test schema lock");
+        drop(conn);
+
+        PostgresRepository::new(pool)
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn create_user_round_trips_initial_version() {
+        let repo = create_test_repo().await;
+
+        let created = repo
+            .create_user(&NewUser {
+                external_id: "google|pg_version_test".to_string(),
+                provider: "google".to_string(),
+                email: Some("pg@example.com".to_string()),
+                display_name: None,
+            })
+            .await
+            .expect("create_user");
+        assert_eq!(created.version, INITIAL_USER_VERSION);
+
+        let fetched = repo
+            .get_user_by_id(&created.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("user should exist");
+        assert_eq!(fetched.version, created.version);
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn legacy_row_without_version_column_defaults_to_initial_version() {
+        let repo = create_test_repo().await;
+
+        // Simulate a pre-migration row: drop the column, then apply the same
+        // idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` migrations run.
+        sqlx::query("ALTER TABLE users DROP COLUMN version")
+            .execute(&repo.pool)
+            .await
+            .expect("drop version column to simulate a pre-migration row");
+
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO users (id, external_id, provider, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'active', $4, $4)",
+        )
+        .bind("usr_legacy")
+        .bind("legacy-ext")
+        .bind("google")
+        .bind(now)
+        .execute(&repo.pool)
+        .await
+        .expect("insert legacy row");
+
+        sqlx::raw_sql(MIGRATIONS)
+            .execute(&repo.pool)
+            .await
+            .expect("re-run migrations to backfill the version column");
+
+        let user = repo
+            .get_user_by_id("usr_legacy")
+            .await
+            .expect("get_user_by_id")
+            .expect("legacy user should be found");
+        assert_eq!(user.version, INITIAL_USER_VERSION);
+        assert_eq!(user.external_id, "legacy-ext");
     }
 }

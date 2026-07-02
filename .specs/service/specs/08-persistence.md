@@ -33,15 +33,23 @@ provider prefix so the same external id from two providers does not collide.
 
 ## PostgreSQL (`adapters/postgres`)
 
-Two tables via `sqlx`: `users` and `sessions`. `metadata` and `claims` are `JSONB`; indexes
-cover `(external_id, provider)` and `sessions.user_id`. `create_pool(url, max_connections)`
-builds the connection pool. Implements both repository traits.
+Two tables via `sqlx`: `users` and `sessions`. `metadata` and `claims` are `JSONB`; `users`
+carries a `version BIGINT NOT NULL DEFAULT 1` column — a store-managed optimistic-concurrency
+counter that `create_user` writes as `1` and every read carries through unchanged. The
+migration DDL adds the column with an idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS`
+step alongside the inline `CREATE TABLE`, so a `users` table that predates the column gets
+it and an existing row reads back as `1`. Indexes cover `(external_id, provider)` and
+`sessions.user_id`. `create_pool(url, max_connections)` builds the connection pool.
+Implements both repository traits.
 
 ## SQLite (`adapters/sqlite`)
 
 Single-file `sqlx` store with WAL mode and foreign-key enforcement; `metadata`/`claims` stored
-as JSON `TEXT`. `create_pool(path)` opens the database. Implements both repository traits — the
-zero-dependency single-host option.
+as JSON `TEXT`. `users` carries the same store-managed `version INTEGER NOT NULL DEFAULT 1`
+column as PostgreSQL; `create_pool(path)` runs the inline DDL and then an idempotent
+`ALTER TABLE` step (SQLite's `ADD COLUMN` has no `IF NOT EXISTS` form) that adds the column
+to a `users` table that predates it, defaulting existing rows to `1`. Implements both
+repository traits — the zero-dependency single-host option.
 
 ## Session-only stores
 

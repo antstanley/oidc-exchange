@@ -34,6 +34,7 @@ struct User {
     metadata: HashMap<String, Value>, // extensible sync data
     claims: HashMap<String, Value>,   // per-user private claims merged into the access JWT
     status: UserStatus,
+    version: u64,                     // optimistic-concurrency counter; 1 on create
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -44,6 +45,11 @@ private claims injected into the access token, managed through the internal API.
 (creation input) carries `external_id`, `provider`, `email`, `display_name`. `UserPatch`
 (update input) carries optional `email`, `display_name`, `metadata`, `claims`, `status`; a
 `Some(claims)` patch **replaces** the entire claims map.
+
+`version` is store-managed, never caller-supplied: `create_user` writes `1`, every
+`update_user` increments it, and the write is conditioned on the version that was read
+(see [08-persistence.md](08-persistence.md)). It appears in neither `NewUser` nor
+`UserPatch`.
 
 ### Session (`domain/session.rs`)
 
@@ -143,7 +149,10 @@ User.provider / external_id ── upstream provider subject
 - **Suspended** — exchange and refresh are rejected (`UserSuspended`); already-issued access
   JWTs remain valid until they expire (JWTs are not individually revocable).
 - **Deleted** — soft delete via `UserPatch { status: Deleted }`; the service revokes all the
-  user's sessions on delete. The row is kept.
+  user's sessions on delete. The row is kept, but the identity is freed:
+  `get_user_by_external_id` no longer returns the deleted user, and a later first login
+  for the same `(provider, external_id)` re-registers as a brand-new user with no claims
+  or sessions carried over.
 
 ### Session
 
@@ -168,8 +177,10 @@ its TTL attribute, other stores via `cleanup_expired_sessions`.
 
 ### Assumptions
 
-- A user is uniquely keyed by `(provider, external_id)`; provider namespacing prevents
-  cross-provider subject collisions.
+- At most one **non-deleted** user exists per `(provider, external_id)`; provider
+  namespacing prevents cross-provider subject collisions. Deleting a user frees the
+  identity for re-registration — the deleted record is retained but no longer occupies
+  the key.
 
 ### Decisions
 

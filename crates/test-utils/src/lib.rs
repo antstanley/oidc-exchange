@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use oidc_exchange_core::domain::{
     AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
+    INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
@@ -86,6 +87,7 @@ impl UserRepository for MockRepository {
             metadata: HashMap::new(),
             claims: HashMap::new(),
             status: UserStatus::Active,
+            version: INITIAL_USER_VERSION,
             created_at: now,
             updated_at: now,
         };
