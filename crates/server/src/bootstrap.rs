@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
+use config::{Config, Environment, File, FileFormat};
 use tower_http::catch_panic::CatchPanicLayer;
 
 use oidc_exchange_core::config::{AppConfig, ProviderConfig};
@@ -21,28 +22,72 @@ use crate::state::AppState;
 // Config loading
 // ---------------------------------------------------------------------------
 
+/// Name of the config directory relative to the process working directory.
+const CONFIG_DIR: &str = "config";
+
+/// Environment variable that selects the environment-specific overlay TOML
+/// (`config/{OIDC_EXCHANGE_ENV}.toml`), e.g. `production`, `sqlite-only`.
+const ENV_SELECTOR_VAR: &str = "OIDC_EXCHANGE_ENV";
+
+/// Prefix required on environment variables that structurally override the
+/// merged config (`OIDC_EXCHANGE__{section}__{key}`).
+const ENV_OVERRIDE_PREFIX: &str = "OIDC_EXCHANGE";
+
+/// Separator between path segments in `OIDC_EXCHANGE__{section}__{key}`
+/// environment overrides. A double underscore separates segments; a single
+/// underscore stays inside a segment (`OIDC_EXCHANGE__PROVIDERS__MY_IDP__…`
+/// addresses `providers.my_idp`).
+const ENV_OVERRIDE_SEPARATOR: &str = "__";
+
 /// Load configuration from config files on disk, using the `OIDC_EXCHANGE_ENV`
-/// environment variable to select the environment-specific config file.
+/// environment variable to select the environment-specific config file, and
+/// `OIDC_EXCHANGE__{section}__{key}` environment variables to override the
+/// merged result afterward.
 pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let env = std::env::var("OIDC_EXCHANGE_ENV").unwrap_or_else(|_| "default".to_string());
+    load_config_from_dir(CONFIG_DIR)
+}
 
-    // Try to read config files
-    let default_config = std::fs::read_to_string("config/default.toml").unwrap_or_default();
-    let env_config = std::fs::read_to_string(format!("config/{}.toml", env)).unwrap_or_default();
+/// Core of [`load_config`], parameterized over the config directory so tests
+/// can point it at a fixture directory instead of the process's `config/`.
+///
+/// Loading order:
+/// 1. `{config_dir}/default.toml` — compiled-in defaults (missing file is not
+///    an error).
+/// 2. `{config_dir}/{OIDC_EXCHANGE_ENV}.toml` — deep-merged on top when
+///    `OIDC_EXCHANGE_ENV` is set and non-empty (tables merge recursively,
+///    scalars/arrays are replaced; missing/empty file is not an error).
+/// 3. `OIDC_EXCHANGE__{section}__{key}` environment variables, applied on top
+///    of the merged TOML and reaching every path including map-valued
+///    sections.
+///
+/// With no files present and no overriding environment variables, the
+/// deserialized result is `AppConfig::default()` (every field carries
+/// `#[serde(default)]`).
+fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let mut builder = Config::builder().add_source(
+        File::with_name(&format!("{config_dir}/default"))
+            .format(FileFormat::Toml)
+            .required(false),
+    );
 
-    // Use the env-specific config if it exists, otherwise fall back to default.
-    let merged = if env_config.is_empty() {
-        default_config
-    } else {
-        env_config
-    };
-
-    if merged.is_empty() {
-        // No config files found — fall back to compiled-in defaults
-        return Ok(AppConfig::default());
+    if let Ok(env) = std::env::var(ENV_SELECTOR_VAR) {
+        if !env.is_empty() {
+            builder = builder.add_source(
+                File::with_name(&format!("{config_dir}/{env}"))
+                    .format(FileFormat::Toml)
+                    .required(false),
+            );
+        }
     }
 
-    let config: AppConfig = toml::from_str(&merged)?;
+    builder = builder.add_source(
+        Environment::with_prefix(ENV_OVERRIDE_PREFIX)
+            .separator(ENV_OVERRIDE_SEPARATOR)
+            .try_parsing(true),
+    );
+
+    let merged = builder.build()?;
+    let config: AppConfig = merged.try_deserialize()?;
     Ok(config)
 }
 
@@ -535,4 +580,232 @@ fn provider_config_to_oidc(
         scopes,
         additional_params: HashMap::new(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Config loading tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod load_config_tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    /// Sets one or more environment variables for the duration of a test and
+    /// removes them on drop (including when a later assertion panics), so
+    /// config-loading tests never leak process-global env state.
+    struct EnvVarGuard {
+        keys: Vec<&'static str>,
+    }
+
+    impl EnvVarGuard {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let keys = vars.iter().map(|(key, _)| *key).collect();
+            for (key, value) in vars {
+                std::env::set_var(key, value);
+            }
+            Self { keys }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for key in &self.keys {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    fn write_toml(dir: &Path, stem: &str, contents: &str) {
+        fs::write(dir.join(format!("{stem}.toml")), contents).expect("write fixture toml");
+    }
+
+    fn dir_str(dir: &Path) -> &str {
+        dir.to_str().expect("fixture dir path is valid UTF-8")
+    }
+
+    #[test]
+    fn overlay_merges_over_default_rather_than_replacing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "0.0.0.0"
+                port = 8080
+
+                [registration]
+                mode = "open"
+            "#,
+        );
+        write_toml(
+            dir.path(),
+            "overlay-env",
+            r#"
+                [server]
+                port = 9090
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE_ENV", "overlay-env")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        // A key present only in default.toml survives the overlay...
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.registration.mode, "open");
+        // ...while a key set in both takes the overlay's value.
+        assert_eq!(config.server.port, 9090);
+    }
+
+    #[test]
+    fn env_var_override_reaches_nested_and_map_valued_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                port = 8080
+
+                [providers.google]
+                adapter = "oidc"
+                client_id = "default-client"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[
+            (
+                "OIDC_EXCHANGE__PROVIDERS__GOOGLE__CLIENT_ID",
+                "overridden-client",
+            ),
+            ("OIDC_EXCHANGE__SERVER__PORT", "9999"),
+        ]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(config.server.port, 9999);
+        let google = config.providers.get("google").expect("google provider");
+        assert_eq!(google.adapter, "oidc", "unrelated fields survive the merge");
+        assert_eq!(
+            google.extra.get("client_id").and_then(|v| v.as_str()),
+            Some("overridden-client")
+        );
+    }
+
+    #[test]
+    fn single_underscore_provider_name_is_addressable_not_split() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [providers.my_idp]
+                adapter = "oidc"
+                client_id = "a"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE__PROVIDERS__MY_IDP__CLIENT_ID", "b")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(
+            config.providers.len(),
+            1,
+            "my_idp must address a single provider entry, not split into extra segments"
+        );
+        let provider = config
+            .providers
+            .get("my_idp")
+            .expect("my_idp provider present under its full, unsplit name");
+        assert_eq!(
+            provider.extra.get("client_id").and_then(|v| v.as_str()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn missing_config_files_fall_back_to_compiled_in_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No files written at all, and no OIDC_EXCHANGE_ENV set.
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+        let defaults = AppConfig::default();
+
+        assert_eq!(config.server.host, defaults.server.host);
+        assert_eq!(config.server.port, defaults.server.port);
+        assert_eq!(config.registration.mode, defaults.registration.mode);
+        assert_eq!(
+            config.token.access_token_ttl,
+            defaults.token.access_token_ttl
+        );
+    }
+
+    #[test]
+    fn missing_or_empty_env_overlay_file_is_not_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "10.0.0.1"
+            "#,
+        );
+        // Present but empty overlay file.
+        write_toml(dir.path(), "empty-env", "");
+
+        {
+            let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE_ENV", "empty-env")]);
+            let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+            assert_eq!(config.server.host, "10.0.0.1");
+        }
+
+        // Overlay file that does not exist on disk at all.
+        let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE_ENV", "does-not-exist")]);
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+        assert_eq!(config.server.host, "10.0.0.1");
+    }
+
+    /// End-to-end reviewability case: all three layers (default TOML, env
+    /// overlay TOML, and an `OIDC_EXCHANGE__…` var) are exercised together,
+    /// and the merged `AppConfig` carries the untouched default alongside
+    /// the overlaid and env-overridden values.
+    #[test]
+    fn default_overlay_and_env_var_all_apply_together() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "0.0.0.0"
+                port = 8080
+
+                [registration]
+                mode = "open"
+            "#,
+        );
+        write_toml(
+            dir.path(),
+            "full-stack",
+            r#"
+                [server]
+                port = 9090
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[
+            ("OIDC_EXCHANGE_ENV", "full-stack"),
+            ("OIDC_EXCHANGE__SERVER__HOST", "203.0.113.5"),
+        ]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        // Untouched by either overlay or env var — the compiled default TOML value.
+        assert_eq!(config.registration.mode, "open");
+        // Set by the env overlay TOML, not present in the env var.
+        assert_eq!(config.server.port, 9090);
+        // Set by the OIDC_EXCHANGE__ env var, on top of the overlay and default.
+        assert_eq!(config.server.host, "203.0.113.5");
+    }
 }
