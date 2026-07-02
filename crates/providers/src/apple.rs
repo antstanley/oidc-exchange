@@ -59,6 +59,24 @@ struct ClientSecretClaims {
     exp: u64,
 }
 
+/// Find the JWK matching `kid` inside a JWKS response's `keys` array.
+///
+/// Returns `Ok(None)` on a genuine `kid` miss (the caller decides whether that is terminal
+/// or should trigger a forced refetch); errors if the response does not carry a `keys`
+/// array at all (a malformed JWKS body, distinct from a miss).
+fn find_jwk(jwks: &serde_json::Value, kid: &str) -> Result<Option<serde_json::Value>> {
+    let keys = jwks["keys"]
+        .as_array()
+        .ok_or_else(|| Error::ProviderError {
+            provider: "apple".into(),
+            detail: "JWKS response missing 'keys' array".into(),
+        })?;
+    Ok(keys
+        .iter()
+        .find(|k| k["kid"].as_str() == Some(kid))
+        .cloned())
+}
+
 impl AppleProvider {
     /// Build an `AppleProvider` from a raw TOML config map.
     ///
@@ -214,27 +232,35 @@ impl IdentityProvider for AppleProvider {
             reason: format!("Invalid JWT header: {e}"),
         })?;
 
-        // 2. Fetch JWKS (cached)
-        let jwks = self.jwks_cache.get_keys().await?;
-
-        // 3. Find matching key by kid
         let kid = header.kid.as_deref().ok_or_else(|| Error::InvalidGrant {
             reason: "JWT missing kid header".into(),
         })?;
 
-        let keys = jwks["keys"]
-            .as_array()
-            .ok_or_else(|| Error::ProviderError {
-                provider: "apple".into(),
-                detail: "JWKS response missing 'keys' array".into(),
-            })?;
+        // 2. Fetch JWKS (cached)
+        let jwks = self.jwks_cache.get_keys().await?;
 
-        let jwk = keys
-            .iter()
-            .find(|k| k["kid"].as_str() == Some(kid))
-            .ok_or_else(|| Error::InvalidGrant {
-                reason: format!("No matching key for kid: {kid}"),
-            })?;
+        // 3. Find matching key by kid. On a miss, force one rate-limited refetch (task 02's
+        // `JwksCache::refresh` API, bounded by `MIN_REFRESH_INTERVAL`) and re-search the
+        // refetched set before rejecting, so a rotated Apple signing key is picked up
+        // immediately instead of waiting out the (much longer) cache TTL.
+        let jwk = match find_jwk(&jwks, kid)? {
+            Some(jwk) => jwk,
+            None => {
+                self.jwks_cache.refresh().await?;
+                let refreshed = self.jwks_cache.get_keys().await?;
+                // Provider responses are adversarial (dev-guidelines §Defensive coding):
+                // find_jwk fails closed with a ProviderError if `refreshed` is not a
+                // `keys` array, so we validate rather than assert/panic on a 2xx body.
+                find_jwk(&refreshed, kid)?.ok_or_else(|| Error::InvalidGrant {
+                    reason: format!("No matching key for kid: {kid} (after forced refetch)"),
+                })?
+            }
+        };
+        assert_eq!(
+            jwk["kid"].as_str(),
+            Some(kid),
+            "resolved JWK's kid must equal the header kid"
+        );
 
         // 4. Build decoding key from JWK
         let jwk_value: jsonwebtoken::jwk::Jwk =
@@ -854,5 +880,126 @@ mod tests {
 
         assert_eq!(identity.is_private_email, Some(true));
         assert_eq!(identity.subject, "apple-user-007");
+    }
+
+    // ---------------------------------------------------------------
+    // Unknown kid triggers one rate-limited refetch, then validates
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_refetches_jwks_on_unknown_kid_then_validates() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (pem, jwks, kid) = generate_es256_test_keys();
+
+        // The initially cached JWKS response omits the token's `kid` — simulating an Apple
+        // signing key that rotated after the cache was last populated.
+        let stale_jwks = json!({ "keys": [] });
+
+        Mock::given(method("GET"))
+            .and(path("/auth/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&stale_jwks))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The forced refetch (triggered by the kid miss) serves the rotated key set that
+        // contains the token's kid.
+        Mock::given(method("GET"))
+            .and(path("/auth/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = AppleProvider::new_for_test(
+            "com.example.app".into(),
+            "ABCDEF1234".into(),
+            "apple-test-key-1".into(),
+            EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
+            format!("{uri}/auth/token"),
+            format!("{uri}/auth/keys"),
+            None,
+        );
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-rotated",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        // No TTL sleep anywhere in this test: the rotated key must validate on the very
+        // next call, driven entirely by the kid-miss forced refetch.
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("token should validate after one forced refetch picks up the rotated key");
+
+        assert_eq!(identity.subject, "apple-user-rotated");
+        // wiremock's `expect(1)` on each of the two mounted mocks verifies exactly one
+        // initial fetch and exactly one forced refetch occurred — not zero, not more (they
+        // would panic on drop otherwise).
+    }
+
+    // ---------------------------------------------------------------
+    // kid still missing after the forced refetch is rejected, and the refetch is
+    // rate-limited (negative-space test)
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_rejects_kid_still_missing_after_refetch() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (pem, jwks, _kid) = generate_es256_test_keys();
+        // Both the initial cache fill and the one permitted forced refetch return the same
+        // set — the presented token's kid is never in it.
+        Mock::given(method("GET"))
+            .and(path("/auth/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .expect(2) // Initial fetch + exactly one forced refetch; a third call would panic.
+            .mount(&server)
+            .await;
+
+        let provider = AppleProvider::new_for_test(
+            "com.example.app".into(),
+            "ABCDEF1234".into(),
+            "apple-test-key-1".into(),
+            EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
+            format!("{uri}/auth/token"),
+            format!("{uri}/auth/keys"),
+            None,
+        );
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-x",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, "unknown-kid", &claims);
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(
+            matches!(result, Err(Error::InvalidGrant { .. })),
+            "kid absent even after a forced refetch must be rejected with InvalidGrant, \
+             not a hang or a different error variant"
+        );
+
+        // A second call with the same unknown kid must not trigger a second forced refetch:
+        // the JWKS endpoint's request budget is already exhausted by wiremock's `expect(2)`
+        // above (mounting would panic on drop if a third GET request occurred), proving
+        // MIN_REFRESH_INTERVAL held and no infinite refetch loop happened.
+        let result2 = provider.validate_id_token(&id_token).await;
+        assert!(
+            matches!(result2, Err(Error::InvalidGrant { .. })),
+            "repeated unknown kid must still fail closed without a new network fetch"
+        );
     }
 }
