@@ -9,7 +9,7 @@ pub async fn exchange_code(
     code: &str,
     redirect_uri: &str,
 ) -> Result<ProviderTokens> {
-    let client = reqwest::Client::new();
+    let client = crate::shared::http::client();
     let mut params = vec![
         ("grant_type", "authorization_code"),
         ("code", code),

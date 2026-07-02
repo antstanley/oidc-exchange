@@ -199,7 +199,7 @@ impl IdentityProvider for OidcProvider {
             None => return Ok(()), // Provider doesn't support revocation
         };
 
-        let client = reqwest::Client::new();
+        let client = crate::shared::http::client();
         let mut params = vec![("token", token)];
 
         // Include client credentials if available

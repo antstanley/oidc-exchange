@@ -17,10 +17,14 @@ pub async fn discover(issuer_url: &str) -> Result<DiscoveryDocument> {
         "{}/.well-known/openid-configuration",
         issuer_url.trim_end_matches('/')
     );
-    let response = reqwest::get(&url).await.map_err(|e| Error::ProviderError {
-        provider: issuer_url.to_string(),
-        detail: e.to_string(),
-    })?;
+    let response = crate::shared::http::client()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| Error::ProviderError {
+            provider: issuer_url.to_string(),
+            detail: e.to_string(),
+        })?;
     let doc = response
         .json::<DiscoveryDocument>()
         .await

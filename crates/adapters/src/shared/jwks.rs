@@ -69,7 +69,9 @@ impl JwksCache {
     }
 
     async fn fetch_keys(&self) -> Result<serde_json::Value> {
-        let response = reqwest::get(&self.jwks_uri)
+        let response = crate::shared::http::client()
+            .get(&self.jwks_uri)
+            .send()
             .await
             .map_err(|e| Error::ProviderError {
                 provider: self.jwks_uri.clone(),

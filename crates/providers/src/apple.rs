@@ -301,7 +301,7 @@ impl IdentityProvider for AppleProvider {
 
         let client_secret = self.generate_client_secret()?;
 
-        let client = reqwest::Client::new();
+        let client = oidc_exchange_adapters::shared::http::client();
         let response = client
             .post(endpoint)
             .form(&[
