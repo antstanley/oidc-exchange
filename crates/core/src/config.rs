@@ -246,6 +246,11 @@ pub struct DynamoConfig {
 pub struct PostgresConfig {
     pub url: String,
     pub max_connections: Option<u32>,
+    /// Whether `create_pool` should run the adapter's idempotent migration
+    /// DDL before returning. Absent (`None`) resolves to `true` at the call
+    /// site; set `false` for locked-down databases where the app role has
+    /// no DDL rights and migrations are applied out-of-band.
+    pub run_migrations: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -523,6 +528,59 @@ scopes = ["openid", "email", "profile"]
             google.extra.get("issuer").unwrap().as_str().unwrap(),
             "https://accounts.google.com"
         );
+    }
+
+    /// `[repository.postgres] run_migrations` deserializes to `Some(true|false)`
+    /// when present and to `None` (later resolved as `true`) when absent, for
+    /// all three cases an operator's TOML can express.
+    #[test]
+    fn postgres_run_migrations_deserializes_present_and_absent() {
+        let with_false: AppConfig = toml::from_str(
+            r#"
+[repository]
+adapter = "postgres"
+
+[repository.postgres]
+url = "postgres://localhost/oidc"
+run_migrations = false
+"#,
+        )
+        .expect("run_migrations = false must deserialize");
+        assert_eq!(
+            with_false.repository.postgres.unwrap().run_migrations,
+            Some(false)
+        );
+
+        let with_true: AppConfig = toml::from_str(
+            r#"
+[repository]
+adapter = "postgres"
+
+[repository.postgres]
+url = "postgres://localhost/oidc"
+run_migrations = true
+"#,
+        )
+        .expect("run_migrations = true must deserialize");
+        assert_eq!(
+            with_true.repository.postgres.unwrap().run_migrations,
+            Some(true)
+        );
+
+        // Negative-space: omitting the key must still deserialize (not a
+        // parse error), landing on `None` so the call site can resolve the
+        // documented default of `true`.
+        let absent: AppConfig = toml::from_str(
+            r#"
+[repository]
+adapter = "postgres"
+
+[repository.postgres]
+url = "postgres://localhost/oidc"
+"#,
+        )
+        .expect("omitting run_migrations must still deserialize");
+        assert_eq!(absent.repository.postgres.unwrap().run_migrations, None);
     }
 
     #[test]

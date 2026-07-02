@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
 
 One TOML file drives the whole service. `AppConfig` (and its nested structs) in
 `crates/core/src/config.rs` deserializes it; every section uses `#[serde(default)]`, so any
@@ -67,8 +67,10 @@ or `[key_manager.kms] { key_id, algorithm, kid }`. Skipped (noop) in the `admin`
 ### `[repository]` (users + sessions)
 `adapter` (`dynamodb` | `postgres` | `sqlite`), with one of
 `[repository.dynamodb] { table_name, region? }`,
-`[repository.postgres] { url, max_connections? }`,
-`[repository.sqlite] { path }`.
+`[repository.postgres] { url, max_connections?, run_migrations? }`,
+`[repository.sqlite] { path }`. `run_migrations` defaults to `true`; set it to `false` for
+locked-down databases where the app role has no DDL rights and migrations are applied
+out-of-band.
 
 ### `[session_repository]` (optional, sessions only)
 When present, overrides where sessions are stored: `adapter` (`valkey` | `lmdb`) with

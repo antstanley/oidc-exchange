@@ -1,6 +1,6 @@
 # Plan: Run Postgres migrations on startup
 
-**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-run_postgres_migrations_on_startup.md](../../changes/2026-07-01-run_postgres_migrations_on_startup.md)
+**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-run_postgres_migrations_on_startup.md](../../changes/2026-07-01-run_postgres_migrations_on_startup.md)
 
 Make a fresh Postgres deployment serviceable on first boot by executing the adapter's already-idempotent `MIGRATIONS` DDL inside `create_pool`, mirroring the SQLite adapter. The work is a thin vertical slice across three crates: a config flag (`crates/core`), the migration behaviour and its degrade-with-warning branch in the adapter (`crates/adapters`), and the bootstrap wiring that threads the flag through both pool builds (`crates/server`). The reviewability spine is the adapter task (02): once `create_pool` migrates a fresh database, a reviewer can prove the core promise — a fresh Postgres DB serves `create_user` after `create_pool` alone — and the remaining tasks (denied-DDL degrade path, bootstrap wiring) are reviewed through it.
 
