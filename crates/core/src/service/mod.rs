@@ -164,7 +164,20 @@ pub fn parse_severity(s: &str) -> Option<AuditSeverity> {
     }
 }
 
+/// Seconds in one minute, for `m`-suffixed durations (`token.access_token_ttl` /
+/// `refresh_token_ttl`).
+const SECONDS_PER_MINUTE: u64 = 60;
+/// Seconds in one hour, for `h`-suffixed durations.
+const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
+/// Seconds in one day, for `d`-suffixed durations.
+const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
+
 /// Parse a duration string like "15m", "1h", "30d" into seconds.
+///
+/// Never panics: the suffix is split on the last *character* (not byte), so a
+/// multi-byte final character cannot land on a non-UTF-8 boundary, and unit
+/// conversion uses checked multiplication so an overflowing value is reported
+/// as a `ConfigError` rather than silently wrapping.
 pub(crate) fn parse_duration_secs(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() {
@@ -173,18 +186,135 @@ pub(crate) fn parse_duration_secs(s: &str) -> Result<u64> {
         });
     }
 
-    let (num_str, suffix) = s.split_at(s.len() - 1);
+    // Split on the last *character*, not the last byte: `split_at` panics if
+    // the index does not land on a char boundary, and `s.len() - 1` is only
+    // safe when the final character is a single ASCII byte.
+    let suffix_char = s
+        .chars()
+        .next_back()
+        .expect("s is non-empty, checked above");
+    let split_at = s.len() - suffix_char.len_utf8();
+    let (num_str, suffix) = s.split_at(split_at);
+    // Postcondition: the split partitions `s` exactly, and the suffix is the
+    // single character we split off.
+    assert_eq!(
+        num_str.len() + suffix.len(),
+        s.len(),
+        "split_at must partition the whole string"
+    );
+    assert_eq!(
+        suffix.chars().count(),
+        1,
+        "suffix must be exactly one character"
+    );
+
     let value: u64 = num_str.parse().map_err(|_| Error::ConfigError {
-        detail: format!("invalid duration number: {}", num_str),
+        detail: format!("invalid duration number in {:?}: {}", s, num_str),
     })?;
 
-    match suffix {
-        "s" => Ok(value),
-        "m" => Ok(value * 60),
-        "h" => Ok(value * 3600),
-        "d" => Ok(value * 86400),
-        _ => Err(Error::ConfigError {
-            detail: format!("unknown duration suffix: {}", suffix),
-        }),
+    let secs = match suffix {
+        "s" => Some(value),
+        "m" => value.checked_mul(SECONDS_PER_MINUTE),
+        "h" => value.checked_mul(SECONDS_PER_HOUR),
+        "d" => value.checked_mul(SECONDS_PER_DAY),
+        _ => {
+            return Err(Error::ConfigError {
+                detail: format!("unknown duration suffix in {:?}: {}", s, suffix),
+            });
+        }
+    };
+
+    secs.ok_or_else(|| Error::ConfigError {
+        detail: format!("duration value overflows seconds when parsing {:?}", s),
+    })
+}
+
+#[cfg(test)]
+mod parse_duration_secs_tests {
+    use super::*;
+
+    #[test]
+    fn parse_duration_secs_parses_seconds() {
+        let secs = parse_duration_secs("45s").expect("valid duration");
+        assert_eq!(secs, 45);
+    }
+
+    #[test]
+    fn parse_duration_secs_parses_minutes() {
+        let secs = parse_duration_secs("15m").expect("valid duration");
+        assert_eq!(secs, 15 * SECONDS_PER_MINUTE);
+        assert_eq!(secs, 900);
+    }
+
+    #[test]
+    fn parse_duration_secs_parses_hours() {
+        let secs = parse_duration_secs("1h").expect("valid duration");
+        assert_eq!(secs, SECONDS_PER_HOUR);
+        assert_eq!(secs, 3600);
+    }
+
+    #[test]
+    fn parse_duration_secs_parses_days() {
+        let secs = parse_duration_secs("30d").expect("valid duration");
+        assert_eq!(secs, 30 * SECONDS_PER_DAY);
+        assert_eq!(secs, 2_592_000);
+    }
+
+    #[test]
+    fn parse_duration_secs_multi_byte_final_char_does_not_panic() {
+        let err = parse_duration_secs("15€").expect_err("multi-byte suffix must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("suffix"),
+                    "detail should name the malformed suffix: {detail}"
+                );
+                assert!(
+                    detail.contains("15€"),
+                    "detail should name the offending input: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_duration_secs_overflowing_day_count_is_rejected() {
+        let input = format!("{}d", u64::MAX);
+        let err = parse_duration_secs(&input).expect_err("overflow must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("overflow"),
+                    "detail should call out the overflow: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_duration_secs_empty_string_is_rejected() {
+        let err = parse_duration_secs("").expect_err("empty string must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert_eq!(detail, "empty duration string");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_duration_secs_unknown_suffix_is_rejected() {
+        let err = parse_duration_secs("15x").expect_err("unknown suffix must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("15x"),
+                    "detail should name the offending input: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }
