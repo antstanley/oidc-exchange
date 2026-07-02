@@ -121,6 +121,62 @@ fn test_invalid_config() {
     }
 }
 
+/// Well-formed TOML with a semantically invalid field (an unknown
+/// `server.role`) must be rejected by load-time validation at construction,
+/// not merely at parse time, and never reach request handling.
+#[test]
+fn test_invalid_role_rejected_at_construction() {
+    let config = r#"
+[server]
+issuer = "https://auth.test.com"
+role = "exchang"
+
+[registration]
+mode = "open"
+"#;
+
+    match OidcExchange::new(config) {
+        Err(err) => {
+            assert_eq!(err.code, "CONFIG_ERROR");
+            assert!(
+                err.message.contains("role"),
+                "error message should name the offending field, got: {}",
+                err.message
+            );
+        }
+        Ok(_) => panic!("expected CONFIG_ERROR for an invalid server.role"),
+    }
+}
+
+/// The same validation applies through `from_file`: an invalid config on
+/// disk is rejected before `OidcExchange` is constructed.
+#[test]
+fn test_invalid_config_rejected_via_from_file() {
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+    let config_path = tmp.path().join("bad-config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[server]
+role = "not-a-real-role"
+"#,
+    )
+    .expect("failed to write config file");
+
+    match OidcExchange::from_file(config_path.to_str().unwrap()) {
+        Err(err) => assert_eq!(err.code, "CONFIG_ERROR"),
+        Ok(_) => panic!("expected CONFIG_ERROR for an invalid server.role via from_file"),
+    }
+}
+
+/// A valid config, by contrast, must still construct successfully — the
+/// negative-space tests above only prove half the contract without this
+/// counterpart.
+#[test]
+fn test_valid_config_constructs_successfully() {
+    let (_exchange, _tmp) = setup();
+}
+
 #[test]
 fn test_invalid_method() {
     let (exchange, _tmp) = setup();

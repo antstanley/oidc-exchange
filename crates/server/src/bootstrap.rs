@@ -71,6 +71,10 @@ pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 ///    naming it, and `$${` escapes to a literal `${` rather than opening a
 ///    placeholder (see [`resolve_placeholders`]).
 ///
+/// After deserialization, [`AppConfig::validate`] runs over the fully
+/// merged, fully resolved config (role, TTLs, allowlist, internal API
+/// secret) and a failure aborts before any adapter or router is built.
+///
 /// With no files present and no overriding environment variables, the
 /// deserialized result is `AppConfig::default()` (every field carries
 /// `#[serde(default)]`).
@@ -100,12 +104,17 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
     let mut merged = builder.build()?;
     resolve_placeholders(&mut merged.cache)?;
     let config: AppConfig = merged.try_deserialize()?;
+    config.validate()?;
     Ok(config)
 }
 
-/// Parse a TOML string directly into an `AppConfig`.
+/// Parse a TOML string directly into an `AppConfig`, validating it exactly as
+/// [`load_config`] does so that config supplied through the FFI bindings
+/// (`OidcExchange::new`/`from_file`) is rejected at construction on the same
+/// terms as an invalid config on disk would be rejected at server startup.
 pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let config: AppConfig = toml::from_str(toml_str)?;
+    config.validate()?;
     Ok(config)
 }
 
@@ -1104,5 +1113,102 @@ mod load_config_tests {
             config.internal_api.auth_method.as_deref(),
             Some("${LITERAL}")
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Validation wiring
+    // -----------------------------------------------------------------
+
+    /// A config with an invalid `server.role` must fail `load_config`
+    /// itself — validation runs on the fully merged, fully resolved
+    /// config, before any adapter or router is built.
+    #[test]
+    fn load_config_rejects_invalid_role_before_building_anything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                role = "exchang"
+            "#,
+        );
+
+        let err = load_config_from_dir(dir_str(dir.path()))
+            .expect_err("an unknown server.role must be rejected at load, not absorbed");
+
+        assert!(
+            err.to_string().contains("role"),
+            "the error must name the offending field, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("exchang"),
+            "the error must name the offending value, got: {err}"
+        );
+    }
+
+    /// A well-formed config must still load successfully once validation is
+    /// wired in — the negative-space test above only proves half the
+    /// contract without this counterpart.
+    #[test]
+    fn load_config_accepts_valid_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                role = "exchange"
+
+                [registration]
+                domain_allowlist = ["example.com", "*.example.org"]
+            "#,
+        );
+
+        let config = load_config_from_dir(dir_str(dir.path()))
+            .expect("a well-formed config must load and validate successfully");
+
+        assert_eq!(config.server.role, "exchange");
+        assert_eq!(
+            config.registration.domain_allowlist,
+            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+        );
+    }
+
+    /// `parse_config` (the FFI entry point) must reject the same invalid
+    /// config as `load_config`, so `OidcExchange::new`/`from_file` fail at
+    /// construction rather than at request time.
+    #[test]
+    fn parse_config_rejects_invalid_role() {
+        let toml_str = r#"
+            [server]
+            role = "bogus"
+        "#;
+
+        let err =
+            parse_config(toml_str).expect_err("an unknown server.role must be rejected at parse");
+
+        assert!(
+            err.to_string().contains("role"),
+            "the error must name the offending field, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("bogus"),
+            "the error must name the offending value, got: {err}"
+        );
+    }
+
+    /// A well-formed config must still parse successfully through the FFI
+    /// entry point.
+    #[test]
+    fn parse_config_accepts_valid_config() {
+        let toml_str = r#"
+            [server]
+            role = "all"
+        "#;
+
+        let config = parse_config(toml_str).expect("a well-formed config must parse and validate");
+
+        assert_eq!(config.server.role, "all");
     }
 }
