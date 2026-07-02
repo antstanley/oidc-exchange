@@ -91,8 +91,13 @@ the adapter's idempotent migrations (`CREATE TABLE IF NOT EXISTS …`, run via s
 simple-query path since the migration DDL is multi-statement) before returning — like
 SQLite, a fresh database is ready to serve after startup with no external migration step.
 With `run_migrations = false`, `create_pool` only connects, leaving DDL to an out-of-band
-process — for locked-down deployments where the app role has no DDL rights. Implements both
-repository traits.
+process — for locked-down deployments where the app role has no DDL rights. When the migration
+is instead denied by Postgres itself — the connected role lacks DDL rights and the DDL fails
+with SQLSTATE `42501` (`insufficient_privilege`) — `create_pool` degrades rather than failing
+outright: it logs a structured warning and probes `to_regclass('users')` /
+`to_regclass('sessions')`, returning the pool when both already exist (a schema pre-provisioned
+by an out-of-band process) and failing startup with the original migration error when either is
+missing. Every other migration failure still fails fast. Implements both repository traits.
 
 The `(external_id, provider)` index is a *partial* unique index, `WHERE status !=
 'deleted'`: uniqueness is enforced only among live users, so a soft-deleted row frees its

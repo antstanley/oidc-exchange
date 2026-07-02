@@ -115,6 +115,21 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
         .is_some_and(|code| code == PG_UNIQUE_VIOLATION_CODE)
 }
 
+/// Postgres SQLSTATE for a permission-denied DDL statement (`insufficient_privilege`), per
+/// <https://www.postgresql.org/docs/current/errcodes-appendix.html>. A migration denied with
+/// this code degrades to a warn-and-probe path (see [`create_pool`]) instead of failing
+/// startup outright; every other migration failure still fails fast.
+const INSUFFICIENT_PRIVILEGE_SQLSTATE: &str = "42501";
+
+/// True when `code` — the structured SQLSTATE pulled off a failed migration's database error —
+/// is the Postgres insufficient-privilege code. Kept pure and independent of `sqlx::Error` (a
+/// bare `Option<&str>` in, `bool` out) so it is unit-testable without a live restricted-role
+/// connection; `create_pool` is the only caller, passing
+/// `err.as_database_error().and_then(|e| e.code())`.
+fn is_insufficient_privilege_code(code: Option<&str>) -> bool {
+    code == Some(INSUFFICIENT_PRIVILEGE_SQLSTATE)
+}
+
 /// Builds the Postgres connection pool and, unless `run_migrations` is `false`, executes the
 /// adapter's idempotent [`MIGRATIONS`] DDL before returning — mirroring the SQLite adapter's
 /// `create_pool`. `MIGRATIONS` is a multi-statement block, which Postgres refuses to accept as
@@ -122,6 +137,13 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 /// rather than `sqlx::query`. With `run_migrations = false`, `create_pool` only connects —
 /// for locked-down deployments where the app role has no DDL rights and migrations are applied
 /// out-of-band.
+///
+/// A migration failure whose database error carries [`INSUFFICIENT_PRIVILEGE_SQLSTATE`]
+/// (`42501`, the role lacks DDL rights) degrades instead of failing outright: it logs a
+/// structured warning and probes `to_regclass('users')` / `to_regclass('sessions')`, returning
+/// the pool when both already exist (a pre-provisioned schema under a restricted role) and the
+/// *original* migration error when either is missing. Every other migration error — including
+/// a failed probe — is returned unchanged, so a genuinely broken database still fails startup.
 pub async fn create_pool(
     url: &str,
     max_connections: u32,
@@ -133,7 +155,43 @@ pub async fn create_pool(
         .await?;
 
     if run_migrations {
-        sqlx::raw_sql(MIGRATIONS).execute(&pool).await?;
+        if let Err(err) = sqlx::raw_sql(MIGRATIONS).execute(&pool).await {
+            let code = err.as_database_error().and_then(|db_err| db_err.code());
+            if !is_insufficient_privilege_code(code.as_deref()) {
+                return Err(err);
+            }
+
+            tracing::warn!(
+                sqlstate = INSUFFICIENT_PRIVILEGE_SQLSTATE,
+                "postgres migration denied (insufficient privilege); probing for pre-existing \
+                 users/sessions tables"
+            );
+
+            let tables_exist = sqlx::query(
+                "SELECT to_regclass('users')::text AS users_reg, \
+                        to_regclass('sessions')::text AS sessions_reg",
+            )
+            .fetch_one(&pool)
+            .await
+            .ok()
+            .map(|row| {
+                let users_reg: Option<String> = row.try_get("users_reg").unwrap_or(None);
+                let sessions_reg: Option<String> = row.try_get("sessions_reg").unwrap_or(None);
+                users_reg.is_some() && sessions_reg.is_some()
+            })
+            .unwrap_or(false);
+
+            if !tables_exist {
+                // Return the original migration error, not a probe-derived one: the denied
+                // DDL is why startup is failing, and a failed or inconclusive probe must not
+                // mask that.
+                return Err(err);
+            }
+
+            tracing::warn!(
+                "proceeding despite denied migration DDL: users/sessions tables already exist"
+            );
+        }
     }
 
     Ok(pool)
@@ -1085,6 +1143,31 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::Relaxed),
             winning_attempt,
             "should stop retrying as soon as an attempt succeeds, not keep spinning"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Denied-DDL degrade classification
+    // -----------------------------------------------------------------
+
+    /// [`is_insufficient_privilege_code`] must route on the exact SQLSTATE, not "some error
+    /// occurred": the insufficient-privilege code (`42501`) reads `true` (degrade path), a
+    /// differently-coded failure (here, `undefined_table`, `42P01`) and the no-code case both
+    /// read `false` (fail-fast) — proving the branch is genuinely conditional on the code
+    /// rather than firing on every migration error.
+    #[test]
+    fn is_insufficient_privilege_code_routes_only_42501_to_degrade() {
+        assert!(
+            is_insufficient_privilege_code(Some(INSUFFICIENT_PRIVILEGE_SQLSTATE)),
+            "the insufficient-privilege SQLSTATE must route to the degrade branch"
+        );
+        assert!(
+            !is_insufficient_privilege_code(Some("42P01")),
+            "a differently-coded database error (undefined_table) must fail fast, not degrade"
+        );
+        assert!(
+            !is_insufficient_privilege_code(None),
+            "a database error carrying no code at all must fail fast, not degrade"
         );
     }
 
