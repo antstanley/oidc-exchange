@@ -91,7 +91,7 @@ async fn notify_user_deleted(&self, user_id: &str) -> Result<()>;
 | UserRepository + SessionRepository | Postgres | `adapters/postgres` | `users` + `sessions` tables, JSONB columns, `sqlx` |
 | UserRepository + SessionRepository | SQLite | `adapters/sqlite` | JSON-as-TEXT, WAL mode, `sqlx` |
 | SessionRepository | LMDB | `adapters/lmdb` | embedded; `heed`; `sessions` + `user_sessions` DBs |
-| SessionRepository | Valkey/Redis | `adapters/valkey` | `fred`; `{prefix}session:{hash}`, `{prefix}user_sessions:{user_id}` set |
+| SessionRepository | Valkey/Redis | `adapters/valkey` | `fred`; `{prefix}session:{hash}`, `{prefix}user_sessions:{user_id}` set (TTL bumped via `EXPIRE … GT`), `{prefix}active_sessions` counter; atomic pipelined writes; cleanup prunes index sets and reconciles the counter |
 | KeyManager | AWS KMS | `adapters/kms` | RS/PS/ES 256/384/512; ECDSA DER→raw JWS conversion on sign; local verify against the cached public key; JWK cached on `OnceCell`; `Sign`/`GetPublicKey` |
 | KeyManager | Local Ed25519 | `adapters/local_keys` | EdDSA only; PKCS#8 PEM from file or bytes |
 | KeyManager | Noop | `adapters/noop` | every op errors; used in admin-only role |

@@ -1,6 +1,6 @@
 # Persistence
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
 
 How the domain entities ([01-domain-model.md](01-domain-model.md)) are stored by each
 repository adapter. The adapter-agnostic logical model is `schemas/datamodel.schema.json`; the
@@ -48,9 +48,19 @@ zero-dependency single-host option.
 - **LMDB (`adapters/lmdb`)** — embedded `heed` store with two named databases, `sessions`
   (hash → session) and `user_sessions` (user → set of hashes for revoke-all). Constructed with
   a path and a max map size in MB.
-- **Valkey/Redis (`adapters/valkey`)** — `fred` client; keys `{prefix}session:{hash}` and a
-  `{prefix}user_sessions:{user_id}` set. Suited to high session churn alongside a durable user
-  store.
+- **Valkey/Redis (`adapters/valkey`)** — `fred` client; keys `{prefix}session:{hash}`, a
+  `{prefix}user_sessions:{user_id}` set, and a `{prefix}active_sessions` counter. A session
+  write applies the hash, its TTL, the user-set membership, an `INCR` of the counter, and a
+  bump of the user set's own TTL to the greatest member expiry — atomically (single
+  pipeline). The set-TTL bump uses `EXPIRE … GT` (only-extend), so a concurrent
+  shorter-lived write can never shorten the set's life, and idle users' index sets expire on
+  their own. A session whose `expires_at` is not in the future is rejected, so no TTL-less
+  key is ever created. `count_active_sessions` reads the counter, which is maintained by
+  `INCR` on store and `DECR` on explicit revoke; natural TTL expiry cannot decrement it, so
+  it drifts upward between cleanups. `cleanup_expired_sessions` prunes `user_sessions` set
+  members whose session key no longer exists, reconciles the counter by recomputing it from
+  a SCAN of live `{prefix}session:*` keys, and returns the number of members pruned; session
+  bodies themselves need no sweep.
 
 Both implement `SessionRepository` only and are selected via `[session_repository]`.
 
