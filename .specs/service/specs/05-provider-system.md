@@ -42,6 +42,14 @@ endpoint call (`ClientSecretClaims { iss: team_id, sub: client_id, aud, iat, exp
 lifetime, signed with the `.p8` key). It reuses the shared `JwksCache` for the standard
 ID-token validation parts.
 
+Apple's ID tokens sometimes carry `email_verified` (and `is_private_email`) as the JSON
+strings `"true"`/`"false"` rather than booleans. The Apple provider coerces bool-or-string
+values when mapping to `IdentityClaims.email_verified` and
+`IdentityClaims.is_private_email`, so the registration domain allowlist (which requires
+`email_verified == Some(true)`) works for Apple sign-ins. `is_private_email` is a
+first-class `Option<bool>` field on `IdentityClaims`, populated only by the Apple
+provider; the generic OIDC provider leaves it `None`.
+
 **Tier 3 — non-OIDC (e.g. atproto).** *Not implemented.* The `IdentityProvider` doc comment
 and several config/example files name `atproto`, but no `AtprotoProvider` exists in the
 codebase. Treat any atproto reference as aspirational until a change spec lands it.

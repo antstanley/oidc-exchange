@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
 };
+use oidc_exchange_adapters::shared::claims::coerce_bool;
 use oidc_exchange_adapters::shared::jwks::JwksCache;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
@@ -260,6 +261,8 @@ impl IdentityProvider for AppleProvider {
         let mut validation = Validation::new(jwk_alg);
         validation.set_issuer(&[APPLE_ISSUER]);
         validation.set_audience(&[&self.client_id]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        validation.validate_nbf = true;
 
         // 6. Decode and validate
         let token_data = decode::<serde_json::Value>(id_token, &decoding_key, &validation)
@@ -280,9 +283,9 @@ impl IdentityProvider for AppleProvider {
         Ok(IdentityClaims {
             subject,
             email: claims["email"].as_str().map(String::from),
-            email_verified: claims["email_verified"].as_bool(),
+            email_verified: coerce_bool(&claims["email_verified"]),
             name: claims["name"].as_str().map(String::from),
-            is_private_email: None,
+            is_private_email: coerce_bool(&claims["is_private_email"]),
             raw_claims: claims
                 .as_object()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -663,5 +666,193 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("team_id"), "Expected team_id error: {err}");
+    }
+
+    // ---------------------------------------------------------------
+    // Tests 8-13: validate_id_token hardening — required claims, nbf,
+    // and bool-or-string coercion of email_verified / is_private_email
+    // ---------------------------------------------------------------
+
+    /// Offset (seconds) used to place a test token's `nbf` in the future.
+    const TEST_FUTURE_NBF_OFFSET_SECS: u64 = 3600;
+
+    /// Start a mock server serving the given JWKS at `/auth/keys` and return an
+    /// `AppleProvider` wired to it (token endpoint is unused by these tests).
+    async fn provider_with_mock_jwks(
+        pem: &[u8],
+        jwks: &serde_json::Value,
+    ) -> (AppleProvider, MockServer) {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        Mock::given(method("GET"))
+            .and(path("/auth/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks))
+            .mount(&server)
+            .await;
+
+        let provider = AppleProvider::new_for_test(
+            "com.example.app".into(),
+            "ABCDEF1234".into(),
+            "apple-test-key-1".into(),
+            EncodingKey::from_ec_pem(pem).expect("valid EC PEM"),
+            format!("{uri}/auth/token"),
+            format!("{uri}/auth/keys"),
+            None,
+        );
+
+        (provider, server)
+    }
+
+    /// Sign the given claims into an ES256 ID token using the test key and kid.
+    fn sign_id_token(pem: &[u8], kid: &str, claims: &serde_json::Value) -> String {
+        let encoding_key = EncodingKey::from_ec_pem(pem).expect("valid EC PEM");
+        let mut header = JwtHeader::new(Algorithm::ES256);
+        header.kid = Some(kid.to_string());
+        jwt_encode(&header, claims, &encoding_key).expect("should encode ID token")
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_rejects_missing_aud() {
+        let (pem, jwks, kid) = generate_es256_test_keys();
+        let (provider, _server) = provider_with_mock_jwks(&pem, &jwks).await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "sub": "apple-user-002",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(result.is_err(), "token missing 'aud' must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "rejection must be Error::InvalidGrant"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_rejects_missing_iss() {
+        let (pem, jwks, kid) = generate_es256_test_keys();
+        let (provider, _server) = provider_with_mock_jwks(&pem, &jwks).await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "aud": "com.example.app",
+            "sub": "apple-user-003",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(result.is_err(), "token missing 'iss' must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "rejection must be Error::InvalidGrant"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_rejects_future_nbf() {
+        let (pem, jwks, kid) = generate_es256_test_keys();
+        let (provider, _server) = provider_with_mock_jwks(&pem, &jwks).await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-004",
+            "iat": now,
+            "nbf": now + TEST_FUTURE_NBF_OFFSET_SECS,
+            "exp": now + TEST_FUTURE_NBF_OFFSET_SECS + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(result.is_err(), "token with future 'nbf' must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "rejection must be Error::InvalidGrant"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_coerces_string_email_verified() {
+        let (pem, jwks, kid) = generate_es256_test_keys();
+        let (provider, _server) = provider_with_mock_jwks(&pem, &jwks).await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-005",
+            "email": "user@example.com",
+            "email_verified": "true",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("well-formed token should validate");
+
+        assert_eq!(identity.email_verified, Some(true));
+        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_coerces_string_is_private_email() {
+        let (pem, jwks, kid) = generate_es256_test_keys();
+        let (provider, _server) = provider_with_mock_jwks(&pem, &jwks).await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-006",
+            "is_private_email": "true",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("well-formed token should validate");
+
+        assert_eq!(identity.is_private_email, Some(true));
+        assert_eq!(identity.subject, "apple-user-006");
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_coerces_bool_is_private_email() {
+        let (pem, jwks, kid) = generate_es256_test_keys();
+        let (provider, _server) = provider_with_mock_jwks(&pem, &jwks).await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-007",
+            "is_private_email": true,
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("well-formed token should validate");
+
+        assert_eq!(identity.is_private_email, Some(true));
+        assert_eq!(identity.subject, "apple-user-007");
     }
 }
