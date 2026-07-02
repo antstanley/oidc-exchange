@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::error::Error;
+
 /// Top-level application configuration, matching the TOML structure.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -18,6 +20,101 @@ pub struct AppConfig {
     pub internal_api: InternalApiConfig,
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+}
+
+/// The only values `server.role` may take: which parts of the API a process
+/// serves. See `06-configuration.md` → Sections → `[server]`.
+const ALLOWED_SERVER_ROLES: [&str; 3] = ["all", "exchange", "admin"];
+
+impl AppConfig {
+    /// Validate the loaded configuration once, at startup, so malformed
+    /// config fails closed instead of being absorbed and discovered later
+    /// (an unmounted router, a per-request panic, or an over-permissive
+    /// allowlist/auth check).
+    ///
+    /// Checks, each returning a `ConfigError` naming the offending field:
+    /// - `server.role` is one of [`ALLOWED_SERVER_ROLES`].
+    /// - `token.access_token_ttl` and `token.refresh_token_ttl` parse via
+    ///   [`crate::service::parse_duration_secs`].
+    /// - Every `registration.domain_allowlist` entry is an exact domain or a
+    ///   `*.`-prefixed wildcard.
+    /// - When the internal API will be served (`server.role` is `admin` or
+    ///   `all`, and `internal_api.enabled == true`),
+    ///   `internal_api.shared_secret` is present and non-empty.
+    pub fn validate(&self) -> Result<(), Error> {
+        if !ALLOWED_SERVER_ROLES.contains(&self.server.role.as_str()) {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "server.role {:?} is not one of {ALLOWED_SERVER_ROLES:?}",
+                    self.server.role
+                ),
+            });
+        }
+
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.token.access_token_ttl),
+            "token.access_token_ttl",
+        )?;
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.token.refresh_token_ttl),
+            "token.refresh_token_ttl",
+        )?;
+
+        if let Some(allowlist) = &self.registration.domain_allowlist {
+            for entry in allowlist {
+                validate_allowlist_entry(entry)?;
+            }
+        }
+
+        let internal_api_served =
+            matches!(self.server.role.as_str(), "admin" | "all") && self.internal_api.enabled;
+        if internal_api_served {
+            let secret_is_present_and_non_empty = self
+                .internal_api
+                .shared_secret
+                .as_deref()
+                .is_some_and(|secret| !secret.is_empty());
+            if !secret_is_present_and_non_empty {
+                return Err(Error::ConfigError {
+                    detail: "internal_api.shared_secret must be non-empty when the internal API \
+                             is served (server.role is \"admin\" or \"all\" and \
+                             internal_api.enabled = true)"
+                        .to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Rewrap a `parse_duration_secs` failure with the config field it came
+/// from, so the reported `ConfigError` names the offending TOML key rather
+/// than just the raw duration string.
+fn prefix_config_error<T>(result: Result<T, Error>, field: &str) -> Result<T, Error> {
+    result.map_err(|err| match err {
+        Error::ConfigError { detail } => Error::ConfigError {
+            detail: format!("{field}: {detail}"),
+        },
+        other => other,
+    })
+}
+
+/// Validate a single `registration.domain_allowlist` entry: only an exact
+/// domain (`example.com`) or a `*.`-prefixed wildcard (`*.example.com`) is
+/// accepted. A bare `*` or a dotless prefix (`*example.com`) is rejected —
+/// both would let `matches_domain_allowlist` (`service::exchange`) match
+/// domains the operator never intended to allow.
+fn validate_allowlist_entry(entry: &str) -> Result<(), Error> {
+    if entry.starts_with('*') && !entry.starts_with("*.") {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "registration.domain_allowlist entry {entry:?} must be an exact domain \
+                 (\"example.com\") or a \"*.\"-prefixed wildcard (\"*.example.com\")"
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -426,5 +523,226 @@ scopes = ["openid", "email", "profile"]
             google.extra.get("issuer").unwrap().as_str().unwrap(),
             "https://accounts.google.com"
         );
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_default_config() {
+        let config = AppConfig::default();
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "well-formed config must validate: {result:?}"
+        );
+        assert_eq!(config.server.role, "all");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_role() {
+        let mut config = AppConfig::default();
+        config.server.role = "exchang".to_string();
+
+        let err = config.validate().expect_err("typo'd role must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("server.role"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("exchang"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_access_token_ttl() {
+        let mut config = AppConfig::default();
+        config.token.access_token_ttl = "not-a-duration".to_string();
+
+        let err = config.validate().expect_err("bad TTL must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("token.access_token_ttl"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("not-a-duration"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_overflowing_refresh_token_ttl() {
+        let mut config = AppConfig::default();
+        config.token.refresh_token_ttl = format!("{}d", u64::MAX);
+
+        let err = config
+            .validate()
+            .expect_err("overflowing TTL must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("token.refresh_token_ttl"),
+                    "detail must name the field: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bare_wildcard_allowlist_entry() {
+        let mut config = AppConfig::default();
+        config.registration.domain_allowlist = Some(vec!["*".to_string()]);
+
+        let err = config.validate().expect_err("bare * must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("domain_allowlist"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains('*'),
+                    "detail must echo the offending entry: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_dotless_wildcard_allowlist_entry() {
+        let mut config = AppConfig::default();
+        config.registration.domain_allowlist = Some(vec!["*example.com".to_string()]);
+
+        let err = config
+            .validate()
+            .expect_err("dotless *-prefix must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("domain_allowlist"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("*example.com"),
+                    "detail must echo the offending entry: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_exact_and_wildcard_allowlist_entries() {
+        let mut config = AppConfig::default();
+        config.registration.domain_allowlist =
+            Some(vec!["example.com".to_string(), "*.example.com".to_string()]);
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "well-formed allowlist must pass: {result:?}"
+        );
+        assert_eq!(
+            config.registration.domain_allowlist.as_ref().unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn validate_rejects_served_internal_api_with_missing_secret() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = None;
+
+        let err = config
+            .validate()
+            .expect_err("missing secret on a served internal API must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("internal_api.shared_secret"),
+                    "detail must name the field: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_served_internal_api_with_empty_secret() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(String::new());
+
+        let err = config
+            .validate()
+            .expect_err("empty secret on a served internal API must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("internal_api.shared_secret"),
+                    "detail must name the field: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_does_not_require_secret_when_internal_api_not_served() {
+        // Role excludes the internal API even though it is "enabled".
+        let mut role_excludes = AppConfig::default();
+        role_excludes.server.role = "exchange".to_string();
+        role_excludes.internal_api.enabled = true;
+        role_excludes.internal_api.shared_secret = None;
+        assert!(
+            role_excludes.validate().is_ok(),
+            "role=exchange never serves the internal API, so no secret is required"
+        );
+
+        // Role admits the internal API but it is disabled.
+        let mut disabled = AppConfig::default();
+        disabled.server.role = "admin".to_string();
+        disabled.internal_api.enabled = false;
+        disabled.internal_api.shared_secret = None;
+        assert!(
+            disabled.validate().is_ok(),
+            "internal_api.enabled = false never serves the internal API, so no secret is required"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_served_internal_api_with_non_empty_secret() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some("shhh".to_string());
+
+        let result = config.validate();
+
+        assert!(result.is_ok(), "non-empty secret must pass: {result:?}");
+        assert!(config.internal_api.enabled);
     }
 }
