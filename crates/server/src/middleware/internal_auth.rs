@@ -16,9 +16,15 @@ pub async fn internal_auth_layer(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // An empty secret is never "configured": defence in depth alongside
+    // `AppConfig::validate`, which already refuses to start a role that
+    // serves the internal API with a missing/empty
+    // `internal_api.shared_secret`. Treating `Some("")` as unconfigured here
+    // means this middleware can never be tricked into accepting an empty
+    // `Authorization: Bearer ` header as a match.
     let secret = match state.config.internal_api.shared_secret.as_deref() {
-        Some(s) => s,
-        None => {
+        Some(s) if !s.is_empty() => s,
+        _ => {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "unauthorized", "error_description": "internal API not configured"})),

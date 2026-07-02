@@ -140,6 +140,65 @@ async fn internal_auth_passes_with_correct_secret() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. Internal auth rejection: empty configured secret is never "configured",
+// even against an empty Bearer token (defence in depth — `AppConfig::validate`
+// already refuses to start a role that serves the internal API with an empty
+// `shared_secret`, so this only guards a config built by hand, e.g. in tests
+// or an embedder).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_token() {
+    let provider = MockIdentityProvider::new("test");
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+
+    let mut config = AppConfig::default();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.internal_api.enabled = true;
+    config.internal_api.shared_secret = Some(String::new());
+
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        providers,
+        config.clone(),
+    );
+
+    let state = AppState {
+        service: Arc::new(service),
+        config: Arc::new(config),
+    };
+
+    let app = public_routes()
+        .merge(internal_routes(state.clone()))
+        .with_state(state);
+
+    // An empty `Bearer ` token must not be accepted just because the
+    // configured secret is also empty.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/internal/stats")
+                .header("authorization", "Bearer ")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unauthorized");
+    assert_eq!(json["error_description"], "internal API not configured");
+}
+
+// ---------------------------------------------------------------------------
 // 4. Create user → 201 with user JSON
 // ---------------------------------------------------------------------------
 

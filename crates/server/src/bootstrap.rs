@@ -281,6 +281,13 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 
 /// Build the Axum `Router` from a config and service, applying role-based
 /// route merging and middleware layers.
+///
+/// The internal routes (`/internal/*`) are mounted only when the role is
+/// `admin`/`all` **and** `internal_api.enabled = true`; the flag being false
+/// is not a startup error, it simply leaves the internal surface unmounted
+/// (`AppConfig::validate` already requires a non-empty shared secret whenever
+/// the flag is true and the role would serve it, so a missing/empty secret
+/// is caught at startup, never discovered by an unauthenticated request).
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     let role = config.server.role.as_str();
 
@@ -294,16 +301,17 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     if role == "exchange" || role == "all" {
         app = app.merge(routes::public_routes());
     }
-    if role == "admin" || role == "all" {
+    if (role == "admin" || role == "all") && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
-        // Ensure /health is available even in admin-only mode
-        // (only add if not already present from public_routes)
-        if role == "admin" {
-            app = app.route(
-                "/health",
-                axum::routing::get(routes::health::health_handler),
-            );
-        }
+    }
+    if role == "admin" {
+        // Ensure /health is available even in admin-only mode, whether or
+        // not the internal API is enabled — "admin" never merges
+        // `public_routes`, which is the only other source of `/health`.
+        app = app.route(
+            "/health",
+            axum::routing::get(routes::health::health_handler),
+        );
     }
 
     app.layer(axum::middleware::from_fn(request_id_layer))
@@ -1210,5 +1218,175 @@ mod load_config_tests {
         let config = parse_config(toml_str).expect("a well-formed config must parse and validate");
 
         assert_eq!(config.server.role, "all");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_router tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod build_router_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use std::collections::HashMap;
+    use tower::ServiceExt;
+
+    use oidc_exchange_core::ports::IdentityProvider;
+    use oidc_exchange_test_utils::{
+        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    };
+
+    const TEST_SECRET: &str = "test-internal-secret-build-router";
+
+    /// Build an `AppService` backed entirely by in-memory mocks, matching
+    /// the given `AppConfig`.
+    fn build_test_service(config: &AppConfig) -> AppService {
+        let provider = MockIdentityProvider::new("test");
+        let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+        providers.insert("test".to_string(), Box::new(provider));
+
+        AppService::new(
+            Box::new(MockRepository::new()),
+            Box::new(MockRepository::new()),
+            Box::new(MockKeyManager::new()),
+            Box::new(MockAuditLog::new()),
+            Box::new(MockUserSync::new()),
+            providers,
+            config.clone(),
+        )
+    }
+
+    async fn get(app: Router, uri: &str, bearer: Option<&str>) -> StatusCode {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        response.status()
+    }
+
+    async fn body_to_json(body: Body) -> serde_json::Value {
+        let bytes = body.collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// `internal_api.enabled = true` with role `admin` mounts `/internal/*`
+    /// behind the Bearer check: reachable with the right token, 401 without.
+    #[tokio::test]
+    async fn enabled_true_admin_mounts_internal_behind_bearer_auth() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(
+            get(app.clone(), "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::OK,
+            "the correct bearer token must reach the internal handler"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", None).await,
+            StatusCode::UNAUTHORIZED,
+            "a missing bearer token must be rejected"
+        );
+    }
+
+    /// `internal_api.enabled = true` with role `all` mounts both the public
+    /// routes and `/internal/*` behind the Bearer check.
+    #[tokio::test]
+    async fn enabled_true_all_mounts_public_and_internal() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(app, "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::OK
+        );
+    }
+
+    /// `internal_api.enabled = false` mounts no `/internal/*` route for
+    /// `role = "admin"`, which instead serves only `/health` — startup must
+    /// not error and the instance stays observable.
+    #[tokio::test]
+    async fn enabled_false_admin_serves_only_health_no_internal_routes() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = false;
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(
+            get(app.clone(), "/health", None).await,
+            StatusCode::OK,
+            "an admin instance must stay observable via /health"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", Some("irrelevant")).await,
+            StatusCode::NOT_FOUND,
+            "with the flag off, /internal/* must not be mounted at all, not merely unauthorized"
+        );
+    }
+
+    /// `internal_api.enabled = false` with role `all` still mounts the
+    /// public routes and `/health`, but no `/internal/*` route.
+    #[tokio::test]
+    async fn enabled_false_all_serves_public_and_health_no_internal_routes() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = false;
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(app.clone(), "/keys", None).await,
+            StatusCode::OK,
+            "public routes must still be mounted"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", Some("irrelevant")).await,
+            StatusCode::NOT_FOUND,
+            "with the flag off, /internal/* must not be mounted at all"
+        );
+    }
+
+    /// An empty configured `shared_secret` must never be treated as
+    /// "configured" by the auth middleware, even when the request supplies
+    /// an equally empty bearer token — defence in depth alongside
+    /// `AppConfig::validate`, which already refuses to start a role that
+    /// serves the internal API with an empty secret.
+    #[tokio::test]
+    async fn empty_shared_secret_is_never_accepted_as_configured() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(String::new());
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/internal/stats")
+            .header("authorization", "Bearer ")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let json = body_to_json(response.into_body()).await;
+        assert_eq!(json["error_description"], "internal API not configured");
     }
 }
