@@ -5,6 +5,7 @@ use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
 
+use crate::shared::claims::coerce_bool;
 use crate::shared::jwks::JwksCache;
 
 /// Standard OIDC identity provider adapter (Tier 1 — e.g., Google).
@@ -19,6 +20,28 @@ pub struct OidcProvider {
     jwks_cache: JwksCache,
     revocation_endpoint: Option<String>,
     issuer: String,
+}
+
+/// Infer the signing algorithm from a JWK that carries no `alg` member.
+///
+/// Azure-AD-style JWKS omit `alg`; the algorithm is then derived from the trusted
+/// key material itself (`kty`, and `crv` for EC keys) rather than trusting the
+/// untrusted JWT header. An alg-less RSA key is treated as RS256 (the RSA family is
+/// not distinguishable from key parameters alone, and RS256 matches Azure AD's actual
+/// signing algorithm). Any other alg-less key type is rejected.
+fn infer_alg_from_jwk(jwk: &serde_json::Value) -> Result<Algorithm> {
+    let kty = jwk.get("kty").and_then(|k| k.as_str());
+    let crv = jwk.get("crv").and_then(|c| c.as_str());
+
+    match (kty, crv) {
+        (Some("RSA"), _) => Ok(Algorithm::RS256),
+        (Some("EC"), Some("P-256")) => Ok(Algorithm::ES256),
+        (Some("EC"), Some("P-384")) => Ok(Algorithm::ES384),
+        (Some("OKP"), _) => Ok(Algorithm::EdDSA),
+        _ => Err(Error::InvalidGrant {
+            reason: "JWK has unsupported or missing algorithm".into(),
+        }),
+    }
 }
 
 impl OidcProvider {
@@ -133,10 +156,13 @@ impl IdentityProvider for OidcProvider {
                 "EdDSA" => Some(Algorithm::EdDSA),
                 _ => None,
             })
-            .unwrap_or(Algorithm::RS256);
+            .map(Ok)
+            .unwrap_or_else(|| infer_alg_from_jwk(jwk))?;
         let mut validation = Validation::new(jwk_alg);
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.client_id]);
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        validation.validate_nbf = true;
 
         // 6. Decode and validate
         let token_data = decode::<serde_json::Value>(id_token, &decoding_key, &validation)
@@ -157,7 +183,7 @@ impl IdentityProvider for OidcProvider {
         Ok(IdentityClaims {
             subject,
             email: claims["email"].as_str().map(String::from),
-            email_verified: claims["email_verified"].as_bool(),
+            email_verified: coerce_bool(&claims["email_verified"]),
             name: claims["name"].as_str().map(String::from),
             is_private_email: None,
             raw_claims: claims
@@ -211,6 +237,8 @@ impl IdentityProvider for OidcProvider {
 mod tests {
     use super::*;
     use jsonwebtoken::{encode, EncodingKey, Header};
+    use p256::ecdsa::SigningKey;
+    use p256::pkcs8::EncodePrivateKey;
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -245,6 +273,49 @@ mod tests {
                 "e": e,
             }]
         });
+
+        (encoding_key, jwks, kid)
+    }
+
+    /// Helper: generate an RSA key pair whose JWK carries no `alg` member, returning
+    /// (encoding_key, jwks_json, kid).
+    fn generate_rsa_test_keys_no_alg() -> (EncodingKey, serde_json::Value, String) {
+        let (encoding_key, mut jwks, kid) = generate_rsa_test_keys();
+        jwks["keys"][0].as_object_mut().unwrap().remove("alg");
+        (encoding_key, jwks, kid)
+    }
+
+    /// Helper: generate an EC P-256 key pair, returning (encoding_key, jwks_json, kid).
+    /// `with_alg` controls whether the JWK carries an explicit `alg: "ES256"` member.
+    fn generate_es256_test_keys(with_alg: bool) -> (EncodingKey, serde_json::Value, String) {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        use p256::elliptic_curve::Generate;
+
+        let signing_key = SigningKey::generate();
+        let pem = signing_key
+            .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
+            .expect("PEM encoding should work");
+        let encoding_key = EncodingKey::from_ec_pem(pem.as_bytes()).unwrap();
+
+        let verifying_key = signing_key.verifying_key();
+        let public_key = p256::PublicKey::from(verifying_key);
+        let sec1_bytes = public_key.to_sec1_bytes();
+        let x = URL_SAFE_NO_PAD.encode(&sec1_bytes[1..33]);
+        let y = URL_SAFE_NO_PAD.encode(&sec1_bytes[33..65]);
+
+        let kid = "test-ec-key-1".to_string();
+        let mut jwk = json!({
+            "kty": "EC",
+            "kid": &kid,
+            "use": "sig",
+            "crv": "P-256",
+            "x": x,
+            "y": y,
+        });
+        if with_alg {
+            jwk["alg"] = json!("ES256");
+        }
+        let jwks = json!({ "keys": [jwk] });
 
         (encoding_key, jwks, kid)
     }
@@ -626,5 +697,368 @@ mod tests {
             provider.revocation_endpoint.as_deref(),
             Some(format!("{uri}/oauth/revoke").as_str())
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 10: ID token missing 'aud' claim is rejected
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_rejects_missing_aud() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys();
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        // Deliberately omit 'aud' — e.g. a provider access token presented as an ID token.
+        let claims = json!({
+            "iss": &uri,
+            "sub": "user-123",
+            "iat": now,
+            "exp": now + 3600,
+        });
+
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(result.is_err(), "token missing 'aud' must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "missing 'aud' must be reported as InvalidGrant"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 11: ID token missing 'iss' claim is rejected
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_rejects_missing_iss() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys();
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        // Deliberately omit 'iss'.
+        let claims = json!({
+            "aud": "test-client-id",
+            "sub": "user-123",
+            "iat": now,
+            "exp": now + 3600,
+        });
+
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(result.is_err(), "token missing 'iss' must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "missing 'iss' must be reported as InvalidGrant"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 12: ID token with a future 'nbf' claim is rejected
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_rejects_future_nbf() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys();
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &uri,
+            "aud": "test-client-id",
+            "sub": "user-123",
+            "iat": now,
+            "nbf": now + 3600,
+            "exp": now + 7200,
+        });
+
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(result.is_err(), "future 'nbf' must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "future 'nbf' must be reported as InvalidGrant"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 13: alg-less RSA JWK infers RS256 and validates
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_alg_less_rsa_jwk_infers_rs256() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys_no_alg();
+        assert!(
+            jwks["keys"][0].get("alg").is_none(),
+            "test fixture must omit 'alg'"
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &uri,
+            "aud": "test-client-id",
+            "sub": "user-123",
+            "iat": now,
+            "exp": now + 3600,
+        });
+
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("alg-less RSA JWK should validate as RS256");
+
+        assert_eq!(identity.subject, "user-123");
+        assert!(identity.raw_claims.contains_key("sub"));
+    }
+
+    // ---------------------------------------------------------------
+    // Test 14: alg-less EC P-256 JWK infers ES256 and validates
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_alg_less_ec_p256_jwk_infers_es256() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (encoding_key, jwks, kid) = generate_es256_test_keys(false);
+        assert!(
+            jwks["keys"][0].get("alg").is_none(),
+            "test fixture must omit 'alg'"
+        );
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &uri,
+            "aud": "test-client-id",
+            "sub": "user-456",
+            "iat": now,
+            "exp": now + 3600,
+        });
+
+        let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(kid);
+
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("alg-less EC P-256 JWK should validate as ES256");
+
+        assert_eq!(identity.subject, "user-456");
+        assert!(identity.raw_claims.contains_key("sub"));
+    }
+
+    // ---------------------------------------------------------------
+    // Test 15: alg-less JWK of an unrecognised key type is rejected
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_rejects_unrecognised_alg_less_key() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        // An alg-less octet-sequence ("oct") key: not RSA/EC/OKP, so inference must fail.
+        let kid = "test-oct-key-1".to_string();
+        let jwks = json!({
+            "keys": [{
+                "kty": "oct",
+                "kid": &kid,
+                "use": "sig",
+                "k": "c2VjcmV0LWtleS1tYXRlcmlhbA",
+            }]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        // We never get far enough to need a validly-signed token; the key lookup and
+        // alg-inference happen before signature verification. An arbitrary (unsigned)
+        // three-segment string with a matching 'kid' is enough to reach that code path.
+        let header = json!({"alg": "HS256", "kid": &kid});
+        let header_b64 = base64_url_encode(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 =
+            base64_url_encode(&serde_json::to_vec(&json!({"sub": "user-1"})).unwrap());
+        let id_token = format!("{header_b64}.{payload_b64}.sig");
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(
+            result.is_err(),
+            "unrecognised alg-less key must be rejected"
+        );
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "unrecognised alg-less key must be reported as InvalidGrant"
+        );
+    }
+
+    fn base64_url_encode(bytes: &[u8]) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    // ---------------------------------------------------------------
+    // Test 16: string 'email_verified' claim coerces to Some(true)
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_coerces_string_email_verified() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys();
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &uri,
+            "aud": "test-client-id",
+            "sub": "user-789",
+            "email": "user@example.com",
+            "email_verified": "true",
+            "iat": now,
+            "exp": now + 3600,
+        });
+
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("well-formed token with string email_verified should validate");
+
+        assert_eq!(identity.email_verified, Some(true));
+        assert_eq!(identity.subject, "user-789");
+        assert_eq!(identity.is_private_email, None);
     }
 }

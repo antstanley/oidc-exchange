@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -52,7 +52,13 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   `authorization_code` POST with client credentials).
 - `validate_id_token` decodes the JWT header, fetches the issuer's JWKS through the cached
   `JwksCache`, and validates the signature using the **algorithm from the JWK** (not the
-  untrusted header), the issuer, and the audience, returning `IdentityClaims`.
+  untrusted header), returning `IdentityClaims`. Validation requires the `exp`, `iss`,
+  and `aud` claims to be **present** (`set_required_spec_claims`) and to match the
+  configured issuer and `client_id`; `nbf` is validated when present. A token missing
+  `iss` or `aud` — e.g. a provider access token presented as an ID token — is rejected.
+- When the matched JWK carries no `alg`, the algorithm is inferred from the key type:
+  `kty: EC` by `crv` (P-256 → ES256, P-384 → ES384), `kty: OKP` → EdDSA, `kty: RSA` →
+  RS256. Any other alg-less key is rejected. (Azure-AD-style JWKS omit `alg`.)
 - `revoke_token` POSTs to the discovered revocation endpoint with client credentials.
 
 ## Provider registry
@@ -88,6 +94,9 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
 - *Provider keyed by config name.* **The `provider` request field maps to the `[providers.X]`
   section name, not an issuer URL.** Clients reference a stable short name; the issuer can
   change in config without changing clients.
+- *Required spec claims.* **ID-token validation requires `exp`, `iss`, and `aud` to be
+  present, not merely correct-when-present.** Closes the cross-token-type confusion class
+  (e.g. Keycloak realm access tokens omit `aud`).
 
 ### Open questions
 
