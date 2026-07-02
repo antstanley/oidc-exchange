@@ -2659,6 +2659,7 @@ dependencies = [
  "oidc-exchange-test-utils",
  "p256 0.14.0-rc.15",
  "p384 0.14.0-rc.15",
+ "p521",
  "rand 0.10.1",
  "reqwest",
  "rsa 0.10.0-rc.18",
@@ -2841,6 +2842,20 @@ dependencies = [
  "ecdsa 0.17.0-rc.23",
  "elliptic-curve 0.14.1",
  "fiat-crypto 0.3.0",
+ "primefield",
+ "primeorder 0.14.0-rc.15",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "p521"
+version = "0.14.0-rc.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff42e4ace5424e3b6d7cb82514be89866b85af87015f80341e37dcc21a66ce6e"
+dependencies = [
+ "base16ct 1.0.0",
+ "ecdsa 0.17.0-rc.23",
+ "elliptic-curve 0.14.1",
  "primefield",
  "primeorder 0.14.0-rc.15",
  "sha2 0.11.0",

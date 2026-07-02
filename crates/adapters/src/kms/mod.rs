@@ -79,6 +79,17 @@ impl KmsKeyManager {
 /// Base64urlUInt encoding is never an empty string.
 const ZERO_VALUE_OCTET: [u8; 1] = [0u8];
 
+/// Coordinate byte length of a NIST P-256 point (RFC 7518 §6.2.1.2/6.2.1.3),
+/// used to size the `x`/`y` split of a SEC1 uncompressed EC point.
+const EC_COORD_LEN_P256: usize = 32;
+
+/// Coordinate byte length of a NIST P-384 point (RFC 7518 §6.2.1.2/6.2.1.3).
+const EC_COORD_LEN_P384: usize = 48;
+
+/// Coordinate byte length of a NIST P-521 point (RFC 7518 §6.2.1.2/6.2.1.3).
+/// P-521 field elements are 521 bits, which pack into 66 bytes (ceil(521/8)).
+const EC_COORD_LEN_P521: usize = 66;
+
 /// Encode a big-endian unsigned integer as an RFC 7518 §6.3 Base64urlUInt:
 /// base64url (no padding) of the minimal big-endian byte string, with every
 /// leading `0x00` octet stripped. A value of zero still encodes as a single
@@ -93,7 +104,8 @@ fn base64url_uint(be_bytes: &[u8]) -> String {
 
 /// Parse a DER-encoded SubjectPublicKeyInfo into an RFC 7517 JWK JSON value.
 ///
-/// Supports RSA (RS256/384/512, PS256/384/512) and EC (ES256, ES384) keys.
+/// Supports RSA (RS256/384/512, PS256/384/512) and EC (ES256/ES384/ES512,
+/// i.e. P-256/P-384/P-521) keys.
 fn parse_spki_to_jwk(spki_der: &[u8], algorithm: &str, kid: &str) -> Result<serde_json::Value> {
     match algorithm {
         a if a.starts_with("RS") || a.starts_with("PS") => {
@@ -114,12 +126,13 @@ fn parse_spki_to_jwk(spki_der: &[u8], algorithm: &str, kid: &str) -> Result<serd
                 "e": e,
             }))
         }
-        "ES256" | "ES384" => {
+        "ES256" | "ES384" | "ES512" => {
             // EC keys in SPKI DER contain an uncompressed SEC1 point: 0x04 || x || y
             let (crv, coord_len) = match algorithm {
-                "ES256" => ("P-256", 32),
-                "ES384" => ("P-384", 48),
-                _ => unreachable!(),
+                "ES256" => ("P-256", EC_COORD_LEN_P256),
+                "ES384" => ("P-384", EC_COORD_LEN_P384),
+                "ES512" => ("P-521", EC_COORD_LEN_P521),
+                _ => unreachable!("outer match already restricted algorithm to ES256/ES384/ES512"),
             };
 
             let point_len = 1 + 2 * coord_len;
@@ -333,6 +346,72 @@ mod tests {
         assert!(
             (42..=44).contains(&y_len),
             "y should be ~43 base64url chars, got {y_len}"
+        );
+    }
+
+    #[test]
+    fn test_parse_p521_public_key_to_jwk() {
+        use p521::ecdsa::SigningKey;
+        use p521::elliptic_curve::Generate;
+        use p521::pkcs8::EncodePublicKey;
+
+        let signing_key = SigningKey::generate();
+        let public_key = signing_key.verifying_key();
+        let spki_der = p521::PublicKey::from(public_key)
+            .to_public_key_der()
+            .expect("DER encoding should work");
+
+        let jwk =
+            parse_spki_to_jwk(spki_der.as_ref(), "ES512", "test-kid").expect("should parse EC key");
+
+        assert_eq!(jwk["kty"], "EC");
+        assert_eq!(jwk["crv"], "P-521");
+        assert_eq!(jwk["alg"], "ES512");
+        assert_eq!(jwk["kid"], "test-kid");
+        let x_len = jwk["x"].as_str().expect("should have x coordinate").len();
+        let y_len = jwk["y"].as_str().expect("should have y coordinate").len();
+        // 66-byte coordinates base64url (no padding) encode to
+        // ceil(66 * 4 / 3) = 88 characters, exactly (66 is divisible by 3).
+        assert_eq!(
+            x_len, 88,
+            "x should be 88 base64url chars for a 66-byte P-521 coordinate"
+        );
+        assert_eq!(
+            y_len, 88,
+            "y should be 88 base64url chars for a 66-byte P-521 coordinate"
+        );
+    }
+
+    #[test]
+    fn test_parse_ec_public_key_spki_too_short_is_key_error() {
+        // One byte short of the minimum P-256 uncompressed point
+        // (1 prefix byte + 32 + 32 coordinate bytes = 65 bytes minimum).
+        let too_short = vec![0x04u8; 64];
+        let result = parse_spki_to_jwk(&too_short, "ES256", "test-kid");
+        assert!(
+            result.is_err(),
+            "SPKI DER too short for the curve must be rejected, not panic"
+        );
+        assert!(
+            matches!(result, Err(Error::KeyError { .. })),
+            "must surface as a KeyError, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_ec_public_key_missing_uncompressed_prefix_is_key_error() {
+        // Right length for a P-256 point (65 bytes), but the point prefix
+        // byte is not 0x04 (uncompressed), e.g. 0x02 (compressed, even y).
+        let mut bad_prefix = vec![0x02u8; 65];
+        bad_prefix[0] = 0x02;
+        let result = parse_spki_to_jwk(&bad_prefix, "ES256", "test-kid");
+        assert!(
+            result.is_err(),
+            "a non-0x04 point prefix must be rejected, not panic"
+        );
+        assert!(
+            matches!(result, Err(Error::KeyError { .. })),
+            "must surface as a KeyError, got {result:?}"
         );
     }
 
