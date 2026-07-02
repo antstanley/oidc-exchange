@@ -1,6 +1,6 @@
 # Plan: Harden outbound provider HTTP (timeouts, status checks, key rotation)
 
-**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-harden_outbound_provider_http.md](../../changes/2026-07-01-harden_outbound_provider_http.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-harden_outbound_provider_http.md](../../changes/2026-07-01-harden_outbound_provider_http.md)
 
 This plan hardens every outbound provider call (JWKS, discovery, token endpoint, revocation) in `crates/adapters/shared`, `crates/adapters/oidc`, and `crates/providers/apple`. It leads with a single shared, timed-out `reqwest::Client` (task 01) that every later task is reviewed through — once outbound HTTP goes through one client with connect/total timeouts and redirects disabled, the remaining tasks layer per-endpoint semantics on top: JWKS fail-closed caching plus a rate-limited refetch API (02), wiring that refetch into the two providers' unknown-`kid` paths (03), token-endpoint OAuth-error surfacing (04), and discovery issuer verification (05). Five thin vertical slices, each provable with a `wiremock` test.
 
