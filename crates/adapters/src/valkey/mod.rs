@@ -216,12 +216,32 @@ impl SessionRepository for ValkeySessionRepository {
                     detail: e.to_string(),
                 })?;
 
-        self.client
-            .del::<(), _>(&key)
-            .await
-            .map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+        // Capture DEL's return count: it is 0 when the key was already gone (already
+        // revoked or naturally expired) and 1 when this call actually removed it. Only
+        // decrement the counter on an actual delete, so a repeated or already-expired
+        // revoke does not double-decrement.
+        let deleted_count: u64 = self.client.del(&key).await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+        assert!(
+            deleted_count <= 1,
+            "DEL of a single key must return 0 or 1, got {deleted_count}"
+        );
+
+        if deleted_count == 1 {
+            let active_sessions_key = self.active_sessions_key();
+            let counter: i64 =
+                self.client
+                    .decr(&active_sessions_key)
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            assert!(
+                counter >= 0,
+                "active_sessions counter must not go negative after a decrement, got {counter}"
+            );
+        }
 
         if let Some(user_id) = user_id {
             self.client
@@ -237,15 +257,30 @@ impl SessionRepository for ValkeySessionRepository {
 
     #[instrument(skip(self))]
     async fn count_active_sessions(&self) -> Result<u64> {
-        // Count all session keys. Valkey sessions have TTL set, so existing keys
-        // are active by definition (expired keys are removed automatically).
-        let count: u64 = self.client.dbsize().await.map_err(|e| Error::StoreError {
-            detail: e.to_string(),
-        })?;
-        // dbsize returns total keys including user_sessions sets.
-        // For an approximate count, this is acceptable. For exact counts,
-        // a scan with prefix matching would be needed.
-        Ok(count)
+        // Read the maintained counter rather than DBSIZE (which would count every key in
+        // the database, including the user_sessions index sets and any keys outside
+        // key_prefix). A missing key (nothing ever stored under this prefix) reads as 0
+        // rather than erroring.
+        let active_sessions_key = self.active_sessions_key();
+        assert!(
+            !active_sessions_key.is_empty(),
+            "active_sessions key must not be empty"
+        );
+
+        let count: Option<u64> =
+            self.client
+                .get(&active_sessions_key)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+
+        let result = count.unwrap_or(0);
+        assert!(
+            count.is_some() || result == 0,
+            "a missing active_sessions key must report 0, not an arbitrary count"
+        );
+        Ok(result)
     }
 
     #[instrument(skip(self))]
@@ -267,14 +302,47 @@ impl SessionRepository for ValkeySessionRepository {
                     detail: e.to_string(),
                 })?;
 
-        for token_hash in &token_hashes {
-            let key = self.session_key(token_hash);
-            self.client
-                .del::<(), _>(&key)
+        // Delete every session key the user set names, then DECR the counter by exactly
+        // the number of keys that actually existed (a stale/already-expired member in the
+        // set must not decrement the counter). A single multi-key DEL both avoids an
+        // unbounded round-trip loop and returns the live-key count directly.
+        let deleted_count: u64 = if token_hashes.is_empty() {
+            0
+        } else {
+            let keys: Vec<String> = token_hashes
+                .iter()
+                .map(|token_hash| self.session_key(token_hash))
+                .collect();
+            self.client.del(keys).await.map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?
+        };
+        assert!(
+            deleted_count <= token_hashes.len() as u64,
+            "deleted session-key count must not exceed the number of member hashes read, \
+             got deleted={deleted_count} members={}",
+            token_hashes.len()
+        );
+
+        if deleted_count > 0 {
+            let active_sessions_key = self.active_sessions_key();
+            let deleted_count_i64 =
+                i64::try_from(deleted_count).map_err(|_| Error::StoreError {
+                    detail: format!(
+                        "deleted session-key count {deleted_count} overflows i64 for DECRBY"
+                    ),
+                })?;
+            let counter: i64 = self
+                .client
+                .decr_by(&active_sessions_key, deleted_count_i64)
                 .await
                 .map_err(|e| Error::StoreError {
                     detail: e.to_string(),
                 })?;
+            assert!(
+                counter >= 0,
+                "active_sessions counter must not go negative after a decrement, got {counter}"
+            );
         }
 
         self.client
@@ -469,5 +537,189 @@ mod tests {
             !counter_exists,
             "rejected session must not increment (or create) the counter"
         );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn count_active_sessions_on_untouched_prefix_returns_zero() {
+        let repo = create_test_repo().await;
+
+        let count = repo
+            .count_active_sessions()
+            .await
+            .expect("count_active_sessions on a prefix with no counter key");
+
+        assert_eq!(
+            count, 0,
+            "a prefix nothing has ever been stored under should report 0, not error"
+        );
+        let counter_exists: bool = repo
+            .client
+            .exists(&repo.active_sessions_key())
+            .await
+            .expect("exists on counter key");
+        assert!(
+            !counter_exists,
+            "an untouched prefix must not have created a counter key as a side effect"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn revoke_session_decrements_counter_exactly_once() {
+        let repo = create_test_repo().await;
+        let session = sample_session("usr_revoke", "hash_revoke", 3600);
+
+        repo.store_refresh_token(&session)
+            .await
+            .expect("store_refresh_token");
+        assert_eq!(
+            repo.count_active_sessions()
+                .await
+                .expect("count after store"),
+            1,
+            "counter should read 1 after one store"
+        );
+
+        repo.revoke_session(&session.refresh_token_hash)
+            .await
+            .expect("first revoke_session");
+        let count_after_first_revoke = repo
+            .count_active_sessions()
+            .await
+            .expect("count after first revoke");
+        assert_eq!(
+            count_after_first_revoke, 0,
+            "counter should drop from 1 to 0 after the session is revoked"
+        );
+
+        let key = repo.session_key(&session.refresh_token_hash);
+        let exists: bool = repo
+            .client
+            .exists(&key)
+            .await
+            .expect("exists on session hash after revoke");
+        assert!(!exists, "revoked session hash key must be gone");
+
+        // A second revoke of the same (already-gone) token must not double-decrement: DEL
+        // returns 0 because the key no longer exists, so the counter must stay at 0.
+        repo.revoke_session(&session.refresh_token_hash)
+            .await
+            .expect("second revoke_session on an already-revoked token");
+        let count_after_second_revoke = repo
+            .count_active_sessions()
+            .await
+            .expect("count after second revoke");
+        assert_eq!(
+            count_after_second_revoke, 0,
+            "a repeated revoke of an already-deleted session must not decrement the counter again"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn revoke_all_user_sessions_decrements_by_live_key_count() {
+        let repo = create_test_repo().await;
+        let user_id = "usr_revoke_all";
+
+        let session_a = sample_session(user_id, "hash_all_a", 3600);
+        let session_b = sample_session(user_id, "hash_all_b", 3600);
+        let session_c = sample_session(user_id, "hash_all_c", 3600);
+        repo.store_refresh_token(&session_a)
+            .await
+            .expect("store session a");
+        repo.store_refresh_token(&session_b)
+            .await
+            .expect("store session b");
+        repo.store_refresh_token(&session_c)
+            .await
+            .expect("store session c");
+        assert_eq!(
+            repo.count_active_sessions()
+                .await
+                .expect("count after 3 stores"),
+            3,
+            "counter should read 3 after three stores for the same user"
+        );
+
+        // Revoke one session individually first. revoke_session also SREMs the user set, so
+        // after this the set holds exactly the two remaining live members (hash_all_b,
+        // hash_all_c) — not all three with one stale.
+        repo.revoke_session(&session_a.refresh_token_hash)
+            .await
+            .expect("revoke session a individually");
+        assert_eq!(
+            repo.count_active_sessions()
+                .await
+                .expect("count after single revoke"),
+            2,
+            "counter should read 2 after individually revoking one of three sessions"
+        );
+
+        // Delete session_b's hash directly through the client, bypassing revoke_session, so
+        // the counter is NOT decremented for it. This leaves the user set naming a member
+        // (hash_all_b) whose session key no longer exists — a stale member — while the
+        // counter still reads 2 even though only one live key (session_c) remains. This
+        // reproduces the exact drift revoke_all_user_sessions must handle: it must DECRBY
+        // the counter by the number of keys its own DEL actually removed (1, for
+        // session_c), not by the number of members read from the set (2).
+        let deleted_directly: u64 = repo
+            .client
+            .del(repo.session_key("hash_all_b"))
+            .await
+            .expect("delete session_b's hash directly, bypassing revoke_session");
+        assert_eq!(
+            deleted_directly, 1,
+            "the direct DEL of session_b's hash must have removed exactly one key"
+        );
+        assert_eq!(
+            repo.count_active_sessions()
+                .await
+                .expect("count before revoke_all_user_sessions"),
+            2,
+            "the counter must still read 2: the direct DEL above bypassed revoke_session, so \
+             it never decremented the counter, leaving it stale relative to the one truly \
+             live key (session_c)"
+        );
+
+        repo.revoke_all_user_sessions(user_id)
+            .await
+            .expect("revoke_all_user_sessions");
+
+        let count_after_revoke_all = repo
+            .count_active_sessions()
+            .await
+            .expect("count after revoke_all_user_sessions");
+        assert_eq!(
+            count_after_revoke_all, 1,
+            "counter should drop from 2 to 1: revoke_all_user_sessions read two members from \
+             the set (hash_all_b, hash_all_c) but its DEL only actually removed one live key \
+             (session_c, since session_b's hash was already gone), so it must DECRBY 1 — the \
+             actual delete count — not DECRBY 2, the set-membership count"
+        );
+
+        let user_set_key = repo.user_sessions_key(user_id);
+        let set_exists: bool = repo
+            .client
+            .exists(&user_set_key)
+            .await
+            .expect("exists on user set after revoke_all_user_sessions");
+        assert!(
+            !set_exists,
+            "the user set itself must be deleted by revoke_all_user_sessions"
+        );
+
+        for hash in ["hash_all_a", "hash_all_b", "hash_all_c"] {
+            let key = repo.session_key(hash);
+            let exists: bool = repo
+                .client
+                .exists(&key)
+                .await
+                .expect("exists on session hash after revoke_all_user_sessions");
+            assert!(
+                !exists,
+                "session hash {hash} must be gone after revoke_all_user_sessions"
+            );
+        }
     }
 }
