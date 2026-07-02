@@ -1,9 +1,11 @@
 pub mod schema;
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::types::{AttributeValue, WriteRequest};
 use chrono::Utc;
 use tracing::instrument;
 
@@ -16,6 +18,55 @@ use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 use schema::{item_to_session, item_to_user, session_to_item, user_to_item};
 
 const GSI1_NAME: &str = "GSI1";
+
+/// Maximum number of `BatchWriteItem` submission attempts (the initial send plus retries)
+/// allowed while draining a batch's `unprocessed_items` before the retry budget is exhausted
+/// and the call errors instead of silently leaving items undeleted.
+const BATCH_WRITE_MAX_ATTEMPTS: u32 = 8;
+
+/// Base delay, in milliseconds, for the capped exponential backoff between `BatchWriteItem`
+/// retry attempts: attempt `n` (n >= 2) sleeps `BATCH_WRITE_BACKOFF_BASE_MS * 2^(n-2)` ms
+/// before re-submitting whatever DynamoDB reported as `unprocessed_items`.
+const BATCH_WRITE_BACKOFF_BASE_MS: u64 = 50;
+
+/// Submit `requests` via `submit`, re-submitting only the items it reports back as still
+/// unprocessed, with capped exponential backoff, until the batch drains (an empty vec comes
+/// back) or `BATCH_WRITE_MAX_ATTEMPTS` is exhausted. Returns the number of items deleted (equal
+/// to `requests.len()` on success — every submitted item was eventually processed) or
+/// `Error::StoreError` if the retry budget is exhausted with items still unprocessed.
+async fn drain_unprocessed<S, Fut>(requests: Vec<WriteRequest>, mut submit: S) -> Result<u64>
+where
+    S: FnMut(Vec<WriteRequest>) -> Fut,
+    Fut: Future<Output = Result<Vec<WriteRequest>>>,
+{
+    if requests.is_empty() {
+        return Ok(0);
+    }
+
+    let total = requests.len() as u64;
+    let mut pending = requests;
+
+    for attempt in 1..=BATCH_WRITE_MAX_ATTEMPTS {
+        if attempt > 1 {
+            let backoff_ms = BATCH_WRITE_BACKOFF_BASE_MS * (1u64 << (attempt - 2));
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        }
+
+        pending = submit(pending).await?;
+
+        if pending.is_empty() {
+            return Ok(total);
+        }
+    }
+
+    Err(Error::StoreError {
+        detail: format!(
+            "BatchWriteItem retry budget ({BATCH_WRITE_MAX_ATTEMPTS} attempts) exhausted with \
+             {} item(s) still unprocessed",
+            pending.len()
+        ),
+    })
+}
 
 pub struct DynamoRepository {
     client: aws_sdk_dynamodb::Client,
@@ -31,6 +82,31 @@ impl DynamoRepository {
         Error::StoreError {
             detail: e.to_string(),
         }
+    }
+
+    /// Submit up to 25 `WriteRequest`s via `BatchWriteItem` on this repository's table,
+    /// draining any `unprocessed_items` DynamoDB reports back (see [`drain_unprocessed`]).
+    /// Returns the number of items actually deleted.
+    async fn batch_write_with_retry(&self, requests: Vec<WriteRequest>) -> Result<u64> {
+        let table_name = self.table_name.clone();
+        drain_unprocessed(requests, |batch| {
+            let table_name = table_name.clone();
+            async move {
+                let result = self
+                    .client
+                    .batch_write_item()
+                    .request_items(&table_name, batch)
+                    .send()
+                    .await
+                    .map_err(Self::store_err)?;
+
+                Ok(result
+                    .unprocessed_items
+                    .and_then(|mut m| m.remove(&table_name))
+                    .unwrap_or_default())
+            }
+        })
+        .await
     }
 }
 
@@ -392,14 +468,9 @@ impl SessionRepository for DynamoRepository {
                     })
                     .collect();
 
-                deleted += delete_requests.len() as u64;
-
-                self.client
-                    .batch_write_item()
-                    .request_items(&self.table_name, delete_requests)
-                    .send()
-                    .await
-                    .map_err(Self::store_err)?;
+                // Count deletions from the batch actually drained (every unprocessed item
+                // retried until it succeeds), not from the number submitted.
+                deleted += self.batch_write_with_retry(delete_requests).await?;
             }
 
             match result.last_evaluated_key {
@@ -466,12 +537,7 @@ impl SessionRepository for DynamoRepository {
                         })
                         .collect();
 
-                    self.client
-                        .batch_write_item()
-                        .request_items(&self.table_name, delete_requests)
-                        .send()
-                        .await
-                        .map_err(Self::store_err)?;
+                    self.batch_write_with_retry(delete_requests).await?;
                 }
             }
 
@@ -482,6 +548,112 @@ impl SessionRepository for DynamoRepository {
         }
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the BatchWriteItem retry helper (no DynamoDB Local required)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod retry_tests {
+    use std::cell::Cell;
+
+    use aws_sdk_dynamodb::types::{AttributeValue, DeleteRequest, WriteRequest};
+
+    use super::{drain_unprocessed, BATCH_WRITE_MAX_ATTEMPTS};
+    use oidc_exchange_core::error::Error;
+
+    fn write_request(id: &str) -> WriteRequest {
+        WriteRequest::builder()
+            .delete_request(
+                DeleteRequest::builder()
+                    .key("pk", AttributeValue::S(format!("SESSION#{id}")))
+                    .key("sk", AttributeValue::S("SESSION".to_string()))
+                    .build()
+                    .expect("valid delete request"),
+            )
+            .build()
+    }
+
+    /// A fake client that reports the last `unprocessed_after` items of a batch as
+    /// `unprocessed_items` for its first `attempts_before_drain - 1` calls, then reports the
+    /// whole batch as processed (an empty vec) from that attempt onward.
+    fn flaky_submit(
+        attempts_before_drain: u32,
+        calls: &Cell<u32>,
+    ) -> impl FnMut(
+        Vec<WriteRequest>,
+    ) -> std::future::Ready<oidc_exchange_core::error::Result<Vec<WriteRequest>>>
+           + '_ {
+        move |pending| {
+            let attempt = calls.get() + 1;
+            calls.set(attempt);
+            let outcome = if attempt < attempts_before_drain {
+                // Only the last item in the batch is still unprocessed.
+                pending.into_iter().rev().take(1).collect()
+            } else {
+                Vec::new()
+            };
+            std::future::ready(Ok(outcome))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drains_within_budget_and_reports_true_deleted_count() {
+        let requests = vec![write_request("a"), write_request("b"), write_request("c")];
+        let submitted = requests.len() as u64;
+
+        let calls = Cell::new(0u32);
+        let attempts_before_drain = 4u32;
+        assert!(
+            attempts_before_drain <= BATCH_WRITE_MAX_ATTEMPTS,
+            "test setup must fit inside the retry budget"
+        );
+
+        let result = drain_unprocessed(requests, flaky_submit(attempts_before_drain, &calls)).await;
+
+        assert_eq!(
+            result.expect("retry loop should drain within the budget"),
+            submitted,
+            "should report every originally submitted item as deleted"
+        );
+        assert_eq!(
+            calls.get(),
+            attempts_before_drain,
+            "should stop retrying as soon as the batch drains, not keep spinning"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn errors_when_retry_budget_is_exhausted_without_draining() {
+        let requests = vec![write_request("a")];
+
+        // Every submission reports the item as still unprocessed — it never drains.
+        let result = drain_unprocessed(requests, |pending| std::future::ready(Ok(pending))).await;
+
+        match result {
+            Err(Error::StoreError { detail }) => {
+                assert!(
+                    detail.contains("unprocessed"),
+                    "error should explain the batch never drained: {detail}"
+                );
+            }
+            other => panic!("expected Error::StoreError on budget exhaustion, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_batch_is_a_no_op() {
+        let calls = Cell::new(0u32);
+        let result = drain_unprocessed(Vec::new(), |pending| {
+            calls.set(calls.get() + 1);
+            std::future::ready(Ok(pending))
+        })
+        .await;
+
+        assert_eq!(result.expect("empty batch should succeed"), 0);
+        assert_eq!(calls.get(), 0, "an empty batch should never call submit");
     }
 }
 

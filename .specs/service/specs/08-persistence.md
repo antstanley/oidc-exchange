@@ -23,13 +23,17 @@ Access patterns:
 | `get_user_by_id` | `GetItem` on `USER#<id>` / `PROFILE` |
 | `get_user_by_external_id` | `Query` GSI1 `EXT#<provider>#<external_id>` |
 | `get_session_by_refresh_token` | `GetItem` on `SESSION#<hash>` |
-| `revoke_all_user_sessions` | `Query` GSI1 `USER#<user_id>` then `BatchWrite` deletes |
+| `revoke_all_user_sessions` | `Query` GSI1 `USER#<user_id>` then `BatchWrite` deletes (unprocessed items retried) |
 | `count_by_status` / `count_active_sessions` | table scans / counts |
 
 `metadata` and `claims` are stored as DynamoDB maps; `created_at`/`updated_at`/`expires_at`
 are ISO-8601 strings. Sessions carry a numeric `ttl` (epoch seconds) so DynamoDB expires them
-natively — `cleanup_expired_sessions` is a no-op cost there. The GSI1 user key includes the
-provider prefix so the same external id from two providers does not collide.
+natively — `cleanup_expired_sessions` batch-deletes whatever TTL has not yet reaped, retrying
+any `BatchWriteItem` `unprocessed_items` with capped exponential backoff until the batch drains
+or a bounded retry budget is exhausted (then error), so a successful return means every expired
+session found is gone. `revoke_all_user_sessions` retries the same way, so a successful return
+means every targeted session item was deleted. The GSI1 user key includes the provider prefix
+so the same external id from two providers does not collide.
 
 ## PostgreSQL (`adapters/postgres`)
 
