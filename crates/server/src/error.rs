@@ -88,6 +88,11 @@ fn map_domain_error(err: &Error) -> (StatusCode, String, String) {
         Error::Conflict { detail } => {
             (StatusCode::CONFLICT, "conflict".to_string(), detail.clone())
         }
+        Error::NotFound { detail } => (
+            StatusCode::NOT_FOUND,
+            "not_found".to_string(),
+            detail.clone(),
+        ),
         Error::ProviderError { .. } => (
             StatusCode::BAD_GATEWAY,
             "server_error".to_string(),
@@ -137,6 +142,21 @@ mod tests {
             body["error_description"],
             "user already registered for (google, sub-123)"
         );
+    }
+
+    #[tokio::test]
+    async fn not_found_error_renders_404_with_not_found_code() {
+        let err = ApiError::Domain(Error::NotFound {
+            detail: "user abc-123 not found".to_string(),
+        });
+
+        let (status, body) = response_to_json(err.into_response()).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
+        assert_eq!(body["error_description"], "user abc-123 not found");
+        // Negative-space: NotFound must not be swallowed by the 5xx catch-all.
+        assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

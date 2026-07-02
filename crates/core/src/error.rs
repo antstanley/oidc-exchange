@@ -27,6 +27,9 @@ pub enum Error {
     #[error("conflict: {detail}")]
     Conflict { detail: String },
 
+    #[error("not found: {detail}")]
+    NotFound { detail: String },
+
     // Provider errors (upstream)
     #[error("provider error ({provider}): {detail}")]
     ProviderError { provider: String, detail: String },
