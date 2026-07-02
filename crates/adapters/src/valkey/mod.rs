@@ -13,6 +13,11 @@ use tracing::instrument;
 /// already-expired Valkey key is ever written).
 const SESSION_TTL_SECONDS_MIN: i64 = 1;
 
+/// The `COUNT` hint, in keys per page, passed to every `SCAN` issued by `cleanup_expired_sessions`.
+/// This only advises the server on page size; it does not bound the total number of keys
+/// visited (the client keeps paging until the cursor returns to 0).
+const SCAN_BATCH_COUNT: u32 = 256;
+
 pub struct ValkeySessionRepository {
     client: fred::clients::Client,
     key_prefix: String,
@@ -285,9 +290,130 @@ impl SessionRepository for ValkeySessionRepository {
 
     #[instrument(skip(self))]
     async fn cleanup_expired_sessions(&self) -> Result<u64> {
-        // Valkey/Redis TTL handles expiration automatically.
-        // Keys with TTL are deleted by the server, so this is a no-op.
-        Ok(0)
+        use futures::stream::TryStreamExt;
+
+        // Pass 1: prune dead members out of every `{prefix}user_sessions:*` index set. A
+        // member is dead when its `{prefix}session:{hash}` key has already expired (or was
+        // otherwise removed) server-side, so natural TTL expiry never shrinks the set on its
+        // own — this pass is what reaps them.
+        let user_sessions_pattern = format!("{}user_sessions:*", self.key_prefix);
+        let set_keys: Vec<Key> = self
+            .client
+            .scan_buffered(user_sessions_pattern.as_str(), Some(SCAN_BATCH_COUNT), None)
+            .try_collect()
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        let mut removed_members: u64 = 0;
+        let mut members_scanned: u64 = 0;
+
+        for set_key in set_keys {
+            let set_key = set_key.as_str_lossy().into_owned();
+            let members: Vec<String> =
+                self.client
+                    .smembers(&set_key)
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            members_scanned += members.len() as u64;
+
+            let mut dead_members = Vec::new();
+            for member in &members {
+                let session_key = self.session_key(member);
+                let exists: bool =
+                    self.client
+                        .exists(&session_key)
+                        .await
+                        .map_err(|e| Error::StoreError {
+                            detail: e.to_string(),
+                        })?;
+                if !exists {
+                    dead_members.push(member.clone());
+                }
+            }
+
+            if !dead_members.is_empty() {
+                let dead_count = dead_members.len() as u64;
+                let srem_count: u64 =
+                    self.client
+                        .srem(&set_key, dead_members)
+                        .await
+                        .map_err(|e| Error::StoreError {
+                            detail: e.to_string(),
+                        })?;
+                assert!(
+                    srem_count <= dead_count,
+                    "SREM must not remove more members than were identified as dead, \
+                     removed={srem_count} dead={dead_count}"
+                );
+                removed_members += srem_count;
+            }
+
+            // Delete the set once it holds no members, so an idle user's index set does not
+            // linger forever as an empty key.
+            let remaining: u64 =
+                self.client
+                    .scard(&set_key)
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            if remaining == 0 {
+                self.client
+                    .del::<(), _>(&set_key)
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            }
+        }
+
+        assert!(
+            removed_members <= members_scanned,
+            "the returned removed-count must not exceed the total members scanned across \
+             all user_sessions sets, removed={removed_members} scanned={members_scanned}"
+        );
+
+        // Pass 2: reconcile the counter. INCR (on store) and DECR (on explicit revoke) never
+        // account for natural TTL expiry, so the counter can only drift upward between
+        // cleanups; recompute it here from a live SCAN of `{prefix}session:*` and SET it to
+        // that exact count.
+        let session_pattern = format!("{}session:*", self.key_prefix);
+        let live_keys: Vec<Key> = self
+            .client
+            .scan_buffered(session_pattern.as_str(), Some(SCAN_BATCH_COUNT), None)
+            .try_collect()
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        let live_count = live_keys.len() as u64;
+
+        let active_sessions_key = self.active_sessions_key();
+        self.client
+            .set::<(), _, _>(&active_sessions_key, live_count, None, None, false)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        let reconciled: Option<u64> =
+            self.client
+                .get(&active_sessions_key)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+        assert_eq!(
+            reconciled.unwrap_or(0),
+            live_count,
+            "the reconciled active_sessions counter must equal the counted live session keys"
+        );
+
+        Ok(removed_members)
     }
 
     #[instrument(skip(self))]
@@ -721,5 +847,137 @@ mod tests {
                 "session hash {hash} must be gone after revoke_all_user_sessions"
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn cleanup_expired_sessions_prunes_only_member_deletes_set_and_resets_counter() {
+        let repo = create_test_repo().await;
+        let user_id = "usr_cleanup_solo";
+
+        // A 2s TTL (rather than the theoretical 1s floor) tolerates the sub-second delay
+        // between computing `expires_at` here and `store_refresh_token` truncating it down
+        // to whole seconds via `num_seconds()`, so the write is never spuriously rejected.
+        let session = sample_session(user_id, "hash_cleanup_solo", 2);
+        repo.store_refresh_token(&session)
+            .await
+            .expect("store short-lived session");
+
+        let user_set_key = repo.user_sessions_key(user_id);
+        // Extend the set's own TTL well beyond the session's short TTL so the set (with its
+        // now-stale sole member) is still present when cleanup runs, decoupling this test
+        // from a race against Valkey's own TTL expiry of the set itself.
+        let _: bool = repo
+            .client
+            .expire(&user_set_key, 10, None)
+            .await
+            .expect("extend user set TTL for deterministic test setup");
+
+        assert_eq!(
+            repo.count_active_sessions()
+                .await
+                .expect("count after store"),
+            1,
+            "counter should read 1 after one store"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+        let key = repo.session_key(&session.refresh_token_hash);
+        let exists: bool = repo
+            .client
+            .exists(&key)
+            .await
+            .expect("exists on session hash after TTL expiry");
+        assert!(!exists, "the short-TTL session hash must have expired");
+
+        let set_exists_before: bool = repo
+            .client
+            .exists(&user_set_key)
+            .await
+            .expect("exists on user set before cleanup");
+        assert!(
+            set_exists_before,
+            "the extended set TTL must have kept the set (with its stale member) alive"
+        );
+
+        // Natural TTL expiry never decrements the counter: it still over-reports the one
+        // session that has since expired.
+        assert_eq!(
+            repo.count_active_sessions()
+                .await
+                .expect("count before cleanup"),
+            1,
+            "the counter must still read 1, drifted above the zero truly live sessions"
+        );
+
+        let removed = repo
+            .cleanup_expired_sessions()
+            .await
+            .expect("cleanup_expired_sessions");
+        assert_eq!(
+            removed, 1,
+            "cleanup should prune exactly the one stale user_sessions member"
+        );
+
+        let set_exists_after: bool = repo
+            .client
+            .exists(&user_set_key)
+            .await
+            .expect("exists on user set after cleanup");
+        assert!(
+            !set_exists_after,
+            "the now-empty user_sessions set must be deleted by cleanup"
+        );
+
+        let counter_after = repo
+            .count_active_sessions()
+            .await
+            .expect("count after cleanup");
+        assert_eq!(
+            counter_after, 0,
+            "the reconciled counter must equal the zero live session keys, resetting the drift"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn cleanup_expired_sessions_with_no_dead_members_returns_zero_and_matches_live_count() {
+        let repo = create_test_repo().await;
+        let user_id = "usr_cleanup_clean";
+
+        let session = sample_session(user_id, "hash_cleanup_clean", 3600);
+        repo.store_refresh_token(&session)
+            .await
+            .expect("store live session");
+
+        let removed = repo
+            .cleanup_expired_sessions()
+            .await
+            .expect("cleanup_expired_sessions over a clean prefix");
+        assert_eq!(
+            removed, 0,
+            "cleanup over a prefix with no dead members must return 0"
+        );
+
+        let user_set_key = repo.user_sessions_key(user_id);
+        let members: Vec<String> = repo
+            .client
+            .smembers(&user_set_key)
+            .await
+            .expect("smembers on user set after cleanup");
+        assert!(
+            members.contains(&session.refresh_token_hash),
+            "the live member must be untouched by cleanup"
+        );
+
+        let counter_after = repo
+            .count_active_sessions()
+            .await
+            .expect("count after cleanup");
+        assert_eq!(
+            counter_after, 1,
+            "the counter must equal the live-key count (1) after cleanup with no drift"
+        );
     }
 }

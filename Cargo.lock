@@ -2651,6 +2651,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0-rc.1",
  "fred",
+ "futures",
  "heed",
  "hex",
  "hmac 0.12.1",
