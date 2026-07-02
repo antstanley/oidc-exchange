@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
-use aws_sdk_dynamodb::types::{AttributeValue, Put, TransactWriteItem, WriteRequest};
+use aws_sdk_dynamodb::types::{AttributeValue, Delete, Put, TransactWriteItem, WriteRequest};
 use chrono::Utc;
 use tracing::instrument;
 
@@ -384,6 +384,11 @@ impl UserRepository for DynamoRepository {
                     detail: format!("user not found: {user_id}"),
                 })?;
             let read_version = user.version;
+            // Captured from the fresh read, *before* the patch is applied, so a repeated
+            // delete of an already-`Deleted` user (e.g. a retried DELETE request) is
+            // recognized as a no-op transition rather than re-triggering the guard delete
+            // below — see `is_delete_transition`.
+            let was_deleted = user.status == UserStatus::Deleted;
 
             if let Some(ref email) = patch.email {
                 user.email = Some(email.clone());
@@ -404,40 +409,124 @@ impl UserRepository for DynamoRepository {
             user.version = read_version + 1;
 
             let item = user_to_item(&user);
+            // A transition to `Deleted` frees `(provider, external_id)` for
+            // re-registration (see 01-domain-model.md §Lifecycles): the guard item
+            // that enforces uniqueness must be removed in the same atomic write as
+            // the status change, so a reader can never observe a `Deleted` user
+            // whose guard is still standing (or vice versa). Every other patch keeps
+            // the plain, cheaper version-conditional `PutItem`.
+            //
+            // Gated on `!was_deleted` (the status read *before* this patch was applied):
+            // without that guard, a repeated delete of an already-`Deleted` user (a
+            // retried DELETE request, or a PATCH status=deleted arriving twice) would
+            // recompute `is_delete_transition` from `patch.status` alone and re-run the
+            // guard delete unconditionally, keyed only by `(provider, external_id)`. If
+            // the identity had since been re-registered (delete -> recreate), that second
+            // delete would remove the *new* user's guard out from under it, freeing the
+            // identity for a third registration while the second user is still `Active` —
+            // two live users sharing one `(provider, external_id)`, violating the
+            // uniqueness invariant this guard exists to enforce.
+            let is_delete_transition =
+                matches!(patch.status, Some(UserStatus::Deleted)) && !was_deleted;
 
-            let outcome = self
-                .client
-                .put_item()
-                .table_name(&self.table_name)
-                .set_item(Some(item))
-                .condition_expression(
-                    "version = :read_version OR attribute_not_exists(version)",
-                )
-                .expression_attribute_values(
-                    ":read_version",
-                    AttributeValue::N(read_version.to_string()),
-                )
-                .send()
-                .await;
+            if is_delete_transition {
+                let user_put = Put::builder()
+                    .table_name(&self.table_name)
+                    .set_item(Some(item))
+                    .condition_expression(
+                        "version = :read_version OR attribute_not_exists(version)",
+                    )
+                    .expression_attribute_values(
+                        ":read_version",
+                        AttributeValue::N(read_version.to_string()),
+                    )
+                    .build()
+                    .map_err(Self::store_err)?;
 
-            match outcome {
-                Ok(_) => Ok(Some(user)),
-                Err(err) => {
-                    let is_version_conflict = matches!(
-                        err.as_service_error(),
-                        Some(
-                            aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(_)
-                        )
-                    );
-                    if !is_version_conflict {
-                        return Err(Self::store_err(err));
+                // Defense in depth alongside the `!was_deleted` gate above: even if this
+                // delete somehow still fired for a stale/retried request, condition it on
+                // the guard item's `user_id` still being *this* user's id, so it can never
+                // remove a guard that has since come to belong to a re-registered user for
+                // the same `(provider, external_id)`.
+                let guard_delete = Delete::builder()
+                    .table_name(&self.table_name)
+                    .key(
+                        "pk",
+                        AttributeValue::S(guard_pk(&user.provider, &user.external_id)),
+                    )
+                    .key("sk", AttributeValue::S(GUARD_SK.to_string()))
+                    .condition_expression("user_id = :user_id")
+                    .expression_attribute_values(
+                        ":user_id",
+                        AttributeValue::S(user.id.clone()),
+                    )
+                    .build()
+                    .map_err(Self::store_err)?;
+
+                let outcome = self
+                    .client
+                    .transact_write_items()
+                    .transact_items(TransactWriteItem::builder().put(user_put).build())
+                    .transact_items(TransactWriteItem::builder().delete(guard_delete).build())
+                    .send()
+                    .await;
+
+                match outcome {
+                    Ok(_) => Ok(Some(user)),
+                    Err(err) => {
+                        let is_version_conflict = match err.as_service_error() {
+                            Some(TransactWriteItemsError::TransactionCanceledException(tce)) => tce
+                                .cancellation_reasons()
+                                .iter()
+                                .any(|reason| reason.code() == Some(CONDITIONAL_CHECK_FAILED_CODE)),
+                            _ => false,
+                        };
+                        if !is_version_conflict {
+                            return Err(Self::store_err(err));
+                        }
+                        tracing::debug!(
+                            attempt = attempt_number,
+                            max_attempts = UPDATE_MAX_ATTEMPTS,
+                            "update_user (delete transition) version conflict, retrying"
+                        );
+                        Ok(None)
                     }
-                    tracing::debug!(
-                        attempt = attempt_number,
-                        max_attempts = UPDATE_MAX_ATTEMPTS,
-                        "update_user version conflict, retrying"
-                    );
-                    Ok(None)
+                }
+            } else {
+                let outcome = self
+                    .client
+                    .put_item()
+                    .table_name(&self.table_name)
+                    .set_item(Some(item))
+                    .condition_expression(
+                        "version = :read_version OR attribute_not_exists(version)",
+                    )
+                    .expression_attribute_values(
+                        ":read_version",
+                        AttributeValue::N(read_version.to_string()),
+                    )
+                    .send()
+                    .await;
+
+                match outcome {
+                    Ok(_) => Ok(Some(user)),
+                    Err(err) => {
+                        let is_version_conflict = matches!(
+                            err.as_service_error(),
+                            Some(
+                                aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(_)
+                            )
+                        );
+                        if !is_version_conflict {
+                            return Err(Self::store_err(err));
+                        }
+                        tracing::debug!(
+                            attempt = attempt_number,
+                            max_attempts = UPDATE_MAX_ATTEMPTS,
+                            "update_user version conflict, retrying"
+                        );
+                        Ok(None)
+                    }
                 }
             }
         })
@@ -1673,6 +1762,174 @@ mod tests {
             Some(&serde_json::Value::String("org_racing".to_string()))
         );
         assert_eq!(final_user.version, INITIAL_USER_VERSION + 2);
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn delete_user_removes_guard_and_frees_identity_for_recreation() {
+        let table_name = "oidc-exchange-test-delete-frees-identity";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        let new_user = NewUser {
+            external_id: "google|delete_frees_test".to_string(),
+            provider: "google".to_string(),
+            email: Some("delete_frees@example.com".to_string()),
+            display_name: None,
+        };
+        let original = repo.create_user(&new_user).await.expect("create_user");
+
+        repo.delete_user(&original.id).await.expect("delete_user");
+
+        // The guard item must be removed by the very same `TransactWriteItems` call as
+        // the status write — both succeed or neither does.
+        let guard_after_delete = client
+            .get_item()
+            .table_name(table_name)
+            .key(
+                "pk",
+                AttributeValue::S(guard_pk("google", "google|delete_frees_test")),
+            )
+            .key("sk", AttributeValue::S(GUARD_SK.to_string()))
+            .send()
+            .await
+            .expect("get guard item after delete")
+            .item;
+        assert!(
+            guard_after_delete.is_none(),
+            "guard item should be removed in the same transaction as the status write"
+        );
+
+        // The profile row is retained (soft delete), not purged.
+        let profile_after_delete = repo
+            .get_user_by_id(&original.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("deleted row should still exist");
+        assert_eq!(profile_after_delete.status, UserStatus::Deleted);
+
+        // A deleted user must not satisfy the external-id lookup.
+        let looked_up = repo
+            .get_user_by_external_id("google|delete_frees_test", "google")
+            .await
+            .expect("get_user_by_external_id");
+        assert!(
+            looked_up.is_none(),
+            "deleted user must not be returned by external-id lookup"
+        );
+
+        // The identity is free: create_user for the same (provider, external_id) succeeds
+        // as a brand-new user with a fresh id and no carried-over claims.
+        let recreated = repo
+            .create_user(&new_user)
+            .await
+            .expect("recreate after delete should succeed, not conflict");
+        assert_ne!(
+            recreated.id, original.id,
+            "recreated user must get a fresh id"
+        );
+        assert!(
+            recreated.claims.is_empty(),
+            "recreated user must start with no carried-over claims"
+        );
+
+        // Lookup now resolves to the recreated user via the fresh guard item.
+        let found = repo
+            .get_user_by_external_id("google|delete_frees_test", "google")
+            .await
+            .expect("get_user_by_external_id")
+            .expect("recreated user should be found");
+        assert_eq!(found.id, recreated.id);
+
+        // Negative-space: a live duplicate against the recreated user still conflicts —
+        // deletion frees the id, it does not disable uniqueness among live users.
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("a second live duplicate must still conflict");
+        match err {
+            Error::Conflict { .. } => {}
+            other => panic!("expected Error::Conflict, got {other:?}"),
+        }
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn retried_delete_of_already_deleted_user_does_not_evict_a_recreated_users_guard() {
+        // Regression test: create A -> delete A -> recreate B for the same identity ->
+        // delete_user(A.id) again (simulating a retried DELETE /internal/users/:id or a
+        // duplicate PATCH status=deleted). The second delete must be a no-op with respect
+        // to B's guard: it must NOT remove the guard that now belongs to the recreated,
+        // still-`Active` user B. Before the fix, `is_delete_transition` was computed from
+        // `patch.status` alone (ignoring the user's pre-patch status), so the second
+        // delete unconditionally deleted the `EXT#<provider>#<external_id>` guard item —
+        // which by then belonged to B — freeing the identity while B was still live and
+        // allowing a third `create_user` to produce a second, simultaneously-live user for
+        // the same `(provider, external_id)`.
+        let table_name = "oidc-exchange-test-retried-delete-guard-safety";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        let new_user = NewUser {
+            external_id: "google|retried_delete_test".to_string(),
+            provider: "google".to_string(),
+            email: Some("retried_delete@example.com".to_string()),
+            display_name: None,
+        };
+
+        let user_a = repo.create_user(&new_user).await.expect("create A");
+        repo.delete_user(&user_a.id).await.expect("delete A");
+
+        let user_b = repo
+            .create_user(&new_user)
+            .await
+            .expect("recreate B after A's delete freed the identity");
+        assert_ne!(user_b.id, user_a.id, "B must be a fresh user, not A");
+
+        // Re-delete A. This must succeed (or at least not corrupt state) but must not
+        // touch B's guard, since the pre-patch status read for A is already `Deleted`.
+        let _ = repo.delete_user(&user_a.id).await;
+
+        // B's guard must be intact: B is still resolvable by external-id lookup.
+        let looked_up = repo
+            .get_user_by_external_id("google|retried_delete_test", "google")
+            .await
+            .expect("get_user_by_external_id after repeated delete of A");
+        assert!(
+            looked_up.is_some(),
+            "B's guard must survive a repeated delete of the unrelated, already-deleted A"
+        );
+        let looked_up = looked_up.expect("checked above");
+        assert_eq!(
+            looked_up.id, user_b.id,
+            "lookup must resolve to B, not a ghost"
+        );
+        assert_eq!(
+            looked_up.status,
+            UserStatus::Active,
+            "B must still be Active — the repeated delete of A must not have deleted B"
+        );
+
+        // A third create for the same identity must conflict with the still-live B, not
+        // silently create a second live user sharing the identity.
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("a third create while B is still live must conflict, not succeed");
+        match err {
+            Error::Conflict { .. } => {}
+            other => panic!("expected Error::Conflict, got {other:?}"),
+        }
 
         // Clean up
         let _ = client.delete_table().table_name(table_name).send().await;

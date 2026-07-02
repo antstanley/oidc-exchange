@@ -1,6 +1,6 @@
 # Plan: Fix user-creation races and DynamoDB write integrity
 
-**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](../../changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](../../changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md)
 
 This plan enforces the `(provider, external_id)` uniqueness invariant across all three durable
 backends and closes the DynamoDB write-integrity gaps the change spec names. It opens with two

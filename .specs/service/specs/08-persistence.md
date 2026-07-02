@@ -61,6 +61,20 @@ item's `version`, and the read-modify-write is retried against the fresh value u
 `UPDATE_MAX_ATTEMPTS` before erroring — a lost update cannot silently revert a concurrent
 status change.
 
+When a patch transitions `status` to `Deleted`, `update_user` writes the same
+version-conditioned user item through a `TransactWriteItems` call instead of a plain
+`PutItem`, adding a `Delete` of the uniqueness-guard item
+(`EXT#<provider>#<external_id>` / `UNIQUE`) as the transaction's second item. Both writes
+succeed or neither does, so a reader can never observe a `Deleted` user whose guard is
+still standing (which would keep blocking re-registration) or a removed guard whose
+status write did not land. Any other patch (no status change, or a change to `Active`/
+`Suspended`) keeps the cheaper plain versioned `PutItem` — the guard is only ever touched
+on the transition into `Deleted`. Removing the guard is what frees `(provider,
+external_id)`: with no guard item, `get_user_by_external_id` returns `None` for that
+identity and a subsequent `create_user` for the same pair writes a fresh guard rather than
+losing to the guard's `attribute_not_exists(pk)` condition. The deleted user's profile item
+itself is never removed — only its guard.
+
 ## PostgreSQL (`adapters/postgres`)
 
 Two tables via `sqlx`: `users` and `sessions`. `metadata` and `claims` are `JSONB`; `users`
@@ -74,6 +88,16 @@ it and an existing row reads back as `1`. Indexes cover `(external_id, provider)
 distinguishable from an infrastructure failure. `create_pool(url, max_connections)` builds
 the connection pool. Implements both repository traits.
 
+The `(external_id, provider)` index is a *partial* unique index, `WHERE status !=
+'deleted'`: uniqueness is enforced only among live users, so a soft-deleted row frees its
+identity for re-registration rather than permanently occupying the slot. Because
+`CREATE UNIQUE INDEX IF NOT EXISTS` cannot turn a pre-existing full index into a partial
+one, the inline DDL also runs an explicit `DROP INDEX IF EXISTS idx_users_external_id_provider`
+immediately before recreating it with the `WHERE` predicate — idempotent on both a fresh
+database (the `DROP` is a no-op) and one that predates this migration (the full index is
+replaced). `get_user_by_external_id` adds `AND status != 'deleted'` so a deleted row is
+never returned to the exchange flow, matching the index's own predicate.
+
 ## SQLite (`adapters/sqlite`)
 
 Single-file `sqlx` store with WAL mode and foreign-key enforcement; `metadata`/`claims` stored
@@ -81,10 +105,12 @@ as JSON `TEXT`. `users` carries the same store-managed `version INTEGER NOT NULL
 column as PostgreSQL; `create_pool(path)` runs the inline DDL and then an idempotent
 `ALTER TABLE` step (SQLite's `ADD COLUMN` has no `IF NOT EXISTS` form) that adds the column
 to a `users` table that predates it, defaulting existing rows to `1`. The same
-`(external_id, provider)` unique index applies, and SQLite's unique-violation extended
-result code (`2067`, `SQLITE_CONSTRAINT_UNIQUE`) maps to `Error::Conflict` the same way as
-Postgres's `23505`. Implements both repository traits — the zero-dependency single-host
-option.
+partial `(external_id, provider)` unique index (`WHERE status != 'deleted'`, with the same
+`DROP INDEX IF EXISTS` + recreate upgrade step for a database that predates it) and
+`get_user_by_external_id` deleted-exclusion apply as Postgres, and SQLite's unique-violation
+extended result code (`2067`, `SQLITE_CONSTRAINT_UNIQUE`) maps to `Error::Conflict` the same
+way as Postgres's `23505`. Implements both repository traits — the zero-dependency
+single-host option.
 
 ## Session-only stores
 

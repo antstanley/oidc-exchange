@@ -29,7 +29,13 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at      TEXT NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_id_provider ON users(external_id, provider);
+-- `(external_id, provider)` is unique only among live (non-deleted) users: a soft-deleted
+-- user must free its identity for re-registration. `CREATE UNIQUE INDEX IF NOT EXISTS`
+-- cannot turn a pre-existing full index into a partial one, so a database that predates
+-- this migration needs the index dropped and recreated with the `WHERE` predicate. Safe to
+-- re-run on every startup since both statements are idempotent (`IF EXISTS` / `IF NOT EXISTS`).
+DROP INDEX IF EXISTS idx_users_external_id_provider;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_id_provider ON users(external_id, provider) WHERE status != 'deleted';
 
 CREATE TABLE IF NOT EXISTS sessions (
     refresh_token_hash  TEXT PRIMARY KEY,
@@ -274,14 +280,18 @@ impl UserRepository for SqliteRepository {
         external_id: &str,
         provider: &str,
     ) -> Result<Option<User>> {
-        let row = sqlx::query("SELECT * FROM users WHERE external_id = ?1 AND provider = ?2")
-            .bind(external_id)
-            .bind(provider)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+        // A soft-deleted user must never satisfy this lookup: deletion frees the
+        // (provider, external_id) pair for re-registration (01-domain-model.md §Lifecycles).
+        let row = sqlx::query(
+            "SELECT * FROM users WHERE external_id = ?1 AND provider = ?2 AND status != 'deleted'",
+        )
+        .bind(external_id)
+        .bind(provider)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
 
         match row {
             Some(ref r) => Ok(Some(row_to_user(r)?)),
@@ -913,6 +923,125 @@ mod tests {
             }
             other => panic!("expected Error::Conflict, got {other:?}"),
         }
+    }
+
+    /// Deletion frees `(provider, external_id)` for re-registration: `get_user_by_external_id`
+    /// stops returning the deleted row, `create_user` succeeds as a brand-new user rather than
+    /// conflicting, and the soft-deleted row is retained. Negative-space at the end: a further
+    /// live duplicate against the recreated user must still conflict — deletion frees the id,
+    /// it does not disable uniqueness among live rows.
+    #[tokio::test]
+    async fn delete_user_frees_external_id_for_recreation() {
+        let repo = create_test_repo().await;
+
+        let new_user = NewUser {
+            external_id: "google|sqlite_delete_frees_test".to_string(),
+            provider: "google".to_string(),
+            email: Some("first@example.com".to_string()),
+            display_name: None,
+        };
+        let original = repo.create_user(&new_user).await.expect("create_user");
+
+        repo.delete_user(&original.id).await.expect("delete_user");
+
+        // A deleted user must not satisfy the external-id lookup.
+        let looked_up = repo
+            .get_user_by_external_id(&new_user.external_id, &new_user.provider)
+            .await
+            .expect("get_user_by_external_id");
+        assert!(
+            looked_up.is_none(),
+            "deleted user must not be returned by external-id lookup"
+        );
+
+        // The identity is free: create_user for the same (provider, external_id) succeeds
+        // as a brand-new user, not a conflict.
+        let recreated = repo
+            .create_user(&new_user)
+            .await
+            .expect("recreate after delete should succeed, not conflict");
+        assert_ne!(
+            recreated.id, original.id,
+            "recreated user must get a fresh id"
+        );
+        assert!(
+            recreated.claims.is_empty(),
+            "recreated user must start with no carried-over claims"
+        );
+
+        // The original (soft-deleted) row is retained, not purged.
+        let original_row = repo
+            .get_user_by_id(&original.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("deleted row should still exist");
+        assert_eq!(original_row.status, UserStatus::Deleted);
+
+        // Negative-space: a second live duplicate against the recreated user still
+        // conflicts — deletion frees the id, it does not disable uniqueness among live rows.
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("a second live duplicate must still conflict");
+        match err {
+            Error::Conflict { .. } => {}
+            other => panic!("expected Error::Conflict, got {other:?}"),
+        }
+    }
+
+    /// The partial-index migration must upgrade a database that predates it (a full unique
+    /// index across all rows, deleted or not) by dropping and recreating the index with the
+    /// `WHERE status != 'deleted'` predicate, and must be safe to re-run more than once.
+    #[tokio::test]
+    async fn partial_unique_index_migration_upgrades_legacy_full_index_and_is_idempotent() {
+        let repo = create_test_repo().await;
+
+        // Simulate a legacy database: replace the partial index the test-repo bootstrap
+        // just created with the old full unique index that predates this migration
+        // (uniqueness enforced across *all* rows, deleted or not).
+        sqlx::query("DROP INDEX IF EXISTS idx_users_external_id_provider")
+            .execute(&repo.pool)
+            .await
+            .expect("drop partial index to simulate a legacy schema");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_users_external_id_provider ON users(external_id, provider)",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("recreate legacy full unique index");
+
+        // Re-running the migration DDL (statement by statement, as `create_pool` and this
+        // test harness both do for SQLite) must drop the legacy full index and recreate it
+        // as partial — and running it a second time must not error (idempotent).
+        for _ in 0..2 {
+            for statement in MIGRATIONS.split(';') {
+                let trimmed = statement.trim();
+                if !trimmed.is_empty() {
+                    sqlx::query(trimmed)
+                        .execute(&repo.pool)
+                        .await
+                        .expect("re-running a migration statement should not error");
+                }
+            }
+        }
+
+        let new_user = NewUser {
+            external_id: "google|sqlite_migration_test".to_string(),
+            provider: "google".to_string(),
+            email: None,
+            display_name: None,
+        };
+        let created = repo.create_user(&new_user).await.expect("create_user");
+        repo.delete_user(&created.id).await.expect("delete_user");
+
+        // Under the legacy full index this would still conflict; under the partial index
+        // it must succeed, since the deleted row no longer occupies the
+        // (external_id, provider) slot.
+        let recreated = repo
+            .create_user(&new_user)
+            .await
+            .expect("recreate after delete should succeed under the partial index");
+        assert_ne!(recreated.id, created.id);
     }
 
     /// Negative-space: an insert failure that is *not* a unique-constraint violation must
