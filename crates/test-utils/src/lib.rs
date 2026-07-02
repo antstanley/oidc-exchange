@@ -71,11 +71,35 @@ impl UserRepository for MockRepository {
         Ok(state
             .users
             .values()
-            .find(|u| u.external_id == external_id && u.provider == provider)
+            .find(|u| {
+                u.external_id == external_id
+                    && u.provider == provider
+                    && u.status != UserStatus::Deleted
+            })
             .cloned())
     }
 
     async fn create_user(&self, new_user: &NewUser) -> Result<User> {
+        let mut state = self.state.lock().await;
+
+        // Mirror the durable backends' uniqueness constraint on the live
+        // (provider, external_id) pair: a deleted user frees the slot, but a
+        // concurrent winner that already created a live row must be reported
+        // as a conflict rather than silently overwritten.
+        let conflict = state.users.values().any(|u| {
+            u.external_id == new_user.external_id
+                && u.provider == new_user.provider
+                && u.status != UserStatus::Deleted
+        });
+        if conflict {
+            return Err(Error::Conflict {
+                detail: format!(
+                    "user already exists for provider={} external_id={}",
+                    new_user.provider, new_user.external_id
+                ),
+            });
+        }
+
         let now = Utc::now();
         let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
         let user = User {
@@ -91,7 +115,6 @@ impl UserRepository for MockRepository {
             created_at: now,
             updated_at: now,
         };
-        let mut state = self.state.lock().await;
         state.users.insert(id, user.clone());
         Ok(user)
     }
@@ -467,5 +490,85 @@ impl IdentityProvider for MockIdentityProvider {
 
     fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::MockRepository;
+    use oidc_exchange_core::domain::NewUser;
+    use oidc_exchange_core::error::Error;
+    use oidc_exchange_core::ports::UserRepository;
+
+    fn make_new_user(external_id: &str, provider: &str) -> NewUser {
+        NewUser {
+            external_id: external_id.to_string(),
+            provider: provider.to_string(),
+            email: Some("user@example.com".to_string()),
+            display_name: Some("Test User".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_duplicate_live_external_id() {
+        let repo = MockRepository::new();
+        let new_user = make_new_user("sub-1", "mock");
+
+        let first = repo
+            .create_user(&new_user)
+            .await
+            .expect("first create should succeed");
+
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("duplicate live (provider, external_id) must conflict");
+
+        match err {
+            Error::Conflict { .. } => {}
+            other => panic!("expected Error::Conflict, got: {:?}", other),
+        }
+
+        // The rejected create must not have mutated state: exactly one user
+        // exists, and it is the winner from the first call.
+        let users = repo.get_all_users().await;
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].id, first.id);
+    }
+
+    #[tokio::test]
+    async fn deleted_user_frees_external_id_for_lookup_and_recreation() {
+        let repo = MockRepository::new();
+        let new_user = make_new_user("sub-2", "mock");
+
+        let original = repo
+            .create_user(&new_user)
+            .await
+            .expect("create should succeed");
+        repo.delete_user(&original.id)
+            .await
+            .expect("delete should succeed");
+
+        // A deleted user must not satisfy the external-id lookup.
+        let lookup = repo
+            .get_user_by_external_id("sub-2", "mock")
+            .await
+            .expect("lookup should not error");
+        assert!(lookup.is_none());
+
+        // With the deleted row excluded from uniqueness, the identity can be
+        // re-registered rather than conflicting.
+        let recreated = repo
+            .create_user(&new_user)
+            .await
+            .expect("recreate after delete should succeed, not conflict");
+        assert_ne!(recreated.id, original.id);
+
+        // Both the (soft-)deleted row and the fresh row remain in storage.
+        assert_eq!(repo.get_all_users().await.len(), 2);
     }
 }

@@ -28,7 +28,11 @@
        A missing/unverified email or non-matching domain → `AccessDenied`
        (audited `RegistrationDenied`).
      - If `registration.mode == "existing_users_only"` → `AccessDenied` (`RegistrationDenied`).
-     - Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`).
+     - Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`);
+       if creation returns `Conflict` (a concurrent first login won the race), re-run
+       `get_user_by_external_id` and continue with the existing user, re-applying the
+       suspended-status check. The losing racer emits no `UserCreated` event — the winning
+       create already audited it — and the flow otherwise proceeds as for a found user.
 4. **Mint refresh token** — 32 random bytes, base64url-no-pad for the opaque token; SHA-256
    hex of the bytes is the stored hash.
 5. **Store session** — `expires_at = now + refresh_token_ttl`; `store_refresh_token`.

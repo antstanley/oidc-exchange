@@ -134,7 +134,50 @@ impl AppService {
                     email: claims.email.clone(),
                     display_name: claims.name.clone(),
                 };
-                self.user_repo.create_user(&new_user).await?
+                match self.user_repo.create_user(&new_user).await {
+                    Ok(created) => created,
+                    Err(Error::Conflict { .. }) => {
+                        // A concurrent first login for the same subject won the
+                        // race and created the row first (JIT-registration
+                        // race). Re-run the lookup and continue on the
+                        // found-user branch instead of surfacing a 500; do not
+                        // emit a second create or `UserCreated` audit event.
+                        let winner = self
+                            .user_repo
+                            .get_user_by_external_id(&claims.subject, &request.provider)
+                            .await?;
+                        match winner {
+                            Some(user) => {
+                                // Postcondition: the re-lookup is keyed on
+                                // the exact identity we just tried to
+                                // create, so the row it returns must match —
+                                // an adapter that returned a different
+                                // identity's row would be a port-contract
+                                // violation.
+                                debug_assert_eq!(user.provider, request.provider);
+                                debug_assert_eq!(user.external_id, claims.subject);
+                                if user.status != UserStatus::Active {
+                                    return Err(Error::UserSuspended { user_id: user.id });
+                                }
+                                user
+                            }
+                            None => {
+                                // The winner's row is absent from a re-lookup
+                                // immediately after a uniqueness conflict was
+                                // reported — an adapter invariant violation.
+                                // Surface a distinct error rather than
+                                // panicking so the branch stays total.
+                                return Err(Error::StoreError {
+                                    detail: format!(
+                                        "create_user conflicted for provider={} external_id={} but re-lookup found no user",
+                                        request.provider, claims.subject
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    Err(other) => return Err(other),
+                }
             }
         };
 

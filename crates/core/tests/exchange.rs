@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -6,9 +7,9 @@ use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::{
-    AccessTokenClaims, IdentityClaims, NewUser, UserPatch, UserStatus,
+    AccessTokenClaims, IdentityClaims, NewUser, User, UserPatch, UserStatus,
 };
-use oidc_exchange_core::error::Error;
+use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::AppService;
@@ -55,6 +56,160 @@ fn make_service_with_config(
         providers,
         config,
     )
+}
+
+/// Build a service whose `UserRepository` is a caller-supplied decorator
+/// (used to model a JIT-registration racer deterministically) while sessions
+/// still land in the shared `MockRepository`.
+fn make_service_with_user_repo(
+    user_repo: Box<dyn UserRepository>,
+    session_repo: MockRepository,
+    provider: MockIdentityProvider,
+    config: AppConfig,
+) -> AppService {
+    let provider_id = provider.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider));
+
+    AppService::new(
+        user_repo,
+        Box::new(session_repo),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        providers,
+        config,
+    )
+}
+
+/// Decorates a `UserRepository` so `get_user_by_external_id` reports "not
+/// found" for a fixed number of calls before delegating to the inner
+/// repository. Models the read side of a JIT-registration race
+/// deterministically: this racer's lookup ran before a concurrent winner's
+/// write committed, so its subsequent `create_user` call (which always
+/// delegates to the real, shared `MockRepository`) observes the winner's row
+/// and conflicts — without relying on actual thread scheduling.
+struct StaleReadUserRepository {
+    inner: MockRepository,
+    stale_reads_remaining: AtomicU32,
+}
+
+impl StaleReadUserRepository {
+    fn new(inner: MockRepository, stale_reads: u32) -> Self {
+        Self {
+            inner,
+            stale_reads_remaining: AtomicU32::new(stale_reads),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl UserRepository for StaleReadUserRepository {
+    async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
+        self.inner.get_user_by_id(user_id).await
+    }
+
+    async fn get_user_by_external_id(
+        &self,
+        external_id: &str,
+        provider: &str,
+    ) -> Result<Option<User>> {
+        // Assertion: the counter never underflows past zero — `fetch_sub` is
+        // only called while `remaining > 0`.
+        let remaining = self.stale_reads_remaining.load(Ordering::SeqCst);
+        if remaining > 0 {
+            self.stale_reads_remaining.fetch_sub(1, Ordering::SeqCst);
+            return Ok(None);
+        }
+        self.inner
+            .get_user_by_external_id(external_id, provider)
+            .await
+    }
+
+    async fn create_user(&self, user: &NewUser) -> Result<User> {
+        self.inner.create_user(user).await
+    }
+
+    async fn update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
+        self.inner.update_user(user_id, patch).await
+    }
+
+    async fn delete_user(&self, user_id: &str) -> Result<()> {
+        self.inner.delete_user(user_id).await
+    }
+
+    async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+        self.inner.count_by_status().await
+    }
+
+    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+        self.inner.list_users(offset, limit).await
+    }
+}
+
+/// Decorates a `UserRepository` whose `create_user` always fails with a
+/// fixed, non-`Conflict` error, and counts `get_user_by_external_id` calls.
+/// Used to assert a non-`Conflict` `create_user` error propagates without a
+/// silent re-lookup.
+struct FailingCreateUserRepository {
+    inner: MockRepository,
+    lookup_calls: std::sync::Arc<AtomicU32>,
+}
+
+impl FailingCreateUserRepository {
+    /// Returns the decorator plus a shared handle onto its lookup-call
+    /// counter, so a test can inspect the count after the decorator itself
+    /// has been moved into a `Box<dyn UserRepository>`.
+    fn new(inner: MockRepository) -> (Self, std::sync::Arc<AtomicU32>) {
+        let lookup_calls = std::sync::Arc::new(AtomicU32::new(0));
+        (
+            Self {
+                inner,
+                lookup_calls: lookup_calls.clone(),
+            },
+            lookup_calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl UserRepository for FailingCreateUserRepository {
+    async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
+        self.inner.get_user_by_id(user_id).await
+    }
+
+    async fn get_user_by_external_id(
+        &self,
+        external_id: &str,
+        provider: &str,
+    ) -> Result<Option<User>> {
+        self.lookup_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .get_user_by_external_id(external_id, provider)
+            .await
+    }
+
+    async fn create_user(&self, _user: &NewUser) -> Result<User> {
+        Err(Error::StoreError {
+            detail: "simulated infrastructure failure".to_string(),
+        })
+    }
+
+    async fn update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
+        self.inner.update_user(user_id, patch).await
+    }
+
+    async fn delete_user(&self, user_id: &str) -> Result<()> {
+        self.inner.delete_user(user_id).await
+    }
+
+    async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+        self.inner.count_by_status().await
+    }
+
+    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+        self.inner.list_users(offset, limit).await
+    }
 }
 
 #[tokio::test]
@@ -585,4 +740,183 @@ async fn exchange_with_neither_code_nor_id_token_fails() {
         Error::InvalidRequest { .. } => {}
         other => panic!("expected InvalidRequest, got: {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
+    let repo = MockRepository::new();
+
+    // Racer A: a normal first login that wins the race and creates the user.
+    let provider_a = MockIdentityProvider::new("mock");
+    let svc_a = make_service(repo.clone(), provider_a);
+    let request_a = ExchangeRequest {
+        code: Some("code-a".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+    };
+    let resp_a = svc_a
+        .exchange(request_a)
+        .await
+        .expect("winning racer should succeed");
+
+    // Racer B: its first `get_user_by_external_id` reports "not found" (it
+    // read before A's write committed), so it proceeds to `create_user`,
+    // which conflicts against the real shared repository — exercising the
+    // re-lookup path.
+    let provider_b = MockIdentityProvider::new("mock");
+    let stale_repo = StaleReadUserRepository::new(repo.clone(), 1);
+    let svc_b = make_service_with_user_repo(
+        Box::new(stale_repo),
+        repo.clone(),
+        provider_b,
+        make_config(),
+    );
+    let request_b = ExchangeRequest {
+        code: Some("code-b".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+    };
+    let resp_b = svc_b
+        .exchange(request_b)
+        .await
+        .expect("losing racer should still return a token via re-lookup, not a 500");
+
+    // Both racers got a usable token, and exactly one user exists.
+    assert!(!resp_a.access_token.is_empty());
+    assert!(!resp_b.access_token.is_empty());
+    let users = repo.get_all_users().await;
+    assert_eq!(
+        users.len(),
+        1,
+        "exactly one user should be created despite two racing exchanges"
+    );
+
+    // Both tokens reference the same, single user.
+    let sub_a = decode_sub(&resp_a.access_token);
+    let sub_b = decode_sub(&resp_b.access_token);
+    assert_eq!(sub_a, sub_b);
+    assert_eq!(sub_a, users[0].id);
+}
+
+#[tokio::test]
+async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
+    let repo = MockRepository::new();
+
+    // Racer A wins and creates the user; it is then suspended before racer
+    // B's re-lookup observes it.
+    let provider_a = MockIdentityProvider::new("mock");
+    let svc_a = make_service(repo.clone(), provider_a);
+    let request_a = ExchangeRequest {
+        code: Some("code-a".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+    };
+    svc_a
+        .exchange(request_a)
+        .await
+        .expect("winning racer should succeed");
+
+    let winner_id = repo.get_all_users().await[0].id.clone();
+    repo.update_user(
+        &winner_id,
+        &UserPatch {
+            status: Some(UserStatus::Suspended),
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: None,
+        },
+    )
+    .await
+    .expect("suspend should succeed");
+
+    // Racer B races in, conflicts, re-looks-up, and must re-apply the
+    // suspended check against the winner it just found.
+    let provider_b = MockIdentityProvider::new("mock");
+    let stale_repo = StaleReadUserRepository::new(repo.clone(), 1);
+    let svc_b = make_service_with_user_repo(
+        Box::new(stale_repo),
+        repo.clone(),
+        provider_b,
+        make_config(),
+    );
+    let request_b = ExchangeRequest {
+        code: Some("code-b".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+    };
+    let err = svc_b
+        .exchange(request_b)
+        .await
+        .expect_err("re-lookup of a suspended winner must reject, not issue a token");
+
+    match err {
+        Error::UserSuspended { user_id } => assert_eq!(user_id, winner_id),
+        other => panic!("expected UserSuspended, got: {:?}", other),
+    }
+
+    // No second user was created, and the rejected racer did not mint a
+    // session on top of racer A's single one.
+    assert_eq!(repo.get_all_users().await.len(), 1);
+    assert_eq!(repo.get_all_sessions().await.len(), 1);
+}
+
+#[tokio::test]
+async fn exchange_non_conflict_create_error_propagates_without_relookup() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+
+    // `create_user` always fails with a non-`Conflict` error (simulating a
+    // real infrastructure failure); the exchange must propagate it directly
+    // rather than treating it as a race and silently re-looking up.
+    let (failing_repo, lookup_calls) = FailingCreateUserRepository::new(repo.clone());
+    let svc = make_service_with_user_repo(
+        Box::new(failing_repo),
+        repo.clone(),
+        provider,
+        make_config(),
+    );
+
+    let request = ExchangeRequest {
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+    };
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("a non-Conflict create_user error must propagate");
+
+    match err {
+        Error::StoreError { .. } => {}
+        other => panic!("expected StoreError to propagate, got: {:?}", other),
+    }
+
+    // No user or session was created, and the flow did not swallow the
+    // infra error to attempt a silent re-lookup.
+    assert_eq!(repo.get_all_users().await.len(), 0);
+    assert_eq!(repo.get_all_sessions().await.len(), 0);
+
+    // Exactly one lookup happened (the initial miss); a buggy implementation
+    // that re-looks-up on *any* create_user error would call this twice.
+    assert_eq!(
+        lookup_calls.load(Ordering::SeqCst),
+        1,
+        "a non-Conflict create_user error must not trigger a re-lookup"
+    );
+}
+
+/// Decode the `sub` claim out of a signed access token's payload segment.
+fn decode_sub(access_token: &str) -> String {
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(access_token.split('.').nth(1).unwrap())
+        .expect("payload should be valid base64url");
+    let claims: AccessTokenClaims =
+        serde_json::from_slice(&payload_bytes).expect("payload should deserialize");
+    claims.sub
 }
