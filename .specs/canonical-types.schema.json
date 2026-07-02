@@ -96,6 +96,7 @@
             "access_denied",
             "unauthorized",
             "unsupported_grant_type",
+            "conflict",
             "server_error"
           ]
         },

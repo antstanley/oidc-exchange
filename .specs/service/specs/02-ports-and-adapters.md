@@ -24,6 +24,16 @@ async fn count_by_status(&self) -> Result<HashMap<String, u64>>;
 async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>>;
 ```
 
+`create_user` fails with `Error::Conflict` when a live user with the same
+`(provider, external_id)` already exists — every adapter maps its native uniqueness
+violation (SQL unique index, DynamoDB transaction cancellation) to this variant so callers
+can distinguish "already registered" from an infrastructure failure. `update_user` applies
+a patch atomically with respect to concurrent updates using the user's integer `version`:
+the write is conditioned on the version that was read and increments it, so two racing
+patches serialize and neither silently overwrites the other's fields. `delete_user` frees
+the `(provider, external_id)` key: after a delete, `get_user_by_external_id` returns
+nothing for that identity and `create_user` succeeds as a new user.
+
 ### SessionRepository (`ports/repository.rs`)
 
 ```rust

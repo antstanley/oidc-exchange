@@ -116,6 +116,7 @@ identical routing and middleware.
 | `AccessDenied`, `UserSuspended` | 403 | `access_denied` |
 | `Unauthorized` | 401 | `unauthorized` |
 | `UnsupportedGrantType` | 400 | `unsupported_grant_type` |
+| `Conflict` | 409 | `conflict` |
 | `ProviderError` | 502 | `server_error` |
 | `ProviderTimeout` | 504 | `server_error` |
 | `StoreError`, `KeyError`, `AuditError`, `SyncError`, `ConfigError` | 500 | `server_error` |

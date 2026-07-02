@@ -24,6 +24,9 @@ pub enum Error {
     #[error("unauthorized: {reason}")]
     Unauthorized { reason: String },
 
+    #[error("conflict: {detail}")]
+    Conflict { detail: String },
+
     // Provider errors (upstream)
     #[error("provider error ({provider}): {detail}")]
     ProviderError { provider: String, detail: String },
