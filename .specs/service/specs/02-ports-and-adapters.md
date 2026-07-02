@@ -1,6 +1,6 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
@@ -52,6 +52,14 @@ fn key_id(&self) -> &str;        // JWT kid
 `verify` exists so the revoke flow can authenticate an access token JWT before revoking the
 user's sessions.
 
+`sign` returns signature bytes in the form the JWS serialization uses directly. For the ES\*
+algorithms the KMS adapter converts the DER-encoded `Ecdsa-Sig-Value` returned by KMS Sign
+into raw fixed-length `r || s` (64/96/132 bytes for ES256/384/512). RSA and PSS signatures
+are already in JWS form and pass through unchanged. `verify` does not call KMS: it checks
+the signature locally against the cached public key (the same SPKI fetched once for the
+JWK), so revoking an access token costs no KMS round-trip. Local verification consumes the
+raw `r || s` form directly, so no raw→DER conversion exists anywhere in the adapter.
+
 ### IdentityProvider (`ports/identity_provider.rs`)
 
 ```rust
@@ -84,7 +92,7 @@ async fn notify_user_deleted(&self, user_id: &str) -> Result<()>;
 | UserRepository + SessionRepository | SQLite | `adapters/sqlite` | JSON-as-TEXT, WAL mode, `sqlx` |
 | SessionRepository | LMDB | `adapters/lmdb` | embedded; `heed`; `sessions` + `user_sessions` DBs |
 | SessionRepository | Valkey/Redis | `adapters/valkey` | `fred`; `{prefix}session:{hash}`, `{prefix}user_sessions:{user_id}` set |
-| KeyManager | AWS KMS | `adapters/kms` | RS/PS/ES 256/384/512; JWK cached on `OnceCell`; `Sign`/`Verify`/`GetPublicKey` |
+| KeyManager | AWS KMS | `adapters/kms` | RS/PS/ES 256/384/512; ECDSA DER→raw JWS conversion on sign; local verify against the cached public key; JWK cached on `OnceCell`; `Sign`/`GetPublicKey` |
 | KeyManager | Local Ed25519 | `adapters/local_keys` | EdDSA only; PKCS#8 PEM from file or bytes |
 | KeyManager | Noop | `adapters/noop` | every op errors; used in admin-only role |
 | AuditLog | Stdout/stderr | `adapters/stdout_audit` | JSON lines; `Auto` routes error+ to stderr, else stdout |
@@ -94,6 +102,10 @@ async fn notify_user_deleted(&self, user_id: &str) -> Result<()>;
 | IdentityProvider | Apple | `providers/apple` | Tier 2; ES256 client JWT |
 | UserSync | Webhook | `adapters/webhook` | HMAC-SHA256 signed POST, retry with backoff |
 | UserSync | Noop | `adapters/noop` | always `Ok(())` |
+
+The KMS adapter's JWKs are strict RFC 7517/7518: RSA `n`/`e` are Base64urlUInt with no
+leading zero octets (`e = 65537` encodes as `AQAB`), and EC keys cover P-256, P-384, and
+P-521, so every algorithm the adapter signs with has a published JWK at `/keys`.
 
 The previous CloudTrail audit adapter has been removed; structured audit now flows through
 the stdout/SQS/noop adapters (`crates/adapters/src/stdout_audit`, `sqs_audit`, `noop`).
