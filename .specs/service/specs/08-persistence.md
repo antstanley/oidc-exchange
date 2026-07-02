@@ -53,6 +53,14 @@ Deployments must run that backfill to completion — leaving no user unguarded �
 this guard-based `get_user_by_external_id`; a guard-less pre-existing user is invisible to it
 even though its profile item still exists.
 
+`update_user` writes conditionally on the integer `version` read at the start of the
+read-modify-write (`ConditionExpression: version = :read_version OR attribute_not_exists(version)`,
+a missing attribute counting as the migration default `1`), incrementing `version` on every
+write; a `ConditionalCheckFailedException` means a concurrent writer already advanced the
+item's `version`, and the read-modify-write is retried against the fresh value up to
+`UPDATE_MAX_ATTEMPTS` before erroring — a lost update cannot silently revert a concurrent
+status change.
+
 ## PostgreSQL (`adapters/postgres`)
 
 Two tables via `sqlx`: `users` and `sessions`. `metadata` and `claims` are `JSONB`; `users`

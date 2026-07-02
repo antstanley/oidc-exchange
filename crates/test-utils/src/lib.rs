@@ -144,6 +144,10 @@ impl UserRepository for MockRepository {
             user.status = status.clone();
         }
         user.updated_at = Utc::now();
+        // Mirror the durable backends' version-conditional `update_user`: every successful
+        // update increments `version` by exactly one, so mock-backed tests exercise the
+        // same optimistic-concurrency semantics as Dynamo/Postgres/SQLite.
+        user.version += 1;
 
         Ok(user.clone())
     }
@@ -500,7 +504,7 @@ impl IdentityProvider for MockIdentityProvider {
 #[cfg(test)]
 mod tests {
     use super::MockRepository;
-    use oidc_exchange_core::domain::NewUser;
+    use oidc_exchange_core::domain::{NewUser, UserPatch, INITIAL_USER_VERSION};
     use oidc_exchange_core::error::Error;
     use oidc_exchange_core::ports::UserRepository;
 
@@ -570,5 +574,50 @@ mod tests {
 
         // Both the (soft-)deleted row and the fresh row remain in storage.
         assert_eq!(repo.get_all_users().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_user_increments_version_each_call() {
+        let repo = MockRepository::new();
+        let new_user = make_new_user("sub-3", "mock");
+
+        let created = repo
+            .create_user(&new_user)
+            .await
+            .expect("create should succeed");
+        assert_eq!(created.version, INITIAL_USER_VERSION);
+
+        let first_patch = UserPatch {
+            email: Some("updated@example.com".to_string()),
+            display_name: None,
+            metadata: None,
+            claims: None,
+            status: None,
+        };
+        let after_first = repo
+            .update_user(&created.id, &first_patch)
+            .await
+            .expect("first update should succeed");
+        assert_eq!(after_first.version, INITIAL_USER_VERSION + 1);
+
+        let second_patch = UserPatch {
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: None,
+            status: Some(oidc_exchange_core::domain::UserStatus::Suspended),
+        };
+        let after_second = repo
+            .update_user(&created.id, &second_patch)
+            .await
+            .expect("second update should succeed");
+
+        // Matches the durable backends: every successful `update_user` call increments
+        // `version` by exactly one, not by an arbitrary amount and not left unchanged.
+        assert_eq!(after_second.version, INITIAL_USER_VERSION + 2);
+        assert_eq!(
+            after_second.status,
+            oidc_exchange_core::domain::UserStatus::Suspended
+        );
     }
 }

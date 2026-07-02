@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -65,6 +66,39 @@ impl PostgresRepository {
 /// Postgres SQLSTATE for a unique-constraint violation (`unique_violation`), per
 /// <https://www.postgresql.org/docs/current/errcodes-appendix.html>.
 const PG_UNIQUE_VIOLATION_CODE: &str = "23505";
+
+/// Maximum number of read-modify-write attempts `update_user` makes against its
+/// version-conditional `UPDATE … WHERE id = $1 AND version = $2` before giving up: the
+/// initial attempt plus retries triggered by a losing race (zero rows affected because a
+/// concurrent writer already advanced the row's `version`). Bounds retries so a row whose
+/// `version` keeps changing under relentless concurrent writes cannot loop unbounded — it
+/// errors instead of looping forever or silently overwriting the other writer's change.
+const UPDATE_MAX_ATTEMPTS: u32 = 5;
+
+/// Drives `update_user`'s version-conditional read-modify-write. Calls `attempt` (1-indexed)
+/// up to `UPDATE_MAX_ATTEMPTS` times; `attempt` performs one full read-patch-write cycle and
+/// returns `Ok(Some(user))` on a successful, version-conditioned write, or `Ok(None)` when
+/// the write affected zero rows because a concurrent writer already advanced the row's
+/// `version` (retry against the fresh value). Returns `Error::Conflict` — not an unbounded
+/// loop — once the budget is exhausted without a successful write.
+async fn retry_on_version_conflict<F, Fut>(user_id: &str, mut attempt: F) -> Result<User>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<Option<User>>>,
+{
+    for attempt_number in 1..=UPDATE_MAX_ATTEMPTS {
+        if let Some(user) = attempt(attempt_number).await? {
+            return Ok(user);
+        }
+    }
+
+    Err(Error::Conflict {
+        detail: format!(
+            "update_user for {user_id} exhausted the retry budget \
+             ({UPDATE_MAX_ATTEMPTS} attempts) racing concurrent version conflicts"
+        ),
+    })
+}
 
 /// True when `err` is a Postgres unique-constraint violation, decided by the driver's
 /// structured SQLSTATE code (not a substring match on the error message) so callers can
@@ -254,51 +288,71 @@ impl UserRepository for PostgresRepository {
 
     #[instrument(skip(self, patch), fields(user_id))]
     async fn update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
-        let mut user = self
-            .get_user_by_id(user_id)
-            .await?
-            .ok_or_else(|| Error::StoreError {
-                detail: format!("user not found: {user_id}"),
-            })?;
+        retry_on_version_conflict(user_id, |attempt_number| async move {
+            let mut user = self
+                .get_user_by_id(user_id)
+                .await?
+                .ok_or_else(|| Error::StoreError {
+                    detail: format!("user not found: {user_id}"),
+                })?;
+            let read_version = user.version as i64;
 
-        if let Some(ref email) = patch.email {
-            user.email = Some(email.clone());
-        }
-        if let Some(ref display_name) = patch.display_name {
-            user.display_name = Some(display_name.clone());
-        }
-        if let Some(ref metadata) = patch.metadata {
-            user.metadata = metadata.clone();
-        }
-        if let Some(ref claims) = patch.claims {
-            user.claims = claims.clone();
-        }
-        if let Some(ref status) = patch.status {
-            user.status = status.clone();
-        }
-        user.updated_at = Utc::now();
+            if let Some(ref email) = patch.email {
+                user.email = Some(email.clone());
+            }
+            if let Some(ref display_name) = patch.display_name {
+                user.display_name = Some(display_name.clone());
+            }
+            if let Some(ref metadata) = patch.metadata {
+                user.metadata = metadata.clone();
+            }
+            if let Some(ref claims) = patch.claims {
+                user.claims = claims.clone();
+            }
+            if let Some(ref status) = patch.status {
+                user.status = status.clone();
+            }
+            user.updated_at = Utc::now();
 
-        let metadata_json = serde_json::to_value(&user.metadata).map_err(Self::store_err)?;
-        let claims_json = serde_json::to_value(&user.claims).map_err(Self::store_err)?;
-        let status_str = status_to_str(&user.status);
+            let metadata_json = serde_json::to_value(&user.metadata).map_err(Self::store_err)?;
+            let claims_json = serde_json::to_value(&user.claims).map_err(Self::store_err)?;
+            let status_str = status_to_str(&user.status);
 
-        let row = sqlx::query(
-            "UPDATE users SET email = $1, display_name = $2, metadata = $3, claims = $4, status = $5, updated_at = $6
-             WHERE id = $7
-             RETURNING *",
-        )
-        .bind(&user.email)
-        .bind(&user.display_name)
-        .bind(&metadata_json)
-        .bind(&claims_json)
-        .bind(status_str)
-        .bind(user.updated_at)
-        .bind(user_id)
-        .fetch_one(&self.pool)
+            // Version-conditional write: only the writer whose `read_version` still
+            // matches the stored row wins, and it increments `version` in the same
+            // statement. A concurrent writer that already bumped the row's version makes
+            // this affect zero rows (`fetch_optional` returns `None`) instead of silently
+            // clobbering the other writer's change.
+            let row = sqlx::query(
+                "UPDATE users SET email = $1, display_name = $2, metadata = $3, claims = $4, status = $5, updated_at = $6, version = version + 1
+                 WHERE id = $7 AND version = $8
+                 RETURNING *",
+            )
+            .bind(&user.email)
+            .bind(&user.display_name)
+            .bind(&metadata_json)
+            .bind(&claims_json)
+            .bind(status_str)
+            .bind(user.updated_at)
+            .bind(user_id)
+            .bind(read_version)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Self::store_err)?;
+
+            match row {
+                Some(row) => Ok(Some(row_to_user(&row)?)),
+                None => {
+                    tracing::debug!(
+                        attempt = attempt_number,
+                        max_attempts = UPDATE_MAX_ATTEMPTS,
+                        "update_user version conflict, retrying"
+                    );
+                    Ok(None)
+                }
+            }
+        })
         .await
-        .map_err(Self::store_err)?;
-
-        row_to_user(&row)
     }
 
     #[instrument(skip(self), fields(user_id))]
@@ -748,6 +802,145 @@ mod tests {
         assert!(
             !is_unique_violation(&not_null_violation_err),
             "a NOT NULL violation must not be misclassified as a unique violation"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn racing_suspend_and_claims_patch_ends_suspended() {
+        let repo = create_isolated_schema_repo("oidc_adapter_test_version_race").await;
+
+        let created = repo
+            .create_user(&NewUser {
+                external_id: "google|pg_version_race_test".to_string(),
+                provider: "google".to_string(),
+                email: Some("race@example.com".to_string()),
+                display_name: None,
+            })
+            .await
+            .expect("create_user");
+        assert_eq!(created.version, INITIAL_USER_VERSION);
+
+        let suspend_patch = UserPatch {
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: None,
+            status: Some(UserStatus::Suspended),
+        };
+        let mut claims = HashMap::new();
+        claims.insert(
+            "org_id".to_string(),
+            Value::String("org_racing".to_string()),
+        );
+        let claims_patch = UserPatch {
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: Some(claims),
+            status: None,
+        };
+
+        // Race a suspend patch against an unrelated claims patch, both reading the same
+        // starting `version`. The version-conditional write lets exactly one land per
+        // attempt; the other retries against the fresh version until it too succeeds.
+        let (suspend_result, claims_result) = tokio::join!(
+            repo.update_user(&created.id, &suspend_patch),
+            repo.update_user(&created.id, &claims_patch),
+        );
+
+        suspend_result.expect("suspend patch should eventually succeed");
+        claims_result.expect("claims patch should eventually succeed");
+
+        let final_user = repo
+            .get_user_by_id(&created.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("user should exist");
+
+        // Both racing writes landed — neither silently reverted the other — and `version`
+        // advanced by exactly one per successful write.
+        assert_eq!(final_user.status, UserStatus::Suspended);
+        assert_eq!(
+            final_user.claims.get("org_id"),
+            Some(&Value::String("org_racing".to_string()))
+        );
+        assert_eq!(final_user.version, INITIAL_USER_VERSION + 2);
+    }
+
+    /// Negative-space: when every attempt's version-conditioned write loses the race (the
+    /// row's `version` "keeps changing" out from under it), `retry_on_version_conflict`
+    /// must exhaust `UPDATE_MAX_ATTEMPTS` and return `Error::Conflict` — not loop unbounded
+    /// or silently report success. Exercises the retry driver directly with a closure that
+    /// always reports a conflict, the same technique [`drain_unprocessed`]-style retry
+    /// loops elsewhere in this codebase use to make budget exhaustion deterministically
+    /// testable without a live, racing database.
+    #[tokio::test]
+    async fn retry_on_version_conflict_errors_when_every_attempt_conflicts() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+
+        let result = retry_on_version_conflict("usr_relentless", |attempt_number| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                (1..=UPDATE_MAX_ATTEMPTS).contains(&attempt_number),
+                "attempt numbers should stay within the bound"
+            );
+            std::future::ready(Ok(None))
+        })
+        .await;
+
+        match result {
+            Err(Error::Conflict { detail }) => {
+                assert!(
+                    detail.contains("usr_relentless") && detail.contains("exhausted"),
+                    "error should name the user and explain budget exhaustion: {detail}"
+                );
+            }
+            other => panic!("expected Error::Conflict on retry-budget exhaustion, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            UPDATE_MAX_ATTEMPTS,
+            "should make exactly UPDATE_MAX_ATTEMPTS attempts, no more and no fewer"
+        );
+    }
+
+    /// The mirror-image happy path: a conflict on the first attempts must not abort the
+    /// retry — it should keep trying and return the eventual success once the write stops
+    /// losing the race, well within the budget.
+    #[tokio::test]
+    async fn retry_on_version_conflict_succeeds_once_a_later_attempt_wins() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let winning_attempt = 3u32;
+
+        let result = retry_on_version_conflict("usr_eventually_wins", |attempt_number| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::future::ready(if attempt_number == winning_attempt {
+                Ok(Some(User {
+                    id: "usr_eventually_wins".to_string(),
+                    external_id: "google|eventual".to_string(),
+                    provider: "google".to_string(),
+                    email: None,
+                    display_name: None,
+                    metadata: HashMap::new(),
+                    claims: HashMap::new(),
+                    status: UserStatus::Active,
+                    version: attempt_number as u64 + 1,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }))
+            } else {
+                Ok(None)
+            })
+        })
+        .await
+        .expect("should eventually succeed within the budget");
+
+        assert_eq!(result.id, "usr_eventually_wins");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            winning_attempt,
+            "should stop retrying as soon as an attempt succeeds, not keep spinning"
         );
     }
 }

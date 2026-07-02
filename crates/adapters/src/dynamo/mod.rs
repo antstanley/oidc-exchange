@@ -27,6 +27,41 @@ const CONDITIONAL_CHECK_FAILED_CODE: &str = "ConditionalCheckFailed";
 
 const GSI1_NAME: &str = "GSI1";
 
+/// Maximum number of read-modify-write attempts `update_user` makes against its
+/// version-conditional `PutItem` (`version = :read_version OR attribute_not_exists(version)`)
+/// before giving up: the initial attempt plus retries triggered by a
+/// `ConditionalCheckFailedException` (a concurrent writer already advanced the item's
+/// `version`). Bounds retries so an item whose `version` keeps changing under relentless
+/// concurrent writes cannot loop unbounded — it errors instead of looping forever or
+/// silently overwriting the other writer's change.
+const UPDATE_MAX_ATTEMPTS: u32 = 5;
+
+/// Drives `update_user`'s version-conditional read-modify-write. Calls `attempt` (1-indexed)
+/// up to `UPDATE_MAX_ATTEMPTS` times; `attempt` performs one full read-patch-`PutItem` cycle
+/// and returns `Ok(Some(user))` on a successful, version-conditioned write, or `Ok(None)`
+/// when the write lost to a `ConditionalCheckFailedException` because a concurrent writer
+/// already advanced the item's `version` (retry against the fresh value). Returns
+/// `Error::Conflict` — not an unbounded loop — once the budget is exhausted without a
+/// successful write.
+async fn retry_on_version_conflict<F, Fut>(user_id: &str, mut attempt: F) -> Result<User>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<Option<User>>>,
+{
+    for attempt_number in 1..=UPDATE_MAX_ATTEMPTS {
+        if let Some(user) = attempt(attempt_number).await? {
+            return Ok(user);
+        }
+    }
+
+    Err(Error::Conflict {
+        detail: format!(
+            "update_user for {user_id} exhausted the retry budget \
+             ({UPDATE_MAX_ATTEMPTS} attempts) racing concurrent version conflicts"
+        ),
+    })
+}
+
 /// Maximum number of `BatchWriteItem` submission attempts (the initial send plus retries)
 /// allowed while draining a batch's `unprocessed_items` before the retry budget is exhausted
 /// and the call errors instead of silently leaving items undeleted.
@@ -335,42 +370,78 @@ impl UserRepository for DynamoRepository {
 
     #[instrument(skip(self, patch), fields(user_id))]
     async fn update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
-        // Get-modify-put pattern for v1 simplicity
-        let mut user = self
-            .get_user_by_id(user_id)
-            .await?
-            .ok_or_else(|| Error::StoreError {
-                detail: format!("user not found: {user_id}"),
-            })?;
+        // Get-modify-put pattern, made concurrency-safe with a version-conditional write:
+        // each attempt re-reads the current item, applies the patch on top of it, and puts
+        // the result back conditioned on `version` still matching what was just read. A
+        // concurrent writer that already advanced `version` cancels the condition instead
+        // of letting this write silently clobber the other writer's change; the loop
+        // re-reads and retries against the new version, up to `UPDATE_MAX_ATTEMPTS`.
+        retry_on_version_conflict(user_id, |attempt_number| async move {
+            let mut user = self
+                .get_user_by_id(user_id)
+                .await?
+                .ok_or_else(|| Error::StoreError {
+                    detail: format!("user not found: {user_id}"),
+                })?;
+            let read_version = user.version;
 
-        if let Some(ref email) = patch.email {
-            user.email = Some(email.clone());
-        }
-        if let Some(ref display_name) = patch.display_name {
-            user.display_name = Some(display_name.clone());
-        }
-        if let Some(ref metadata) = patch.metadata {
-            user.metadata = metadata.clone();
-        }
-        if let Some(ref claims) = patch.claims {
-            user.claims = claims.clone();
-        }
-        if let Some(ref status) = patch.status {
-            user.status = status.clone();
-        }
-        user.updated_at = Utc::now();
+            if let Some(ref email) = patch.email {
+                user.email = Some(email.clone());
+            }
+            if let Some(ref display_name) = patch.display_name {
+                user.display_name = Some(display_name.clone());
+            }
+            if let Some(ref metadata) = patch.metadata {
+                user.metadata = metadata.clone();
+            }
+            if let Some(ref claims) = patch.claims {
+                user.claims = claims.clone();
+            }
+            if let Some(ref status) = patch.status {
+                user.status = status.clone();
+            }
+            user.updated_at = Utc::now();
+            user.version = read_version + 1;
 
-        let item = user_to_item(&user);
+            let item = user_to_item(&user);
 
-        self.client
-            .put_item()
-            .table_name(&self.table_name)
-            .set_item(Some(item))
-            .send()
-            .await
-            .map_err(Self::store_err)?;
+            let outcome = self
+                .client
+                .put_item()
+                .table_name(&self.table_name)
+                .set_item(Some(item))
+                .condition_expression(
+                    "version = :read_version OR attribute_not_exists(version)",
+                )
+                .expression_attribute_values(
+                    ":read_version",
+                    AttributeValue::N(read_version.to_string()),
+                )
+                .send()
+                .await;
 
-        Ok(user)
+            match outcome {
+                Ok(_) => Ok(Some(user)),
+                Err(err) => {
+                    let is_version_conflict = matches!(
+                        err.as_service_error(),
+                        Some(
+                            aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(_)
+                        )
+                    );
+                    if !is_version_conflict {
+                        return Err(Self::store_err(err));
+                    }
+                    tracing::debug!(
+                        attempt = attempt_number,
+                        max_attempts = UPDATE_MAX_ATTEMPTS,
+                        "update_user version conflict, retrying"
+                    );
+                    Ok(None)
+                }
+            }
+        })
+        .await
     }
 
     #[instrument(skip(self), fields(user_id))]
@@ -796,6 +867,89 @@ mod retry_tests {
 
         assert_eq!(result.expect("empty batch should succeed"), 0);
         assert_eq!(calls.get(), 0, "an empty batch should never call submit");
+    }
+
+    // -----------------------------------------------------------------------
+    // `retry_on_version_conflict` (update_user's retry driver)
+    // -----------------------------------------------------------------------
+
+    use super::{retry_on_version_conflict, UPDATE_MAX_ATTEMPTS};
+    use oidc_exchange_core::domain::{User, UserStatus};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Negative-space: when every attempt's version-conditioned write loses the race (the
+    /// item's `version` "keeps changing" out from under it), `retry_on_version_conflict`
+    /// must exhaust `UPDATE_MAX_ATTEMPTS` and return `Error::Conflict` — not loop unbounded
+    /// or silently report success. Mirrors [`errors_when_retry_budget_is_exhausted_without_draining`]'s
+    /// technique for `drain_unprocessed`: inject a closure that always reports a conflict so
+    /// budget exhaustion is deterministically testable without a live, racing table.
+    #[tokio::test]
+    async fn retry_on_version_conflict_errors_when_every_attempt_conflicts() {
+        let calls = AtomicU32::new(0);
+
+        let result = retry_on_version_conflict("usr_relentless", |attempt_number| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            assert!(
+                (1..=UPDATE_MAX_ATTEMPTS).contains(&attempt_number),
+                "attempt numbers should stay within the bound"
+            );
+            std::future::ready(Ok(None))
+        })
+        .await;
+
+        match result {
+            Err(Error::Conflict { detail }) => {
+                assert!(
+                    detail.contains("usr_relentless") && detail.contains("exhausted"),
+                    "error should name the user and explain budget exhaustion: {detail}"
+                );
+            }
+            other => panic!("expected Error::Conflict on retry-budget exhaustion, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            UPDATE_MAX_ATTEMPTS,
+            "should make exactly UPDATE_MAX_ATTEMPTS attempts, no more and no fewer"
+        );
+    }
+
+    /// The mirror-image happy path: a conflict on the first attempts must not abort the
+    /// retry — it should keep trying and return the eventual success once the write stops
+    /// losing the race, well within the budget.
+    #[tokio::test]
+    async fn retry_on_version_conflict_succeeds_once_a_later_attempt_wins() {
+        let calls = AtomicU32::new(0);
+        let winning_attempt = 3u32;
+
+        let result = retry_on_version_conflict("usr_eventually_wins", |attempt_number| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            std::future::ready(if attempt_number == winning_attempt {
+                Ok(Some(User {
+                    id: "usr_eventually_wins".to_string(),
+                    external_id: "google|eventual".to_string(),
+                    provider: "google".to_string(),
+                    email: None,
+                    display_name: None,
+                    metadata: std::collections::HashMap::new(),
+                    claims: std::collections::HashMap::new(),
+                    status: UserStatus::Active,
+                    version: attempt_number as u64 + 1,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                }))
+            } else {
+                Ok(None)
+            })
+        })
+        .await
+        .expect("should eventually succeed within the budget");
+
+        assert_eq!(result.id, "usr_eventually_wins");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            winning_attempt,
+            "should stop retrying as soon as an attempt succeeds, not keep spinning"
+        );
     }
 }
 
@@ -1440,6 +1594,85 @@ mod tests {
             missing.is_none(),
             "lookup for an identity with no guard item must return None"
         );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn racing_suspend_and_claims_patch_ends_suspended() {
+        let table_name = "oidc-exchange-test-version-race";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        let created = repo
+            .create_user(&NewUser {
+                external_id: "google|version_race_test".to_string(),
+                provider: "google".to_string(),
+                email: Some("race@example.com".to_string()),
+                display_name: None,
+            })
+            .await
+            .expect("create_user");
+        assert_eq!(created.version, INITIAL_USER_VERSION);
+
+        let repo_a = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo_b = DynamoRepository::new(client.clone(), table_name.to_string());
+        let user_id_a = created.id.clone();
+        let user_id_b = created.id.clone();
+
+        let suspend_patch = UserPatch {
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: None,
+            status: Some(UserStatus::Suspended),
+        };
+        let mut claims = HashMap::new();
+        claims.insert(
+            "org_id".to_string(),
+            serde_json::Value::String("org_racing".to_string()),
+        );
+        let claims_patch = UserPatch {
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: Some(claims),
+            status: None,
+        };
+
+        // Race a suspend patch against an unrelated claims patch, both reading the same
+        // starting `version`. The version-conditional write lets exactly one land per
+        // attempt; the other retries against the fresh version until it too succeeds.
+        let (result_a, result_b) = tokio::join!(
+            tokio::spawn(async move { repo_a.update_user(&user_id_a, &suspend_patch).await }),
+            tokio::spawn(async move { repo_b.update_user(&user_id_b, &claims_patch).await })
+        );
+
+        result_a
+            .expect("task a should not panic")
+            .expect("suspend patch should eventually succeed");
+        result_b
+            .expect("task b should not panic")
+            .expect("claims patch should eventually succeed");
+
+        let final_user = repo
+            .get_user_by_id(&created.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("user should exist");
+
+        // Both racing writes landed — neither silently reverted the other — and `version`
+        // advanced by exactly one per successful write.
+        assert_eq!(final_user.status, UserStatus::Suspended);
+        assert_eq!(
+            final_user.claims.get("org_id"),
+            Some(&serde_json::Value::String("org_racing".to_string()))
+        );
+        assert_eq!(final_user.version, INITIAL_USER_VERSION + 2);
 
         // Clean up
         let _ = client.delete_table().table_name(table_name).send().await;
