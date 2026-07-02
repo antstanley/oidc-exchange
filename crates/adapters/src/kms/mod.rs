@@ -75,6 +75,22 @@ impl KmsKeyManager {
     }
 }
 
+/// A single zero octet, preserved when encoding a zero-valued integer so the
+/// Base64urlUInt encoding is never an empty string.
+const ZERO_VALUE_OCTET: [u8; 1] = [0u8];
+
+/// Encode a big-endian unsigned integer as an RFC 7518 §6.3 Base64urlUInt:
+/// base64url (no padding) of the minimal big-endian byte string, with every
+/// leading `0x00` octet stripped. A value of zero still encodes as a single
+/// zero octet (never an empty string).
+fn base64url_uint(be_bytes: &[u8]) -> String {
+    let trimmed = match be_bytes.iter().position(|&b| b != 0) {
+        Some(idx) => &be_bytes[idx..],
+        None => &ZERO_VALUE_OCTET[..],
+    };
+    URL_SAFE_NO_PAD.encode(trimmed)
+}
+
 /// Parse a DER-encoded SubjectPublicKeyInfo into an RFC 7517 JWK JSON value.
 ///
 /// Supports RSA (RS256/384/512, PS256/384/512) and EC (ES256, ES384) keys.
@@ -86,8 +102,8 @@ fn parse_spki_to_jwk(spki_der: &[u8], algorithm: &str, kid: &str) -> Result<serd
                     detail: format!("failed to parse RSA public key DER: {e}"),
                 })?;
 
-            let n = URL_SAFE_NO_PAD.encode(public_key.n().to_be_bytes());
-            let e = URL_SAFE_NO_PAD.encode(public_key.e().to_be_bytes());
+            let n = base64url_uint(&public_key.n().to_be_bytes());
+            let e = base64url_uint(&public_key.e().to_be_bytes());
 
             Ok(serde_json::json!({
                 "kty": "RSA",
@@ -338,7 +354,45 @@ mod tests {
         assert_eq!(jwk["alg"], "RS256");
         assert_eq!(jwk["kid"], "test-kid");
         assert!(jwk["n"].as_str().is_some(), "should have modulus");
-        assert!(jwk["e"].as_str().is_some(), "should have exponent");
+        // RsaPrivateKey::new() always uses the standard public exponent
+        // 65537 (0x010001); Base64urlUInt of that value is "AQAB" (no
+        // leading zero octet from the 0x01 high byte's own padding, and no
+        // extra byte for the value's own 3-byte minimal encoding).
+        assert_eq!(
+            jwk["e"], "AQAB",
+            "e=65537 should encode as Base64urlUInt \"AQAB\" with no leading zero octet"
+        );
+
+        let n_bytes = URL_SAFE_NO_PAD
+            .decode(jwk["n"].as_str().unwrap())
+            .expect("n should be valid base64url");
+        assert!(
+            n_bytes.first() != Some(&0x00),
+            "n must not have a leading zero octet (Base64urlUInt, RFC 7518 §6.3)"
+        );
+    }
+
+    #[test]
+    fn test_base64url_uint_strips_leading_zeros_but_not_the_value() {
+        // A value whose minimal big-endian encoding starts with a genuine
+        // leading zero octet in the *unstripped* input (e.g. as produced by
+        // a fixed-width to_be_bytes() call) must have that zero stripped.
+        let with_leading_zero: [u8; 4] = [0x00, 0x01, 0x00, 0x01];
+        assert_eq!(base64url_uint(&with_leading_zero), "AQAB");
+
+        // Multiple leading zero octets are all stripped.
+        let multiple_leading_zeros: [u8; 3] = [0x00, 0x00, 0x2a];
+        assert_eq!(base64url_uint(&multiple_leading_zeros), "Kg");
+
+        // A zero-valued input still yields a non-empty, single-zero-octet
+        // encoding rather than an empty string.
+        let all_zero: [u8; 3] = [0x00, 0x00, 0x00];
+        let encoded = base64url_uint(&all_zero);
+        assert!(
+            !encoded.is_empty(),
+            "zero value must not encode to empty string"
+        );
+        assert_eq!(encoded, URL_SAFE_NO_PAD.encode([0x00u8]));
     }
 
     #[test]

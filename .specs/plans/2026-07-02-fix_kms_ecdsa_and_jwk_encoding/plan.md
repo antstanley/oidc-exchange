@@ -1,6 +1,6 @@
 # Plan: Fix KMS ECDSA signature encoding and JWK output
 
-**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md](../../changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md)
+**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md](../../changes/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md)
 
 This plan makes the AWS KMS `KeyManager` adapter (`crates/adapters/src/kms/mod.rs`) produce JWS-valid output and describe every algorithm it signs with. The work splits into two concerns cut as vertical slices over one file: the JWK output at `/keys` (RFC 7518-compliant RSA `n`/`e`, plus a published ES512/P-521 key) and the signature path (DER→raw `r || s` on `sign`, and a local in-process `verify` against the cached SPKI that drops the KMS Verify round-trip). The reviewability spine leads with the two JWK fixes because they are self-contained and independently exercisable, then adds the `p521` dependency once (folded into the ES512 JWK task), then the `sign` conversion, then the local `verify` that consumes the raw form `sign` now produces, and closes by syncing the canonical spec page to the shipped behaviour.
 
