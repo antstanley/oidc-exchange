@@ -14,6 +14,7 @@ Single-table design with one global secondary index (`GSI1`). Keys `pk`/`sk`, GS
 | Item | pk | sk | GSI1pk | GSI1sk |
 |---|---|---|---|---|
 | User | `USER#<id>` | `PROFILE` | `EXT#<provider>#<external_id>` | `USER` |
+| User uniqueness guard | `EXT#<provider>#<external_id>` | `UNIQUE` | — | — |
 | Session | `SESSION#<refresh_token_hash>` | `SESSION` | `USER#<user_id>` | `SESSION#<created_at>` |
 
 Access patterns:
@@ -34,6 +35,18 @@ or a bounded retry budget is exhausted (then error), so a successful return mean
 session found is gone. `revoke_all_user_sessions` retries the same way, so a successful return
 means every targeted session item was deleted. The GSI1 user key includes the provider prefix
 so the same external id from two providers does not collide.
+
+`create_user` is a `TransactWriteItems` of two `Put`s — the user item and a uniqueness-guard
+item (`EXT#<provider>#<external_id>` / `UNIQUE`, attribute `user_id`) — each conditioned on
+`attribute_not_exists(pk)`, making `(provider, external_id)` unique at write time. A
+`TransactionCanceledException` whose cancellation reasons include `ConditionalCheckFailed`
+means the guard already existed (a racing duplicate `create_user`) and is mapped to
+`Error::Conflict`; any other transaction failure (e.g. a missing table, throttling) maps to
+`Error::StoreError`. Guard items for users written before this invariant existed are backfilled
+by `DynamoRepository::backfill_uniqueness_guards`, a one-off, idempotent migration step (each
+write conditioned on `attribute_not_exists(pk)`, so re-running after a partial failure is safe)
+that must complete before `get_user_by_external_id` reads through the guard instead of GSI1 — a
+guard-less pre-existing user would otherwise become invisible to that lookup.
 
 ## PostgreSQL (`adapters/postgres`)
 

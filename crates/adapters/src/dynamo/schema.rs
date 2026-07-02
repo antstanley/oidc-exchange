@@ -97,6 +97,41 @@ pub fn item_to_user(item: &HashMap<String, AttributeValue>) -> Result<User> {
 }
 
 // ---------------------------------------------------------------------------
+// User uniqueness guard <-> DynamoDB Item
+// ---------------------------------------------------------------------------
+
+/// Sort key value for every user-uniqueness-guard item (see [`guard_to_item`]).
+pub const GUARD_SK: &str = "UNIQUE";
+
+/// Partition key for the uniqueness-guard item that makes `(provider, external_id)` unique.
+pub fn guard_pk(provider: &str, external_id: &str) -> String {
+    format!("EXT#{provider}#{external_id}")
+}
+
+/// Builds the uniqueness-guard item: `pk = EXT#<provider>#<external_id>`, `sk = UNIQUE`,
+/// carrying the owning `user_id`. `create_user` writes this in the same `TransactWriteItems`
+/// call as the user profile item, both conditioned on `attribute_not_exists(pk)`, so a
+/// duplicate `(provider, external_id)` cancels the transaction instead of silently
+/// overwriting — or racing past — an existing user.
+pub fn guard_to_item(
+    provider: &str,
+    external_id: &str,
+    user_id: &str,
+) -> HashMap<String, AttributeValue> {
+    let mut item = HashMap::new();
+    item.insert(
+        "pk".to_string(),
+        AttributeValue::S(guard_pk(provider, external_id)),
+    );
+    item.insert("sk".to_string(), AttributeValue::S(GUARD_SK.to_string()));
+    item.insert(
+        "user_id".to_string(),
+        AttributeValue::S(user_id.to_string()),
+    );
+    item
+}
+
+// ---------------------------------------------------------------------------
 // Session <-> DynamoDB Item
 // ---------------------------------------------------------------------------
 

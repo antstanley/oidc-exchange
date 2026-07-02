@@ -5,7 +5,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::types::{AttributeValue, WriteRequest};
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
+use aws_sdk_dynamodb::types::{AttributeValue, Put, TransactWriteItem, WriteRequest};
 use chrono::Utc;
 use tracing::instrument;
 
@@ -15,7 +16,12 @@ use oidc_exchange_core::domain::{
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
-use schema::{item_to_session, item_to_user, session_to_item, user_to_item};
+use schema::{guard_to_item, item_to_session, item_to_user, session_to_item, user_to_item};
+
+/// DynamoDB cancellation-reason code reported for a failed `attribute_not_exists(pk)`
+/// condition inside a `TransactWriteItems` call — the signal that a `create_user` lost a
+/// uniqueness race, mapped to `Error::Conflict` rather than `Error::StoreError`.
+const CONDITIONAL_CHECK_FAILED_CODE: &str = "ConditionalCheckFailed";
 
 const GSI1_NAME: &str = "GSI1";
 
@@ -82,6 +88,78 @@ impl DynamoRepository {
         Error::StoreError {
             detail: e.to_string(),
         }
+    }
+
+    /// One-off migration step: scans every `PROFILE` item in the table and writes the
+    /// uniqueness-guard item (`EXT#<provider>#<external_id>` / `UNIQUE`) for any user that
+    /// does not already have one, so the `(provider, external_id)` invariant that
+    /// transactional `create_user` enforces going forward also holds for rows written
+    /// before the guard existed.
+    ///
+    /// **Ordering constraint:** this must run to completion — with no user left
+    /// unguarded — before `get_user_by_external_id` is switched to resolve through the
+    /// guard item instead of the GSI1 query; a guard-less pre-existing user would
+    /// otherwise become invisible to that lookup.
+    ///
+    /// Idempotent and safe to re-run after a partial failure: each guard write is
+    /// conditioned on `attribute_not_exists(pk)`, so a user that already has a guard
+    /// (backfilled by an earlier run, or created after the guard existed) is left
+    /// untouched and not counted. Returns the number of guard items actually written.
+    pub async fn backfill_uniqueness_guards(&self) -> Result<u64> {
+        let mut written: u64 = 0;
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("sk = :sk")
+                .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()));
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+            let items = result.items.unwrap_or_default();
+
+            for item in &items {
+                let user = item_to_user(item)?;
+                let guard_item = guard_to_item(&user.provider, &user.external_id, &user.id);
+
+                let outcome = self
+                    .client
+                    .put_item()
+                    .table_name(&self.table_name)
+                    .set_item(Some(guard_item))
+                    .condition_expression("attribute_not_exists(pk)")
+                    .send()
+                    .await;
+
+                match outcome {
+                    Ok(_) => written += 1,
+                    Err(err) => {
+                        let already_guarded = matches!(
+                            err.as_service_error(),
+                            Some(
+                                aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(_)
+                            )
+                        );
+                        if !already_guarded {
+                            return Err(Self::store_err(err));
+                        }
+                    }
+                }
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        Ok(written)
     }
 
     /// Submit up to 25 `WriteRequest`s via `BatchWriteItem` on this repository's table,
@@ -177,16 +255,49 @@ impl UserRepository for DynamoRepository {
             updated_at: now,
         };
 
-        let item = user_to_item(&full_user);
+        let user_item = user_to_item(&full_user);
+        let guard_item = guard_to_item(&full_user.provider, &full_user.external_id, &full_user.id);
+
+        let user_put = Put::builder()
+            .table_name(&self.table_name)
+            .set_item(Some(user_item))
+            .condition_expression("attribute_not_exists(pk)")
+            .build()
+            .map_err(Self::store_err)?;
+
+        let guard_put = Put::builder()
+            .table_name(&self.table_name)
+            .set_item(Some(guard_item))
+            .condition_expression("attribute_not_exists(pk)")
+            .build()
+            .map_err(Self::store_err)?;
 
         self.client
-            .put_item()
-            .table_name(&self.table_name)
-            .set_item(Some(item))
-            .condition_expression("attribute_not_exists(pk)")
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().put(user_put).build())
+            .transact_items(TransactWriteItem::builder().put(guard_put).build())
             .send()
             .await
-            .map_err(Self::store_err)?;
+            .map_err(|err| {
+                let is_uniqueness_conflict = match err.as_service_error() {
+                    Some(TransactWriteItemsError::TransactionCanceledException(tce)) => tce
+                        .cancellation_reasons()
+                        .iter()
+                        .any(|reason| reason.code() == Some(CONDITIONAL_CHECK_FAILED_CODE)),
+                    _ => false,
+                };
+
+                if is_uniqueness_conflict {
+                    Error::Conflict {
+                        detail: format!(
+                            "user already exists for external_id={} provider={}",
+                            user.external_id, user.provider
+                        ),
+                    }
+                } else {
+                    Self::store_err(err)
+                }
+            })?;
 
         Ok(full_user)
     }
@@ -952,6 +1063,279 @@ mod tests {
             .expect("get after revoke_all");
         assert!(s1.is_none());
         assert!(s2.is_none());
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn create_user_writes_profile_and_guard_items() {
+        let table_name = "oidc-exchange-test-guard-write";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        let new_user = NewUser {
+            external_id: "google|guard_write_test".to_string(),
+            provider: "google".to_string(),
+            email: Some("guard_write@example.com".to_string()),
+            display_name: None,
+        };
+        let created = repo.create_user(&new_user).await.expect("create_user");
+
+        // The profile item exists under USER#<id> / PROFILE.
+        let profile = client
+            .get_item()
+            .table_name(table_name)
+            .key("pk", AttributeValue::S(format!("USER#{}", created.id)))
+            .key("sk", AttributeValue::S("PROFILE".to_string()))
+            .send()
+            .await
+            .expect("get profile item")
+            .item
+            .expect("profile item should exist");
+        assert_eq!(
+            profile.get("id").and_then(|v| v.as_s().ok()),
+            Some(&created.id)
+        );
+
+        // The uniqueness-guard item exists under EXT#<provider>#<external_id> / UNIQUE and
+        // carries the same user_id as the profile item just written.
+        let guard = client
+            .get_item()
+            .table_name(table_name)
+            .key(
+                "pk",
+                AttributeValue::S("EXT#google#google|guard_write_test".to_string()),
+            )
+            .key("sk", AttributeValue::S("UNIQUE".to_string()))
+            .send()
+            .await
+            .expect("get guard item")
+            .item
+            .expect("guard item should exist");
+        assert_eq!(
+            guard.get("user_id").and_then(|v| v.as_s().ok()),
+            Some(&created.id),
+            "guard item should carry the owning user_id"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn concurrent_create_user_same_identity_yields_one_user_and_one_conflict() {
+        let table_name = "oidc-exchange-test-guard-conflict";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let new_user = NewUser {
+            external_id: "google|guard_conflict_test".to_string(),
+            provider: "google".to_string(),
+            email: Some("guard_conflict@example.com".to_string()),
+            display_name: None,
+        };
+
+        let repo_a = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo_b = DynamoRepository::new(client.clone(), table_name.to_string());
+        let user_a = new_user.clone();
+        let user_b = new_user.clone();
+
+        // Race two create_user calls for the same (provider, external_id) so the guard's
+        // `attribute_not_exists(pk)` condition decides exactly one winner.
+        let (result_a, result_b) = tokio::join!(
+            tokio::spawn(async move { repo_a.create_user(&user_a).await }),
+            tokio::spawn(async move { repo_b.create_user(&user_b).await })
+        );
+        let result_a = result_a.expect("task a should not panic");
+        let result_b = result_b.expect("task b should not panic");
+
+        let outcomes = [result_a, result_b];
+        let successes: Vec<_> = outcomes.iter().filter(|r| r.is_ok()).collect();
+        let conflicts: Vec<_> = outcomes
+            .iter()
+            .filter(|r| matches!(r, Err(Error::Conflict { .. })))
+            .collect();
+
+        assert_eq!(
+            successes.len(),
+            1,
+            "exactly one racer should create the user"
+        );
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "exactly one racer should lose to the guard's condition with Conflict"
+        );
+
+        let winner = successes[0].as_ref().expect("checked is_ok above");
+        assert_eq!(winner.external_id, "google|guard_conflict_test");
+        if let Err(Error::Conflict { detail }) = conflicts[0] {
+            assert!(
+                !detail.is_empty(),
+                "Conflict detail should describe the collision"
+            );
+        }
+
+        // The persisted guard item points at the single winner, not the loser.
+        let guard = client
+            .get_item()
+            .table_name(table_name)
+            .key(
+                "pk",
+                AttributeValue::S("EXT#google#google|guard_conflict_test".to_string()),
+            )
+            .key("sk", AttributeValue::S("UNIQUE".to_string()))
+            .send()
+            .await
+            .expect("get guard item")
+            .item
+            .expect("guard item should exist after the race resolves");
+        assert_eq!(
+            guard.get("user_id").and_then(|v| v.as_s().ok()),
+            Some(&winner.id),
+            "guard item should carry the winning racer's user_id"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn create_user_non_conditional_failure_maps_to_store_error() {
+        // Point the repository at a table that was never created, so `TransactWriteItems`
+        // fails with `ResourceNotFoundException` — a transaction failure that is not a
+        // conditional-check cancellation — and must map to `StoreError`, not `Conflict`.
+        let client = create_test_client().await;
+        let repo = DynamoRepository::new(client, "oidc-exchange-test-nonexistent".to_string());
+
+        let new_user = NewUser {
+            external_id: "google|guard_store_error_test".to_string(),
+            provider: "google".to_string(),
+            email: None,
+            display_name: None,
+        };
+
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("create_user against a missing table should fail");
+
+        match err {
+            Error::StoreError { detail } => {
+                assert!(!detail.is_empty(), "StoreError detail should not be empty");
+            }
+            other => panic!("expected Error::StoreError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn backfill_writes_guards_for_legacy_users_and_is_idempotent() {
+        let table_name = "oidc-exchange-test-guard-backfill";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        // Simulate a user written before the guard existed: a profile item written
+        // directly, bypassing `create_user`'s transactional guard write.
+        let now = Utc::now();
+        let legacy_user = User {
+            id: "usr_legacy_backfill".to_string(),
+            external_id: "google|legacy_backfill_test".to_string(),
+            provider: "google".to_string(),
+            email: None,
+            display_name: None,
+            metadata: HashMap::new(),
+            claims: HashMap::new(),
+            status: UserStatus::Active,
+            version: INITIAL_USER_VERSION,
+            created_at: now,
+            updated_at: now,
+        };
+        client
+            .put_item()
+            .table_name(table_name)
+            .set_item(Some(user_to_item(&legacy_user)))
+            .send()
+            .await
+            .expect("write legacy profile item without a guard");
+
+        // A user created through the normal path already carries a guard; the backfill
+        // must not double-write or error on it.
+        let created = repo
+            .create_user(&NewUser {
+                external_id: "google|backfill_already_guarded".to_string(),
+                provider: "google".to_string(),
+                email: None,
+                display_name: None,
+            })
+            .await
+            .expect("create_user");
+
+        let first_run = repo
+            .backfill_uniqueness_guards()
+            .await
+            .expect("first backfill run");
+        assert_eq!(
+            first_run, 1,
+            "backfill should write exactly one guard, for the legacy user only"
+        );
+
+        let guard = client
+            .get_item()
+            .table_name(table_name)
+            .key(
+                "pk",
+                AttributeValue::S("EXT#google#google|legacy_backfill_test".to_string()),
+            )
+            .key("sk", AttributeValue::S("UNIQUE".to_string()))
+            .send()
+            .await
+            .expect("get backfilled guard item")
+            .item
+            .expect("backfilled guard item should exist");
+        assert_eq!(
+            guard.get("user_id").and_then(|v| v.as_s().ok()),
+            Some(&legacy_user.id),
+            "backfilled guard should carry the legacy user's id"
+        );
+
+        // Re-running is a no-op: every user now has a guard, so nothing new is written.
+        let second_run = repo
+            .backfill_uniqueness_guards()
+            .await
+            .expect("second backfill run should be idempotent");
+        assert_eq!(
+            second_run, 0,
+            "re-running backfill should write nothing new"
+        );
+
+        // The already-guarded user's original guard is untouched (still points at its
+        // own id, not overwritten by anything from the backfill pass).
+        let untouched_guard = client
+            .get_item()
+            .table_name(table_name)
+            .key(
+                "pk",
+                AttributeValue::S("EXT#google#google|backfill_already_guarded".to_string()),
+            )
+            .key("sk", AttributeValue::S("UNIQUE".to_string()))
+            .send()
+            .await
+            .expect("get pre-existing guard item")
+            .item
+            .expect("pre-existing guard item should still exist");
+        assert_eq!(
+            untouched_guard.get("user_id").and_then(|v| v.as_s().ok()),
+            Some(&created.id)
+        );
 
         // Clean up
         let _ = client.delete_table().table_name(table_name).send().await;

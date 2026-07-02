@@ -79,6 +79,14 @@
         "created_at": "S (ISO 8601)",
         "ttl": "N (epoch seconds, DynamoDB TTL)"
       }
+    },
+    "UserUniquenessGuard": {
+      "pk": "EXT#<provider>#<external_id>",
+      "sk": "UNIQUE",
+      "description": "Written in the same TransactWriteItems call as the User item, both conditioned on attribute_not_exists(pk), so a duplicate (provider, external_id) cancels the transaction with a Conflict instead of racing past an existing user.",
+      "attributes": {
+        "user_id": "S"
+      }
     }
   }
 }
