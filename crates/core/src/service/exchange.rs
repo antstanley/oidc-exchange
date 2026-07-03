@@ -3,9 +3,11 @@ use base64::Engine;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{NewUser, Session, TokenResponse, UserStatus};
+use crate::domain::{
+    AuditEventType, AuditOutcome, AuditSeverity, NewUser, Session, TokenResponse, UserStatus,
+};
 use crate::error::{Error, Result};
-use crate::service::{parse_duration_secs, AppService};
+use crate::service::{create_audit_event, parse_duration_secs, AppService};
 
 #[derive(Default)]
 pub struct ExchangeRequest {
@@ -99,6 +101,18 @@ impl AppService {
         {
             Some(user) => {
                 if user.status != UserStatus::Active {
+                    self.emit_audit(create_audit_event(
+                        AuditEventType::UserSuspended,
+                        AuditSeverity::Warning,
+                        AuditOutcome::Failure {
+                            reason: format!("user status is {:?}, not active", user.status),
+                        },
+                        Some(user.id.clone()),
+                        Some(request.provider.clone()),
+                        request.ip_address.clone(),
+                        request.user_agent.clone(),
+                    ))
+                    .await?;
                     return Err(Error::UserSuspended { user_id: user.id });
                 }
                 user
@@ -112,30 +126,76 @@ impl AppService {
                         Some(ref email) => {
                             // Reject unverified emails for allowlist matching
                             if claims.email_verified != Some(true) {
-                                return Err(Error::AccessDenied {
-                                    reason: "verified email required when domain allowlist is configured".to_string(),
-                                });
+                                let reason =
+                                    "verified email required when domain allowlist is configured"
+                                        .to_string();
+                                self.emit_audit(create_audit_event(
+                                    AuditEventType::RegistrationDenied,
+                                    AuditSeverity::Warning,
+                                    AuditOutcome::Failure {
+                                        reason: reason.clone(),
+                                    },
+                                    None,
+                                    Some(request.provider.clone()),
+                                    request.ip_address.clone(),
+                                    request.user_agent.clone(),
+                                ))
+                                .await?;
+                                return Err(Error::AccessDenied { reason });
                             }
                             if !matches_domain_allowlist(email, allowlist) {
-                                return Err(Error::AccessDenied {
-                                    reason: "email domain not in allowlist".to_string(),
-                                });
+                                let reason = "email domain not in allowlist".to_string();
+                                self.emit_audit(create_audit_event(
+                                    AuditEventType::RegistrationDenied,
+                                    AuditSeverity::Warning,
+                                    AuditOutcome::Failure {
+                                        reason: reason.clone(),
+                                    },
+                                    None,
+                                    Some(request.provider.clone()),
+                                    request.ip_address.clone(),
+                                    request.user_agent.clone(),
+                                ))
+                                .await?;
+                                return Err(Error::AccessDenied { reason });
                             }
                         }
                         None => {
-                            return Err(Error::AccessDenied {
-                                reason: "email required when domain allowlist is configured"
-                                    .to_string(),
-                            });
+                            let reason =
+                                "email required when domain allowlist is configured".to_string();
+                            self.emit_audit(create_audit_event(
+                                AuditEventType::RegistrationDenied,
+                                AuditSeverity::Warning,
+                                AuditOutcome::Failure {
+                                    reason: reason.clone(),
+                                },
+                                None,
+                                Some(request.provider.clone()),
+                                request.ip_address.clone(),
+                                request.user_agent.clone(),
+                            ))
+                            .await?;
+                            return Err(Error::AccessDenied { reason });
                         }
                     }
                 }
 
                 // Check registration mode
                 if self.config.registration.mode == "existing_users_only" {
-                    return Err(Error::AccessDenied {
-                        reason: "registration is restricted to existing users only".to_string(),
-                    });
+                    let reason = "registration is restricted to existing users only".to_string();
+                    self.emit_audit(create_audit_event(
+                        AuditEventType::RegistrationDenied,
+                        AuditSeverity::Warning,
+                        AuditOutcome::Failure {
+                            reason: reason.clone(),
+                        },
+                        None,
+                        Some(request.provider.clone()),
+                        request.ip_address.clone(),
+                        request.user_agent.clone(),
+                    ))
+                    .await?;
+                    return Err(Error::AccessDenied { reason });
                 }
 
                 let new_user = NewUser {
@@ -145,7 +205,19 @@ impl AppService {
                     display_name: claims.name.clone(),
                 };
                 match self.user_repo.create_user(&new_user).await {
-                    Ok(created) => created,
+                    Ok(created) => {
+                        self.emit_audit(create_audit_event(
+                            AuditEventType::UserCreated,
+                            AuditSeverity::Notice,
+                            AuditOutcome::Success,
+                            Some(created.id.clone()),
+                            Some(request.provider.clone()),
+                            request.ip_address.clone(),
+                            request.user_agent.clone(),
+                        ))
+                        .await?;
+                        created
+                    }
                     Err(Error::Conflict { .. }) => {
                         // A concurrent first login for the same subject won the
                         // race and created the row first (JIT-registration
@@ -167,6 +239,21 @@ impl AppService {
                                 debug_assert_eq!(user.provider, request.provider);
                                 debug_assert_eq!(user.external_id, claims.subject);
                                 if user.status != UserStatus::Active {
+                                    self.emit_audit(create_audit_event(
+                                        AuditEventType::UserSuspended,
+                                        AuditSeverity::Warning,
+                                        AuditOutcome::Failure {
+                                            reason: format!(
+                                                "user status is {:?}, not active",
+                                                user.status
+                                            ),
+                                        },
+                                        Some(user.id.clone()),
+                                        Some(request.provider.clone()),
+                                        request.ip_address.clone(),
+                                        request.user_agent.clone(),
+                                    ))
+                                    .await?;
                                     return Err(Error::UserSuspended { user_id: user.id });
                                 }
                                 user
@@ -218,12 +305,27 @@ impl AppService {
         // 9. Build access token JWT (shared logic)
         let (access_token, access_ttl_secs) = self.build_access_token(&user).await?;
 
-        Ok(TokenResponse {
+        let response = TokenResponse {
             access_token,
             refresh_token: Some(refresh_token),
             token_type: "Bearer".to_string(),
             expires_in: access_ttl_secs,
-        })
+        };
+
+        // 10. Audit the successful exchange, after the token response is
+        // fully assembled.
+        self.emit_audit(create_audit_event(
+            AuditEventType::TokenExchange,
+            AuditSeverity::Info,
+            AuditOutcome::Success,
+            Some(user.id.clone()),
+            Some(request.provider.clone()),
+            request.ip_address.clone(),
+            request.user_agent.clone(),
+        ))
+        .await?;
+
+        Ok(response)
     }
 }
 

@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::{
-    AccessTokenClaims, IdentityClaims, NewUser, User, UserPatch, UserStatus,
+    AccessTokenClaims, AuditEventType, AuditOutcome, IdentityClaims, NewUser, User, UserPatch,
+    UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -76,6 +77,29 @@ fn make_service_with_user_repo(
         Box::new(session_repo),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        providers,
+        config,
+    )
+}
+
+/// Builds a service whose `AuditLog` is a caller-supplied `MockAuditLog`, so
+/// the test can inspect recorded events after the exchange runs.
+fn make_service_with_audit(
+    repo: MockRepository,
+    provider: MockIdentityProvider,
+    config: AppConfig,
+    audit: MockAuditLog,
+) -> AppService {
+    let provider_id = provider.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider));
+
+    AppService::new(
+        Box::new(repo.clone()),
+        Box::new(repo),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit),
         Box::new(MockUserSync::new()),
         providers,
         config,
@@ -993,6 +1017,321 @@ async fn exchange_without_client_context_stores_none_session_values() {
     assert_eq!(sessions[0].ip_address, None);
     assert_eq!(sessions[0].user_agent, None);
     assert_eq!(sessions[0].device_id, None);
+}
+
+// ---------------------------------------------------------------------------
+// Audit emission tests
+// ---------------------------------------------------------------------------
+
+/// A brand-new user's exchange emits exactly `UserCreated` (notice, success)
+/// followed by `TokenExchange` (info, success), both carrying the request's
+/// ip/ua and no other event types.
+#[tokio::test]
+async fn exchange_new_user_emits_user_created_then_token_exchange() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, provider, make_config(), audit);
+
+    let request = ExchangeRequest {
+        code: Some("auth-code-123".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ip_address: Some("203.0.113.9".to_string()),
+        user_agent: Some("test-agent/2.0".to_string()),
+        device_id: None,
+    };
+
+    svc.exchange(request)
+        .await
+        .expect("exchange should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        2,
+        "expected exactly UserCreated + TokenExchange, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+
+    assert_eq!(events[0].event_type, AuditEventType::UserCreated);
+    assert_eq!(events[0].outcome, AuditOutcome::Success);
+    assert_eq!(events[0].provider.as_deref(), Some("mock"));
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.9"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/2.0"));
+    assert!(
+        events[0].actor.is_some(),
+        "UserCreated should carry the new user's id as actor"
+    );
+
+    assert_eq!(events[1].event_type, AuditEventType::TokenExchange);
+    assert_eq!(events[1].outcome, AuditOutcome::Success);
+    assert_eq!(events[1].provider.as_deref(), Some("mock"));
+    assert_eq!(events[1].ip_address.as_deref(), Some("203.0.113.9"));
+    assert_eq!(events[1].user_agent.as_deref(), Some("test-agent/2.0"));
+    assert_eq!(
+        events[1].actor, events[0].actor,
+        "TokenExchange should carry the same actor as UserCreated"
+    );
+}
+
+/// Negative space: a returning (already-existing) user's exchange emits only
+/// `TokenExchange` — no `UserCreated` event for a user that already existed.
+#[tokio::test]
+async fn exchange_existing_user_emits_only_token_exchange() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    // First exchange creates the user (audit log discarded here).
+    let request1 = ExchangeRequest {
+        code: Some("code-1".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ..Default::default()
+    };
+    svc.exchange(request1)
+        .await
+        .expect("first exchange should succeed");
+
+    // Second exchange, now with an audit log we can inspect, should reuse
+    // the existing user and emit only TokenExchange.
+    let provider2 = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc2 = make_service_with_audit(repo, provider2, make_config(), audit);
+
+    let request2 = ExchangeRequest {
+        code: Some("code-2".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ip_address: Some("203.0.113.10".to_string()),
+        user_agent: Some("test-agent/3.0".to_string()),
+        device_id: None,
+    };
+    svc2.exchange(request2)
+        .await
+        .expect("second exchange should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "existing-user exchange must not emit UserCreated, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].event_type, AuditEventType::TokenExchange);
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.10"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/3.0"));
+}
+
+/// A suspended user's exchange emits exactly one `UserSuspended` (warning,
+/// failure) event carrying the request's ip/ua and the user's id as actor —
+/// and nothing else (no `TokenExchange`).
+#[tokio::test]
+async fn exchange_suspended_user_emits_only_user_suspended_event() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    // First exchange creates the user.
+    let request = ExchangeRequest {
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ..Default::default()
+    };
+    svc.exchange(request)
+        .await
+        .expect("first exchange should succeed");
+
+    let users = repo.get_all_users().await;
+    let user_id = users[0].id.clone();
+    repo.update_user(
+        &user_id,
+        &UserPatch {
+            status: Some(UserStatus::Suspended),
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: None,
+        },
+    )
+    .await
+    .expect("suspend should succeed");
+
+    let provider2 = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc2 = make_service_with_audit(repo, provider2, make_config(), audit);
+
+    let request2 = ExchangeRequest {
+        code: Some("code-2".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ip_address: Some("203.0.113.11".to_string()),
+        user_agent: Some("test-agent/4.0".to_string()),
+        device_id: None,
+    };
+    svc2.exchange(request2)
+        .await
+        .expect_err("exchange should fail for suspended user");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "suspended-user exchange must emit exactly one event, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].event_type, AuditEventType::UserSuspended);
+    match &events[0].outcome {
+        AuditOutcome::Failure { .. } => {}
+        other => panic!("expected Failure outcome, got: {:?}", other),
+    }
+    assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.11"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/4.0"));
+}
+
+/// Negative space: a domain-allowlist rejection emits `RegistrationDenied`
+/// (warning, failure) and does not proceed to emit `TokenExchange` — the
+/// user is never created and no token is ever issued.
+#[tokio::test]
+async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_token_exchange() {
+    let config = AppConfig {
+        registration: RegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: Some(vec!["example.com".to_string()]),
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    provider
+        .set_claims(IdentityClaims {
+            subject: "test-subject".to_string(),
+            email: Some("user@other.com".to_string()),
+            email_verified: Some(true),
+            name: Some("Test User".to_string()),
+            is_private_email: None,
+            raw_claims: HashMap::new(),
+        })
+        .await;
+
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, provider, config, audit);
+
+    let request = ExchangeRequest {
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ip_address: Some("203.0.113.12".to_string()),
+        user_agent: Some("test-agent/5.0".to_string()),
+        device_id: None,
+    };
+
+    svc.exchange(request)
+        .await
+        .expect_err("should reject non-matching domain");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "allowlist rejection must emit exactly RegistrationDenied, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].event_type, AuditEventType::RegistrationDenied);
+    match &events[0].outcome {
+        AuditOutcome::Failure { .. } => {}
+        other => panic!("expected Failure outcome, got: {:?}", other),
+    }
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.12"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/5.0"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.event_type == AuditEventType::TokenExchange),
+        "a rejected exchange must never emit TokenExchange"
+    );
+}
+
+/// A blocking audit failure on the success-path emission (`TokenExchange`)
+/// propagates as `Err` from `exchange`, even though the session was already
+/// stored — `emit_audit`'s blocking-threshold semantics apply to the flow.
+/// Uses a pre-existing (not newly created) user so the only audit emission
+/// on the success path is `TokenExchange` itself, isolating this case from
+/// the earlier `UserCreated` emission.
+#[tokio::test]
+async fn exchange_success_audit_failure_under_blocking_threshold_propagates_err() {
+    use oidc_exchange_core::config::AuditConfig;
+
+    // `blocking_threshold: "info"` covers every severity from Emergency down
+    // to Info, so the `TokenExchange` (info) emission on this success path
+    // is blocking: a failing adapter must propagate.
+    let config = AppConfig {
+        audit: AuditConfig {
+            blocking_threshold: "info".to_string(),
+            ..Default::default()
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+
+    // Pre-create the user directly (bypassing `exchange`, so no audit event
+    // is emitted yet) so the upcoming exchange takes the existing-user path
+    // and never emits `UserCreated`.
+    repo.create_user(&NewUser {
+        external_id: "test-subject".to_string(),
+        provider: "mock".to_string(),
+        email: Some("test@example.com".to_string()),
+        display_name: Some("Test User".to_string()),
+    })
+    .await
+    .expect("pre-create user should succeed");
+
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    audit.set_fail_mode(true).await;
+    let svc = make_service_with_audit(repo.clone(), provider, config, audit);
+
+    let request = ExchangeRequest {
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ..Default::default()
+    };
+
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("a blocking audit failure must propagate as Err");
+
+    match err {
+        Error::AuditError { .. } => {}
+        other => panic!("expected AuditError to propagate, got: {:?}", other),
+    }
+
+    // The session was already stored before the blocking audit failure was
+    // observed on the success-path `TokenExchange` event — the flow's
+    // blocking semantics do not retroactively undo prior writes.
+    assert_eq!(
+        repo.get_all_sessions().await.len(),
+        1,
+        "session write happens before the TokenExchange audit emission"
+    );
 }
 
 /// Decode the `sub` claim out of a signed access token's payload segment.
