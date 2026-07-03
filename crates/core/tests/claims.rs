@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use oidc_exchange_core::domain::{User, UserStatus};
+use oidc_exchange_core::domain::{User, UserStatus, INITIAL_USER_VERSION};
 use oidc_exchange_core::service::claims::resolve_custom_claims;
 
 fn make_user() -> User {
@@ -15,6 +15,7 @@ fn make_user() -> User {
         metadata: HashMap::new(),
         claims: HashMap::new(),
         status: UserStatus::Active,
+        version: INITIAL_USER_VERSION,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

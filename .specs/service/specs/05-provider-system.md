@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -42,6 +42,14 @@ endpoint call (`ClientSecretClaims { iss: team_id, sub: client_id, aud, iat, exp
 lifetime, signed with the `.p8` key). It reuses the shared `JwksCache` for the standard
 ID-token validation parts.
 
+Apple's ID tokens sometimes carry `email_verified` (and `is_private_email`) as the JSON
+strings `"true"`/`"false"` rather than booleans. The Apple provider coerces bool-or-string
+values when mapping to `IdentityClaims.email_verified` and
+`IdentityClaims.is_private_email`, so the registration domain allowlist (which requires
+`email_verified == Some(true)`) works for Apple sign-ins. `is_private_email` is a
+first-class `Option<bool>` field on `IdentityClaims`, populated only by the Apple
+provider; the generic OIDC provider leaves it `None`.
+
 **Tier 3 — non-OIDC (e.g. atproto).** *Not implemented.* The `IdentityProvider` doc comment
 and several config/example files name `atproto`, but no `AtprotoProvider` exists in the
 codebase. Treat any atproto reference as aspirational until a change spec lands it.
@@ -52,7 +60,13 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   `authorization_code` POST with client credentials).
 - `validate_id_token` decodes the JWT header, fetches the issuer's JWKS through the cached
   `JwksCache`, and validates the signature using the **algorithm from the JWK** (not the
-  untrusted header), the issuer, and the audience, returning `IdentityClaims`.
+  untrusted header), returning `IdentityClaims`. Validation requires the `exp`, `iss`,
+  and `aud` claims to be **present** (`set_required_spec_claims`) and to match the
+  configured issuer and `client_id`; `nbf` is validated when present. A token missing
+  `iss` or `aud` — e.g. a provider access token presented as an ID token — is rejected.
+- When the matched JWK carries no `alg`, the algorithm is inferred from the key type:
+  `kty: EC` by `crv` (P-256 → ES256, P-384 → ES384), `kty: OKP` → EdDSA, `kty: RSA` →
+  RS256. Any other alg-less key is rejected. (Azure-AD-style JWKS omit `alg`.)
 - `revoke_token` POSTs to the discovered revocation endpoint with client credentials.
 
 ## Provider registry
@@ -88,6 +102,9 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
 - *Provider keyed by config name.* **The `provider` request field maps to the `[providers.X]`
   section name, not an issuer URL.** Clients reference a stable short name; the issuer can
   change in config without changing clients.
+- *Required spec claims.* **ID-token validation requires `exp`, `iss`, and `aud` to be
+  present, not merely correct-when-present.** Closes the cross-token-type confusion class
+  (e.g. Keycloak realm access tokens omit `aud`).
 
 ### Open questions
 

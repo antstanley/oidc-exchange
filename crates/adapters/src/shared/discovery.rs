@@ -12,15 +12,22 @@ pub struct DiscoveryDocument {
 }
 
 /// Fetch and parse an OIDC provider's `.well-known/openid-configuration` document.
+///
+/// Per RFC 8414 §3.3, the `issuer` field in the returned document must be identical to
+/// the issuer URL used to construct the discovery request URL; a mismatch is rejected.
 pub async fn discover(issuer_url: &str) -> Result<DiscoveryDocument> {
-    let url = format!(
-        "{}/.well-known/openid-configuration",
-        issuer_url.trim_end_matches('/')
-    );
-    let response = reqwest::get(&url).await.map_err(|e| Error::ProviderError {
-        provider: issuer_url.to_string(),
-        detail: e.to_string(),
-    })?;
+    assert!(!issuer_url.is_empty(), "issuer_url must not be empty");
+
+    let normalised_issuer = issuer_url.trim_end_matches('/');
+    let url = format!("{normalised_issuer}/.well-known/openid-configuration");
+    let response = crate::shared::http::client()
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| Error::ProviderError {
+            provider: issuer_url.to_string(),
+            detail: e.to_string(),
+        })?;
     let doc = response
         .json::<DiscoveryDocument>()
         .await
@@ -28,6 +35,23 @@ pub async fn discover(issuer_url: &str) -> Result<DiscoveryDocument> {
             provider: issuer_url.to_string(),
             detail: e.to_string(),
         })?;
+
+    if doc.issuer.trim_end_matches('/') != normalised_issuer {
+        return Err(Error::ProviderError {
+            provider: issuer_url.to_string(),
+            detail: format!(
+                "discovered issuer '{}' does not match configured issuer '{}'",
+                doc.issuer, normalised_issuer
+            ),
+        });
+    }
+
+    assert_eq!(
+        doc.issuer.trim_end_matches('/'),
+        normalised_issuer,
+        "discovery document issuer must match the configured issuer after normalisation"
+    );
+
     Ok(doc)
 }
 
@@ -132,5 +156,34 @@ mod tests {
             .expect("discovery should succeed with trailing slash");
 
         assert_eq!(doc.issuer, server.uri());
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_mismatched_issuer() {
+        let server = MockServer::start().await;
+
+        let body = serde_json::json!({
+            "issuer": "https://evil.example.com",
+            "token_endpoint": format!("{}/token", server.uri()),
+            "jwks_uri": format!("{}/jwks", server.uri())
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let result = discover(&server.uri()).await;
+
+        let err = result.expect_err("mismatched issuer should be rejected");
+        match err {
+            Error::ProviderError { provider, detail } => {
+                assert_eq!(provider, server.uri());
+                assert!(detail.contains(&server.uri()));
+                assert!(detail.contains("evil.example.com"));
+            }
+            other => panic!("expected ProviderError, got {other:?}"),
+        }
     }
 }

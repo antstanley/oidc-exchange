@@ -77,5 +77,8 @@ pub struct IdentityClaims {
     pub email: Option<String>,
     pub email_verified: Option<bool>,
     pub name: Option<String>,
+    /// Apple private-relay flag, coerced bool-or-string like `email_verified`;
+    /// `None` for non-Apple providers.
+    pub is_private_email: Option<bool>,
     pub raw_claims: HashMap<String, Value>,
 }

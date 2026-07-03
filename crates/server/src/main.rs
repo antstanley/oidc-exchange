@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use oidc_exchange::bootstrap;
+use oidc_exchange::lambda;
+use oidc_exchange::shutdown::{self, DrainOutcome, ShutdownSignal, SHUTDOWN_DRAIN_DEADLINE_SECS};
 use oidc_exchange::telemetry;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,14 +31,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Run
     if std::env::var("AWS_LAMBDA_RUNTIME_API").is_ok() {
-        // Lambda mode — not yet implemented
-        tracing::info!("Lambda runtime detected, but not yet implemented");
-        // TODO: lambda_http::run(app)
+        // Lambda mode: the same router (middleware, state, and base-path layer) is served
+        // through `lambda_http`, which speaks the Lambda Runtime API directly and translates
+        // API Gateway REST/HTTP-API, Function URL, and ALB events into tower `Service` calls
+        // against `app` (`04-http-api.md` → Bootstrap, step 6). `lambda::run_lambda` wraps
+        // `app` in the per-invocation flush hook (`FlushOnResponse`) so telemetry (and any
+        // future buffered audit writes) force-flush synchronously after each invocation's
+        // response future resolves and before the response is returned — the execution
+        // environment may freeze immediately after the response. `lambda_http::run` fails with
+        // `lambda_http::Error` (`Box<dyn std::error::Error + Send + Sync>`), which the
+        // standard library does not blanket-convert into `main`'s `Box<dyn std::error::Error>`
+        // (the `Send + Sync` marker traits make the two boxed trait objects distinct types to
+        // `?`'s `From` resolution); the error message is preserved and reboxed so the failure
+        // still propagates via `?` with no `unwrap`/`expect` on this path.
+        tracing::info!("Lambda runtime detected; serving via lambda_http");
+        lambda::run_lambda(app, Arc::new(telemetry::flush_telemetry))
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error> { err.to_string().into() })?;
     } else {
         let addr = format!("{}:{}", config.server.host, config.server.port);
+        assert!(
+            !addr.is_empty(),
+            "bind address must not be empty before serving"
+        );
         tracing::info!(addr = %addr, "starting server");
         let listener = tokio::net::TcpListener::bind(&addr).await?;
-        axum::serve(listener, app).await?;
+
+        // `signal` is spawned once, up front, and cloned so the graceful-shutdown hook below
+        // and `run_with_drain_deadline`'s watchdog observe the *same* SIGTERM/ctrl-c instant —
+        // the drain deadline must be anchored to when the signal fires, not to process
+        // startup (see `shutdown` module docs).
+        let signal = ShutdownSignal::spawn();
+        let graceful_signal = signal.clone();
+        let serve_future = async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(graceful_signal.wait())
+                .await
+        };
+        let deadline = std::time::Duration::from_secs(SHUTDOWN_DRAIN_DEADLINE_SECS);
+
+        match shutdown::run_with_drain_deadline(serve_future, signal, deadline).await {
+            DrainOutcome::Completed(Ok(())) => tracing::info!("server exited cleanly after drain"),
+            DrainOutcome::Completed(Err(err)) => return Err(err.into()),
+            DrainOutcome::DeadlineExceeded => {
+                tracing::warn!(
+                    deadline_secs = SHUTDOWN_DRAIN_DEADLINE_SECS,
+                    "shutdown drain deadline exceeded; aborting stragglers and exiting"
+                );
+            }
+        }
     }
 
     Ok(())

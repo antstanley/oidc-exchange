@@ -9,7 +9,12 @@ pub async fn exchange_code(
     code: &str,
     redirect_uri: &str,
 ) -> Result<ProviderTokens> {
-    let client = reqwest::Client::new();
+    assert!(
+        !token_endpoint.is_empty(),
+        "token_endpoint must not be empty"
+    );
+
+    let client = crate::shared::http::client();
     let mut params = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -30,13 +35,50 @@ pub async fn exchange_code(
             detail: e.to_string(),
         })?;
 
-    let body: serde_json::Value = response.json().await.map_err(|e| Error::ProviderError {
+    let status = response.status();
+    let raw_body = response.text().await.map_err(|e| Error::ProviderError {
         provider: token_endpoint.to_string(),
         detail: e.to_string(),
     })?;
 
+    if !status.is_success() {
+        let detail = match serde_json::from_str::<serde_json::Value>(&raw_body) {
+            Ok(body) if body.get("error").is_some() => {
+                let error = body["error"].as_str().unwrap_or("unknown_error");
+                match body["error_description"].as_str() {
+                    Some(description) => format!("{error}: {description}"),
+                    None => error.to_string(),
+                }
+            }
+            _ => raw_body,
+        };
+        return Err(Error::ProviderError {
+            provider: token_endpoint.to_string(),
+            detail,
+        });
+    }
+
+    let body: serde_json::Value =
+        serde_json::from_str(&raw_body).map_err(|e| Error::ProviderError {
+            provider: token_endpoint.to_string(),
+            detail: e.to_string(),
+        })?;
+
+    let id_token = body["id_token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::ProviderError {
+            provider: token_endpoint.to_string(),
+            detail: "token endpoint response is missing id_token".to_string(),
+        })?
+        .to_string();
+    assert!(
+        !id_token.is_empty(),
+        "id_token must be non-empty on the success path"
+    );
+
     Ok(ProviderTokens {
-        id_token: body["id_token"].as_str().unwrap_or_default().to_string(),
+        id_token,
         refresh_token: body["refresh_token"].as_str().map(String::from),
         access_token: body["access_token"].as_str().map(String::from),
     })
@@ -170,5 +212,75 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn exchange_code_surfaces_oauth_error_on_non_2xx() {
+        let server = MockServer::start().await;
+
+        let error_body = serde_json::json!({
+            "error": "invalid_grant",
+            "error_description": "the authorization code has expired"
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(&error_body))
+            .mount(&server)
+            .await;
+
+        let result = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "expired-code",
+            "https://example.com/cb",
+        )
+        .await;
+
+        let err = result.expect_err("a 400 OAuth error must not succeed");
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid_grant"),
+            "error should name the OAuth error code, got: {message}"
+        );
+        assert!(
+            message.contains("the authorization code has expired"),
+            "error should include the error_description, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_2xx_response_missing_id_token() {
+        let server = MockServer::start().await;
+
+        // A 2xx body with no id_token must be rejected, never defaulted to "".
+        let token_response = serde_json::json!({
+            "access_token": "access-token-value"
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&token_response))
+            .mount(&server)
+            .await;
+
+        let result = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "code",
+            "https://example.com/cb",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a 2xx response without id_token must be an error"
+        );
+        assert!(
+            matches!(result.unwrap_err(), Error::ProviderError { .. }),
+            "the missing-id_token error must be a ProviderError"
+        );
     }
 }

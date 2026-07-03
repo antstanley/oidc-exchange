@@ -140,6 +140,65 @@ async fn internal_auth_passes_with_correct_secret() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. Internal auth rejection: empty configured secret is never "configured",
+// even against an empty Bearer token (defence in depth — `AppConfig::validate`
+// already refuses to start a role that serves the internal API with an empty
+// `shared_secret`, so this only guards a config built by hand, e.g. in tests
+// or an embedder).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_token() {
+    let provider = MockIdentityProvider::new("test");
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+
+    let mut config = AppConfig::default();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.internal_api.enabled = true;
+    config.internal_api.shared_secret = Some(String::new());
+
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        providers,
+        config.clone(),
+    );
+
+    let state = AppState {
+        service: Arc::new(service),
+        config: Arc::new(config),
+    };
+
+    let app = public_routes()
+        .merge(internal_routes(state.clone()))
+        .with_state(state);
+
+    // An empty `Bearer ` token must not be accepted just because the
+    // configured secret is also empty.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/internal/stats")
+                .header("authorization", "Bearer ")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unauthorized");
+    assert_eq!(json["error_description"], "internal API not configured");
+}
+
+// ---------------------------------------------------------------------------
 // 4. Create user → 201 with user JSON
 // ---------------------------------------------------------------------------
 
@@ -366,4 +425,153 @@ async fn delete_user_returns_200() {
         .unwrap();
 
     assert_eq!(del_resp.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// 8. Unknown user id on the mutating internal routes → 404 `not_found`,
+// never a 500 `server_error` (negative-space: the pre-check must catch the
+// typo before the adapter's `StoreError` backstop would fire).
+// ---------------------------------------------------------------------------
+
+const UNKNOWN_USER_ID: &str = "usr_does_not_exist";
+
+#[tokio::test]
+async fn update_user_unknown_id_returns_404_not_found() {
+    let app = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/internal/users/{}", UNKNOWN_USER_ID))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::from(json!({"display_name": "New Name"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "not_found");
+}
+
+#[tokio::test]
+async fn delete_user_unknown_id_returns_404_not_found() {
+    let app = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/internal/users/{}", UNKNOWN_USER_ID))
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "not_found");
+}
+
+#[tokio::test]
+async fn get_claims_unknown_id_returns_404_not_found() {
+    let app = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/internal/users/{}/claims", UNKNOWN_USER_ID))
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "not_found");
+}
+
+#[tokio::test]
+async fn set_claims_unknown_id_returns_404_not_found() {
+    let app = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/internal/users/{}/claims", UNKNOWN_USER_ID))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::from(json!({"a": 1}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "not_found");
+}
+
+#[tokio::test]
+async fn merge_claims_unknown_id_returns_404_not_found() {
+    let app = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/internal/users/{}/claims", UNKNOWN_USER_ID))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::from(json!({"b": 2}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "not_found");
+}
+
+#[tokio::test]
+async fn clear_claims_unknown_id_returns_404_not_found() {
+    let app = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/internal/users/{}/claims", UNKNOWN_USER_ID))
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_ne!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "not_found");
 }

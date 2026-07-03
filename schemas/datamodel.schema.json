@@ -4,7 +4,7 @@
   "definitions": {
     "User": {
       "type": "object",
-      "required": ["id", "external_id", "provider", "status", "created_at", "updated_at"],
+      "required": ["id", "external_id", "provider", "status", "version", "created_at", "updated_at"],
       "properties": {
         "id": { "type": "string", "description": "Internal user ID (e.g., usr_01ARZ3NDEK...)" },
         "external_id": { "type": "string", "description": "Provider subject claim or DID" },
@@ -22,6 +22,7 @@
           "description": "Per-user private claims added to access token JWT, managed via internal API"
         },
         "status": { "enum": ["active", "suspended", "deleted"] },
+        "version": { "type": "integer", "minimum": 1, "description": "Optimistic-concurrency counter; starts at 1 on create, incremented by every update_user." },
         "created_at": { "type": "string", "format": "date-time" },
         "updated_at": { "type": "string", "format": "date-time" }
       }

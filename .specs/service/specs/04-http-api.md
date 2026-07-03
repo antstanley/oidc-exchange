@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -13,7 +13,7 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 |---|---|---|---|
 | GET | `/health` | `health` | `{"status":"ok"}` — mounted for every role |
 | POST | `/token` | `token` | exchange (`authorization_code`/`id_token`) and refresh (`refresh_token`) |
-| POST | `/revoke` | `revoke` | RFC 7009 revocation, always 200 |
+| POST | `/revoke` | `revoke` | RFC 7009 revocation: 200 for invalid/unknown tokens, 503 on backend failure |
 | GET | `/keys` | `keys` | JWKS: `{"keys":[<jwk>]}` from `KeyManager::public_jwk` |
 | GET | `/.well-known/openid-configuration` | `openid_config` | discovery document |
 
@@ -63,10 +63,15 @@ extracted into every handler.
 Applied to the router (`routes/mod.rs`), outermost first:
 
 1. **Request ID** (`middleware/request_id.rs`) — reuse `X-Request-Id` or generate a UUIDv4;
-   record on the tracing span; echo in the response header.
-2. **Audit context** (`middleware/audit_context.rs`) — extract `X-Forwarded-For`,
+   open a per-request `info_span` carrying `request_id` so all downstream logs — including
+   the `server_error` detail log — inherit it; echo in the response header.
+2. **Request timeout** (`tower_http::timeout::TimeoutLayer`) — abort any request that runs
+   longer than `server.request_timeout` (default `30s`) and respond `408`. Sits inside the
+   request-id layer, so a timeout response still carries the request id, and outside the
+   rest of the stack, so the bound covers the remaining middleware and the handler.
+3. **Audit context** (`middleware/audit_context.rs`) — extract `X-Forwarded-For`,
    `User-Agent`, `X-Device-Id` into an `AuditContext` request extension.
-3. **Catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — a panic becomes
+4. **Catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — a panic becomes
    `500 {"error":"server_error","error_description":"internal server error"}`.
 
 Internal routes additionally pass through **internal auth** (`middleware/internal_auth.rs`):
@@ -98,7 +103,11 @@ be network-isolated independently from one binary.
 4. `bootstrap::build_service` — construct adapters by role and assemble `AppService`.
 5. `bootstrap::build_router` — build the axum router for the role with middleware and state.
 6. Detect runtime: `AWS_LAMBDA_RUNTIME_API` present → Lambda mode; otherwise bind
-   `server.host:server.port` and serve over hyper.
+   `server.host:server.port` and serve over hyper with graceful shutdown — SIGTERM or
+   ctrl-c stops accepting connections and drains in-flight requests for up to a 10 s hard
+   deadline, after which stragglers are aborted and the process exits. The middleware
+   stack's request-timeout layer bounds slow clients at `server.request_timeout`
+   (default 30 s).
 
 `crates/ffi` calls the same `build_service` / `build_router` path, so in-process bindings get
 identical routing and middleware.
@@ -116,12 +125,14 @@ identical routing and middleware.
 | `AccessDenied`, `UserSuspended` | 403 | `access_denied` |
 | `Unauthorized` | 401 | `unauthorized` |
 | `UnsupportedGrantType` | 400 | `unsupported_grant_type` |
+| `Conflict` | 409 | `conflict` |
 | `ProviderError` | 502 | `server_error` |
 | `ProviderTimeout` | 504 | `server_error` |
 | `StoreError`, `KeyError`, `AuditError`, `SyncError`, `ConfigError` | 500 | `server_error` |
 
-`server_error` responses log the internal detail and return a generic message; infrastructure
-detail is never leaked to the client.
+`server_error` responses (500/502/504) log the internal detail via `tracing::error!` —
+inside the request span, so the log carries the request id — and return a generic message;
+infrastructure detail is never leaked to the client.
 
 ## Assumptions and open questions
 
@@ -138,8 +149,10 @@ detail is never leaked to the client.
   build artifact covers public-only, admin-only, and combined deployments.
 - *Constant-time secret compare.* **Internal auth uses `subtle`.** Avoids timing oracles on
   the shared secret.
-- *Always-200 revoke.* **`/revoke` returns 200 regardless of token validity.** RFC 7009
-  forbids leaking whether a token existed.
+- *200 for token state, 503 for infrastructure.* **`/revoke` returns 200 whether the token
+  was revoked, invalid, or unknown, and 503 when the backend fails.** RFC 7009 forbids
+  leaking whether a token existed (§2.2) but permits 503 when the server cannot handle the
+  request (§2.2.1); a client must never be told a live session is dead.
 - *Discovery reflects the live key.* **`id_token_signing_alg_values_supported` comes from the
   configured `KeyManager`.** The advertised algorithm always matches the signing key.
 

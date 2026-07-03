@@ -1,6 +1,6 @@
 # Development Guidelines
 
-**Status:** Implemented · **Date:** 2026-06-29 · **Owner:** Ant Stanley · **Scope:** Repo-wide
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** Repo-wide
 
 The rules of the road for everyone — humans and agents — writing code in `oidc-exchange`.
 This page is canonical: a guideline here is a rule the repo adopts. It covers the toolchain,
@@ -110,8 +110,9 @@ Validate at every boundary where data crosses from a place you do not control in
   ([04-http-api](service/specs/04-http-api.md)). The FFI boundary collapses errors into
   `{code, message}`.
 - **Every error is handled or explicitly propagated.** Swallowing an error is a bug — except
-  the two documented best-effort paths (user-sync notifications and the RFC 7009 revoke
-  response), which log via `tracing` and are called out in the spec.
+  the two documented best-effort paths (user-sync notifications, and token-verification
+  failures in the RFC 7009 revoke response — backend and session-repo failures on `/revoke`
+  propagate and map to 503), which log via `tracing` and are called out in the spec.
 - **Retry policies are explicit and bounded** — the webhook adapter's `retries` + backoff is
   the model.
 - **Never log a secret.** `WebhookConfig.secret` and `InternalApiConfig.shared_secret` have
@@ -310,7 +311,8 @@ These are not different rules — they are emphasis on where agents slip.
 2. **Add assertions as you go.** Every function you touch leaves with at least two meaningful
    assertions.
 3. **No silent error swallowing.** Every error is handled; every match on an enum is
-   exhaustive. The only best-effort paths are the two documented ones (user-sync, revoke).
+   exhaustive. The only best-effort paths are the two documented ones (user-sync, and
+   revoke's token-verification failures — never revoke's backend errors).
 4. **Stay inside the architecture.** Adding I/O to a core module is the most common slip —
    define a port, implement an adapter, call into it.
 5. **Do not add backwards-compat shims.** If a type changes, change every caller; there is no

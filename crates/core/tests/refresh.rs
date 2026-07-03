@@ -5,8 +5,10 @@ use base64::Engine;
 use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, ServerConfig, TokenConfig};
-use oidc_exchange_core::domain::{AccessTokenClaims, Session, UserPatch, UserStatus};
+use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::domain::{
+    AccessTokenClaims, AuditEventType, AuditOutcome, Session, UserPatch, UserStatus,
+};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, SessionRepository, UserRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
@@ -49,6 +51,29 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
     )
 }
 
+/// Builds a service whose `AuditLog` is a caller-supplied `MockAuditLog`, so
+/// the test can inspect recorded events after the refresh runs.
+fn make_service_with_audit(
+    repo: MockRepository,
+    provider: MockIdentityProvider,
+    config: AppConfig,
+    audit: MockAuditLog,
+) -> AppService {
+    let provider_id = provider.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider));
+
+    AppService::new(
+        Box::new(repo.clone()),
+        Box::new(repo),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit),
+        Box::new(MockUserSync::new()),
+        providers,
+        config,
+    )
+}
+
 /// Helper: perform an exchange to get a refresh token, then return it along
 /// with the service and repo for further testing.
 async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService) -> String {
@@ -57,6 +82,7 @@ async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let response = svc
         .exchange(request)
@@ -77,6 +103,7 @@ async fn refresh_happy_path_returns_new_access_token() {
     // Now use the refresh token
     let request = RefreshRequest {
         refresh_token: refresh_token.clone(),
+        ..Default::default()
     };
     let response = svc.refresh(request).await.expect("refresh should succeed");
 
@@ -140,7 +167,10 @@ async fn refresh_expired_token_returns_invalid_token() {
         .expect("store should succeed");
 
     // Now try to refresh with the expired token
-    let request = RefreshRequest { refresh_token };
+    let request = RefreshRequest {
+        refresh_token,
+        ..Default::default()
+    };
     let err = svc
         .refresh(request)
         .await
@@ -161,6 +191,7 @@ async fn refresh_unknown_token_returns_invalid_token() {
     // Try to refresh with a token that was never stored
     let request = RefreshRequest {
         refresh_token: "this-token-does-not-exist".to_string(),
+        ..Default::default()
     };
     let err = svc
         .refresh(request)
@@ -199,7 +230,10 @@ async fn refresh_suspended_user_returns_user_suspended() {
     .expect("update should succeed");
 
     // Now try to refresh
-    let request = RefreshRequest { refresh_token };
+    let request = RefreshRequest {
+        refresh_token,
+        ..Default::default()
+    };
     let err = svc
         .refresh(request)
         .await
@@ -211,4 +245,235 @@ async fn refresh_suspended_user_returns_user_suspended() {
         }
         other => panic!("expected UserSuspended, got: {:?}", other),
     }
+}
+
+/// Negative space: an unknown-token refresh under the default `info`
+/// `emit_threshold` audits nothing — `ValidationFailed` is emitted at
+/// `debug`, which the default threshold drops before any adapter sees it.
+#[tokio::test]
+async fn refresh_unknown_token_under_default_threshold_emits_nothing() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, provider, make_config(), audit);
+
+    let request = RefreshRequest {
+        refresh_token: "this-token-does-not-exist".to_string(),
+        ip_address: Some("203.0.113.20".to_string()),
+        user_agent: Some("test-agent/1.0".to_string()),
+        device_id: None,
+    };
+    svc.refresh(request)
+        .await
+        .expect_err("refresh should fail for unknown token");
+
+    let events = audit_clone.events().await;
+    assert!(
+        events.is_empty(),
+        "default info threshold must suppress debug-severity ValidationFailed, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+}
+
+/// Lowering `[audit] emit_threshold` to `debug` surfaces the
+/// `ValidationFailed` event that the default threshold suppresses, carrying
+/// the request's ip/ua and a `Failure` outcome.
+#[tokio::test]
+async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
+    let config = AppConfig {
+        audit: AuditConfig {
+            emit_threshold: "debug".to_string(),
+            ..Default::default()
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, provider, config, audit);
+
+    let request = RefreshRequest {
+        refresh_token: "this-token-does-not-exist".to_string(),
+        ip_address: Some("203.0.113.21".to_string()),
+        user_agent: Some("test-agent/2.0".to_string()),
+        device_id: None,
+    };
+    svc.refresh(request)
+        .await
+        .expect_err("refresh should fail for unknown token");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "lowering the threshold to debug must surface exactly one event, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].event_type, AuditEventType::ValidationFailed);
+    match &events[0].outcome {
+        AuditOutcome::Failure { .. } => {}
+        other => panic!("expected Failure outcome, got: {:?}", other),
+    }
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.21"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/2.0"));
+}
+
+/// An expired-token refresh under a lowered `emit_threshold` also audits
+/// `ValidationFailed`, this time with the session's user id as actor since
+/// the session (and therefore the user id) was already resolved.
+#[tokio::test]
+async fn refresh_expired_token_under_debug_threshold_emits_validation_failed_with_actor() {
+    let config = AppConfig {
+        audit: AuditConfig {
+            emit_threshold: "debug".to_string(),
+            ..Default::default()
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    let refresh_token = exchange_and_get_refresh_token(&repo, &svc).await;
+
+    let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
+    let sessions = repo.get_all_sessions().await;
+    let original_session = sessions
+        .iter()
+        .find(|s| s.refresh_token_hash == token_hash)
+        .expect("session should exist");
+    let user_id = original_session.user_id.clone();
+
+    repo.revoke_session(&token_hash)
+        .await
+        .expect("revoke should succeed");
+    let expired_session = Session {
+        expires_at: Utc::now() - Duration::hours(1),
+        ..original_session.clone()
+    };
+    repo.store_refresh_token(&expired_session)
+        .await
+        .expect("store should succeed");
+
+    let provider2 = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc2 = make_service_with_audit(repo, provider2, config, audit);
+
+    let request = RefreshRequest {
+        refresh_token,
+        ..Default::default()
+    };
+    svc2.refresh(request)
+        .await
+        .expect_err("refresh should fail for expired token");
+
+    let events = audit_clone.events().await;
+    assert_eq!(events.len(), 1, "expected exactly one audit event");
+    assert_eq!(events[0].event_type, AuditEventType::ValidationFailed);
+    assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
+}
+
+/// A suspended-user refresh emits `UserSuspended` (default threshold covers
+/// it, since it is not gated behind `emit_threshold`), carrying the user id
+/// as actor and the request's ip/ua.
+#[tokio::test]
+async fn refresh_suspended_user_emits_user_suspended_event() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    let refresh_token = exchange_and_get_refresh_token(&repo, &svc).await;
+
+    let users = repo.get_all_users().await;
+    let user_id = users[0].id.clone();
+    repo.update_user(
+        &user_id,
+        &UserPatch {
+            status: Some(UserStatus::Suspended),
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: None,
+        },
+    )
+    .await
+    .expect("update should succeed");
+
+    let provider2 = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc2 = make_service_with_audit(repo, provider2, make_config(), audit);
+
+    let request = RefreshRequest {
+        refresh_token,
+        ip_address: Some("203.0.113.22".to_string()),
+        user_agent: Some("test-agent/3.0".to_string()),
+        device_id: None,
+    };
+    svc2.refresh(request)
+        .await
+        .expect_err("refresh should fail for suspended user");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "suspended-user refresh must emit exactly one event, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].event_type, AuditEventType::UserSuspended);
+    match &events[0].outcome {
+        AuditOutcome::Failure { .. } => {}
+        other => panic!("expected Failure outcome, got: {:?}", other),
+    }
+    assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.22"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/3.0"));
+}
+
+/// A successful refresh emits exactly one `TokenRefresh` (info, success)
+/// event, carrying the user id as actor and the request's ip/ua — visible
+/// under the default `info` `emit_threshold` since `TokenRefresh` is `Info`
+/// severity.
+#[tokio::test]
+async fn refresh_success_emits_token_refresh_event() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    let refresh_token = exchange_and_get_refresh_token(&repo, &svc).await;
+
+    let users = repo.get_all_users().await;
+    let user_id = users[0].id.clone();
+
+    let provider2 = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc2 = make_service_with_audit(repo, provider2, make_config(), audit);
+
+    let request = RefreshRequest {
+        refresh_token,
+        ip_address: Some("203.0.113.23".to_string()),
+        user_agent: Some("test-agent/4.0".to_string()),
+        device_id: None,
+    };
+    svc2.refresh(request).await.expect("refresh should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "successful refresh must emit exactly one event, got: {:?}",
+        events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+    );
+    assert_eq!(events[0].event_type, AuditEventType::TokenRefresh);
+    assert_eq!(events[0].outcome, AuditOutcome::Success);
+    assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.23"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/4.0"));
 }

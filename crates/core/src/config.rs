@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::error::Error;
+
 /// Top-level application configuration, matching the TOML structure.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -20,6 +22,113 @@ pub struct AppConfig {
     pub providers: HashMap<String, ProviderConfig>,
 }
 
+/// The only values `server.role` may take: which parts of the API a process
+/// serves. See `06-configuration.md` → Sections → `[server]`.
+const ALLOWED_SERVER_ROLES: [&str; 3] = ["all", "exchange", "admin"];
+
+impl AppConfig {
+    /// Validate the loaded configuration once, at startup, so malformed
+    /// config fails closed instead of being absorbed and discovered later
+    /// (an unmounted router, a per-request panic, or an over-permissive
+    /// allowlist/auth check).
+    ///
+    /// Checks, each returning a `ConfigError` naming the offending field:
+    /// - `server.role` is one of [`ALLOWED_SERVER_ROLES`].
+    /// - `server.request_timeout`, `token.access_token_ttl`, and
+    ///   `token.refresh_token_ttl` parse via
+    ///   [`crate::service::parse_duration_secs`].
+    /// - Every `registration.domain_allowlist` entry is an exact domain or a
+    ///   `*.`-prefixed wildcard.
+    /// - When the internal API will be served (`server.role` is `admin` or
+    ///   `all`, and `internal_api.enabled == true`),
+    ///   `internal_api.shared_secret` is present and non-empty.
+    pub fn validate(&self) -> Result<(), Error> {
+        if !ALLOWED_SERVER_ROLES.contains(&self.server.role.as_str()) {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "server.role {:?} is not one of {ALLOWED_SERVER_ROLES:?}",
+                    self.server.role
+                ),
+            });
+        }
+
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.server.request_timeout),
+            "server.request_timeout",
+        )?;
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.token.access_token_ttl),
+            "token.access_token_ttl",
+        )?;
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.token.refresh_token_ttl),
+            "token.refresh_token_ttl",
+        )?;
+
+        if let Some(allowlist) = &self.registration.domain_allowlist {
+            for entry in allowlist {
+                validate_allowlist_entry(entry)?;
+            }
+        }
+
+        let internal_api_served =
+            matches!(self.server.role.as_str(), "admin" | "all") && self.internal_api.enabled;
+        if internal_api_served {
+            let secret_is_present_and_non_empty = self
+                .internal_api
+                .shared_secret
+                .as_deref()
+                .is_some_and(|secret| !secret.is_empty());
+            if !secret_is_present_and_non_empty {
+                return Err(Error::ConfigError {
+                    detail: "internal_api.shared_secret must be non-empty when the internal API \
+                             is served (server.role is \"admin\" or \"all\" and \
+                             internal_api.enabled = true)"
+                        .to_string(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Rewrap a `parse_duration_secs` failure with the config field it came
+/// from, so the reported `ConfigError` names the offending TOML key rather
+/// than just the raw duration string.
+fn prefix_config_error<T>(result: Result<T, Error>, field: &str) -> Result<T, Error> {
+    result.map_err(|err| match err {
+        Error::ConfigError { detail } => Error::ConfigError {
+            detail: format!("{field}: {detail}"),
+        },
+        other => other,
+    })
+}
+
+/// Validate a single `registration.domain_allowlist` entry: only an exact
+/// domain (`example.com`) or a `*.`-prefixed wildcard (`*.example.com`) is
+/// accepted. A bare `*` or a dotless prefix (`*example.com`) is rejected —
+/// both would let `matches_domain_allowlist` (`service::exchange`) match
+/// domains the operator never intended to allow.
+fn validate_allowlist_entry(entry: &str) -> Result<(), Error> {
+    if entry.starts_with('*') && !entry.starts_with("*.") {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "registration.domain_allowlist entry {entry:?} must be an exact domain \
+                 (\"example.com\") or a \"*.\"-prefixed wildcard (\"*.example.com\")"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Default for `[server] request_timeout` when the key is absent from config: a humantime
+/// duration string parsed the same way as the `[token]` TTLs (see
+/// [`crate::service::parse_duration_secs`]). Named rather than a bare literal so the value
+/// backing `AppConfig::validate` and the docs stay in lockstep.
+/// See `06-configuration.md` → Sections → `[server]` and Defaults summary.
+pub const DEFAULT_REQUEST_TIMEOUT: &str = "30s";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -27,6 +136,17 @@ pub struct ServerConfig {
     pub port: u16,
     pub issuer: String,
     pub role: String,
+    /// Humantime duration string (e.g. `"30s"`) bounding how long the server's
+    /// request-timeout middleware layer lets a single request run before aborting it with a
+    /// `408`. Parsed via [`crate::service::parse_duration_secs`] and validated at startup by
+    /// [`AppConfig::validate`] — an unparseable value fails config load rather than silently
+    /// falling back to [`DEFAULT_REQUEST_TIMEOUT`].
+    pub request_timeout: String,
+    /// Path prefix (e.g. `"/prod"`) stripped from incoming request paths before routing.
+    /// Absent (`None`) by default; exists for deployments fronted by a mount prefix such as
+    /// an API Gateway stage, where the platform includes the stage name in the request path
+    /// but the app's routes are defined without it.
+    pub base_path: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -36,6 +156,8 @@ impl Default for ServerConfig {
             port: 8080,
             issuer: String::new(),
             role: "all".to_string(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT.to_string(),
+            base_path: None,
         }
     }
 }
@@ -81,6 +203,11 @@ impl Default for TokenConfig {
 pub struct AuditConfig {
     pub adapter: String,
     pub blocking_threshold: String,
+    /// Severity floor for emitting events at all: events strictly less
+    /// severe than this threshold are dropped before any adapter dispatch,
+    /// independently of `blocking_threshold`. Parsed with
+    /// `service::parse_severity`; defaults to `"info"`.
+    pub emit_threshold: String,
     pub sqs: Option<SqsAuditConfig>,
 }
 
@@ -89,6 +216,7 @@ impl Default for AuditConfig {
         Self {
             adapter: "noop".to_string(),
             blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
             sqs: None,
         }
     }
@@ -149,6 +277,11 @@ pub struct DynamoConfig {
 pub struct PostgresConfig {
     pub url: String,
     pub max_connections: Option<u32>,
+    /// Whether `create_pool` should run the adapter's idempotent migration
+    /// DDL before returning. Absent (`None`) resolves to `true` at the call
+    /// site; set `false` for locked-down databases where the app role has
+    /// no DDL rights and migrations are applied out-of-band.
+    pub run_migrations: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,12 +309,43 @@ pub struct UserSyncConfig {
     pub webhook: Option<WebhookConfig>,
 }
 
+/// Upper bound on `[user_sync.webhook].retries`. A misconfigured `retries`
+/// must never turn a synchronous request (an admin call, or the JIT notify
+/// on token exchange) into an hours-long hang or overflow the backoff shift;
+/// [`WebhookConfig::effective_retries`] clamps to this at config load time.
+/// See `06-configuration.md` → `[user_sync]`.
+pub const MAX_WEBHOOK_RETRIES: u32 = 10;
+
+/// Default `retries` when `[user_sync.webhook].retries` is unset.
+const DEFAULT_WEBHOOK_RETRIES: u32 = 2;
+
 #[derive(Clone, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
     pub secret: String,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
+}
+
+impl WebhookConfig {
+    /// The `retries` value that reaches the webhook adapter: the configured
+    /// value clamped to [`MAX_WEBHOOK_RETRIES`], or [`DEFAULT_WEBHOOK_RETRIES`]
+    /// when unset. Logs a warning naming the configured and clamped values
+    /// when clamping actually reduces the configured value.
+    pub fn effective_retries(&self) -> u32 {
+        let configured = self.retries.unwrap_or(DEFAULT_WEBHOOK_RETRIES);
+        if configured > MAX_WEBHOOK_RETRIES {
+            tracing::warn!(
+                configured_retries = configured,
+                clamped_retries = MAX_WEBHOOK_RETRIES,
+                "user_sync.webhook.retries exceeds the maximum of {MAX_WEBHOOK_RETRIES}; \
+                 clamping"
+            );
+            MAX_WEBHOOK_RETRIES
+        } else {
+            configured
+        }
+    }
 }
 
 impl std::fmt::Debug for WebhookConfig {
@@ -268,6 +432,9 @@ mod tests {
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 8080);
         assert!(config.server.issuer.is_empty());
+        assert_eq!(config.server.request_timeout, DEFAULT_REQUEST_TIMEOUT);
+        assert_eq!(config.server.request_timeout, "30s");
+        assert!(config.server.base_path.is_none());
 
         // Registration defaults
         assert_eq!(config.registration.mode, "open");
@@ -305,6 +472,7 @@ mod tests {
 host = "127.0.0.1"
 port = 9090
 issuer = "https://auth.example.com"
+request_timeout = "45s"
 
 [registration]
 mode = "existing_users_only"
@@ -379,6 +547,12 @@ scopes = ["openid", "email", "profile"]
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9090);
         assert_eq!(config.server.issuer, "https://auth.example.com");
+        assert_eq!(config.server.request_timeout, "45s");
+        assert_eq!(
+            crate::service::parse_duration_secs(&config.server.request_timeout)
+                .expect("overridden request_timeout must still parse as a humantime duration"),
+            45
+        );
 
         assert_eq!(config.registration.mode, "existing_users_only");
         let allowlist = config.registration.domain_allowlist.unwrap();
@@ -426,5 +600,385 @@ scopes = ["openid", "email", "profile"]
             google.extra.get("issuer").unwrap().as_str().unwrap(),
             "https://accounts.google.com"
         );
+    }
+
+    /// `[repository.postgres] run_migrations` deserializes to `Some(true|false)`
+    /// when present and to `None` (later resolved as `true`) when absent, for
+    /// all three cases an operator's TOML can express.
+    #[test]
+    fn postgres_run_migrations_deserializes_present_and_absent() {
+        let with_false: AppConfig = toml::from_str(
+            r#"
+[repository]
+adapter = "postgres"
+
+[repository.postgres]
+url = "postgres://localhost/oidc"
+run_migrations = false
+"#,
+        )
+        .expect("run_migrations = false must deserialize");
+        assert_eq!(
+            with_false.repository.postgres.unwrap().run_migrations,
+            Some(false)
+        );
+
+        let with_true: AppConfig = toml::from_str(
+            r#"
+[repository]
+adapter = "postgres"
+
+[repository.postgres]
+url = "postgres://localhost/oidc"
+run_migrations = true
+"#,
+        )
+        .expect("run_migrations = true must deserialize");
+        assert_eq!(
+            with_true.repository.postgres.unwrap().run_migrations,
+            Some(true)
+        );
+
+        // Negative-space: omitting the key must still deserialize (not a
+        // parse error), landing on `None` so the call site can resolve the
+        // documented default of `true`.
+        let absent: AppConfig = toml::from_str(
+            r#"
+[repository]
+adapter = "postgres"
+
+[repository.postgres]
+url = "postgres://localhost/oidc"
+"#,
+        )
+        .expect("omitting run_migrations must still deserialize");
+        assert_eq!(absent.repository.postgres.unwrap().run_migrations, None);
+    }
+
+    /// `[server] base_path` deserializes to `Some(prefix)` when present and to
+    /// `None` when absent, so the strip layer can tell "no prefix configured"
+    /// apart from "prefix is the empty string".
+    #[test]
+    fn server_base_path_deserializes_present_and_absent() {
+        let with_base_path: AppConfig = toml::from_str(
+            r#"
+[server]
+base_path = "/prod"
+"#,
+        )
+        .expect("base_path = \"/prod\" must deserialize");
+        assert_eq!(with_base_path.server.base_path.as_deref(), Some("/prod"));
+
+        // Negative-space: omitting the key must still deserialize (not a
+        // parse error), landing on `None` — the "no mount prefix" default.
+        let absent: AppConfig = toml::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+"#,
+        )
+        .expect("omitting base_path must still deserialize");
+        assert!(absent.server.base_path.is_none());
+    }
+
+    #[test]
+    fn effective_retries_clamps_over_max_passes_through_in_range_and_default() {
+        let over_max = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: Some(20),
+        };
+        assert_eq!(
+            over_max.effective_retries(),
+            MAX_WEBHOOK_RETRIES,
+            "retries = 20 must clamp down to the named maximum of {MAX_WEBHOOK_RETRIES}"
+        );
+
+        let in_range = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: Some(5),
+        };
+        assert_eq!(
+            in_range.effective_retries(),
+            5,
+            "an in-range retries value must pass through unchanged"
+        );
+
+        let unset = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: None,
+        };
+        assert_eq!(
+            unset.effective_retries(),
+            DEFAULT_WEBHOOK_RETRIES,
+            "an unset retries must resolve to the documented default of \
+             {DEFAULT_WEBHOOK_RETRIES}"
+        );
+    }
+
+    #[test]
+    fn effective_retries_at_max_is_not_clamped() {
+        // Negative-space boundary: exactly at the maximum must not trigger
+        // the clamp path (it is not "greater than" the maximum).
+        let at_max = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: Some(MAX_WEBHOOK_RETRIES),
+        };
+        assert_eq!(at_max.effective_retries(), MAX_WEBHOOK_RETRIES);
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_default_config() {
+        let config = AppConfig::default();
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "well-formed config must validate: {result:?}"
+        );
+        assert_eq!(config.server.role, "all");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_role() {
+        let mut config = AppConfig::default();
+        config.server.role = "exchang".to_string();
+
+        let err = config.validate().expect_err("typo'd role must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("server.role"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("exchang"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_unparseable_access_token_ttl() {
+        let mut config = AppConfig::default();
+        config.token.access_token_ttl = "not-a-duration".to_string();
+
+        let err = config.validate().expect_err("bad TTL must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("token.access_token_ttl"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("not-a-duration"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Negative-space: an unparseable `server.request_timeout` must fail `validate` (and
+    /// therefore `load_config`/`parse_config`, which call it before anything else is built)
+    /// rather than being absorbed and silently falling back to `DEFAULT_REQUEST_TIMEOUT`.
+    #[test]
+    fn validate_rejects_unparseable_request_timeout() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "not-a-duration".to_string();
+
+        let err = config
+            .validate()
+            .expect_err("bad request_timeout must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("server.request_timeout"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("not-a-duration"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_overflowing_refresh_token_ttl() {
+        let mut config = AppConfig::default();
+        config.token.refresh_token_ttl = format!("{}d", u64::MAX);
+
+        let err = config
+            .validate()
+            .expect_err("overflowing TTL must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("token.refresh_token_ttl"),
+                    "detail must name the field: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bare_wildcard_allowlist_entry() {
+        let mut config = AppConfig::default();
+        config.registration.domain_allowlist = Some(vec!["*".to_string()]);
+
+        let err = config.validate().expect_err("bare * must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("domain_allowlist"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains('*'),
+                    "detail must echo the offending entry: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_dotless_wildcard_allowlist_entry() {
+        let mut config = AppConfig::default();
+        config.registration.domain_allowlist = Some(vec!["*example.com".to_string()]);
+
+        let err = config
+            .validate()
+            .expect_err("dotless *-prefix must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("domain_allowlist"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("*example.com"),
+                    "detail must echo the offending entry: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_exact_and_wildcard_allowlist_entries() {
+        let mut config = AppConfig::default();
+        config.registration.domain_allowlist =
+            Some(vec!["example.com".to_string(), "*.example.com".to_string()]);
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "well-formed allowlist must pass: {result:?}"
+        );
+        assert_eq!(
+            config.registration.domain_allowlist.as_ref().unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn validate_rejects_served_internal_api_with_missing_secret() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = None;
+
+        let err = config
+            .validate()
+            .expect_err("missing secret on a served internal API must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("internal_api.shared_secret"),
+                    "detail must name the field: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_served_internal_api_with_empty_secret() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(String::new());
+
+        let err = config
+            .validate()
+            .expect_err("empty secret on a served internal API must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("internal_api.shared_secret"),
+                    "detail must name the field: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_does_not_require_secret_when_internal_api_not_served() {
+        // Role excludes the internal API even though it is "enabled".
+        let mut role_excludes = AppConfig::default();
+        role_excludes.server.role = "exchange".to_string();
+        role_excludes.internal_api.enabled = true;
+        role_excludes.internal_api.shared_secret = None;
+        assert!(
+            role_excludes.validate().is_ok(),
+            "role=exchange never serves the internal API, so no secret is required"
+        );
+
+        // Role admits the internal API but it is disabled.
+        let mut disabled = AppConfig::default();
+        disabled.server.role = "admin".to_string();
+        disabled.internal_api.enabled = false;
+        disabled.internal_api.shared_secret = None;
+        assert!(
+            disabled.validate().is_ok(),
+            "internal_api.enabled = false never serves the internal API, so no secret is required"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_served_internal_api_with_non_empty_secret() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some("shhh".to_string());
+
+        let result = config.validate();
+
+        assert!(result.is_ok(), "non-empty secret must pass: {result:?}");
+        assert!(config.internal_api.enabled);
     }
 }

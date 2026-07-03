@@ -7,6 +7,30 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Base delay (in milliseconds) for the first retry's exponential backoff.
+const BASE_BACKOFF_MS: u64 = 100;
+
+/// Maximum left-shift applied to the base delay. Bounding the shift keeps
+/// `1u64 << shift` from overflowing (and keeps the pre-clamp value from
+/// growing absurdly large) even when `retries` is set very high.
+const MAX_BACKOFF_SHIFT: u32 = 6;
+
+/// Hard ceiling on the per-attempt retry delay, regardless of attempt count.
+const MAX_BACKOFF_MS: u64 = 5_000;
+
+/// Compute the exponential backoff delay for a given retry `attempt`
+/// (1-indexed: the delay before the first retry, second retry, ...).
+///
+/// The delay doubles per attempt starting from `BASE_BACKOFF_MS`, with the
+/// shift clamped to `MAX_BACKOFF_SHIFT` so it can never overflow, and the
+/// resulting delay clamped to `MAX_BACKOFF_MS` so a large `retries` count
+/// cannot accumulate hours of sleep inside a request.
+fn backoff_delay(attempt: u32) -> std::time::Duration {
+    let shift = (attempt - 1).min(MAX_BACKOFF_SHIFT);
+    let delay_ms = BASE_BACKOFF_MS.saturating_mul(1u64 << shift);
+    std::time::Duration::from_millis(delay_ms.min(MAX_BACKOFF_MS))
+}
+
 /// Sends user lifecycle events as webhook HTTP POST requests with HMAC-SHA256 signatures.
 pub struct WebhookUserSync {
     url: String,
@@ -19,6 +43,7 @@ impl WebhookUserSync {
     pub fn new(url: String, secret: String, timeout: std::time::Duration, retries: u32) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build reqwest client");
 
@@ -47,9 +72,8 @@ impl WebhookUserSync {
         let mut last_err = None;
         for attempt in 0..=self.retries {
             if attempt > 0 {
-                // Exponential backoff: 100ms, 200ms, 400ms, ...
-                let delay = std::time::Duration::from_millis(100 * (1 << (attempt - 1)));
-                tokio::time::sleep(delay).await;
+                // Exponential backoff: 100ms, 200ms, 400ms, ... capped at MAX_BACKOFF_MS.
+                tokio::time::sleep(backoff_delay(attempt)).await;
             }
 
             match self
@@ -63,7 +87,7 @@ impl WebhookUserSync {
             {
                 Ok(resp) => {
                     let status = resp.status();
-                    if status.is_success() || status.is_redirection() {
+                    if status.is_success() {
                         return Ok(());
                     }
                     if status.is_server_error() {
@@ -148,9 +172,38 @@ mod tests {
             metadata: HashMap::new(),
             claims: HashMap::new(),
             status: oidc_exchange_core::domain::user::UserStatus::Active,
+            version: oidc_exchange_core::domain::user::INITIAL_USER_VERSION,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn test_backoff_delay_is_capped_and_never_overflows() {
+        // retries = 20: far beyond MAX_BACKOFF_SHIFT, exercising both the
+        // pre-clamp overflow guard and the post-clamp cap.
+        for attempt in 1..=20u32 {
+            let delay = backoff_delay(attempt);
+            assert!(
+                delay <= std::time::Duration::from_millis(MAX_BACKOFF_MS),
+                "attempt {attempt} produced delay {delay:?} exceeding the {MAX_BACKOFF_MS}ms cap"
+            );
+        }
+
+        // The delay must actually grow (exponentially) before it saturates,
+        // not just be clamped to the cap from the first attempt.
+        assert!(backoff_delay(1) < backoff_delay(2));
+        assert!(backoff_delay(2) < backoff_delay(3));
+
+        // Once the shift bound is reached, further attempts stay at the cap.
+        assert_eq!(
+            backoff_delay(MAX_BACKOFF_SHIFT + 1),
+            std::time::Duration::from_millis(MAX_BACKOFF_MS)
+        );
+        assert_eq!(
+            backoff_delay(20),
+            std::time::Duration::from_millis(MAX_BACKOFF_MS)
+        );
     }
 
     #[tokio::test]
@@ -270,5 +323,51 @@ mod tests {
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "should not retry on 4xx");
+    }
+
+    #[tokio::test]
+    async fn test_redirect_is_not_followed_and_is_not_retried() {
+        // A second, unmounted server: it never registers a `Mock`, so any request
+        // that reached it would be answered with wiremock's default 404 and would
+        // register as a received request. It stands in for a redirect target the
+        // operator never configured.
+        let redirect_target = MockServer::start().await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/", redirect_target.uri())),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sync = WebhookUserSync::new(
+            format!("{}/", server.uri()),
+            "secret".to_string(),
+            std::time::Duration::from_secs(5),
+            2,
+        );
+
+        let user = test_user();
+        let result = sync.notify_user_created(&user).await;
+        assert!(result.is_err(), "a 3xx must not count as delivery success");
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "a 3xx is not retried, so the configured host sees exactly one request"
+        );
+
+        let redirect_requests = redirect_target.received_requests().await.unwrap();
+        assert_eq!(
+            redirect_requests.len(),
+            0,
+            "the client must not follow redirects: the signed body is never re-sent \
+             to a location the operator did not configure"
+        );
     }
 }

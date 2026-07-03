@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
+use config::{Config, Environment, File, FileFormat, Value, ValueKind};
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::timeout::TimeoutLayer;
 
 use oidc_exchange_core::config::{AppConfig, ProviderConfig};
 use oidc_exchange_core::error::Error;
@@ -12,6 +14,7 @@ use oidc_exchange_core::ports::{
 use oidc_exchange_core::service::AppService;
 
 use crate::middleware::audit_context::audit_context_layer;
+use crate::middleware::base_path::with_base_path_strip;
 use crate::middleware::error_handler::panic_handler;
 use crate::middleware::request_id::request_id_layer;
 use crate::routes;
@@ -21,35 +24,216 @@ use crate::state::AppState;
 // Config loading
 // ---------------------------------------------------------------------------
 
+/// Name of the config directory relative to the process working directory.
+const CONFIG_DIR: &str = "config";
+
+/// Environment variable that selects the environment-specific overlay TOML
+/// (`config/{OIDC_EXCHANGE_ENV}.toml`), e.g. `production`, `sqlite-only`.
+const ENV_SELECTOR_VAR: &str = "OIDC_EXCHANGE_ENV";
+
+/// Prefix required on environment variables that structurally override the
+/// merged config (`OIDC_EXCHANGE__{section}__{key}`).
+const ENV_OVERRIDE_PREFIX: &str = "OIDC_EXCHANGE";
+
+/// Separator between path segments in `OIDC_EXCHANGE__{section}__{key}`
+/// environment overrides. A double underscore separates segments; a single
+/// underscore stays inside a segment (`OIDC_EXCHANGE__PROVIDERS__MY_IDP__…`
+/// addresses `providers.my_idp`).
+const ENV_OVERRIDE_SEPARATOR: &str = "__";
+
+/// Sane upper bound, in seconds, on `server.request_timeout`: a value above this is almost
+/// certainly a misconfiguration (e.g. a stray extra digit, or a TTL-style string pasted into
+/// the wrong key) rather than an intentionally very slow deployment, so
+/// [`request_timeout_duration`] asserts the parsed value never exceeds it. One hour is far
+/// beyond any sane per-request bound for this service's synchronous HTTP handlers.
+const REQUEST_TIMEOUT_MAX_SECS: u64 = 60 * 60;
+
+/// Upper bound, in bytes, on how far the placeholder resolver scans past a
+/// `${` opener looking for its closing `}` before giving up and treating the
+/// `${` as ordinary text. Environment variable names are short; this bounds
+/// the scan so a stray `${` inside free-form config text (e.g. a URL query
+/// string) can never force an unbounded scan.
+const PLACEHOLDER_NAME_LEN_MAX: usize = 256;
+
 /// Load configuration from config files on disk, using the `OIDC_EXCHANGE_ENV`
-/// environment variable to select the environment-specific config file.
+/// environment variable to select the environment-specific config file, and
+/// `OIDC_EXCHANGE__{section}__{key}` environment variables to override the
+/// merged result afterward.
 pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let env = std::env::var("OIDC_EXCHANGE_ENV").unwrap_or_else(|_| "default".to_string());
+    load_config_from_dir(CONFIG_DIR)
+}
 
-    // Try to read config files
-    let default_config = std::fs::read_to_string("config/default.toml").unwrap_or_default();
-    let env_config = std::fs::read_to_string(format!("config/{}.toml", env)).unwrap_or_default();
+/// Core of [`load_config`], parameterized over the config directory so tests
+/// can point it at a fixture directory instead of the process's `config/`.
+///
+/// Loading order:
+/// 1. `{config_dir}/default.toml` — compiled-in defaults (missing file is not
+///    an error).
+/// 2. `{config_dir}/{OIDC_EXCHANGE_ENV}.toml` — deep-merged on top when
+///    `OIDC_EXCHANGE_ENV` is set and non-empty (tables merge recursively,
+///    scalars/arrays are replaced; missing/empty file is not an error).
+/// 3. `OIDC_EXCHANGE__{section}__{key}` environment variables, applied on top
+///    of the merged TOML and reaching every path including map-valued
+///    sections.
+/// 4. `${VAR_NAME}` placeholders anywhere in the merged config are resolved
+///    from the environment; an unset variable is a fail-closed `ConfigError`
+///    naming it, and `$${` escapes to a literal `${` rather than opening a
+///    placeholder (see [`resolve_placeholders`]).
+///
+/// After deserialization, [`AppConfig::validate`] runs over the fully
+/// merged, fully resolved config (role, TTLs, allowlist, internal API
+/// secret) and a failure aborts before any adapter or router is built.
+///
+/// With no files present and no overriding environment variables, the
+/// deserialized result is `AppConfig::default()` (every field carries
+/// `#[serde(default)]`).
+fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let mut builder = Config::builder().add_source(
+        File::with_name(&format!("{config_dir}/default"))
+            .format(FileFormat::Toml)
+            .required(false),
+    );
 
-    // Use the env-specific config if it exists, otherwise fall back to default.
-    let merged = if env_config.is_empty() {
-        default_config
-    } else {
-        env_config
-    };
-
-    if merged.is_empty() {
-        // No config files found — fall back to compiled-in defaults
-        return Ok(AppConfig::default());
+    if let Ok(env) = std::env::var(ENV_SELECTOR_VAR) {
+        if !env.is_empty() {
+            builder = builder.add_source(
+                File::with_name(&format!("{config_dir}/{env}"))
+                    .format(FileFormat::Toml)
+                    .required(false),
+            );
+        }
     }
 
-    let config: AppConfig = toml::from_str(&merged)?;
+    builder = builder.add_source(
+        Environment::with_prefix(ENV_OVERRIDE_PREFIX)
+            .separator(ENV_OVERRIDE_SEPARATOR)
+            .try_parsing(true),
+    );
+
+    let mut merged = builder.build()?;
+    resolve_placeholders(&mut merged.cache)?;
+    let config: AppConfig = merged.try_deserialize()?;
+    config.validate()?;
     Ok(config)
 }
 
-/// Parse a TOML string directly into an `AppConfig`.
+/// Parse a TOML string directly into an `AppConfig`, validating it exactly as
+/// [`load_config`] does so that config supplied through the FFI bindings
+/// (`OidcExchange::new`/`from_file`) is rejected at construction on the same
+/// terms as an invalid config on disk would be rejected at server startup.
 pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let config: AppConfig = toml::from_str(toml_str)?;
+    config.validate()?;
     Ok(config)
+}
+
+// ---------------------------------------------------------------------------
+// Placeholder resolution
+// ---------------------------------------------------------------------------
+
+/// Recursively walk every string value in a merged `config::Value` tree,
+/// resolving `${VAR}` placeholders from the environment in place.
+///
+/// Fails closed: a placeholder naming an unset environment variable aborts
+/// the whole resolution with `Error::ConfigError` — the literal placeholder
+/// text must never survive into a live secret. `$${` is the escape for a
+/// literal `${`; the escaped text is never looked up in the environment.
+fn resolve_placeholders(value: &mut Value) -> Result<(), Error> {
+    match &mut value.kind {
+        ValueKind::String(s) => {
+            *s = resolve_placeholders_in_str(s)?;
+        }
+        ValueKind::Table(table) => {
+            for nested in table.values_mut() {
+                resolve_placeholders(nested)?;
+            }
+        }
+        ValueKind::Array(items) => {
+            for item in items.iter_mut() {
+                resolve_placeholders(item)?;
+            }
+        }
+        // Non-string scalars (bool, numbers, nil) carry no placeholders.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Resolve every `${VAR}` placeholder and `$${` escape inside a single
+/// string, returning the rewritten string.
+fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
+    let bytes = input.as_bytes();
+    let mut output = String::with_capacity(input.len());
+    let mut i = 0;
+
+    // Bounded by `bytes.len()`, not recursive: each iteration consumes at
+    // least one byte (asserted below), so the loop always terminates.
+    while i < bytes.len() {
+        let before = i;
+
+        // Escape: `$${` rewrites to a literal `${` and is never treated as a
+        // placeholder opener, even for the `{` it consumes.
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'$') && bytes.get(i + 2) == Some(&b'{') {
+            output.push_str("${");
+            i += 3;
+            debug_assert!(i > before, "escape branch must consume input");
+            continue;
+        }
+
+        // Placeholder open: `${NAME}`.
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
+            if let Some((name, consumed)) = scan_placeholder_name(&input[i + 2..]) {
+                let resolved = std::env::var(name).map_err(|_| Error::ConfigError {
+                    detail: format!(
+                        "config placeholder '${{{name}}}' references unset environment \
+                         variable '{name}'"
+                    ),
+                })?;
+                output.push_str(&resolved);
+                i += 2 + consumed;
+                debug_assert!(i > before, "placeholder branch must consume input");
+                continue;
+            }
+        }
+
+        // Ordinary text: copy one full UTF-8 scalar value forward. `i` is
+        // guaranteed to sit on a char boundary here because every branch
+        // above only ever advances `i` past whole ASCII marker sequences.
+        let ch = input[i..]
+            .chars()
+            .next()
+            .expect("non-empty remainder has a leading char");
+        output.push(ch);
+        i += ch.len_utf8();
+        debug_assert!(i > before, "ordinary-text branch must consume input");
+    }
+
+    assert!(
+        i == bytes.len(),
+        "resolver must consume the whole input, not overrun or stop short"
+    );
+    Ok(output)
+}
+
+/// Scan forward from just past a `${` opener for its closing `}`, bounded by
+/// [`PLACEHOLDER_NAME_LEN_MAX`]. Returns the placeholder name and the number
+/// of bytes consumed (name plus the closing brace), or `None` when no `}` is
+/// found within the bound — in which case the `${` is left as ordinary text
+/// rather than treated as a malformed placeholder.
+fn scan_placeholder_name(rest: &str) -> Option<(&str, usize)> {
+    let bytes = rest.as_bytes();
+    let scan_bound = bytes.len().min(PLACEHOLDER_NAME_LEN_MAX);
+    let close = bytes[..scan_bound].iter().position(|&b| b == b'}')?;
+    let consumed = close + 1;
+    debug_assert!(
+        consumed <= PLACEHOLDER_NAME_LEN_MAX + 1,
+        "consumed byte count must stay within the declared scan bound"
+    );
+    debug_assert!(
+        &rest[close..consumed] == "}",
+        "must stop exactly on the closing brace"
+    );
+    Some((&rest[..close], consumed))
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +290,39 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 
 /// Build the Axum `Router` from a config and service, applying role-based
 /// route merging and middleware layers.
+///
+/// The internal routes (`/internal/*`) are mounted only when the role is
+/// `admin`/`all` **and** `internal_api.enabled = true`; the flag being false
+/// is not a startup error, it simply leaves the internal surface unmounted
+/// (`AppConfig::validate` already requires a non-empty shared secret whenever
+/// the flag is true and the role would serve it, so a missing/empty secret
+/// is caught at startup, never discovered by an unauthenticated request).
+///
+/// Middleware stack, outermost first (`04-http-api.md` → Middleware stack): base-path strip,
+/// request-id, request-timeout, audit-context, catch-panic. Axum/tower give the *last*
+/// `.layer()` call the outermost position (it wraps every layer added before it as its
+/// `next`), so the code below applies the per-route layers in the reverse of that list —
+/// catch-panic first (innermost, nearest the handler), then audit-context, then the timeout
+/// layer, then request-id last (outermost among them). This ordering is what makes a
+/// request-timeout response still carry the `x-request-id` header: because request-id wraps
+/// the timeout layer, its header-insertion code always runs on whatever `next.run()`
+/// produces, including the timeout layer's own manufactured `408` when the inner future is
+/// abandoned — whereas a layer *outside* request-id would have its future abandoned right
+/// along with the rest and never see the response at all. The timeout layer itself wraps
+/// audit-context and catch-panic so the bound covers them and the handler, not just the
+/// handler.
+///
+/// The base-path strip is applied *last*, wrapping the entire already-assembled, already-
+/// stated router from the outside via [`crate::middleware::base_path::with_base_path_strip`]
+/// — not as one more `.layer()` call. `Router::layer` only wraps each already-registered
+/// route's endpoint, which runs *after* axum has already decided which route (if any) matches
+/// the request's current path; a layer added that way can never influence *which* route is
+/// chosen, so it cannot be used to strip a prefix that needs to affect the routing decision
+/// itself (`/prod/health` → `/health`). Wrapping the whole router from the outside is the one
+/// way to rewrite the path early enough. This is applied unconditionally on this one shared
+/// path used by both the hyper and Lambda runtimes — when `config.server.base_path` is `None`
+/// the wrapper still runs on every request but is a pure pass-through, so there is no separate
+/// Lambda-only branch that installs it only sometimes.
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     let role = config.server.role.as_str();
 
@@ -119,22 +336,63 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     if role == "exchange" || role == "all" {
         app = app.merge(routes::public_routes());
     }
-    if role == "admin" || role == "all" {
+    if (role == "admin" || role == "all") && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
-        // Ensure /health is available even in admin-only mode
-        // (only add if not already present from public_routes)
-        if role == "admin" {
-            app = app.route(
-                "/health",
-                axum::routing::get(routes::health::health_handler),
-            );
-        }
+    }
+    if role == "admin" {
+        // Ensure /health is available even in admin-only mode, whether or
+        // not the internal API is enabled — "admin" never merges
+        // `public_routes`, which is the only other source of `/health`.
+        app = app.route(
+            "/health",
+            axum::routing::get(routes::health::health_handler),
+        );
     }
 
-    app.layer(axum::middleware::from_fn(request_id_layer))
-        .layer(axum::middleware::from_fn(audit_context_layer))
+    let router = app
         .layer(CatchPanicLayer::custom(panic_handler))
-        .with_state(state)
+        .layer(axum::middleware::from_fn(audit_context_layer))
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            request_timeout_duration(config),
+        ))
+        .layer(axum::middleware::from_fn(request_id_layer))
+        .with_state(state);
+
+    with_base_path_strip(router, config.server.base_path.clone())
+}
+
+/// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
+/// from — entry 2 of the outermost-first middleware ordering (inside the request-id layer,
+/// so a timeout response still carries the request id; outside audit-context and
+/// catch-panic, so the bound covers the remaining middleware and the handler).
+///
+/// Every production entry point (`load_config`, `parse_config`) runs `AppConfig::validate`
+/// — which parses this same field via [`oidc_exchange_core::service::parse_duration_secs`] —
+/// before a router is ever built, so an unparseable value fails config loading closed rather
+/// than reaching this function. Reaching it here anyway (e.g. a hand-built `AppConfig` in a
+/// test that skipped `validate`) is treated as a programmer error and panics loudly instead
+/// of silently substituting [`oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT`].
+fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
+    let secs = oidc_exchange_core::service::parse_duration_secs(&config.server.request_timeout)
+        .unwrap_or_else(|err| {
+            panic!(
+                "server.request_timeout {:?} is invalid: {err} (AppConfig::validate should \
+                     have rejected this before build_router was ever called)",
+                config.server.request_timeout
+            )
+        });
+    assert!(
+        secs > 0,
+        "parsed request_timeout must be non-zero, got {secs}s from {:?}",
+        config.server.request_timeout
+    );
+    assert!(
+        secs <= REQUEST_TIMEOUT_MAX_SECS,
+        "parsed request_timeout of {secs}s from {:?} exceeds the sane upper bound of {REQUEST_TIMEOUT_MAX_SECS}s",
+        config.server.request_timeout
+    );
+    std::time::Duration::from_secs(secs)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +443,7 @@ async fn build_user_repository(
             let pool = oidc_exchange_adapters::postgres::create_pool(
                 &pg_cfg.url,
                 pg_cfg.max_connections.unwrap_or(5),
+                pg_cfg.run_migrations.unwrap_or(true),
             )
             .await?;
             Ok(Box::new(
@@ -244,6 +503,7 @@ async fn build_session_repository(
             let pool = oidc_exchange_adapters::postgres::create_pool(
                 &pg_cfg.url,
                 pg_cfg.max_connections.unwrap_or(5),
+                pg_cfg.run_migrations.unwrap_or(true),
             )
             .await?;
             Ok(Box::new(
@@ -433,7 +693,7 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
                     }
                 })
                 .unwrap_or(5);
-            let retries = wh_cfg.retries.unwrap_or(2);
+            let retries = wh_cfg.effective_retries();
 
             Ok(Box::new(
                 oidc_exchange_adapters::webhook::WebhookUserSync::new(
@@ -535,4 +795,945 @@ fn provider_config_to_oidc(
         scopes,
         additional_params: HashMap::new(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Config loading tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod load_config_tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    /// Sets one or more environment variables for the duration of a test and
+    /// removes them on drop (including when a later assertion panics), so
+    /// config-loading tests never leak process-global env state.
+    struct EnvVarGuard {
+        keys: Vec<&'static str>,
+    }
+
+    impl EnvVarGuard {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let keys = vars.iter().map(|(key, _)| *key).collect();
+            for (key, value) in vars {
+                std::env::set_var(key, value);
+            }
+            Self { keys }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            for key in &self.keys {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    fn write_toml(dir: &Path, stem: &str, contents: &str) {
+        fs::write(dir.join(format!("{stem}.toml")), contents).expect("write fixture toml");
+    }
+
+    fn dir_str(dir: &Path) -> &str {
+        dir.to_str().expect("fixture dir path is valid UTF-8")
+    }
+
+    #[test]
+    fn overlay_merges_over_default_rather_than_replacing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "0.0.0.0"
+                port = 8080
+
+                [registration]
+                mode = "open"
+            "#,
+        );
+        write_toml(
+            dir.path(),
+            "overlay-env",
+            r#"
+                [server]
+                port = 9090
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE_ENV", "overlay-env")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        // A key present only in default.toml survives the overlay...
+        assert_eq!(config.server.host, "0.0.0.0");
+        assert_eq!(config.registration.mode, "open");
+        // ...while a key set in both takes the overlay's value.
+        assert_eq!(config.server.port, 9090);
+    }
+
+    #[test]
+    fn env_var_override_reaches_nested_and_map_valued_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                port = 8080
+
+                [providers.google]
+                adapter = "oidc"
+                client_id = "default-client"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[
+            (
+                "OIDC_EXCHANGE__PROVIDERS__GOOGLE__CLIENT_ID",
+                "overridden-client",
+            ),
+            ("OIDC_EXCHANGE__SERVER__PORT", "9999"),
+        ]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(config.server.port, 9999);
+        let google = config.providers.get("google").expect("google provider");
+        assert_eq!(google.adapter, "oidc", "unrelated fields survive the merge");
+        assert_eq!(
+            google.extra.get("client_id").and_then(|v| v.as_str()),
+            Some("overridden-client")
+        );
+    }
+
+    #[test]
+    fn single_underscore_provider_name_is_addressable_not_split() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [providers.my_idp]
+                adapter = "oidc"
+                client_id = "a"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE__PROVIDERS__MY_IDP__CLIENT_ID", "b")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(
+            config.providers.len(),
+            1,
+            "my_idp must address a single provider entry, not split into extra segments"
+        );
+        let provider = config
+            .providers
+            .get("my_idp")
+            .expect("my_idp provider present under its full, unsplit name");
+        assert_eq!(
+            provider.extra.get("client_id").and_then(|v| v.as_str()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn missing_config_files_fall_back_to_compiled_in_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No files written at all, and no OIDC_EXCHANGE_ENV set.
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+        let defaults = AppConfig::default();
+
+        assert_eq!(config.server.host, defaults.server.host);
+        assert_eq!(config.server.port, defaults.server.port);
+        assert_eq!(config.registration.mode, defaults.registration.mode);
+        assert_eq!(
+            config.token.access_token_ttl,
+            defaults.token.access_token_ttl
+        );
+    }
+
+    #[test]
+    fn missing_or_empty_env_overlay_file_is_not_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "10.0.0.1"
+            "#,
+        );
+        // Present but empty overlay file.
+        write_toml(dir.path(), "empty-env", "");
+
+        {
+            let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE_ENV", "empty-env")]);
+            let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+            assert_eq!(config.server.host, "10.0.0.1");
+        }
+
+        // Overlay file that does not exist on disk at all.
+        let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE_ENV", "does-not-exist")]);
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+        assert_eq!(config.server.host, "10.0.0.1");
+    }
+
+    /// End-to-end reviewability case: all three layers (default TOML, env
+    /// overlay TOML, and an `OIDC_EXCHANGE__…` var) are exercised together,
+    /// and the merged `AppConfig` carries the untouched default alongside
+    /// the overlaid and env-overridden values.
+    #[test]
+    fn default_overlay_and_env_var_all_apply_together() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "0.0.0.0"
+                port = 8080
+
+                [registration]
+                mode = "open"
+            "#,
+        );
+        write_toml(
+            dir.path(),
+            "full-stack",
+            r#"
+                [server]
+                port = 9090
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[
+            ("OIDC_EXCHANGE_ENV", "full-stack"),
+            ("OIDC_EXCHANGE__SERVER__HOST", "203.0.113.5"),
+        ]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        // Untouched by either overlay or env var — the compiled default TOML value.
+        assert_eq!(config.registration.mode, "open");
+        // Set by the env overlay TOML, not present in the env var.
+        assert_eq!(config.server.port, 9090);
+        // Set by the OIDC_EXCHANGE__ env var, on top of the overlay and default.
+        assert_eq!(config.server.host, "203.0.113.5");
+    }
+
+    // -----------------------------------------------------------------
+    // Placeholder resolution
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn set_var_placeholder_resolves_to_its_environment_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("INTERNAL_API_SECRET", "super-secret-value")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("super-secret-value")
+        );
+        assert_ne!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("${INTERNAL_API_SECRET}"),
+            "the literal placeholder must never survive resolution"
+        );
+    }
+
+    #[test]
+    fn unset_var_placeholder_fails_closed_and_produces_no_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        );
+        // Make sure the variable really is unset for this process (nextest
+        // runs each test in its own process, so this cannot race a sibling
+        // test that sets the same name).
+        std::env::remove_var("INTERNAL_API_SECRET");
+
+        let result = load_config_from_dir(dir_str(dir.path()));
+
+        let err = result.expect_err("an unset placeholder variable must fail closed, not load");
+        assert!(
+            err.to_string().contains("INTERNAL_API_SECRET"),
+            "the error must name the missing variable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn escaped_placeholder_yields_literal_dollar_brace_without_env_lookup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "$${LITERAL_NOT_A_VAR}"
+            "#,
+        );
+        // LITERAL_NOT_A_VAR is deliberately left unset: if `$${` were ever
+        // treated as a placeholder opener instead of an escape, resolution
+        // would fail closed here instead of loading.
+        std::env::remove_var("LITERAL_NOT_A_VAR");
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("${LITERAL_NOT_A_VAR}")
+        );
+        assert_ne!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("$${LITERAL_NOT_A_VAR}"),
+            "the escape's leading '$$' must be collapsed to a single '$'"
+        );
+    }
+
+    #[test]
+    fn value_without_a_placeholder_is_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                host = "plain-value.example.com"
+            "#,
+        );
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        assert_eq!(config.server.host, "plain-value.example.com");
+        assert_eq!(config.server.port, AppConfig::default().server.port);
+    }
+
+    #[test]
+    fn placeholder_inside_a_nested_map_valued_section_resolves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [providers.google]
+                adapter = "oidc"
+                client_secret = "${GOOGLE_CLIENT_SECRET}"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("GOOGLE_CLIENT_SECRET", "nested-secret")]);
+
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+
+        let google = config
+            .providers
+            .get("google")
+            .expect("google provider present");
+        assert_eq!(google.adapter, "oidc");
+        assert_eq!(
+            google.extra.get("client_secret").and_then(|v| v.as_str()),
+            Some("nested-secret")
+        );
+    }
+
+    /// End-to-end reviewability case: a set variable resolves, an unset one
+    /// aborts naming itself, and the escape produces a literal — the exact
+    /// scenario in the task's Definition of done.
+    #[test]
+    fn set_unset_and_escaped_placeholders_together_match_reviewable_scenario() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${SET_VAR}"
+                auth_method = "${UNSET_VAR}"
+            "#,
+        );
+        let _guard = EnvVarGuard::set(&[("SET_VAR", "resolved-value")]);
+        std::env::remove_var("UNSET_VAR");
+
+        let err = load_config_from_dir(dir_str(dir.path()))
+            .expect_err("UNSET_VAR must fail the whole load closed");
+        assert!(
+            err.to_string().contains("UNSET_VAR"),
+            "the error must name the unset variable, got: {err}"
+        );
+
+        // Replace the unset placeholder with the escape form and reload —
+        // the set variable still resolves and the escape becomes a literal.
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [internal_api]
+                shared_secret = "${SET_VAR}"
+                auth_method = "$${LITERAL}"
+            "#,
+        );
+        let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("resolved-value")
+        );
+        assert_eq!(
+            config.internal_api.auth_method.as_deref(),
+            Some("${LITERAL}")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Validation wiring
+    // -----------------------------------------------------------------
+
+    /// A config with an invalid `server.role` must fail `load_config`
+    /// itself — validation runs on the fully merged, fully resolved
+    /// config, before any adapter or router is built.
+    #[test]
+    fn load_config_rejects_invalid_role_before_building_anything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                role = "exchang"
+            "#,
+        );
+
+        let err = load_config_from_dir(dir_str(dir.path()))
+            .expect_err("an unknown server.role must be rejected at load, not absorbed");
+
+        assert!(
+            err.to_string().contains("role"),
+            "the error must name the offending field, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("exchang"),
+            "the error must name the offending value, got: {err}"
+        );
+    }
+
+    /// A well-formed config must still load successfully once validation is
+    /// wired in — the negative-space test above only proves half the
+    /// contract without this counterpart.
+    #[test]
+    fn load_config_accepts_valid_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            r#"
+                [server]
+                role = "exchange"
+
+                [registration]
+                domain_allowlist = ["example.com", "*.example.org"]
+            "#,
+        );
+
+        let config = load_config_from_dir(dir_str(dir.path()))
+            .expect("a well-formed config must load and validate successfully");
+
+        assert_eq!(config.server.role, "exchange");
+        assert_eq!(
+            config.registration.domain_allowlist,
+            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+        );
+    }
+
+    /// `parse_config` (the FFI entry point) must reject the same invalid
+    /// config as `load_config`, so `OidcExchange::new`/`from_file` fail at
+    /// construction rather than at request time.
+    #[test]
+    fn parse_config_rejects_invalid_role() {
+        let toml_str = r#"
+            [server]
+            role = "bogus"
+        "#;
+
+        let err =
+            parse_config(toml_str).expect_err("an unknown server.role must be rejected at parse");
+
+        assert!(
+            err.to_string().contains("role"),
+            "the error must name the offending field, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("bogus"),
+            "the error must name the offending value, got: {err}"
+        );
+    }
+
+    /// A well-formed config must still parse successfully through the FFI
+    /// entry point.
+    #[test]
+    fn parse_config_accepts_valid_config() {
+        let toml_str = r#"
+            [server]
+            role = "all"
+        "#;
+
+        let config = parse_config(toml_str).expect("a well-formed config must parse and validate");
+
+        assert_eq!(config.server.role, "all");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_router tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod build_router_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use std::collections::HashMap;
+    use tower::ServiceExt;
+
+    use oidc_exchange_core::ports::IdentityProvider;
+    use oidc_exchange_test_utils::{
+        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    };
+
+    const TEST_SECRET: &str = "test-internal-secret-build-router";
+
+    /// Build an `AppService` backed entirely by in-memory mocks, matching
+    /// the given `AppConfig`.
+    fn build_test_service(config: &AppConfig) -> AppService {
+        let provider = MockIdentityProvider::new("test");
+        let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+        providers.insert("test".to_string(), Box::new(provider));
+
+        AppService::new(
+            Box::new(MockRepository::new()),
+            Box::new(MockRepository::new()),
+            Box::new(MockKeyManager::new()),
+            Box::new(MockAuditLog::new()),
+            Box::new(MockUserSync::new()),
+            providers,
+            config.clone(),
+        )
+    }
+
+    async fn get(app: Router, uri: &str, bearer: Option<&str>) -> StatusCode {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(token) = bearer {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let response = app
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        response.status()
+    }
+
+    async fn body_to_json(body: Body) -> serde_json::Value {
+        let bytes = body.collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// `internal_api.enabled = true` with role `admin` mounts `/internal/*`
+    /// behind the Bearer check: reachable with the right token, 401 without.
+    #[tokio::test]
+    async fn enabled_true_admin_mounts_internal_behind_bearer_auth() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(
+            get(app.clone(), "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::OK,
+            "the correct bearer token must reach the internal handler"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", None).await,
+            StatusCode::UNAUTHORIZED,
+            "a missing bearer token must be rejected"
+        );
+    }
+
+    /// `internal_api.enabled = true` with role `all` mounts both the public
+    /// routes and `/internal/*` behind the Bearer check.
+    #[tokio::test]
+    async fn enabled_true_all_mounts_public_and_internal() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(app, "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::OK
+        );
+    }
+
+    /// `internal_api.enabled = false` mounts no `/internal/*` route for
+    /// `role = "admin"`, which instead serves only `/health` — startup must
+    /// not error and the instance stays observable.
+    #[tokio::test]
+    async fn enabled_false_admin_serves_only_health_no_internal_routes() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = false;
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(
+            get(app.clone(), "/health", None).await,
+            StatusCode::OK,
+            "an admin instance must stay observable via /health"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", Some("irrelevant")).await,
+            StatusCode::NOT_FOUND,
+            "with the flag off, /internal/* must not be mounted at all, not merely unauthorized"
+        );
+    }
+
+    /// `internal_api.enabled = false` with role `all` still mounts the
+    /// public routes and `/health`, but no `/internal/*` route.
+    #[tokio::test]
+    async fn enabled_false_all_serves_public_and_health_no_internal_routes() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = false;
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(app.clone(), "/keys", None).await,
+            StatusCode::OK,
+            "public routes must still be mounted"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", Some("irrelevant")).await,
+            StatusCode::NOT_FOUND,
+            "with the flag off, /internal/* must not be mounted at all"
+        );
+    }
+
+    /// An empty configured `shared_secret` must never be treated as
+    /// "configured" by the auth middleware, even when the request supplies
+    /// an equally empty bearer token — defence in depth alongside
+    /// `AppConfig::validate`, which already refuses to start a role that
+    /// serves the internal API with an empty secret.
+    #[tokio::test]
+    async fn empty_shared_secret_is_never_accepted_as_configured() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(String::new());
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/internal/stats")
+            .header("authorization", "Bearer ")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let json = body_to_json(response.into_body()).await;
+        assert_eq!(json["error_description"], "internal API not configured");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request-timeout layer tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod request_timeout_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    /// `request_timeout_duration` resolves the config default (`"30s"`) to exactly 30
+    /// seconds — the value `06-configuration.md`'s Defaults summary documents.
+    #[test]
+    fn request_timeout_duration_resolves_documented_default() {
+        let config = AppConfig::default();
+
+        let duration = request_timeout_duration(&config);
+
+        assert_eq!(duration, Duration::from_secs(30));
+        assert_eq!(
+            config.server.request_timeout,
+            oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT
+        );
+    }
+
+    /// An overridden `server.request_timeout` parses to the matching `Duration`, not just
+    /// the default.
+    #[test]
+    fn request_timeout_duration_resolves_configured_override() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "2m".to_string();
+
+        let duration = request_timeout_duration(&config);
+
+        assert_eq!(duration, Duration::from_secs(120));
+    }
+
+    /// Negative-space: an unparseable `server.request_timeout` must panic rather than
+    /// silently building a `TimeoutLayer` from a fallback duration — `AppConfig::validate`
+    /// is expected to have already rejected this at config load, so reaching this function
+    /// with a bad value is a programmer error that must fail loudly.
+    #[test]
+    fn request_timeout_duration_panics_on_unparseable_value() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "not-a-duration".to_string();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            request_timeout_duration(&config)
+        }));
+
+        assert!(
+            result.is_err(),
+            "an unparseable request_timeout must panic, not silently default"
+        );
+    }
+
+    /// Negative-space: a zero-second `request_timeout` — a value `parse_duration_secs`
+    /// happily parses but that would time out every request instantly — must trip the
+    /// non-zero assertion in `request_timeout_duration` rather than build a degenerate
+    /// `TimeoutLayer`.
+    #[test]
+    fn request_timeout_duration_panics_on_zero_seconds() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "0s".to_string();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            request_timeout_duration(&config)
+        }));
+
+        assert!(
+            result.is_err(),
+            "a zero-second request_timeout must panic rather than build a degenerate timeout \
+             layer"
+        );
+    }
+
+    /// Builds the same middleware ordering `build_router` installs — request-id, then the
+    /// timeout layer, then audit-context, then catch-panic — around two bare test handlers,
+    /// so the layer-ordering contract (timeout inside request-id, outside everything else)
+    /// is exercised directly against a slow and a fast handler.
+    fn timeout_test_app(timeout: Duration) -> Router {
+        async fn fast_handler() -> &'static str {
+            "ok"
+        }
+        async fn slow_handler() -> &'static str {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            "too slow to ever return"
+        }
+
+        // Mirrors `build_router`'s exact layer ordering (see its doc comment): applied
+        // innermost first, so request-id ends up outermost and the timeout layer sits
+        // between it and audit-context/catch-panic.
+        Router::new()
+            .route("/fast", get(fast_handler))
+            .route("/slow", get(slow_handler))
+            .layer(CatchPanicLayer::custom(panic_handler))
+            .layer(axum::middleware::from_fn(audit_context_layer))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                timeout,
+            ))
+            .layer(axum::middleware::from_fn(request_id_layer))
+    }
+
+    /// A handler that runs longer than `server.request_timeout` is aborted with `408`, and
+    /// — because the timeout layer sits inside the request-id layer — the response still
+    /// carries the echoed `x-request-id` header.
+    #[tokio::test]
+    async fn slow_handler_past_timeout_yields_408_with_request_id() {
+        let app = timeout_test_app(Duration::from_millis(50));
+
+        let response = app
+            .oneshot(Request::get("/slow").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            response.headers().get("x-request-id").is_some(),
+            "a timeout response must still carry the request id: the timeout layer sits \
+             inside (nearer the handler than) the request-id layer, so request-id processes \
+             the response on the way back out"
+        );
+    }
+
+    /// A handler that finishes well under `server.request_timeout` completes normally with
+    /// `200`, proving the timeout layer does not interfere with ordinary fast requests.
+    #[tokio::test]
+    async fn fast_handler_under_timeout_yields_200() {
+        let app = timeout_test_app(Duration::from_millis(50));
+
+        let response = app
+            .oneshot(Request::get("/fast").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().get("x-request-id").is_some(),
+            "a normal response must still carry the request id"
+        );
+    }
+}
+
+/// Exercises `build_user_repository`/`build_session_repository`'s `postgres` arms end to
+/// end — through the same `AppConfig` plumbing a real bootstrap uses — rather than calling
+/// `oidc_exchange_adapters::postgres::create_pool` directly (which the adapter's own gated
+/// suite already covers). This is the layer that changed in this task: reading
+/// `pg_cfg.run_migrations` out of config and threading it into `create_pool`, for both the
+/// user and session pools.
+#[cfg(test)]
+mod postgres_bootstrap_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use oidc_exchange_core::config::PostgresConfig;
+    use oidc_exchange_core::domain::{NewUser, Session};
+    use uuid::Uuid;
+
+    /// An `AppConfig` whose user repository (and, since `session_repository.adapter` is
+    /// left unset, the session repository via its documented fallback) both target
+    /// Postgres at `url`, with `run_migrations` left as given.
+    fn postgres_config(url: &str, run_migrations: Option<bool>) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.repository.adapter = "postgres".to_string();
+        config.repository.postgres = Some(PostgresConfig {
+            url: url.to_string(),
+            max_connections: None,
+            run_migrations,
+        });
+        config
+    }
+
+    /// Gated on `DATABASE_URL` (skips cleanly, not a failure, when unset, so
+    /// `cargo nextest run --workspace` stays green without a live database configured).
+    ///
+    /// Manual boot check when `DATABASE_URL` is unset: start Postgres (e.g.
+    /// `docker compose -f examples/linux-postgres/docker-compose.yml up -d`), point
+    /// `[repository.postgres].url` at it with `repository.adapter = "postgres"` and no
+    /// `[session_repository]` override, boot the server against a fresh database, and
+    /// confirm a request that touches the repository (e.g. registering a user) succeeds
+    /// instead of 500ing; then set `run_migrations = false` against that same
+    /// already-migrated database and confirm startup still connects and serves requests.
+    ///
+    /// With `run_migrations` left absent, both `build_user_repository` and
+    /// `build_session_repository` must leave a fresh database serviceable: the DDL is
+    /// idempotent, so the session pool's migration run is a no-op over what the user
+    /// pool already created.
+    #[tokio::test]
+    async fn postgres_bootstrap_migrates_both_pools_and_is_serviceable_on_startup() {
+        let Ok(base_url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping postgres_bootstrap_migrates_both_pools_and_is_serviceable_on_startup: \
+                 DATABASE_URL is not set"
+            );
+            return;
+        };
+
+        let config = postgres_config(&base_url, None);
+
+        // Build and exercise the user pool alone first, before the session pool is built,
+        // so a wiring regression confined to `build_user_repository` (e.g. a hard-coded
+        // `false` slipping back in) cannot be masked by the session pool's migration also
+        // creating the `users` table as a side effect.
+        let user_repo = build_user_repository(&config)
+            .await
+            .expect("build_user_repository must connect and migrate a fresh database");
+
+        let external_id = format!("bootstrap-test|{}", Uuid::new_v4());
+        let created = user_repo
+            .create_user(&NewUser {
+                external_id: external_id.clone(),
+                provider: "bootstrap-test".to_string(),
+                email: Some(format!("{external_id}@example.com")),
+                display_name: None,
+            })
+            .await
+            .expect("create_user must succeed once bootstrap has migrated the user pool");
+        let fetched = user_repo
+            .get_user_by_id(&created.id)
+            .await
+            .expect("get_user_by_id")
+            .expect("the user created through the bootstrap-built repository must round-trip");
+        assert_eq!(fetched.id, created.id, "round-tripped user id must match");
+        assert_eq!(
+            fetched.external_id, external_id,
+            "round-tripped user external_id must match"
+        );
+
+        let session_repo = build_session_repository(&config).await.expect(
+            "build_session_repository must connect and migrate (a no-op the second time) \
+                 the same database",
+        );
+
+        let now = Utc::now();
+        let refresh_token_hash = format!("bootstrap-test-hash-{}", Uuid::new_v4());
+        let session = Session {
+            user_id: created.id.clone(),
+            refresh_token_hash: refresh_token_hash.clone(),
+            provider: "bootstrap-test".to_string(),
+            expires_at: now + Duration::hours(1),
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: now,
+        };
+        session_repo.store_refresh_token(&session).await.expect(
+            "store_refresh_token must succeed once bootstrap has migrated the session pool",
+        );
+        let fetched_session = session_repo
+            .get_session_by_refresh_token(&refresh_token_hash)
+            .await
+            .expect("get_session_by_refresh_token")
+            .expect(
+                "the session stored through the bootstrap-built session repository must \
+                 round-trip",
+            );
+        assert_eq!(
+            fetched_session.user_id, created.id,
+            "round-tripped session user_id must match"
+        );
+        assert_eq!(
+            fetched_session.refresh_token_hash, refresh_token_hash,
+            "round-tripped session refresh_token_hash must match"
+        );
+    }
 }

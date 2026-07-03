@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
@@ -28,7 +28,11 @@
        A missing/unverified email or non-matching domain → `AccessDenied`
        (audited `RegistrationDenied`).
      - If `registration.mode == "existing_users_only"` → `AccessDenied` (`RegistrationDenied`).
-     - Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`).
+     - Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`);
+       if creation returns `Conflict` (a concurrent first login won the race), re-run
+       `get_user_by_external_id` and continue with the existing user, re-applying the
+       suspended-status check. The losing racer emits no `UserCreated` event — the winning
+       create already audited it — and the flow otherwise proceeds as for a found user.
 4. **Mint refresh token** — 32 random bytes, base64url-no-pad for the opaque token; SHA-256
    hex of the bytes is the stored hash.
 5. **Store session** — `expires_at = now + refresh_token_ttl`; `store_refresh_token`.
@@ -50,13 +54,19 @@
 
 ## Revocation (`revoke.rs`)
 
-`POST /revoke` (RFC 7009 — always succeeds toward the client).
+`POST /revoke` (RFC 7009 — token-state failures still succeed toward the client; backend
+failures propagate).
 
-- `token_type_hint == "access_token"` → `verify_and_extract_sub(token)`: split the JWT, base64url
-  the signature, `keys.verify(signing_input, signature)`, and on success decode the payload and
-  read `sub`; then `revoke_all_user_sessions(sub)`. Any failure is swallowed (still returns 200),
-  since individual access JWTs cannot be revoked.
-- hint `refresh_token`, absent, or unknown → SHA-256 hex the token and `revoke_session(hash)`.
+- `token_type_hint == "access_token"` → `verify_and_extract_sub(token)`: split the JWT,
+  base64url the signature, `keys.verify(signing_input, signature)`, and on success decode
+  the payload and read `sub`; then `revoke_all_user_sessions(sub)`. A token-verification
+  failure (malformed, unsigned, expired, or unknown token) is swallowed and still returns
+  200 — individual access JWTs cannot be revoked and RFC 7009 §2.2 forbids leaking whether
+  a token existed — but a session-repo error from `revoke_all_user_sessions` propagates,
+  and the server maps it to 503.
+- hint `refresh_token`, absent, or unknown → SHA-256 hex the token and
+  `revoke_session(hash)`. A missing session is `Ok` (idempotent delete, 200); a store
+  error propagates, and the server maps it to 503.
 
 ## Build access token (`service/mod.rs::build_access_token`)
 

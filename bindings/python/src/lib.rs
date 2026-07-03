@@ -82,11 +82,22 @@ impl OidcExchange {
             Vec::new()
         };
 
-        let response = self
-            .inner
-            .handle_request(&method, &path, headers, body)
+        // Precondition on the extracted inputs: `method` and `path` must have been
+        // populated from the request dict before we release the GIL and hand them
+        // (by reference) to the blocking FFI call below.
+        assert!(!method.is_empty(), "method must be a non-empty string");
+        assert!(!path.is_empty(), "path must be a non-empty string");
+
+        // Release the GIL for the blocking FFI call so other Python threads —
+        // including an asyncio event loop driving this call via an executor —
+        // keep running while the request is serviced. All inputs are owned/Send
+        // Rust values by this point, so the closure satisfies `allow_threads`'
+        // `Send` bound with no restructuring.
+        let response = py
+            .allow_threads(|| self.inner.handle_request(&method, &path, headers, body))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
+        // The GIL is re-held here; only now do we touch Python objects again.
         let result = PyDict::new_bound(py);
         result.set_item("status", response.status)?;
 
@@ -99,6 +110,13 @@ impl OidcExchange {
         }
         result.set_item("headers", resp_headers)?;
         result.set_item("body", PyBytes::new_bound(py, &response.body))?;
+
+        // Postcondition on the built response: the caller-facing contract
+        // documented above promises a `status` key on every successful result.
+        debug_assert!(
+            result.contains("status")?,
+            "result dict must carry a status key"
+        );
 
         Ok(result.unbind())
     }

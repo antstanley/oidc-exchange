@@ -67,9 +67,40 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+/// Force-flush the installed telemetry pipeline.
+///
+/// This is the single point [`crate::lambda::run_lambda`]'s per-invocation flush hook calls,
+/// synchronously, after each Lambda invocation's response future resolves and before the
+/// response is returned to the runtime API — the execution environment may freeze immediately
+/// after the response, so anything batched and not yet sent by then is lost
+/// (`04-http-api.md` → Bootstrap, step 6). It is also the seam a buffered audit adapter would
+/// flush through, when one exists.
+///
+/// Under the stdout-JSON subscriber [`init_telemetry`] installs today, every `tracing` event is
+/// written synchronously by `tracing-subscriber`'s `fmt` layer as it is emitted — there is
+/// nothing buffered — so this is a documented, safe no-op. It stays a real function (rather
+/// than being inlined away at the call site) so the Lambda wrapper has exactly one seam to
+/// call regardless of what the telemetry backend becomes; once the OTLP/X-Ray exporters land
+/// (`changes/2026-06-24-complete_telemetry_exporters.md`), the installed tracer provider's
+/// `force_flush` call lands inside this function's body, not at every call site.
+pub fn flush_telemetry() {
+    // No-op today: see doc comment above. Intentionally still called on every Lambda
+    // invocation (`run_lambda`) so the seam is exercised end to end even while it does
+    // nothing, rather than only wired in once there is something to flush.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `flush_telemetry` must be callable any number of times without panicking or requiring
+    /// a subscriber to be installed first — the Lambda wrapper calls it unconditionally on
+    /// every invocation, including in test harnesses that never call `init_telemetry`.
+    #[test]
+    fn flush_telemetry_is_idempotent_and_does_not_panic() {
+        flush_telemetry();
+        flush_telemetry();
+    }
 
     #[test]
     fn disabled_telemetry_does_not_panic() {

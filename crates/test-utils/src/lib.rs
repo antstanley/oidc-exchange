@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use oidc_exchange_core::domain::{
     AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
+    INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
@@ -25,6 +26,15 @@ struct MockRepositoryState {
 #[derive(Clone)]
 pub struct MockRepository {
     state: Arc<Mutex<MockRepositoryState>>,
+    /// When set, `revoke_session` and `revoke_all_user_sessions` return
+    /// `Err(StoreError)` instead of mutating state — models a session store
+    /// that is unreachable, for exercising the `/revoke` 503 path.
+    session_fail_mode: Arc<Mutex<bool>>,
+    /// When set, `get_session_by_refresh_token` returns `Err(StoreError)`
+    /// instead of a lookup result — models a session store that is
+    /// unreachable during the `/revoke` presence-check read, distinct from
+    /// `session_fail_mode` which only fires on the mutating revoke calls.
+    session_lookup_fail_mode: Arc<Mutex<bool>>,
 }
 
 impl MockRepository {
@@ -34,6 +44,8 @@ impl MockRepository {
                 users: HashMap::new(),
                 sessions: HashMap::new(),
             })),
+            session_fail_mode: Arc::new(Mutex::new(false)),
+            session_lookup_fail_mode: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -45,6 +57,19 @@ impl MockRepository {
     pub async fn get_all_sessions(&self) -> Vec<Session> {
         let state = self.state.lock().await;
         state.sessions.values().cloned().collect()
+    }
+
+    /// Toggle whether `revoke_session` / `revoke_all_user_sessions` fail
+    /// with `Error::StoreError`, simulating an unreachable session store.
+    pub async fn set_session_fail_mode(&self, fail: bool) {
+        *self.session_fail_mode.lock().await = fail;
+    }
+
+    /// Toggle whether `get_session_by_refresh_token` fails with
+    /// `Error::StoreError`, simulating an unreachable session store during
+    /// the `/revoke` presence-check read.
+    pub async fn set_session_lookup_fail_mode(&self, fail: bool) {
+        *self.session_lookup_fail_mode.lock().await = fail;
     }
 }
 
@@ -70,11 +95,35 @@ impl UserRepository for MockRepository {
         Ok(state
             .users
             .values()
-            .find(|u| u.external_id == external_id && u.provider == provider)
+            .find(|u| {
+                u.external_id == external_id
+                    && u.provider == provider
+                    && u.status != UserStatus::Deleted
+            })
             .cloned())
     }
 
     async fn create_user(&self, new_user: &NewUser) -> Result<User> {
+        let mut state = self.state.lock().await;
+
+        // Mirror the durable backends' uniqueness constraint on the live
+        // (provider, external_id) pair: a deleted user frees the slot, but a
+        // concurrent winner that already created a live row must be reported
+        // as a conflict rather than silently overwritten.
+        let conflict = state.users.values().any(|u| {
+            u.external_id == new_user.external_id
+                && u.provider == new_user.provider
+                && u.status != UserStatus::Deleted
+        });
+        if conflict {
+            return Err(Error::Conflict {
+                detail: format!(
+                    "user already exists for provider={} external_id={}",
+                    new_user.provider, new_user.external_id
+                ),
+            });
+        }
+
         let now = Utc::now();
         let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
         let user = User {
@@ -86,10 +135,10 @@ impl UserRepository for MockRepository {
             metadata: HashMap::new(),
             claims: HashMap::new(),
             status: UserStatus::Active,
+            version: INITIAL_USER_VERSION,
             created_at: now,
             updated_at: now,
         };
-        let mut state = self.state.lock().await;
         state.users.insert(id, user.clone());
         Ok(user)
     }
@@ -119,6 +168,10 @@ impl UserRepository for MockRepository {
             user.status = status.clone();
         }
         user.updated_at = Utc::now();
+        // Mirror the durable backends' version-conditional `update_user`: every successful
+        // update increments `version` by exactly one, so mock-backed tests exercise the
+        // same optimistic-concurrency semantics as Dynamo/Postgres/SQLite.
+        user.version += 1;
 
         Ok(user.clone())
     }
@@ -174,11 +227,21 @@ impl SessionRepository for MockRepository {
     }
 
     async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+        if *self.session_lookup_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store lookup failure".into(),
+            });
+        }
         let state = self.state.lock().await;
         Ok(state.sessions.get(token_hash).cloned())
     }
 
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+        if *self.session_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store failure".into(),
+            });
+        }
         let mut state = self.state.lock().await;
         state.sessions.remove(token_hash);
         Ok(())
@@ -196,6 +259,11 @@ impl SessionRepository for MockRepository {
     }
 
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+        if *self.session_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store failure".into(),
+            });
+        }
         let mut state = self.state.lock().await;
         state.sessions.retain(|_, s| s.user_id != user_id);
         Ok(())
@@ -346,17 +414,27 @@ pub enum UserSyncCall {
 #[derive(Clone)]
 pub struct MockUserSync {
     calls: Arc<Mutex<Vec<UserSyncCall>>>,
+    fail_mode: Arc<Mutex<bool>>,
 }
 
 impl MockUserSync {
     pub fn new() -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            fail_mode: Arc::new(Mutex::new(false)),
         }
     }
 
     pub async fn calls(&self) -> Vec<UserSyncCall> {
         self.calls.lock().await.clone()
+    }
+
+    /// When enabled, every `UserSync` method returns `Err` instead of
+    /// recording the call — models a sync backend (e.g. a webhook target)
+    /// that fails every delivery attempt, for exercising best-effort
+    /// log-and-continue behaviour.
+    pub async fn set_fail_mode(&self, fail: bool) {
+        *self.fail_mode.lock().await = fail;
     }
 }
 
@@ -369,6 +447,11 @@ impl Default for MockUserSync {
 #[async_trait]
 impl UserSync for MockUserSync {
     async fn notify_user_created(&self, user: &User) -> Result<()> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::SyncError {
+                detail: "mock user sync failure".into(),
+            });
+        }
         self.calls
             .lock()
             .await
@@ -377,6 +460,11 @@ impl UserSync for MockUserSync {
     }
 
     async fn notify_user_updated(&self, user: &User, changed_fields: &[&str]) -> Result<()> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::SyncError {
+                detail: "mock user sync failure".into(),
+            });
+        }
         self.calls.lock().await.push(UserSyncCall::Updated {
             user: user.clone(),
             changed_fields: changed_fields.iter().map(|s| s.to_string()).collect(),
@@ -385,6 +473,11 @@ impl UserSync for MockUserSync {
     }
 
     async fn notify_user_deleted(&self, user_id: &str) -> Result<()> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::SyncError {
+                detail: "mock user sync failure".into(),
+            });
+        }
         self.calls
             .lock()
             .await
@@ -416,6 +509,7 @@ impl MockIdentityProvider {
             email: Some("test@example.com".to_string()),
             email_verified: Some(true),
             name: Some("Test User".to_string()),
+            is_private_email: None,
             raw_claims: HashMap::new(),
         };
 
@@ -453,6 +547,7 @@ impl IdentityProvider for MockIdentityProvider {
             email: Some("test@example.com".to_string()),
             email_verified: Some(true),
             name: Some("Test User".to_string()),
+            is_private_email: None,
             raw_claims: HashMap::new(),
         }))
     }
@@ -463,5 +558,130 @@ impl IdentityProvider for MockIdentityProvider {
 
     fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::MockRepository;
+    use oidc_exchange_core::domain::{NewUser, UserPatch, INITIAL_USER_VERSION};
+    use oidc_exchange_core::error::Error;
+    use oidc_exchange_core::ports::UserRepository;
+
+    fn make_new_user(external_id: &str, provider: &str) -> NewUser {
+        NewUser {
+            external_id: external_id.to_string(),
+            provider: provider.to_string(),
+            email: Some("user@example.com".to_string()),
+            display_name: Some("Test User".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_duplicate_live_external_id() {
+        let repo = MockRepository::new();
+        let new_user = make_new_user("sub-1", "mock");
+
+        let first = repo
+            .create_user(&new_user)
+            .await
+            .expect("first create should succeed");
+
+        let err = repo
+            .create_user(&new_user)
+            .await
+            .expect_err("duplicate live (provider, external_id) must conflict");
+
+        match err {
+            Error::Conflict { .. } => {}
+            other => panic!("expected Error::Conflict, got: {:?}", other),
+        }
+
+        // The rejected create must not have mutated state: exactly one user
+        // exists, and it is the winner from the first call.
+        let users = repo.get_all_users().await;
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].id, first.id);
+    }
+
+    #[tokio::test]
+    async fn deleted_user_frees_external_id_for_lookup_and_recreation() {
+        let repo = MockRepository::new();
+        let new_user = make_new_user("sub-2", "mock");
+
+        let original = repo
+            .create_user(&new_user)
+            .await
+            .expect("create should succeed");
+        repo.delete_user(&original.id)
+            .await
+            .expect("delete should succeed");
+
+        // A deleted user must not satisfy the external-id lookup.
+        let lookup = repo
+            .get_user_by_external_id("sub-2", "mock")
+            .await
+            .expect("lookup should not error");
+        assert!(lookup.is_none());
+
+        // With the deleted row excluded from uniqueness, the identity can be
+        // re-registered rather than conflicting.
+        let recreated = repo
+            .create_user(&new_user)
+            .await
+            .expect("recreate after delete should succeed, not conflict");
+        assert_ne!(recreated.id, original.id);
+
+        // Both the (soft-)deleted row and the fresh row remain in storage.
+        assert_eq!(repo.get_all_users().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_user_increments_version_each_call() {
+        let repo = MockRepository::new();
+        let new_user = make_new_user("sub-3", "mock");
+
+        let created = repo
+            .create_user(&new_user)
+            .await
+            .expect("create should succeed");
+        assert_eq!(created.version, INITIAL_USER_VERSION);
+
+        let first_patch = UserPatch {
+            email: Some("updated@example.com".to_string()),
+            display_name: None,
+            metadata: None,
+            claims: None,
+            status: None,
+        };
+        let after_first = repo
+            .update_user(&created.id, &first_patch)
+            .await
+            .expect("first update should succeed");
+        assert_eq!(after_first.version, INITIAL_USER_VERSION + 1);
+
+        let second_patch = UserPatch {
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: None,
+            status: Some(oidc_exchange_core::domain::UserStatus::Suspended),
+        };
+        let after_second = repo
+            .update_user(&created.id, &second_patch)
+            .await
+            .expect("second update should succeed");
+
+        // Matches the durable backends: every successful `update_user` call increments
+        // `version` by exactly one, not by an arbitrary amount and not left unchanged.
+        assert_eq!(after_second.version, INITIAL_USER_VERSION + 2);
+        assert_eq!(
+            after_second.status,
+            oidc_exchange_core::domain::UserStatus::Suspended
+        );
     }
 }

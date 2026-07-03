@@ -23,10 +23,10 @@
       "sk": "PROFILE"
     },
     "get_user_by_external_id": {
-      "operation": "Query",
-      "index": "GSI1",
-      "GSI1pk": "EXT#<external_id>",
-      "GSI1sk": "USER"
+      "operation": "GetItem + GetItem",
+      "description": "Strongly-consistent GetItem on the UserUniquenessGuard item (pk EXT#<provider>#<external_id>, sk UNIQUE) to resolve user_id, then GetItem on USER#<user_id> / PROFILE for the profile; returns None if the guard item is absent.",
+      "pk": "EXT#<provider>#<external_id>",
+      "sk": "UNIQUE"
     },
     "get_session_by_refresh_token": {
       "operation": "GetItem",
@@ -42,14 +42,16 @@
     "revoke_all_user_sessions": {
       "operation": "Query + BatchWrite (delete)",
       "description": "Query all sessions for user via GSI1, then batch delete"
+    },
+    "delete_user": {
+      "operation": "TransactWriteItems (Put + Delete)",
+      "description": "A patch that transitions status to Deleted writes the versioned User item (Put, conditioned on version) and removes the UserUniquenessGuard item (Delete, pk EXT#<provider>#<external_id> / sk UNIQUE) in the same transaction — both succeed or neither does. Removing the guard frees (provider, external_id) for re-registration: get_user_by_external_id returns None for the identity, and a later create_user for the same pair writes a fresh guard instead of losing to attribute_not_exists(pk). Any other update_user patch (no status change, or a change to Active/Suspended) stays a plain versioned PutItem and never touches the guard."
     }
   },
   "item_schemas": {
     "User": {
       "pk": "USER#<id>",
       "sk": "PROFILE",
-      "GSI1pk": "EXT#<external_id>",
-      "GSI1sk": "USER",
       "attributes": {
         "id": "S",
         "external_id": "S",
@@ -78,6 +80,14 @@
         "ip_address": "S (optional)",
         "created_at": "S (ISO 8601)",
         "ttl": "N (epoch seconds, DynamoDB TTL)"
+      }
+    },
+    "UserUniquenessGuard": {
+      "pk": "EXT#<provider>#<external_id>",
+      "sk": "UNIQUE",
+      "description": "Written in the same TransactWriteItems call as the User item, both conditioned on attribute_not_exists(pk), so a duplicate (provider, external_id) cancels the transaction with a Conflict instead of racing past an existing user. Removed in the same TransactWriteItems call as the versioned status write when a delete_user patch transitions the user to Deleted (see the delete_user access pattern), which is what frees (provider, external_id) for re-registration.",
+      "attributes": {
+        "user_id": "S"
       }
     }
   }

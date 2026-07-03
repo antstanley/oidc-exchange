@@ -5,7 +5,7 @@ use base64::Engine;
 use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, ServerConfig, TokenConfig};
-use oidc_exchange_core::domain::AccessTokenClaims;
+use oidc_exchange_core::domain::{AccessTokenClaims, AuditEventType, AuditOutcome};
 use oidc_exchange_core::ports::{IdentityProvider, SessionRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::revoke::RevokeRequest;
@@ -47,6 +47,28 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
     )
 }
 
+/// Builds a service whose `AuditLog` is a caller-supplied `MockAuditLog`, so
+/// the test can inspect recorded events after the revoke call.
+fn make_service_with_audit(
+    repo: MockRepository,
+    provider: MockIdentityProvider,
+    audit: MockAuditLog,
+) -> AppService {
+    let provider_id = provider.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider));
+
+    AppService::new(
+        Box::new(repo.clone()),
+        Box::new(repo),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit),
+        Box::new(MockUserSync::new()),
+        providers,
+        make_config(),
+    )
+}
+
 /// Helper: perform an exchange and return the full token response.
 async fn do_exchange(svc: &AppService) -> oidc_exchange_core::domain::TokenResponse {
     let request = ExchangeRequest {
@@ -54,6 +76,7 @@ async fn do_exchange(svc: &AppService) -> oidc_exchange_core::domain::TokenRespo
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     svc.exchange(request)
         .await
@@ -78,6 +101,7 @@ async fn revoke_refresh_token_removes_session() {
     let revoke_req = RevokeRequest {
         token: refresh_token.clone(),
         token_type_hint: Some("refresh_token".to_string()),
+        ..Default::default()
     };
     svc.revoke(revoke_req).await.expect("revoke should succeed");
 
@@ -126,6 +150,7 @@ async fn revoke_access_token_removes_all_user_sessions() {
     let revoke_req = RevokeRequest {
         token: response1.access_token.clone(),
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     svc.revoke(revoke_req).await.expect("revoke should succeed");
 
@@ -157,6 +182,7 @@ async fn revoke_unknown_token_returns_ok() {
     let revoke_req = RevokeRequest {
         token: "this-token-does-not-exist-at-all".to_string(),
         token_type_hint: Some("refresh_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(
@@ -168,6 +194,7 @@ async fn revoke_unknown_token_returns_ok() {
     let revoke_req = RevokeRequest {
         token: "not.a.valid-jwt".to_string(),
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(
@@ -179,6 +206,7 @@ async fn revoke_unknown_token_returns_ok() {
     let revoke_req = RevokeRequest {
         token: "garbage".to_string(),
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(
@@ -205,6 +233,7 @@ async fn revoke_default_hint_treats_as_refresh_token() {
     let revoke_req = RevokeRequest {
         token: refresh_token.clone(),
         token_type_hint: None,
+        ..Default::default()
     };
     svc.revoke(revoke_req).await.expect("revoke should succeed");
 
@@ -242,6 +271,7 @@ async fn revoke_forged_access_token_does_not_revoke_sessions() {
     let revoke_req = RevokeRequest {
         token: forged_jwt,
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(result.is_ok(), "revoke should return Ok per RFC 7009");
@@ -252,5 +282,161 @@ async fn revoke_forged_access_token_does_not_revoke_sessions() {
         sessions.len(),
         1,
         "sessions should NOT be revoked for a forged access token"
+    );
+}
+
+#[tokio::test]
+async fn revoke_valid_access_token_emits_all_sessions_revoked() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo.clone(), provider, audit);
+
+    let response = do_exchange(&svc).await;
+    let user_id = repo.get_all_sessions().await[0].user_id.clone();
+    // `do_exchange` itself emits UserCreated/TokenExchange events; capture
+    // the baseline so the assertion below is scoped to what `revoke` adds.
+    let baseline = audit_clone.events().await.len();
+
+    let revoke_req = RevokeRequest {
+        token: response.access_token.clone(),
+        token_type_hint: Some("access_token".to_string()),
+        ip_address: Some("203.0.113.5".to_string()),
+        user_agent: Some("test-agent/1.0".to_string()),
+        ..Default::default()
+    };
+    svc.revoke(revoke_req).await.expect("revoke should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        baseline + 1,
+        "a verified access-token revoke must emit exactly one audit event"
+    );
+    let revoke_event = events.last().expect("an event was just recorded");
+    assert_eq!(revoke_event.event_type, AuditEventType::AllSessionsRevoked);
+    assert_eq!(revoke_event.outcome, AuditOutcome::Success);
+    assert_eq!(revoke_event.actor, Some(user_id));
+    assert_eq!(revoke_event.ip_address, Some("203.0.113.5".to_string()));
+    assert_eq!(revoke_event.user_agent, Some("test-agent/1.0".to_string()));
+}
+
+#[tokio::test]
+async fn revoke_valid_refresh_token_emits_token_revocation() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo.clone(), provider, audit);
+
+    let response = do_exchange(&svc).await;
+    let refresh_token = response.refresh_token.expect("should have refresh token");
+    let user_id = repo.get_all_sessions().await[0].user_id.clone();
+    // `do_exchange` itself emits UserCreated/TokenExchange events; capture
+    // the baseline so the assertion below is scoped to what `revoke` adds.
+    let baseline = audit_clone.events().await.len();
+
+    let revoke_req = RevokeRequest {
+        token: refresh_token,
+        token_type_hint: Some("refresh_token".to_string()),
+        ip_address: Some("198.51.100.7".to_string()),
+        user_agent: Some("test-agent/2.0".to_string()),
+        ..Default::default()
+    };
+    svc.revoke(revoke_req).await.expect("revoke should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        baseline + 1,
+        "a valid refresh-token revoke must emit exactly one audit event"
+    );
+    let revoke_event = events.last().expect("an event was just recorded");
+    assert_eq!(revoke_event.event_type, AuditEventType::TokenRevocation);
+    assert_eq!(revoke_event.outcome, AuditOutcome::Success);
+    assert_eq!(revoke_event.actor, Some(user_id));
+    assert_eq!(revoke_event.ip_address, Some("198.51.100.7".to_string()));
+    assert_eq!(revoke_event.user_agent, Some("test-agent/2.0".to_string()));
+}
+
+#[tokio::test]
+async fn revoke_failed_verification_access_token_emits_nothing() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo.clone(), provider, audit);
+
+    // Create a real session so we can also assert it survives untouched.
+    let _response = do_exchange(&svc).await;
+    let sessions_before = repo.get_all_sessions().await;
+    assert_eq!(sessions_before.len(), 1);
+    let user_id = sessions_before[0].user_id.clone();
+    // `do_exchange` itself emits UserCreated/TokenExchange events; capture
+    // the baseline so the assertion below is scoped to what `revoke` adds.
+    let baseline = audit_clone.events().await.len();
+
+    // Forge a JWT with a valid shape but an invalid signature.
+    let forged_header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+    let forged_payload = URL_SAFE_NO_PAD.encode(
+        format!(r#"{{"sub":"{user_id}","iss":"https://auth.test.com","iat":0,"exp":9999999999}}"#)
+            .as_bytes(),
+    );
+    let forged_sig = URL_SAFE_NO_PAD.encode([0u8; 64]);
+    let forged_jwt = format!("{forged_header}.{forged_payload}.{forged_sig}");
+
+    let revoke_req = RevokeRequest {
+        token: forged_jwt,
+        token_type_hint: Some("access_token".to_string()),
+        ip_address: Some("203.0.113.9".to_string()),
+        user_agent: Some("test-agent/3.0".to_string()),
+        ..Default::default()
+    };
+    let result = svc.revoke(revoke_req).await;
+    assert!(
+        result.is_ok(),
+        "revoke should always return Ok per RFC 7009"
+    );
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        baseline,
+        "failed signature verification must not emit any audit event"
+    );
+    assert_eq!(
+        repo.get_all_sessions().await.len(),
+        1,
+        "the session must survive a forged access-token revoke"
+    );
+}
+
+#[tokio::test]
+async fn revoke_unknown_refresh_token_emits_nothing() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo.clone(), provider, audit);
+
+    let revoke_req = RevokeRequest {
+        token: "this-refresh-token-was-never-issued".to_string(),
+        token_type_hint: Some("refresh_token".to_string()),
+        ip_address: Some("203.0.113.11".to_string()),
+        user_agent: Some("test-agent/4.0".to_string()),
+        ..Default::default()
+    };
+    let result = svc.revoke(revoke_req).await;
+    assert!(
+        result.is_ok(),
+        "revoke should always return Ok per RFC 7009"
+    );
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        0,
+        "an unknown refresh token must not emit any audit event"
     );
 }

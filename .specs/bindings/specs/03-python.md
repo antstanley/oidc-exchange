@@ -1,6 +1,6 @@
 # Python Binding (`oidc-exchange`)
 
-**Status:** Implemented · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Scope:** bindings/python
+**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** bindings/python
 
 A PyO3 native extension wrapping [`crates/ffi`](01-ffi-core.md), built with maturin and
 published to PyPI as `oidc-exchange`. The native module is `oidc_exchange._oidc_exchange`; a
@@ -30,8 +30,11 @@ response `dict` is `{ "status", "headers": dict[str,str], "body": bytes }`.
 ## Implementation
 
 - **Rust (`src/lib.rs`)** — a `#[pyclass] OidcExchange` whose `#[new]` constructor calls FFI
-  `from_file`/`new`, and `handle_request_sync` which extracts method/path/headers/body from the
-  `PyDict`, calls `ffi.handle_request`, and returns a result dict. `shutdown` is a no-op.
+  `from_file`/`new`, and `handle_request_sync` which extracts method/path/headers/body from
+  the `PyDict`, releases the GIL (`py.allow_threads`) around the blocking FFI
+  `handle_request` call, and re-acquires it to build the result dict. Other Python threads
+  — including an asyncio event loop — keep running while a request is in flight.
+  `shutdown` is a no-op.
 - **Python (`python/oidc_exchange/`)** — `__init__.py` wraps the native class; `handle_request`
   (async) runs `handle_request_sync` in the default executor; `asgi_app`/`wsgi_app` delegate to
   the adapter factories. `_asgi.py` (`make_asgi_app`) collects the request body from `receive`,
