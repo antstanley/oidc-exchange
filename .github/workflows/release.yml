@@ -276,24 +276,24 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            # Build the linux-gnu addons against an old glibc floor (2.17, via
-            # @napi-rs/cross-toolchain) so the published binary loads on AWS
-            # Lambda's AL2023 runtime (glibc 2.34) and other glibc>=2.17 hosts.
-            # Building natively on ubuntu-latest (glibc 2.39) linked the addon
-            # against GLIBC_2.39, which failed to load on Lambda (issue #11).
-            build_args: --use-napi-cross
+            # Build the linux-gnu addons with `cross`, whose build image links
+            # against an old glibc floor (~2.17), so the published binary loads on
+            # AWS Lambda's AL2023 runtime (glibc 2.34) and other glibc>=2.17 hosts
+            # (managed zip runtime and container-image alike). Building natively on
+            # ubuntu-latest (glibc 2.39) linked GLIBC_2.39, which failed to load on
+            # Lambda (issue #11). `cross` — unlike napi's own cross-toolchain, which
+            # cannot compile this crate's aws-lc-sys dependency — is the same tool
+            # the server binary's aarch64 build uses and is proven on this crypto stack.
+            use_cross: true
           - target: aarch64-unknown-linux-gnu
-            # napi-cross cross-compiles aarch64 (including ring's C) from the x64
-            # host against the same old glibc floor, so this leg no longer needs
-            # a native arm64 runner.
+            # Cross-compiled from the x64 host via `cross` against the same old glibc
+            # floor, so this leg no longer needs a native arm64 runner.
             os: ubuntu-latest
-            build_args: --use-napi-cross
+            use_cross: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            build_args: ""
           - target: aarch64-apple-darwin
             os: macos-latest
-            build_args: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -306,6 +306,10 @@ jobs:
           node-version: 24.18.0
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
       - run: pnpm add -g @napi-rs/cli
+      - name: Install cross
+        # The linux-gnu legs build through `cross` (Docker-based, old-glibc image).
+        if: matrix.use_cross
+        run: cargo install cross --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
         # --no-frozen-lockfile: the root optionalDependencies point at the
@@ -316,9 +320,9 @@ jobs:
         working-directory: bindings/nodejs
         # --platform: emit oidc-exchange.<triple>.node so each artifact is uniquely
         # named and `napi artifacts` can distribute it into its npm/<triple> package.
-        # build_args carries --use-napi-cross on the linux-gnu legs (old-glibc floor);
-        # it is empty elsewhere. @napi-rs/cli fetches the cross toolchain on demand.
-        run: napi build --release --platform --target ${{ matrix.target }} ${{ matrix.build_args }}
+        # --use-cross (linux-gnu legs) builds via `cross` in an old-glibc image so the
+        # addon loads on AL2023/Lambda; other targets build with plain cargo.
+        run: napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
