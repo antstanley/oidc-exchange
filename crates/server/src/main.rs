@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use oidc_exchange::bootstrap;
+use oidc_exchange::lambda;
 use oidc_exchange::shutdown::{self, DrainOutcome, ShutdownSignal, SHUTDOWN_DRAIN_DEADLINE_SECS};
 use oidc_exchange::telemetry;
 
@@ -31,14 +34,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Lambda mode: the same router (middleware, state, and base-path layer) is served
         // through `lambda_http`, which speaks the Lambda Runtime API directly and translates
         // API Gateway REST/HTTP-API, Function URL, and ALB events into tower `Service` calls
-        // against `app` (`04-http-api.md` → Bootstrap, step 6). `lambda_http::run` fails with
+        // against `app` (`04-http-api.md` → Bootstrap, step 6). `lambda::run_lambda` wraps
+        // `app` in the per-invocation flush hook (`FlushOnResponse`) so telemetry (and any
+        // future buffered audit writes) force-flush synchronously after each invocation's
+        // response future resolves and before the response is returned — the execution
+        // environment may freeze immediately after the response. `lambda_http::run` fails with
         // `lambda_http::Error` (`Box<dyn std::error::Error + Send + Sync>`), which the
         // standard library does not blanket-convert into `main`'s `Box<dyn std::error::Error>`
         // (the `Send + Sync` marker traits make the two boxed trait objects distinct types to
         // `?`'s `From` resolution); the error message is preserved and reboxed so the failure
         // still propagates via `?` with no `unwrap`/`expect` on this path.
         tracing::info!("Lambda runtime detected; serving via lambda_http");
-        lambda_http::run(app)
+        lambda::run_lambda(app, Arc::new(telemetry::flush_telemetry))
             .await
             .map_err(|err| -> Box<dyn std::error::Error> { err.to_string().into() })?;
     } else {

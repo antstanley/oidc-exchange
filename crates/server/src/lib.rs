@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod error;
+pub mod lambda;
 pub mod middleware;
 pub mod routes;
 pub mod shutdown;
