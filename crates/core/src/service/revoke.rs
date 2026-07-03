@@ -93,12 +93,13 @@ impl AppService {
             "revoke: SHA-256 hex digest must be {TOKEN_HASH_HEX_LEN} characters"
         );
 
+        // A missing session is `Ok(None)` (unknown/invalid token, handled
+        // below), but a genuine backend failure on this lookup propagates so
+        // the server maps it to 503 instead of a false 200.
         let existing = self
             .session_repo
             .get_session_by_refresh_token(&token_hash)
-            .await
-            .ok()
-            .flatten();
+            .await?;
 
         if let Some(session) = existing {
             // Invariant: every stored session carries the user it belongs

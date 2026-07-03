@@ -45,7 +45,9 @@ manager). A real deployment overlays a key manager, a repository, and at least o
 
 ### `[server]`
 `host` (`0.0.0.0`), `port` (`8080`), `issuer` (the `iss` claim / discovery issuer, default
-empty), `role` (`all` | `exchange` | `admin`, default `all`).
+empty), `role` (`all` | `exchange` | `admin`, default `all`), `request_timeout` (humantime
+duration string like the token TTLs, default `"30s"`) — the per-request timeout the
+server's timeout layer enforces.
 
 ### `[registration]`
 `mode` (`open` | `existing_users_only`, default `open`), optional `domain_allowlist`
@@ -96,7 +98,7 @@ retries? }`. The `secret` is redacted in `Debug`.
 
 | Setting | Default |
 |---|---|
-| `server.host` / `port` / `role` | `0.0.0.0` / `8080` / `all` |
+| `server.host` / `port` / `role` / `request_timeout` | `0.0.0.0` / `8080` / `all` / `"30s"` |
 | `registration.mode` | `open` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
 | `audit.adapter` / `blocking_threshold` | `noop` / `warning` |

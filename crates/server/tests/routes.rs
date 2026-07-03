@@ -231,6 +231,79 @@ async fn revoke_store_failure_returns_503_refresh_token() {
         .contains("mock session store failure"));
 }
 
+// ---------------------------------------------------------------------------
+// 4a-i. POST /revoke returns 503 (not a false 200) when the presence-check
+// LOOKUP itself fails — distinct from the mutating `revoke_session` call
+// failing above. A store outage on the read must not collapse to "unknown
+// token" and a false 200.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoke_lookup_failure_returns_503_refresh_token() {
+    let (app, session_repo) = build_test_app();
+
+    // Only the presence-check read fails; no session needs to exist for
+    // this to matter — an infrastructure error on the lookup must never be
+    // swallowed into `None` (unknown token).
+    session_repo.set_session_lookup_fail_mode(true).await;
+
+    let revoke_body = "token=some-refresh-token&token_type_hint=refresh_token";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(revoke_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "server_error");
+    // Negative-space: the client-facing body must be generic — no store
+    // internals ("mock session store lookup failure") leak into the response.
+    assert_eq!(json["error_description"], "internal server error");
+    assert!(!json["error_description"]
+        .as_str()
+        .unwrap()
+        .contains("mock session store lookup failure"));
+}
+
+// ---------------------------------------------------------------------------
+// 4a-ii. POST /revoke for a genuinely-unknown refresh token (the store's
+// presence-check lookup succeeds with `Ok(None)`) still returns 200 — the
+// lookup-failure propagation above must not affect the ordinary
+// unknown-token carve-out required by RFC 7009.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoke_unknown_refresh_token_lookup_ok_none_returns_200() {
+    let (app, session_repo) = build_test_app();
+
+    // No fail mode is set, so the lookup succeeds with `Ok(None)` for a
+    // token that was never issued.
+    session_repo.set_session_lookup_fail_mode(false).await;
+
+    let revoke_body = "token=never-issued-refresh-token&token_type_hint=refresh_token";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(revoke_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn revoke_store_failure_returns_503_access_token() {
     let (app, session_repo) = build_test_app();

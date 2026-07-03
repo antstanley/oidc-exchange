@@ -30,6 +30,11 @@ pub struct MockRepository {
     /// `Err(StoreError)` instead of mutating state — models a session store
     /// that is unreachable, for exercising the `/revoke` 503 path.
     session_fail_mode: Arc<Mutex<bool>>,
+    /// When set, `get_session_by_refresh_token` returns `Err(StoreError)`
+    /// instead of a lookup result — models a session store that is
+    /// unreachable during the `/revoke` presence-check read, distinct from
+    /// `session_fail_mode` which only fires on the mutating revoke calls.
+    session_lookup_fail_mode: Arc<Mutex<bool>>,
 }
 
 impl MockRepository {
@@ -40,6 +45,7 @@ impl MockRepository {
                 sessions: HashMap::new(),
             })),
             session_fail_mode: Arc::new(Mutex::new(false)),
+            session_lookup_fail_mode: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -57,6 +63,13 @@ impl MockRepository {
     /// with `Error::StoreError`, simulating an unreachable session store.
     pub async fn set_session_fail_mode(&self, fail: bool) {
         *self.session_fail_mode.lock().await = fail;
+    }
+
+    /// Toggle whether `get_session_by_refresh_token` fails with
+    /// `Error::StoreError`, simulating an unreachable session store during
+    /// the `/revoke` presence-check read.
+    pub async fn set_session_lookup_fail_mode(&self, fail: bool) {
+        *self.session_lookup_fail_mode.lock().await = fail;
     }
 }
 
@@ -214,6 +227,11 @@ impl SessionRepository for MockRepository {
     }
 
     async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+        if *self.session_lookup_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store lookup failure".into(),
+            });
+        }
         let state = self.state.lock().await;
         Ok(state.sessions.get(token_hash).cloned())
     }
