@@ -1,6 +1,6 @@
 # Plan: Wire audit event emission into the service flows
 
-**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-wire_audit_event_emission.md](../../changes/2026-07-01-wire_audit_event_emission.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-wire_audit_event_emission.md](../../changes/2026-07-01-wire_audit_event_emission.md)
 
 This plan turns the dead audit pipeline into a live one. `AppService::emit_audit` exists and is
 tested but has no production call site; the `AuditContext` middleware extracts client headers that

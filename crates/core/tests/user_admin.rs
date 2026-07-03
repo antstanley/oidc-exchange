@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use oidc_exchange_core::config::{AppConfig, ServerConfig, TokenConfig};
-use oidc_exchange_core::domain::{NewUser, UserPatch, UserStatus};
+use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::domain::{AuditEventType, NewUser, UserPatch, UserStatus};
 use oidc_exchange_core::error::Error;
-use oidc_exchange_core::ports::IdentityProvider;
+use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::AppService;
 
@@ -71,6 +71,30 @@ fn make_service_with_provider(
         Box::new(user_sync),
         providers,
         make_config(),
+    )
+}
+
+/// Wire a service against an explicitly supplied `MockAuditLog` (and config)
+/// so tests can inspect emitted audit events or force adapter failures.
+fn make_service_with_audit(
+    repo: MockRepository,
+    user_sync: MockUserSync,
+    audit: MockAuditLog,
+    config: AppConfig,
+) -> AppService {
+    let provider = MockIdentityProvider::new("mock");
+    let provider_id = provider.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider));
+
+    AppService::new(
+        Box::new(repo.clone()),
+        Box::new(repo),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit),
+        Box::new(user_sync),
+        providers,
+        config,
     )
 }
 
@@ -678,5 +702,263 @@ async fn admin_delete_user_unknown_id_returns_not_found() {
     assert!(
         sync_clone.calls().await.is_empty(),
         "unknown-id delete must not notify user sync"
+    );
+}
+
+// ─── Audit event emission for admin mutations ───────────────────────────────
+
+#[tokio::test]
+async fn admin_create_user_emits_user_created_audit_event() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    let nu = new_user("audit-create-1", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "admin_create_user should emit exactly one audit event"
+    );
+    assert_eq!(events[0].event_type, AuditEventType::UserCreated);
+    assert_eq!(events[0].actor.as_deref(), Some(user.id.as_str()));
+    assert!(
+        events[0].ip_address.is_none() && events[0].user_agent.is_none(),
+        "admin operations carry no client context, so ip/user_agent must be None"
+    );
+}
+
+#[tokio::test]
+async fn admin_update_user_non_status_patch_emits_user_updated() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    let nu = new_user("audit-update-1", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    let patch = UserPatch {
+        email: Some("changed@example.com".to_string()),
+        display_name: None,
+        metadata: None,
+        claims: None,
+        status: None,
+    };
+    svc.admin_update_user(&user.id, &patch)
+        .await
+        .expect("update should succeed");
+
+    let events = audit_clone.events().await;
+    // First event is UserCreated from admin_create_user; second is this update.
+    assert_eq!(
+        events.len(),
+        2,
+        "create + update should each emit one event"
+    );
+    assert_eq!(events[1].event_type, AuditEventType::UserUpdated);
+    assert_eq!(events[1].actor.as_deref(), Some(user.id.as_str()));
+}
+
+#[tokio::test]
+async fn admin_update_user_suspend_patch_emits_user_suspended_not_user_updated() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    let nu = new_user("audit-suspend-1", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    svc.admin_update_user(&user.id, &status_patch(UserStatus::Suspended))
+        .await
+        .expect("suspend should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        2,
+        "create + suspend should each emit one event"
+    );
+    assert_eq!(events[1].event_type, AuditEventType::UserSuspended);
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.event_type == AuditEventType::UserUpdated),
+        "a status=Suspended patch must emit UserSuspended, not UserUpdated"
+    );
+}
+
+#[tokio::test]
+async fn admin_delete_user_emits_user_deleted_audit_event() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    let nu = new_user("audit-delete-1", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    svc.admin_delete_user(&user.id)
+        .await
+        .expect("delete should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        2,
+        "create + delete should each emit one event"
+    );
+    assert_eq!(events[1].event_type, AuditEventType::UserDeleted);
+    assert_eq!(events[1].actor.as_deref(), Some(user.id.as_str()));
+}
+
+#[tokio::test]
+async fn admin_claims_mutations_emit_user_updated_with_operation_in_detail() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    let nu = new_user("audit-claims-1", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    let mut claims = HashMap::new();
+    claims.insert("a".to_string(), json!(1));
+    svc.admin_set_claims(&user.id, claims.clone())
+        .await
+        .expect("set claims should succeed");
+
+    let mut merge = HashMap::new();
+    merge.insert("b".to_string(), json!(2));
+    svc.admin_merge_claims(&user.id, merge)
+        .await
+        .expect("merge claims should succeed");
+
+    svc.admin_clear_claims(&user.id)
+        .await
+        .expect("clear claims should succeed");
+
+    let events = audit_clone.events().await;
+    // create + set + merge + clear = 4 events total.
+    assert_eq!(
+        events.len(),
+        4,
+        "each claims mutation should emit one event"
+    );
+
+    let claims_events = &events[1..];
+    let expected_ops = ["set_claims", "merge_claims", "clear_claims"];
+    for (event, expected_op) in claims_events.iter().zip(expected_ops.iter()) {
+        assert_eq!(event.event_type, AuditEventType::UserUpdated);
+        assert_eq!(
+            event.detail.get("operation"),
+            Some(&json!(*expected_op)),
+            "claims mutation event should record its operation name in detail"
+        );
+    }
+}
+
+// ─── Negative space: read-only admin operations emit nothing ───────────────
+
+#[tokio::test]
+async fn admin_reads_emit_no_audit_events() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+
+    // Pre-populate a user directly through the repo, bypassing the service so
+    // no audit event is emitted by this setup step.
+    let nu = new_user("audit-read-1", "google");
+    repo.create_user(&nu)
+        .await
+        .expect("pre-create user should succeed");
+    let user_id = repo.get_all_users().await[0].id.clone();
+
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    svc.admin_get_user(&user_id)
+        .await
+        .expect("get_user should succeed");
+    svc.admin_list_users(0, 10)
+        .await
+        .expect("list_users should succeed");
+    svc.admin_stats().await.expect("stats should succeed");
+    svc.admin_get_claims(&user_id)
+        .await
+        .expect("get_claims should succeed");
+
+    let events = audit_clone.events().await;
+    assert!(
+        events.is_empty(),
+        "read-only admin operations must never emit audit events, got: {:?}",
+        events
+    );
+}
+
+// ─── Blocking audit rules distinguish admin audit from best-effort sync ────
+
+/// A blocking-threshold audit failure on an admin mutation propagates as
+/// `Err`, and — because the emission happens before the best-effort
+/// user-sync notify — the notify call never fires. This is the contrast
+/// with `notify_user_created`/`updated`/`deleted`, which only warn-and-log on
+/// failure and never abort the operation.
+#[tokio::test]
+async fn admin_create_user_blocking_audit_failure_propagates_err_and_skips_sync() {
+    // `blocking_threshold: "info"` covers every severity from Emergency down
+    // to Info, so the Notice-severity `UserCreated` emission is blocking.
+    let config = AppConfig {
+        audit: AuditConfig {
+            blocking_threshold: "info".to_string(),
+            ..Default::default()
+        },
+        ..make_config()
+    };
+
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let sync_clone = user_sync.clone();
+    let audit = MockAuditLog::new();
+    audit.set_fail_mode(true).await;
+    let svc = make_service_with_audit(repo, user_sync, audit, config);
+
+    let nu = new_user("audit-blocking-1", "google");
+    let err = svc
+        .admin_create_user(&nu)
+        .await
+        .expect_err("a blocking audit failure must propagate as Err");
+
+    match err {
+        Error::AuditError { .. } => {}
+        other => panic!("expected AuditError to propagate, got: {:?}", other),
+    }
+
+    assert!(
+        sync_clone.calls().await.is_empty(),
+        "a blocking audit failure must short-circuit before the best-effort sync notify runs"
     );
 }

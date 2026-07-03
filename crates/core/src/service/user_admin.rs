@@ -2,16 +2,36 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::domain::{NewUser, User, UserPatch, UserStatus};
+use crate::domain::{
+    AuditEventType, AuditOutcome, AuditSeverity, NewUser, User, UserPatch, UserStatus,
+};
 use crate::error::{Error, Result};
-use crate::service::AppService;
+use crate::service::{create_audit_event, AppService};
+
+/// Key under which the claims-mutation operation name (`set_claims` /
+/// `merge_claims` / `clear_claims`) is recorded in a `UserUpdated` audit
+/// event's `detail` map.
+const CLAIMS_OPERATION_DETAIL_KEY: &str = "operation";
 
 impl AppService {
     /// Create a new user via admin API.
     ///
-    /// Calls `repo.create_user()`, then notifies user sync (non-blocking).
+    /// Calls `repo.create_user()`, emits a blocking `UserCreated` audit event
+    /// (admin operations carry no client `ip`/`user_agent` context, unlike
+    /// the client-facing flows), then notifies user sync (non-blocking).
     pub async fn admin_create_user(&self, new_user: &NewUser) -> Result<User> {
         let user = self.user_repo.create_user(new_user).await?;
+
+        self.emit_audit(create_audit_event(
+            AuditEventType::UserCreated,
+            AuditSeverity::Notice,
+            AuditOutcome::Success,
+            Some(user.id.clone()),
+            Some(user.provider.clone()),
+            None,
+            None,
+        ))
+        .await?;
 
         if let Err(e) = self.user_sync.notify_user_created(&user).await {
             tracing::warn!(error = %e, user_id = %user.id, "user sync notify_user_created failed");
@@ -72,8 +92,10 @@ impl AppService {
     /// Update a user via admin API with a partial patch.
     ///
     /// See [`Self::apply_validated_patch`] for fetch/validate/revoke
-    /// behaviour; on success, notifies user sync with the list of changed
-    /// fields (non-blocking).
+    /// behaviour. On success, emits a blocking audit event — `UserSuspended`
+    /// when the applied patch sets `status = Suspended`, `UserUpdated`
+    /// otherwise — then notifies user sync with the list of changed fields
+    /// (non-blocking).
     pub async fn admin_update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
         let user = self.apply_validated_patch(user_id, patch).await?;
 
@@ -94,6 +116,22 @@ impl AppService {
             changed_fields.push("status");
         }
 
+        let event_type = if patch.status == Some(UserStatus::Suspended) {
+            AuditEventType::UserSuspended
+        } else {
+            AuditEventType::UserUpdated
+        };
+        self.emit_audit(create_audit_event(
+            event_type,
+            AuditSeverity::Notice,
+            AuditOutcome::Success,
+            Some(user.id.clone()),
+            Some(user.provider.clone()),
+            None,
+            None,
+        ))
+        .await?;
+
         if let Err(e) = self
             .user_sync
             .notify_user_updated(&user, &changed_fields)
@@ -111,6 +149,8 @@ impl AppService {
     /// validation and session revocation apply: deleting a suspended user
     /// succeeds, a second delete on an already-`Deleted` user is rejected with
     /// `Error::InvalidRequest`, and an unknown id returns `Error::NotFound`.
+    /// On success, emits a blocking `UserDeleted` audit event, then notifies
+    /// user sync (non-blocking).
     pub async fn admin_delete_user(&self, user_id: &str) -> Result<()> {
         let patch = UserPatch {
             email: None,
@@ -119,7 +159,18 @@ impl AppService {
             claims: None,
             status: Some(UserStatus::Deleted),
         };
-        self.apply_validated_patch(user_id, &patch).await?;
+        let user = self.apply_validated_patch(user_id, &patch).await?;
+
+        self.emit_audit(create_audit_event(
+            AuditEventType::UserDeleted,
+            AuditSeverity::Notice,
+            AuditOutcome::Success,
+            Some(user.id.clone()),
+            Some(user.provider.clone()),
+            None,
+            None,
+        ))
+        .await?;
 
         if let Err(e) = self.user_sync.notify_user_deleted(user_id).await {
             tracing::warn!(error = %e, user_id = %user_id, "user sync notify_user_deleted failed");
@@ -144,13 +195,17 @@ impl AppService {
     }
 
     /// Replace all custom claims for a user.
+    ///
+    /// On success, emits a blocking `UserUpdated` audit event recording the
+    /// `set_claims` operation in `detail`.
     pub async fn admin_set_claims(
         &self,
         user_id: &str,
         claims: HashMap<String, Value>,
     ) -> Result<()> {
         // Verify user exists
-        self.user_repo
+        let existing = self
+            .user_repo
             .get_user_by_id(user_id)
             .await?
             .ok_or_else(|| Error::NotFound {
@@ -165,12 +220,18 @@ impl AppService {
             status: None,
         };
         self.user_repo.update_user(user_id, &patch).await?;
+
+        self.emit_claims_audit_event(&existing, "set_claims")
+            .await?;
+
         Ok(())
     }
 
     /// Merge new claims into existing user claims.
     ///
-    /// New keys override existing keys; existing keys not in the patch are preserved.
+    /// New keys override existing keys; existing keys not in the patch are
+    /// preserved. On success, emits a blocking `UserUpdated` audit event
+    /// recording the `merge_claims` operation in `detail`.
     pub async fn admin_merge_claims(
         &self,
         user_id: &str,
@@ -184,7 +245,7 @@ impl AppService {
                 detail: format!("user not found: {}", user_id),
             })?;
 
-        let mut merged = user.claims;
+        let mut merged = user.claims.clone();
         for (k, v) in claims {
             merged.insert(k, v);
         }
@@ -197,13 +258,20 @@ impl AppService {
             status: None,
         };
         self.user_repo.update_user(user_id, &patch).await?;
+
+        self.emit_claims_audit_event(&user, "merge_claims").await?;
+
         Ok(())
     }
 
     /// Clear all custom claims for a user (set to empty map).
+    ///
+    /// On success, emits a blocking `UserUpdated` audit event recording the
+    /// `clear_claims` operation in `detail`.
     pub async fn admin_clear_claims(&self, user_id: &str) -> Result<()> {
         // Verify user exists
-        self.user_repo
+        let existing = self
+            .user_repo
             .get_user_by_id(user_id)
             .await?
             .ok_or_else(|| Error::NotFound {
@@ -218,7 +286,32 @@ impl AppService {
             status: None,
         };
         self.user_repo.update_user(user_id, &patch).await?;
+
+        self.emit_claims_audit_event(&existing, "clear_claims")
+            .await?;
+
         Ok(())
+    }
+
+    /// Emit the shared `UserUpdated` audit event for a claims mutation,
+    /// recording `operation` in `detail` so `set_claims`/`merge_claims`/
+    /// `clear_claims` are distinguishable in the audit trail. Admin
+    /// operations carry no client `ip`/`user_agent` context.
+    async fn emit_claims_audit_event(&self, user: &User, operation: &str) -> Result<()> {
+        let mut event = create_audit_event(
+            AuditEventType::UserUpdated,
+            AuditSeverity::Notice,
+            AuditOutcome::Success,
+            Some(user.id.clone()),
+            Some(user.provider.clone()),
+            None,
+            None,
+        );
+        event.detail.insert(
+            CLAIMS_OPERATION_DETAIL_KEY.to_string(),
+            Value::String(operation.to_string()),
+        );
+        self.emit_audit(event).await
     }
 
     /// Get aggregate stats for the dashboard.
