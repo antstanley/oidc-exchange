@@ -276,14 +276,24 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            # Build the linux-gnu addons against an old glibc floor (2.17, via
+            # @napi-rs/cross-toolchain) so the published binary loads on AWS
+            # Lambda's AL2023 runtime (glibc 2.34) and other glibc>=2.17 hosts.
+            # Building natively on ubuntu-latest (glibc 2.39) linked the addon
+            # against GLIBC_2.39, which failed to load on Lambda (issue #11).
+            build_args: --use-napi-cross
           - target: aarch64-unknown-linux-gnu
-            # Native arm64 runner: napi build compiles the aarch64 module and its
-            # native deps (e.g. ring) without a cross toolchain.
-            os: ubuntu-24.04-arm
+            # napi-cross cross-compiles aarch64 (including ring's C) from the x64
+            # host against the same old glibc floor, so this leg no longer needs
+            # a native arm64 runner.
+            os: ubuntu-latest
+            build_args: --use-napi-cross
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            build_args: ""
           - target: aarch64-apple-darwin
             os: macos-latest
+            build_args: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -306,7 +316,9 @@ jobs:
         working-directory: bindings/nodejs
         # --platform: emit oidc-exchange.<triple>.node so each artifact is uniquely
         # named and `napi artifacts` can distribute it into its npm/<triple> package.
-        run: napi build --release --platform --target ${{ matrix.target }}
+        # build_args carries --use-napi-cross on the linux-gnu legs (old-glibc floor);
+        # it is empty elsewhere. @napi-rs/cli fetches the cross toolchain on demand.
+        run: napi build --release --platform --target ${{ matrix.target }} ${{ matrix.build_args }}
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

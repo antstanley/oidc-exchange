@@ -22,11 +22,24 @@ const packageName = PLATFORM_MAP[platformKey];
 if (packageName) {
   try {
     nativeBinding = require(packageName);
-  } catch (_e) {
+  } catch (primaryError) {
+    // The platform package resolved but failed to load — most often an
+    // ABI/glibc mismatch (e.g. "version `GLIBC_2.39' not found" when the
+    // published addon was linked against a newer glibc than this host has).
+    // Fall back to a co-located dev build, but keep `primaryError`: it is the
+    // informative one, whereas the fallback's "Cannot find module" masks it.
     try {
       nativeBinding = require(join(__dirname, "oidc-exchange.node"));
-    } catch (e) {
-      loadError = e;
+    } catch (fallbackError) {
+      loadError = new Error(
+        `Failed to load the native binding for ${platformKey}: the platform ` +
+          `package "${packageName}" did not load and no local dev build ` +
+          `(oidc-exchange.node) was found. See \`error.cause\` for the ` +
+          `underlying failure — a "GLIBC_x.yz not found" there means the ` +
+          `published addon needs a newer glibc than this host provides.`,
+        { cause: primaryError },
+      );
+      loadError.fallbackError = fallbackError;
     }
   }
 } else {
