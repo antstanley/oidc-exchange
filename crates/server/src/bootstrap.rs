@@ -14,6 +14,7 @@ use oidc_exchange_core::ports::{
 use oidc_exchange_core::service::AppService;
 
 use crate::middleware::audit_context::audit_context_layer;
+use crate::middleware::base_path::with_base_path_strip;
 use crate::middleware::error_handler::panic_handler;
 use crate::middleware::request_id::request_id_layer;
 use crate::routes;
@@ -297,18 +298,31 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 /// the flag is true and the role would serve it, so a missing/empty secret
 /// is caught at startup, never discovered by an unauthenticated request).
 ///
-/// Middleware stack, outermost first (`04-http-api.md` → Middleware stack): request-id,
-/// request-timeout, audit-context, catch-panic. Axum/tower give the *last* `.layer()` call
-/// the outermost position (it wraps every layer added before it as its `next`), so the code
-/// below applies the layers in the reverse of that list — catch-panic first (innermost,
-/// nearest the handler), then audit-context, then the timeout layer, then request-id last
-/// (outermost). This ordering is what makes a request-timeout response still carry the
-/// `x-request-id` header: because request-id wraps the timeout layer, its header-insertion
-/// code always runs on whatever `next.run()` produces, including the timeout layer's own
-/// manufactured `408` when the inner future is abandoned — whereas a layer *outside*
-/// request-id would have its future abandoned right along with the rest and never see the
-/// response at all. The timeout layer itself wraps audit-context and catch-panic so the
-/// bound covers them and the handler, not just the handler.
+/// Middleware stack, outermost first (`04-http-api.md` → Middleware stack): base-path strip,
+/// request-id, request-timeout, audit-context, catch-panic. Axum/tower give the *last*
+/// `.layer()` call the outermost position (it wraps every layer added before it as its
+/// `next`), so the code below applies the per-route layers in the reverse of that list —
+/// catch-panic first (innermost, nearest the handler), then audit-context, then the timeout
+/// layer, then request-id last (outermost among them). This ordering is what makes a
+/// request-timeout response still carry the `x-request-id` header: because request-id wraps
+/// the timeout layer, its header-insertion code always runs on whatever `next.run()`
+/// produces, including the timeout layer's own manufactured `408` when the inner future is
+/// abandoned — whereas a layer *outside* request-id would have its future abandoned right
+/// along with the rest and never see the response at all. The timeout layer itself wraps
+/// audit-context and catch-panic so the bound covers them and the handler, not just the
+/// handler.
+///
+/// The base-path strip is applied *last*, wrapping the entire already-assembled, already-
+/// stated router from the outside via [`crate::middleware::base_path::with_base_path_strip`]
+/// — not as one more `.layer()` call. `Router::layer` only wraps each already-registered
+/// route's endpoint, which runs *after* axum has already decided which route (if any) matches
+/// the request's current path; a layer added that way can never influence *which* route is
+/// chosen, so it cannot be used to strip a prefix that needs to affect the routing decision
+/// itself (`/prod/health` → `/health`). Wrapping the whole router from the outside is the one
+/// way to rewrite the path early enough. This is applied unconditionally on this one shared
+/// path used by both the hyper and Lambda runtimes — when `config.server.base_path` is `None`
+/// the wrapper still runs on every request but is a pure pass-through, so there is no separate
+/// Lambda-only branch that installs it only sometimes.
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     let role = config.server.role.as_str();
 
@@ -335,14 +349,17 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         );
     }
 
-    app.layer(CatchPanicLayer::custom(panic_handler))
+    let router = app
+        .layer(CatchPanicLayer::custom(panic_handler))
         .layer(axum::middleware::from_fn(audit_context_layer))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             request_timeout_duration(config),
         ))
         .layer(axum::middleware::from_fn(request_id_layer))
-        .with_state(state)
+        .with_state(state);
+
+    with_base_path_strip(router, config.server.base_path.clone())
 }
 
 /// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
