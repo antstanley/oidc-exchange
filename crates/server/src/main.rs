@@ -28,9 +28,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Run
     if std::env::var("AWS_LAMBDA_RUNTIME_API").is_ok() {
-        // Lambda mode — not yet implemented
-        tracing::info!("Lambda runtime detected, but not yet implemented");
-        // TODO: lambda_http::run(app)
+        // Lambda mode: the same router (middleware, state, and base-path layer) is served
+        // through `lambda_http`, which speaks the Lambda Runtime API directly and translates
+        // API Gateway REST/HTTP-API, Function URL, and ALB events into tower `Service` calls
+        // against `app` (`04-http-api.md` → Bootstrap, step 6). `lambda_http::run` fails with
+        // `lambda_http::Error` (`Box<dyn std::error::Error + Send + Sync>`), which the
+        // standard library does not blanket-convert into `main`'s `Box<dyn std::error::Error>`
+        // (the `Send + Sync` marker traits make the two boxed trait objects distinct types to
+        // `?`'s `From` resolution); the error message is preserved and reboxed so the failure
+        // still propagates via `?` with no `unwrap`/`expect` on this path.
+        tracing::info!("Lambda runtime detected; serving via lambda_http");
+        lambda_http::run(app)
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error> { err.to_string().into() })?;
     } else {
         let addr = format!("{}:{}", config.server.host, config.server.port);
         assert!(

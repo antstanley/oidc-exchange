@@ -24,6 +24,7 @@ aws-sdk-dynamodb = "1"
 aws-sdk-kms = "1"
 aws-sdk-sqs = "1"
 futures = "0.3"
+lambda_http = "1"
 
 [dev-dependencies]
 oidc-exchange-test-utils.workspace = true
