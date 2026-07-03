@@ -7,6 +7,30 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Base delay (in milliseconds) for the first retry's exponential backoff.
+const BASE_BACKOFF_MS: u64 = 100;
+
+/// Maximum left-shift applied to the base delay. Bounding the shift keeps
+/// `1u64 << shift` from overflowing (and keeps the pre-clamp value from
+/// growing absurdly large) even when `retries` is set very high.
+const MAX_BACKOFF_SHIFT: u32 = 6;
+
+/// Hard ceiling on the per-attempt retry delay, regardless of attempt count.
+const MAX_BACKOFF_MS: u64 = 5_000;
+
+/// Compute the exponential backoff delay for a given retry `attempt`
+/// (1-indexed: the delay before the first retry, second retry, ...).
+///
+/// The delay doubles per attempt starting from `BASE_BACKOFF_MS`, with the
+/// shift clamped to `MAX_BACKOFF_SHIFT` so it can never overflow, and the
+/// resulting delay clamped to `MAX_BACKOFF_MS` so a large `retries` count
+/// cannot accumulate hours of sleep inside a request.
+fn backoff_delay(attempt: u32) -> std::time::Duration {
+    let shift = (attempt - 1).min(MAX_BACKOFF_SHIFT);
+    let delay_ms = BASE_BACKOFF_MS.saturating_mul(1u64 << shift);
+    std::time::Duration::from_millis(delay_ms.min(MAX_BACKOFF_MS))
+}
+
 /// Sends user lifecycle events as webhook HTTP POST requests with HMAC-SHA256 signatures.
 pub struct WebhookUserSync {
     url: String,
@@ -48,9 +72,8 @@ impl WebhookUserSync {
         let mut last_err = None;
         for attempt in 0..=self.retries {
             if attempt > 0 {
-                // Exponential backoff: 100ms, 200ms, 400ms, ...
-                let delay = std::time::Duration::from_millis(100 * (1 << (attempt - 1)));
-                tokio::time::sleep(delay).await;
+                // Exponential backoff: 100ms, 200ms, 400ms, ... capped at MAX_BACKOFF_MS.
+                tokio::time::sleep(backoff_delay(attempt)).await;
             }
 
             match self
@@ -153,6 +176,34 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn test_backoff_delay_is_capped_and_never_overflows() {
+        // retries = 20: far beyond MAX_BACKOFF_SHIFT, exercising both the
+        // pre-clamp overflow guard and the post-clamp cap.
+        for attempt in 1..=20u32 {
+            let delay = backoff_delay(attempt);
+            assert!(
+                delay <= std::time::Duration::from_millis(MAX_BACKOFF_MS),
+                "attempt {attempt} produced delay {delay:?} exceeding the {MAX_BACKOFF_MS}ms cap"
+            );
+        }
+
+        // The delay must actually grow (exponentially) before it saturates,
+        // not just be clamped to the cap from the first attempt.
+        assert!(backoff_delay(1) < backoff_delay(2));
+        assert!(backoff_delay(2) < backoff_delay(3));
+
+        // Once the shift bound is reached, further attempts stay at the cap.
+        assert_eq!(
+            backoff_delay(MAX_BACKOFF_SHIFT + 1),
+            std::time::Duration::from_millis(MAX_BACKOFF_MS)
+        );
+        assert_eq!(
+            backoff_delay(20),
+            std::time::Duration::from_millis(MAX_BACKOFF_MS)
+        );
     }
 
     #[tokio::test]
