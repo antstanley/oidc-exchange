@@ -2,8 +2,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
+use crate::domain::{AuditEventType, AuditOutcome, AuditSeverity};
 use crate::error::Result;
-use crate::service::AppService;
+use crate::service::{create_audit_event, AppService};
 
 #[derive(Default)]
 pub struct RevokeRequest {
@@ -24,26 +25,64 @@ impl AppService {
         match request.token_type_hint.as_deref() {
             Some("access_token") => {
                 // Verify the JWT was issued by us before revoking sessions.
-                // If verification fails, silently succeed per RFC 7009.
+                // If verification fails, silently succeed per RFC 7009 — no
+                // audit event is emitted for a failed/forged verification.
                 if let Some(user_id) = self.verify_and_extract_sub(&request.token).await {
                     let _ = self.session_repo.revoke_all_user_sessions(&user_id).await;
+                    self.emit_audit(create_audit_event(
+                        AuditEventType::AllSessionsRevoked,
+                        AuditSeverity::Notice,
+                        AuditOutcome::Success,
+                        Some(user_id),
+                        None,
+                        request.ip_address.clone(),
+                        request.user_agent.clone(),
+                    ))
+                    .await?;
                 }
                 Ok(())
             }
             Some("refresh_token") | None => {
-                // Hash the token (SHA-256, hex) — same as exchange/refresh
-                let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
-                // Revoke the session; if not found, that's OK per RFC 7009
-                let _ = self.session_repo.revoke_session(&token_hash).await;
+                self.revoke_refresh_token(&request).await?;
                 Ok(())
             }
             Some(_) => {
                 // Unknown hint — treat as refresh_token per spec
-                let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
-                let _ = self.session_repo.revoke_session(&token_hash).await;
+                self.revoke_refresh_token(&request).await?;
                 Ok(())
             }
         }
+    }
+
+    /// Hash and revoke a presented refresh token, emitting `TokenRevocation`
+    /// only when a session actually matched the hash. `revoke_session` on the
+    /// `SessionRepository` port is idempotent and always returns `Ok(())`
+    /// even when nothing matched, so the store is queried first to learn
+    /// whether a session was really removed — an unknown token must stay
+    /// silent per RFC 7009.
+    async fn revoke_refresh_token(&self, request: &RevokeRequest) -> Result<()> {
+        let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
+        let existing = self
+            .session_repo
+            .get_session_by_refresh_token(&token_hash)
+            .await
+            .ok()
+            .flatten();
+
+        if let Some(session) = existing {
+            let _ = self.session_repo.revoke_session(&token_hash).await;
+            self.emit_audit(create_audit_event(
+                AuditEventType::TokenRevocation,
+                AuditSeverity::Info,
+                AuditOutcome::Success,
+                Some(session.user_id.clone()),
+                None,
+                request.ip_address.clone(),
+                request.user_agent.clone(),
+            ))
+            .await?;
+        }
+        Ok(())
     }
 
     /// Verify a JWT's signature using the service's key manager, then extract the `sub` claim.
