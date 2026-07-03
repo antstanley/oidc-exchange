@@ -25,12 +25,57 @@ impl AppService {
         self.user_repo.get_user_by_id(user_id).await
     }
 
+    /// Fetch the user (missing id -> `Error::NotFound`), validate any status
+    /// change against the lifecycle in [`UserStatus::can_transition_to`]
+    /// (invalid transition -> `Error::InvalidRequest`), apply the patch via
+    /// `repo.update_user()`, and revoke all the user's sessions when the
+    /// status *changed* to `Suspended` or `Deleted` (a same-status patch,
+    /// e.g. `Suspended -> Suspended`, does not re-revoke). Shared by
+    /// [`Self::admin_update_user`] and [`Self::admin_delete_user`] so both
+    /// enforce identical transition and revocation rules.
+    async fn apply_validated_patch(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
+        let current = self
+            .user_repo
+            .get_user_by_id(user_id)
+            .await?
+            .ok_or_else(|| Error::NotFound {
+                detail: format!("user not found: {}", user_id),
+            })?;
+
+        if let Some(ref target) = patch.status {
+            if !current.status.can_transition_to(target) {
+                return Err(Error::InvalidRequest {
+                    reason: format!(
+                        "invalid status transition: {:?} -> {:?}",
+                        current.status, target
+                    ),
+                });
+            }
+        }
+
+        let user = self.user_repo.update_user(user_id, patch).await?;
+
+        let entered_suspended_or_deleted = match &patch.status {
+            Some(target) => {
+                *target != current.status
+                    && matches!(target, UserStatus::Suspended | UserStatus::Deleted)
+            }
+            None => false,
+        };
+        if entered_suspended_or_deleted {
+            self.session_repo.revoke_all_user_sessions(user_id).await?;
+        }
+
+        Ok(user)
+    }
+
     /// Update a user via admin API with a partial patch.
     ///
-    /// Calls `repo.update_user()`, then notifies user sync with the list of
-    /// changed fields (non-blocking).
+    /// See [`Self::apply_validated_patch`] for fetch/validate/revoke
+    /// behaviour; on success, notifies user sync with the list of changed
+    /// fields (non-blocking).
     pub async fn admin_update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
-        let user = self.user_repo.update_user(user_id, patch).await?;
+        let user = self.apply_validated_patch(user_id, patch).await?;
 
         let mut changed_fields: Vec<&str> = Vec::new();
         if patch.email.is_some() {
@@ -62,7 +107,10 @@ impl AppService {
 
     /// Soft-delete a user via admin API.
     ///
-    /// Sets user status to `Deleted`, revokes all sessions, and notifies user sync.
+    /// Routes through [`Self::apply_validated_patch`] so the same lifecycle
+    /// validation and session revocation apply: deleting a suspended user
+    /// succeeds, a second delete on an already-`Deleted` user is rejected with
+    /// `Error::InvalidRequest`, and an unknown id returns `Error::NotFound`.
     pub async fn admin_delete_user(&self, user_id: &str) -> Result<()> {
         let patch = UserPatch {
             email: None,
@@ -71,8 +119,7 @@ impl AppService {
             claims: None,
             status: Some(UserStatus::Deleted),
         };
-        self.user_repo.update_user(user_id, &patch).await?;
-        self.session_repo.revoke_all_user_sessions(user_id).await?;
+        self.apply_validated_patch(user_id, &patch).await?;
 
         if let Err(e) = self.user_sync.notify_user_deleted(user_id).await {
             tracing::warn!(error = %e, user_id = %user_id, "user sync notify_user_deleted failed");
