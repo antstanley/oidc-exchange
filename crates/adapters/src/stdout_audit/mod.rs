@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use oidc_exchange_core::domain::{AuditEvent, AuditSeverity};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::AuditLog;
+use std::io::{self, Write};
 
 /// Output target for the stdout audit adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,13 +46,23 @@ impl AuditLog for StdoutAuditLog {
         };
 
         if use_stderr {
-            eprintln!("{json}");
+            write_line(io::stderr().lock(), &json)?;
         } else {
-            println!("{json}");
+            write_line(io::stdout().lock(), &json)?;
         }
 
         Ok(())
     }
+}
+
+/// Write a single JSON line to `writer`, mapping any I/O failure (e.g. a
+/// broken pipe on a closed stdout/stderr) to `Error::AuditError` instead of
+/// panicking, so the failure can reach `emit_audit`'s fallback-and-threshold
+/// path.
+fn write_line(mut writer: impl Write, line: &str) -> Result<()> {
+    writeln!(writer, "{line}").map_err(|e| Error::AuditError {
+        detail: format!("failed to write audit event: {e}"),
+    })
 }
 
 #[cfg(test)]
@@ -95,6 +106,43 @@ mod tests {
         let adapter = StdoutAuditLog::new(OutputTarget::Stderr);
         let event = sample_event(AuditSeverity::Error);
         adapter.emit(&event).await.expect("emit should succeed");
+    }
+
+    /// A writer that always fails, simulating a broken stdout/stderr handle
+    /// (e.g. EPIPE from a closed downstream reader).
+    struct BrokenWriter;
+
+    impl std::io::Write for BrokenWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "simulated broken pipe",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_line_surfaces_broken_handle_as_audit_error() {
+        let result = write_line(BrokenWriter, "{}");
+
+        let err = result.expect_err("a broken writer must surface an error, not panic");
+        match err {
+            Error::AuditError { detail } => {
+                assert!(
+                    detail.contains("failed to write audit event"),
+                    "detail should explain the failure: {detail}"
+                );
+                assert!(
+                    detail.contains("simulated broken pipe"),
+                    "detail should include the underlying I/O error: {detail}"
+                );
+            }
+            other => panic!("expected Error::AuditError, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -57,17 +57,10 @@ impl AuditLog for SqsAuditLog {
             .message_body(json_str)
             .message_attributes("severity", severity_attr);
 
-        if self.queue_url.contains(".fifo") {
-            let event_type_str = serde_json::to_string(&event.event_type)
-                .map_err(|e| Error::AuditError {
-                    detail: format!("failed to serialize event_type: {e}"),
-                })?
-                .trim_matches('"')
-                .to_string();
-
+        if self.queue_url.ends_with(".fifo") {
             req = req
                 .message_deduplication_id(&event.id)
-                .message_group_id(event_type_str);
+                .message_group_id(&event.id);
         }
 
         req.send().await.map_err(|e| Error::AuditError {
@@ -111,9 +104,14 @@ mod tests {
     fn test_fifo_detection() {
         let url_fifo = "https://sqs.us-east-1.amazonaws.com/123456789012/audit-events.fifo";
         let url_standard = "https://sqs.us-east-1.amazonaws.com/123456789012/audit-events";
+        // A queue name that merely contains ".fifo" mid-string (not as a
+        // suffix) must NOT be treated as a FIFO queue.
+        let url_fifo_mid_string =
+            "https://sqs.us-east-1.amazonaws.com/123456789012/audit-events.fifo-archive";
 
-        assert!(url_fifo.contains(".fifo"));
-        assert!(!url_standard.contains(".fifo"));
+        assert!(url_fifo.ends_with(".fifo"));
+        assert!(!url_standard.ends_with(".fifo"));
+        assert!(!url_fifo_mid_string.ends_with(".fifo"));
     }
 
     #[test]
