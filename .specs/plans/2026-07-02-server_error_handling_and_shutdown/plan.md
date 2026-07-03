@@ -1,6 +1,6 @@
 # Plan: Server error handling, request-span correlation, and graceful shutdown
 
-**Status:** Accepted · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-server_error_handling_and_shutdown.md](../../changes/2026-07-01-server_error_handling_and_shutdown.md)
+**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-server_error_handling_and_shutdown.md](../../changes/2026-07-01-server_error_handling_and_shutdown.md)
 
 This plan closes four server-layer gaps in `crates/server`: `/revoke` reports success on
 infrastructure failure, `server_error` responses drop the internal detail, request-id
