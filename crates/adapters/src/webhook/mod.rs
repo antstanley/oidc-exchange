@@ -19,6 +19,7 @@ impl WebhookUserSync {
     pub fn new(url: String, secret: String, timeout: std::time::Duration, retries: u32) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("failed to build reqwest client");
 
@@ -63,7 +64,7 @@ impl WebhookUserSync {
             {
                 Ok(resp) => {
                     let status = resp.status();
-                    if status.is_success() || status.is_redirection() {
+                    if status.is_success() {
                         return Ok(());
                     }
                     if status.is_server_error() {
@@ -271,5 +272,51 @@ mod tests {
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "should not retry on 4xx");
+    }
+
+    #[tokio::test]
+    async fn test_redirect_is_not_followed_and_is_not_retried() {
+        // A second, unmounted server: it never registers a `Mock`, so any request
+        // that reached it would be answered with wiremock's default 404 and would
+        // register as a received request. It stands in for a redirect target the
+        // operator never configured.
+        let redirect_target = MockServer::start().await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/", redirect_target.uri())),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sync = WebhookUserSync::new(
+            format!("{}/", server.uri()),
+            "secret".to_string(),
+            std::time::Duration::from_secs(5),
+            2,
+        );
+
+        let user = test_user();
+        let result = sync.notify_user_created(&user).await;
+        assert!(result.is_err(), "a 3xx must not count as delivery success");
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "a 3xx is not retried, so the configured host sees exactly one request"
+        );
+
+        let redirect_requests = redirect_target.received_requests().await.unwrap();
+        assert_eq!(
+            redirect_requests.len(),
+            0,
+            "the client must not follow redirects: the signed body is never re-sent \
+             to a location the operator did not configure"
+        );
     }
 }
