@@ -142,6 +142,11 @@ pub struct ServerConfig {
     /// [`AppConfig::validate`] — an unparseable value fails config load rather than silently
     /// falling back to [`DEFAULT_REQUEST_TIMEOUT`].
     pub request_timeout: String,
+    /// Path prefix (e.g. `"/prod"`) stripped from incoming request paths before routing.
+    /// Absent (`None`) by default; exists for deployments fronted by a mount prefix such as
+    /// an API Gateway stage, where the platform includes the stage name in the request path
+    /// but the app's routes are defined without it.
+    pub base_path: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -152,6 +157,7 @@ impl Default for ServerConfig {
             issuer: String::new(),
             role: "all".to_string(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT.to_string(),
+            base_path: None,
         }
     }
 }
@@ -428,6 +434,7 @@ mod tests {
         assert!(config.server.issuer.is_empty());
         assert_eq!(config.server.request_timeout, DEFAULT_REQUEST_TIMEOUT);
         assert_eq!(config.server.request_timeout, "30s");
+        assert!(config.server.base_path.is_none());
 
         // Registration defaults
         assert_eq!(config.registration.mode, "open");
@@ -646,6 +653,32 @@ url = "postgres://localhost/oidc"
         )
         .expect("omitting run_migrations must still deserialize");
         assert_eq!(absent.repository.postgres.unwrap().run_migrations, None);
+    }
+
+    /// `[server] base_path` deserializes to `Some(prefix)` when present and to
+    /// `None` when absent, so the strip layer can tell "no prefix configured"
+    /// apart from "prefix is the empty string".
+    #[test]
+    fn server_base_path_deserializes_present_and_absent() {
+        let with_base_path: AppConfig = toml::from_str(
+            r#"
+[server]
+base_path = "/prod"
+"#,
+        )
+        .expect("base_path = \"/prod\" must deserialize");
+        assert_eq!(with_base_path.server.base_path.as_deref(), Some("/prod"));
+
+        // Negative-space: omitting the key must still deserialize (not a
+        // parse error), landing on `None` — the "no mount prefix" default.
+        let absent: AppConfig = toml::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+"#,
+        )
+        .expect("omitting base_path must still deserialize");
+        assert!(absent.server.base_path.is_none());
     }
 
     #[test]
