@@ -19,6 +19,16 @@ fn make_config_with_threshold(threshold: &str) -> AppConfig {
     }
 }
 
+fn make_config_with_emit_threshold(emit_threshold: &str) -> AppConfig {
+    AppConfig {
+        audit: AuditConfig {
+            emit_threshold: emit_threshold.to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 fn make_service_with_audit(audit: MockAuditLog, config: AppConfig) -> AppService {
     let provider = MockIdentityProvider::new("mock");
     let provider_id = provider.provider_id().to_string();
@@ -140,4 +150,104 @@ async fn successful_audit_emit_records_event() {
     assert_eq!(events[0].severity, AuditSeverity::Info);
     assert_eq!(events[0].actor.as_deref(), Some("user-1"));
     assert_eq!(events[0].provider.as_deref(), Some("mock"));
+}
+
+/// Negative-space: a Debug-severity event is strictly less severe than the
+/// default `info` emit_threshold, so `emit_audit` drops it before dispatch —
+/// the adapter never sees it, and the call still returns `Ok`.
+#[tokio::test]
+async fn audit_debug_event_under_default_emit_threshold_is_suppressed() {
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+
+    // Default AppConfig carries the default AuditConfig, whose
+    // `emit_threshold` defaults to "info".
+    let config = AppConfig::default();
+    assert_eq!(config.audit.emit_threshold, "info");
+    let svc = make_service_with_audit(audit, config);
+
+    let event = create_audit_event(
+        AuditEventType::ValidationFailed,
+        AuditSeverity::Debug,
+        AuditOutcome::Failure {
+            reason: "unknown token".to_string(),
+        },
+        None,
+        Some("mock".to_string()),
+    );
+
+    let result = svc.emit_audit(event).await;
+    assert!(
+        result.is_ok(),
+        "suppressed events must not surface an error"
+    );
+
+    let events = audit_clone.events().await;
+    assert!(
+        events.is_empty(),
+        "Debug event under the default info emit_threshold must never reach the adapter"
+    );
+}
+
+/// An Info event at the default `info` emit_threshold is exactly at the
+/// floor (not strictly less severe), so it is dispatched normally.
+#[tokio::test]
+async fn audit_info_event_at_default_emit_threshold_is_dispatched() {
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+
+    let config = AppConfig::default();
+    let svc = make_service_with_audit(audit, config);
+
+    let event = create_audit_event(
+        AuditEventType::TokenExchange,
+        AuditSeverity::Info,
+        AuditOutcome::Success,
+        Some("user-1".to_string()),
+        Some("mock".to_string()),
+    );
+
+    let result = svc.emit_audit(event).await;
+    assert!(result.is_ok(), "info event at info threshold should emit");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "an event at the emit_threshold must reach the adapter"
+    );
+    assert_eq!(events[0].severity, AuditSeverity::Info);
+}
+
+/// Lowering `emit_threshold` to `debug` lets a Debug event through to the
+/// adapter, proving the filter is driven by config rather than a hardcoded
+/// floor.
+#[tokio::test]
+async fn audit_debug_event_reaches_adapter_when_threshold_lowered_to_debug() {
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+
+    let config = make_config_with_emit_threshold("debug");
+    let svc = make_service_with_audit(audit, config);
+
+    let event = create_audit_event(
+        AuditEventType::ValidationFailed,
+        AuditSeverity::Debug,
+        AuditOutcome::Failure {
+            reason: "unknown token".to_string(),
+        },
+        None,
+        Some("mock".to_string()),
+    );
+
+    let result = svc.emit_audit(event).await;
+    assert!(result.is_ok(), "dispatched debug event should return Ok");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "lowering emit_threshold to debug must let the debug event through"
+    );
+    assert_eq!(events[0].severity, AuditSeverity::Debug);
 }

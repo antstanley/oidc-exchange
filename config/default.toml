@@ -12,6 +12,7 @@ refresh_token_ttl = "30d"
 [audit]
 adapter = "noop"
 blocking_threshold = "warning"
+emit_threshold = "info"
 
 [telemetry]
 enabled = false

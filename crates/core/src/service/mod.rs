@@ -100,6 +100,15 @@ impl AppService {
     }
 
     pub async fn emit_audit(&self, event: AuditEvent) -> Result<()> {
+        // Pre-dispatch emit-threshold filter: events strictly less severe
+        // than `[audit] emit_threshold` are dropped before any adapter ever
+        // sees them, independently of the blocking-threshold decision below.
+        let emit_threshold =
+            parse_severity(&self.config.audit.emit_threshold).unwrap_or(AuditSeverity::Info);
+        if event.severity as u8 > emit_threshold as u8 {
+            return Ok(());
+        }
+
         match self.audit.emit(&event).await {
             Ok(()) => Ok(()),
             Err(e) => {
