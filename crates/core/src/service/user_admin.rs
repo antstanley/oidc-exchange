@@ -130,14 +130,14 @@ impl AppService {
 
     /// Get custom claims for a user.
     ///
-    /// Returns `Error::InvalidRequest` if user not found.
+    /// Returns `Error::NotFound` if user not found.
     pub async fn admin_get_claims(&self, user_id: &str) -> Result<HashMap<String, Value>> {
         let user = self
             .user_repo
             .get_user_by_id(user_id)
             .await?
-            .ok_or_else(|| Error::InvalidRequest {
-                reason: format!("user not found: {}", user_id),
+            .ok_or_else(|| Error::NotFound {
+                detail: format!("user not found: {}", user_id),
             })?;
 
         Ok(user.claims)
@@ -153,8 +153,8 @@ impl AppService {
         self.user_repo
             .get_user_by_id(user_id)
             .await?
-            .ok_or_else(|| Error::InvalidRequest {
-                reason: format!("user not found: {}", user_id),
+            .ok_or_else(|| Error::NotFound {
+                detail: format!("user not found: {}", user_id),
             })?;
 
         let patch = UserPatch {
@@ -180,8 +180,8 @@ impl AppService {
             .user_repo
             .get_user_by_id(user_id)
             .await?
-            .ok_or_else(|| Error::InvalidRequest {
-                reason: format!("user not found: {}", user_id),
+            .ok_or_else(|| Error::NotFound {
+                detail: format!("user not found: {}", user_id),
             })?;
 
         let mut merged = user.claims;
@@ -206,8 +206,8 @@ impl AppService {
         self.user_repo
             .get_user_by_id(user_id)
             .await?
-            .ok_or_else(|| Error::InvalidRequest {
-                reason: format!("user not found: {}", user_id),
+            .ok_or_else(|| Error::NotFound {
+                detail: format!("user not found: {}", user_id),
             })?;
 
         let patch = UserPatch {

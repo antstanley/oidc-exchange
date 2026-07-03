@@ -277,6 +277,65 @@ async fn admin_clear_claims_empties_map() {
     assert!(claims.is_empty(), "claims should be empty after clear");
 }
 
+// ─── Test 5b: Claims operations on unknown user id return NotFound ─────────
+
+#[tokio::test]
+async fn admin_get_claims_unknown_id_returns_not_found() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, _repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let result = svc.admin_get_claims("usr_does_not_exist").await;
+    assert!(matches!(result, Err(Error::NotFound { .. })));
+    assert!(
+        !matches!(result, Err(Error::InvalidRequest { .. })),
+        "unknown id must not surface as InvalidRequest"
+    );
+}
+
+#[tokio::test]
+async fn admin_set_claims_unknown_id_returns_not_found() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let mut claims = HashMap::new();
+    claims.insert("a".to_string(), json!(1));
+    let result = svc.admin_set_claims("usr_does_not_exist", claims).await;
+    assert!(matches!(result, Err(Error::NotFound { .. })));
+
+    // The rejected set must not have written a user row.
+    assert!(repo_clone.get_all_users().await.is_empty());
+}
+
+#[tokio::test]
+async fn admin_merge_claims_unknown_id_returns_not_found() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let mut claims = HashMap::new();
+    claims.insert("a".to_string(), json!(1));
+    let result = svc.admin_merge_claims("usr_does_not_exist", claims).await;
+    assert!(matches!(result, Err(Error::NotFound { .. })));
+
+    // The rejected merge must not have written a user row.
+    assert!(repo_clone.get_all_users().await.is_empty());
+}
+
+#[tokio::test]
+async fn admin_clear_claims_unknown_id_returns_not_found() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let result = svc.admin_clear_claims("usr_does_not_exist").await;
+    assert!(matches!(result, Err(Error::NotFound { .. })));
+
+    // The rejected clear must not have written a user row.
+    assert!(repo_clone.get_all_users().await.is_empty());
+}
+
 // ─── Test 6: Delete user revokes sessions ───────────────────────────────────
 
 #[tokio::test]
