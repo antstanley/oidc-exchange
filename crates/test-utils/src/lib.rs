@@ -375,17 +375,27 @@ pub enum UserSyncCall {
 #[derive(Clone)]
 pub struct MockUserSync {
     calls: Arc<Mutex<Vec<UserSyncCall>>>,
+    fail_mode: Arc<Mutex<bool>>,
 }
 
 impl MockUserSync {
     pub fn new() -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            fail_mode: Arc::new(Mutex::new(false)),
         }
     }
 
     pub async fn calls(&self) -> Vec<UserSyncCall> {
         self.calls.lock().await.clone()
+    }
+
+    /// When enabled, every `UserSync` method returns `Err` instead of
+    /// recording the call — models a sync backend (e.g. a webhook target)
+    /// that fails every delivery attempt, for exercising best-effort
+    /// log-and-continue behaviour.
+    pub async fn set_fail_mode(&self, fail: bool) {
+        *self.fail_mode.lock().await = fail;
     }
 }
 
@@ -398,6 +408,11 @@ impl Default for MockUserSync {
 #[async_trait]
 impl UserSync for MockUserSync {
     async fn notify_user_created(&self, user: &User) -> Result<()> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::SyncError {
+                detail: "mock user sync failure".into(),
+            });
+        }
         self.calls
             .lock()
             .await
@@ -406,6 +421,11 @@ impl UserSync for MockUserSync {
     }
 
     async fn notify_user_updated(&self, user: &User, changed_fields: &[&str]) -> Result<()> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::SyncError {
+                detail: "mock user sync failure".into(),
+            });
+        }
         self.calls.lock().await.push(UserSyncCall::Updated {
             user: user.clone(),
             changed_fields: changed_fields.iter().map(|s| s.to_string()).collect(),
@@ -414,6 +434,11 @@ impl UserSync for MockUserSync {
     }
 
     async fn notify_user_deleted(&self, user_id: &str) -> Result<()> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::SyncError {
+                detail: "mock user sync failure".into(),
+            });
+        }
         self.calls
             .lock()
             .await

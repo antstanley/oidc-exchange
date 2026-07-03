@@ -16,7 +16,7 @@ use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync, UserSyncCall,
 };
 
 fn make_config() -> AppConfig {
@@ -78,6 +78,30 @@ fn make_service_with_user_repo(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        providers,
+        config,
+    )
+}
+
+/// Builds a service whose `UserSync` is a caller-supplied `MockUserSync`, so
+/// the test can inspect (or fail-mode) sync notifications after the exchange
+/// runs.
+fn make_service_with_user_sync(
+    repo: MockRepository,
+    provider: MockIdentityProvider,
+    config: AppConfig,
+    user_sync: MockUserSync,
+) -> AppService {
+    let provider_id = provider.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider));
+
+    AppService::new(
+        Box::new(repo.clone()),
+        Box::new(repo),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(user_sync),
         providers,
         config,
     )
@@ -1331,6 +1355,124 @@ async fn exchange_success_audit_failure_under_blocking_threshold_propagates_err(
         repo.get_all_sessions().await.len(),
         1,
         "session write happens before the TokenExchange audit emission"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JIT user-sync notify tests
+// ---------------------------------------------------------------------------
+
+/// A JIT-registered (first-login) user fires exactly one
+/// `notify_user_created` sync call carrying the newly created user; a
+/// second exchange for the same identity (now an existing, active user)
+/// fires no further sync calls at all.
+#[tokio::test]
+async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let user_sync = MockUserSync::new();
+    let sync_clone = user_sync.clone();
+    let svc = make_service_with_user_sync(repo.clone(), provider, make_config(), user_sync);
+
+    let request = ExchangeRequest {
+        code: Some("auth-code-123".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ..Default::default()
+    };
+    svc.exchange(request)
+        .await
+        .expect("JIT exchange should succeed");
+
+    let users = repo.get_all_users().await;
+    assert_eq!(users.len(), 1);
+    let created_user_id = users[0].id.clone();
+
+    let calls = sync_clone.calls().await;
+    assert_eq!(
+        calls.len(),
+        1,
+        "a JIT-registered user must fire exactly one sync call, got: {:?}",
+        calls
+    );
+    match &calls[0] {
+        UserSyncCall::Created(u) => assert_eq!(u.id, created_user_id),
+        other => panic!("expected UserSyncCall::Created, got: {:?}", other),
+    }
+
+    // A second exchange for the same identity (the mock provider always
+    // returns the same "test-subject" claim, so this hits the now-existing
+    // active user) must not fire a second notify_user_created. Reuse the
+    // SAME service/mock so the second exchange's sync calls are actually
+    // observed by `sync_clone` rather than routed to a throwaway mock.
+    let request2 = ExchangeRequest {
+        code: Some("auth-code-456".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ..Default::default()
+    };
+    svc.exchange(request2)
+        .await
+        .expect("second exchange for an existing user should succeed");
+
+    // The same sync mock saw no additional calls beyond the single
+    // JIT-registration notify from the first exchange.
+    let calls_after = sync_clone.calls().await;
+    assert_eq!(
+        calls_after.len(),
+        1,
+        "an existing-user exchange must not trigger any further sync calls"
+    );
+    assert_eq!(
+        repo.get_all_users().await.len(),
+        1,
+        "still exactly one user"
+    );
+}
+
+/// Negative space: when the user-sync backend fails every attempt, a JIT
+/// exchange still returns a usable token — the best-effort notify's failure
+/// is swallowed (log-and-continue) and never propagates as an `Err`, nor
+/// does it prevent the session/user from being persisted.
+#[tokio::test]
+async fn exchange_jit_registration_still_returns_token_when_sync_fails_every_attempt() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let user_sync = MockUserSync::new();
+    user_sync.set_fail_mode(true).await;
+    let sync_clone = user_sync.clone();
+    let svc = make_service_with_user_sync(repo.clone(), provider, make_config(), user_sync);
+
+    let request = ExchangeRequest {
+        code: Some("auth-code-789".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ..Default::default()
+    };
+    let response = svc
+        .exchange(request)
+        .await
+        .expect("exchange must succeed even though user sync fails every attempt");
+
+    assert_eq!(response.token_type, "Bearer");
+    assert!(
+        response.refresh_token.is_some(),
+        "a token must still be issued despite the sync failure"
+    );
+
+    // The user and session were still persisted — the sync failure is
+    // isolated from the rest of the flow.
+    assert_eq!(repo.get_all_users().await.len(), 1);
+    assert_eq!(repo.get_all_sessions().await.len(), 1);
+
+    // The failed call was never recorded as a successful sync (fail_mode
+    // returns Err before pushing onto the call log).
+    assert!(
+        sync_clone.calls().await.is_empty(),
+        "a failed sync attempt must not be recorded as a successful call"
     );
 }
 

@@ -216,6 +216,16 @@ impl AppService {
                             request.user_agent.clone(),
                         ))
                         .await?;
+
+                        // Best-effort JIT user-sync notify, mirroring
+                        // `admin_create_user`: awaited (not spawned) so a
+                        // fast follow-up `user.updated` cannot overtake this
+                        // `user.created`, its result discarded, and a
+                        // failure logged rather than failing the exchange.
+                        if let Err(e) = self.user_sync.notify_user_created(&created).await {
+                            tracing::warn!(error = %e, user_id = %created.id, "user sync notify_user_created failed");
+                        }
+
                         created
                     }
                     Err(Error::Conflict { .. }) => {
