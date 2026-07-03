@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::Router;
 use config::{Config, Environment, File, FileFormat, Value, ValueKind};
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::timeout::TimeoutLayer;
 
 use oidc_exchange_core::config::{AppConfig, ProviderConfig};
 use oidc_exchange_core::error::Error;
@@ -38,6 +39,13 @@ const ENV_OVERRIDE_PREFIX: &str = "OIDC_EXCHANGE";
 /// underscore stays inside a segment (`OIDC_EXCHANGE__PROVIDERS__MY_IDP__…`
 /// addresses `providers.my_idp`).
 const ENV_OVERRIDE_SEPARATOR: &str = "__";
+
+/// Sane upper bound, in seconds, on `server.request_timeout`: a value above this is almost
+/// certainly a misconfiguration (e.g. a stray extra digit, or a TTL-style string pasted into
+/// the wrong key) rather than an intentionally very slow deployment, so
+/// [`request_timeout_duration`] asserts the parsed value never exceeds it. One hour is far
+/// beyond any sane per-request bound for this service's synchronous HTTP handlers.
+const REQUEST_TIMEOUT_MAX_SECS: u64 = 60 * 60;
 
 /// Upper bound, in bytes, on how far the placeholder resolver scans past a
 /// `${` opener looking for its closing `}` before giving up and treating the
@@ -288,6 +296,19 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 /// (`AppConfig::validate` already requires a non-empty shared secret whenever
 /// the flag is true and the role would serve it, so a missing/empty secret
 /// is caught at startup, never discovered by an unauthenticated request).
+///
+/// Middleware stack, outermost first (`04-http-api.md` → Middleware stack): request-id,
+/// request-timeout, audit-context, catch-panic. Axum/tower give the *last* `.layer()` call
+/// the outermost position (it wraps every layer added before it as its `next`), so the code
+/// below applies the layers in the reverse of that list — catch-panic first (innermost,
+/// nearest the handler), then audit-context, then the timeout layer, then request-id last
+/// (outermost). This ordering is what makes a request-timeout response still carry the
+/// `x-request-id` header: because request-id wraps the timeout layer, its header-insertion
+/// code always runs on whatever `next.run()` produces, including the timeout layer's own
+/// manufactured `408` when the inner future is abandoned — whereas a layer *outside*
+/// request-id would have its future abandoned right along with the rest and never see the
+/// response at all. The timeout layer itself wraps audit-context and catch-panic so the
+/// bound covers them and the handler, not just the handler.
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     let role = config.server.role.as_str();
 
@@ -314,10 +335,47 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         );
     }
 
-    app.layer(axum::middleware::from_fn(request_id_layer))
+    app.layer(CatchPanicLayer::custom(panic_handler))
         .layer(axum::middleware::from_fn(audit_context_layer))
-        .layer(CatchPanicLayer::custom(panic_handler))
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            request_timeout_duration(config),
+        ))
+        .layer(axum::middleware::from_fn(request_id_layer))
         .with_state(state)
+}
+
+/// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
+/// from — entry 2 of the outermost-first middleware ordering (inside the request-id layer,
+/// so a timeout response still carries the request id; outside audit-context and
+/// catch-panic, so the bound covers the remaining middleware and the handler).
+///
+/// Every production entry point (`load_config`, `parse_config`) runs `AppConfig::validate`
+/// — which parses this same field via [`oidc_exchange_core::service::parse_duration_secs`] —
+/// before a router is ever built, so an unparseable value fails config loading closed rather
+/// than reaching this function. Reaching it here anyway (e.g. a hand-built `AppConfig` in a
+/// test that skipped `validate`) is treated as a programmer error and panics loudly instead
+/// of silently substituting [`oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT`].
+fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
+    let secs = oidc_exchange_core::service::parse_duration_secs(&config.server.request_timeout)
+        .unwrap_or_else(|err| {
+            panic!(
+                "server.request_timeout {:?} is invalid: {err} (AppConfig::validate should \
+                     have rejected this before build_router was ever called)",
+                config.server.request_timeout
+            )
+        });
+    assert!(
+        secs > 0,
+        "parsed request_timeout must be non-zero, got {secs}s from {:?}",
+        config.server.request_timeout
+    );
+    assert!(
+        secs <= REQUEST_TIMEOUT_MAX_SECS,
+        "parsed request_timeout of {secs}s from {:?} exceeds the sane upper bound of {REQUEST_TIMEOUT_MAX_SECS}s",
+        config.server.request_timeout
+    );
+    std::time::Duration::from_secs(secs)
 }
 
 // ---------------------------------------------------------------------------
@@ -1390,6 +1448,153 @@ mod build_router_tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let json = body_to_json(response.into_body()).await;
         assert_eq!(json["error_description"], "internal API not configured");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Request-timeout layer tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod request_timeout_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    /// `request_timeout_duration` resolves the config default (`"30s"`) to exactly 30
+    /// seconds — the value `06-configuration.md`'s Defaults summary documents.
+    #[test]
+    fn request_timeout_duration_resolves_documented_default() {
+        let config = AppConfig::default();
+
+        let duration = request_timeout_duration(&config);
+
+        assert_eq!(duration, Duration::from_secs(30));
+        assert_eq!(
+            config.server.request_timeout,
+            oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT
+        );
+    }
+
+    /// An overridden `server.request_timeout` parses to the matching `Duration`, not just
+    /// the default.
+    #[test]
+    fn request_timeout_duration_resolves_configured_override() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "2m".to_string();
+
+        let duration = request_timeout_duration(&config);
+
+        assert_eq!(duration, Duration::from_secs(120));
+    }
+
+    /// Negative-space: an unparseable `server.request_timeout` must panic rather than
+    /// silently building a `TimeoutLayer` from a fallback duration — `AppConfig::validate`
+    /// is expected to have already rejected this at config load, so reaching this function
+    /// with a bad value is a programmer error that must fail loudly.
+    #[test]
+    fn request_timeout_duration_panics_on_unparseable_value() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "not-a-duration".to_string();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            request_timeout_duration(&config)
+        }));
+
+        assert!(
+            result.is_err(),
+            "an unparseable request_timeout must panic, not silently default"
+        );
+    }
+
+    /// Negative-space: a zero-second `request_timeout` — a value `parse_duration_secs`
+    /// happily parses but that would time out every request instantly — must trip the
+    /// non-zero assertion in `request_timeout_duration` rather than build a degenerate
+    /// `TimeoutLayer`.
+    #[test]
+    fn request_timeout_duration_panics_on_zero_seconds() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "0s".to_string();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            request_timeout_duration(&config)
+        }));
+
+        assert!(
+            result.is_err(),
+            "a zero-second request_timeout must panic rather than build a degenerate timeout \
+             layer"
+        );
+    }
+
+    /// Builds the same middleware ordering `build_router` installs — request-id, then the
+    /// timeout layer, then audit-context, then catch-panic — around two bare test handlers,
+    /// so the layer-ordering contract (timeout inside request-id, outside everything else)
+    /// is exercised directly against a slow and a fast handler.
+    fn timeout_test_app(timeout: Duration) -> Router {
+        async fn fast_handler() -> &'static str {
+            "ok"
+        }
+        async fn slow_handler() -> &'static str {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            "too slow to ever return"
+        }
+
+        // Mirrors `build_router`'s exact layer ordering (see its doc comment): applied
+        // innermost first, so request-id ends up outermost and the timeout layer sits
+        // between it and audit-context/catch-panic.
+        Router::new()
+            .route("/fast", get(fast_handler))
+            .route("/slow", get(slow_handler))
+            .layer(CatchPanicLayer::custom(panic_handler))
+            .layer(axum::middleware::from_fn(audit_context_layer))
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                timeout,
+            ))
+            .layer(axum::middleware::from_fn(request_id_layer))
+    }
+
+    /// A handler that runs longer than `server.request_timeout` is aborted with `408`, and
+    /// — because the timeout layer sits inside the request-id layer — the response still
+    /// carries the echoed `x-request-id` header.
+    #[tokio::test]
+    async fn slow_handler_past_timeout_yields_408_with_request_id() {
+        let app = timeout_test_app(Duration::from_millis(50));
+
+        let response = app
+            .oneshot(Request::get("/slow").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        assert!(
+            response.headers().get("x-request-id").is_some(),
+            "a timeout response must still carry the request id: the timeout layer sits \
+             inside (nearer the handler than) the request-id layer, so request-id processes \
+             the response on the way back out"
+        );
+    }
+
+    /// A handler that finishes well under `server.request_timeout` completes normally with
+    /// `200`, proving the timeout layer does not interfere with ordinary fast requests.
+    #[tokio::test]
+    async fn fast_handler_under_timeout_yields_200() {
+        let app = timeout_test_app(Duration::from_millis(50));
+
+        let response = app
+            .oneshot(Request::get("/fast").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().get("x-request-id").is_some(),
+            "a normal response must still carry the request id"
+        );
     }
 }
 

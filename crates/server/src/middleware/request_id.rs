@@ -10,15 +10,19 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 /// every log emitted while handling the request is correlated to it.
 ///
 /// If the incoming request already contains a non-empty `X-Request-Id` header it is reused;
-/// otherwise (header absent, empty, or not valid UTF-8) a new UUID v4 is generated. This
-/// middleware is the innermost layer, so its per-request `info_span` carrying `request_id`
-/// (plus `method` and `path`) wraps the handler only (not the outer middleware stack), so
-/// every log emitted by the handler — including the `server_error` detail log — inherits the field,
-/// making request-id correlation real. If an outer span is already open when this
-/// middleware runs (e.g. a future tower OTEL request-span layer sitting above it),
-/// `request_id` is recorded on that span instead of opening a nested duplicate — per the
-/// "spans merge across layers, never nest" decision. Either way the value is propagated
-/// back on the response header.
+/// otherwise (header absent, empty, or not valid UTF-8) a new UUID v4 is generated. In
+/// `bootstrap::build_router`'s production stack this middleware is the outermost layer (see
+/// its doc comment), so its per-request `info_span` carrying `request_id` (plus `method` and
+/// `path`) wraps the rest of the middleware stack — including the request-timeout layer — and
+/// the handler, so every log emitted along the way — including the `server_error` detail log
+/// and a caught panic's log — inherits the field, making request-id correlation real. Being
+/// outermost also means the header-insertion code below always runs on the final response,
+/// even one manufactured by an inner layer that gave up early (e.g. the request-timeout
+/// layer's `408`), because that layer's response is exactly what `next.run()` resolves to
+/// here. If an outer span is already open when this middleware runs (e.g. a future tower
+/// OTEL request-span layer sitting above it), `request_id` is recorded on that span instead
+/// of opening a nested duplicate — per the "spans merge across layers, never nest" decision.
+/// Either way the value is propagated back on the response header.
 pub async fn request_id_layer(request: Request<axum::body::Body>, next: Next) -> impl IntoResponse {
     let request_id = request
         .headers()

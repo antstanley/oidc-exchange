@@ -194,7 +194,11 @@ const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
 /// multi-byte final character cannot land on a non-UTF-8 boundary, and unit
 /// conversion uses checked multiplication so an overflowing value is reported
 /// as a `ConfigError` rather than silently wrapping.
-pub(crate) fn parse_duration_secs(s: &str) -> Result<u64> {
+///
+/// `pub` (not `pub(crate)`) so the `oidc-exchange` server crate can reuse the same parser for
+/// `server.request_timeout` instead of duplicating duration-parsing logic for its
+/// `TimeoutLayer` (`bootstrap::request_timeout_duration`).
+pub fn parse_duration_secs(s: &str) -> Result<u64> {
     let s = s.trim();
     if s.is_empty() {
         return Err(Error::ConfigError {

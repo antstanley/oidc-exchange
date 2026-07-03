@@ -34,7 +34,8 @@ impl AppConfig {
     ///
     /// Checks, each returning a `ConfigError` naming the offending field:
     /// - `server.role` is one of [`ALLOWED_SERVER_ROLES`].
-    /// - `token.access_token_ttl` and `token.refresh_token_ttl` parse via
+    /// - `server.request_timeout`, `token.access_token_ttl`, and
+    ///   `token.refresh_token_ttl` parse via
     ///   [`crate::service::parse_duration_secs`].
     /// - Every `registration.domain_allowlist` entry is an exact domain or a
     ///   `*.`-prefixed wildcard.
@@ -51,6 +52,10 @@ impl AppConfig {
             });
         }
 
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.server.request_timeout),
+            "server.request_timeout",
+        )?;
         prefix_config_error(
             crate::service::parse_duration_secs(&self.token.access_token_ttl),
             "token.access_token_ttl",
@@ -117,6 +122,13 @@ fn validate_allowlist_entry(entry: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Default for `[server] request_timeout` when the key is absent from config: a humantime
+/// duration string parsed the same way as the `[token]` TTLs (see
+/// [`crate::service::parse_duration_secs`]). Named rather than a bare literal so the value
+/// backing `AppConfig::validate` and the docs stay in lockstep.
+/// See `06-configuration.md` → Sections → `[server]` and Defaults summary.
+pub const DEFAULT_REQUEST_TIMEOUT: &str = "30s";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -124,6 +136,12 @@ pub struct ServerConfig {
     pub port: u16,
     pub issuer: String,
     pub role: String,
+    /// Humantime duration string (e.g. `"30s"`) bounding how long the server's
+    /// request-timeout middleware layer lets a single request run before aborting it with a
+    /// `408`. Parsed via [`crate::service::parse_duration_secs`] and validated at startup by
+    /// [`AppConfig::validate`] — an unparseable value fails config load rather than silently
+    /// falling back to [`DEFAULT_REQUEST_TIMEOUT`].
+    pub request_timeout: String,
 }
 
 impl Default for ServerConfig {
@@ -133,6 +151,7 @@ impl Default for ServerConfig {
             port: 8080,
             issuer: String::new(),
             role: "all".to_string(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT.to_string(),
         }
     }
 }
@@ -407,6 +426,8 @@ mod tests {
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 8080);
         assert!(config.server.issuer.is_empty());
+        assert_eq!(config.server.request_timeout, DEFAULT_REQUEST_TIMEOUT);
+        assert_eq!(config.server.request_timeout, "30s");
 
         // Registration defaults
         assert_eq!(config.registration.mode, "open");
@@ -444,6 +465,7 @@ mod tests {
 host = "127.0.0.1"
 port = 9090
 issuer = "https://auth.example.com"
+request_timeout = "45s"
 
 [registration]
 mode = "existing_users_only"
@@ -518,6 +540,12 @@ scopes = ["openid", "email", "profile"]
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 9090);
         assert_eq!(config.server.issuer, "https://auth.example.com");
+        assert_eq!(config.server.request_timeout, "45s");
+        assert_eq!(
+            crate::service::parse_duration_secs(&config.server.request_timeout)
+                .expect("overridden request_timeout must still parse as a humantime duration"),
+            45
+        );
 
         assert_eq!(config.registration.mode, "existing_users_only");
         let allowlist = config.registration.domain_allowlist.unwrap();
@@ -719,6 +747,33 @@ url = "postgres://localhost/oidc"
             Error::ConfigError { detail } => {
                 assert!(
                     detail.contains("token.access_token_ttl"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("not-a-duration"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Negative-space: an unparseable `server.request_timeout` must fail `validate` (and
+    /// therefore `load_config`/`parse_config`, which call it before anything else is built)
+    /// rather than being absorbed and silently falling back to `DEFAULT_REQUEST_TIMEOUT`.
+    #[test]
+    fn validate_rejects_unparseable_request_timeout() {
+        let mut config = AppConfig::default();
+        config.server.request_timeout = "not-a-duration".to_string();
+
+        let err = config
+            .validate()
+            .expect_err("bad request_timeout must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("server.request_timeout"),
                     "detail must name the field: {detail}"
                 );
                 assert!(
