@@ -30,13 +30,27 @@ pub async fn shutdown_signal() {
             .expect("failed to install ctrl-c handler");
     };
 
-    // SIGTERM is what ECS/K8s send on a rollout; `tokio::signal::unix` is Unix-only, which
-    // matches this service's deployment targets.
+    // SIGTERM is what ECS/K8s send on a rollout; `tokio::signal::unix` is Unix-only. The server
+    // crate is nonetheless compiled for Windows (the napi/pyo3 bindings ship a win32 platform
+    // package), so the terminate branch is `cfg`-gated: on Windows the closest rollout/stop
+    // events are CTRL_CLOSE / CTRL_SHUTDOWN.
+    #[cfg(unix)]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to install SIGTERM handler")
             .recv()
             .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = async {
+        let mut ctrl_close =
+            tokio::signal::windows::ctrl_close().expect("failed to install ctrl-close handler");
+        let mut ctrl_shutdown = tokio::signal::windows::ctrl_shutdown()
+            .expect("failed to install ctrl-shutdown handler");
+        tokio::select! {
+            _ = ctrl_close.recv() => {}
+            _ = ctrl_shutdown.recv() => {}
+        }
     };
 
     tokio::select! {
@@ -44,7 +58,7 @@ pub async fn shutdown_signal() {
             tracing::info!("received ctrl-c, starting graceful shutdown");
         }
         () = terminate => {
-            tracing::info!("received SIGTERM, starting graceful shutdown");
+            tracing::info!("received termination signal, starting graceful shutdown");
         }
     }
 }
