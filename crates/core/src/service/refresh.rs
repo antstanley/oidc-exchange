@@ -1,9 +1,9 @@
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{TokenResponse, UserStatus};
+use crate::domain::{AuditEventType, AuditOutcome, AuditSeverity, TokenResponse, UserStatus};
 use crate::error::{Error, Result};
-use crate::service::AppService;
+use crate::service::{create_audit_event, AppService};
 
 #[derive(Default)]
 pub struct RefreshRequest {
@@ -24,38 +24,101 @@ impl AppService {
         let token_hash = hex::encode(Sha256::digest(request.refresh_token.as_bytes()));
 
         // 2. Look up session by refresh token hash
-        let session = self
+        let session = match self
             .session_repo
             .get_session_by_refresh_token(&token_hash)
             .await?
-            .ok_or_else(|| Error::InvalidToken {
-                reason: "unknown refresh token".to_string(),
-            })?;
+        {
+            Some(session) => session,
+            None => {
+                let reason = "unknown refresh token".to_string();
+                self.emit_audit(create_audit_event(
+                    AuditEventType::ValidationFailed,
+                    AuditSeverity::Debug,
+                    AuditOutcome::Failure {
+                        reason: reason.clone(),
+                    },
+                    None,
+                    None,
+                    request.ip_address.clone(),
+                    request.user_agent.clone(),
+                ))
+                .await?;
+                return Err(Error::InvalidToken { reason });
+            }
+        };
 
         // 3. Check if the session has expired
         if session.expires_at < Utc::now() {
-            return Err(Error::InvalidToken {
-                reason: "refresh token expired".to_string(),
-            });
+            let reason = "refresh token expired".to_string();
+            self.emit_audit(create_audit_event(
+                AuditEventType::ValidationFailed,
+                AuditSeverity::Debug,
+                AuditOutcome::Failure {
+                    reason: reason.clone(),
+                },
+                Some(session.user_id.clone()),
+                None,
+                request.ip_address.clone(),
+                request.user_agent.clone(),
+            ))
+            .await?;
+            return Err(Error::InvalidToken { reason });
         }
 
         // 4. Look up the user and check status
-        let user = self
-            .user_repo
-            .get_user_by_id(&session.user_id)
-            .await?
-            .ok_or_else(|| Error::InvalidToken {
-                reason: "user not found".to_string(),
-            })?;
+        let user = match self.user_repo.get_user_by_id(&session.user_id).await? {
+            Some(user) => user,
+            None => {
+                let reason = "user not found".to_string();
+                self.emit_audit(create_audit_event(
+                    AuditEventType::ValidationFailed,
+                    AuditSeverity::Debug,
+                    AuditOutcome::Failure {
+                        reason: reason.clone(),
+                    },
+                    Some(session.user_id.clone()),
+                    None,
+                    request.ip_address.clone(),
+                    request.user_agent.clone(),
+                ))
+                .await?;
+                return Err(Error::InvalidToken { reason });
+            }
+        };
 
         if user.status != UserStatus::Active {
+            self.emit_audit(create_audit_event(
+                AuditEventType::UserSuspended,
+                AuditSeverity::Warning,
+                AuditOutcome::Failure {
+                    reason: format!("user status is {:?}, not active", user.status),
+                },
+                Some(user.id.clone()),
+                None,
+                request.ip_address.clone(),
+                request.user_agent.clone(),
+            ))
+            .await?;
             return Err(Error::UserSuspended { user_id: user.id });
         }
 
         // 5. Build and sign a new access token JWT (shared logic)
         let (access_token, expires_in) = self.build_access_token(&user).await?;
 
-        // 6. Return response (no new refresh token on refresh)
+        // 6. Audit the successful refresh, after the access token is built.
+        self.emit_audit(create_audit_event(
+            AuditEventType::TokenRefresh,
+            AuditSeverity::Info,
+            AuditOutcome::Success,
+            Some(user.id.clone()),
+            None,
+            request.ip_address.clone(),
+            request.user_agent.clone(),
+        ))
+        .await?;
+
+        // 7. Return response (no new refresh token on refresh)
         Ok(TokenResponse {
             access_token,
             refresh_token: None,
