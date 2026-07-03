@@ -1,6 +1,6 @@
 # Plan: Enforce user lifecycle transitions in admin update
 
-**Status:** In progress · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-enforce_user_lifecycle_transitions.md](../../changes/2026-07-01-enforce_user_lifecycle_transitions.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-enforce_user_lifecycle_transitions.md](../../changes/2026-07-01-enforce_user_lifecycle_transitions.md)
 
 This plan makes `admin_update_user` enforce the user-status state machine from the domain model: `Deleted` becomes strictly terminal, a status patch that enters `Suspended` or `Deleted` revokes all the user's sessions, off-diagram transitions are rejected, and an update, delete, or claims operation on an unknown user id returns a new `NotFound` domain error rendered as HTTP 404 `not_found` instead of a 500. The decomposition puts the two enablers first — the `NotFound` error variant with its 404 mapping (reviewed-through by every not-found path) and the pure `UserStatus::can_transition_to` predicate (reviewed-through by the service change) — then the service enforcement that consumes both, then the claims not-found switch, and finally the server E2E that proves the 404 behaviour through the full HTTP stack. The reviewability spine is enabler-first so each later slice is exercised end to end.
 
