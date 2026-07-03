@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::middleware::from_fn;
 use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -10,6 +11,7 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
+use oidc_exchange::middleware::audit_context::audit_context_layer;
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::AppConfig;
@@ -48,6 +50,7 @@ fn build_e2e_app() -> Router {
 
     public_routes()
         .merge(internal_routes(state.clone()))
+        .layer(from_fn(audit_context_layer))
         .with_state(state)
 }
 
@@ -73,6 +76,7 @@ fn build_e2e_app_with_config(config: AppConfig) -> Router {
 
     public_routes()
         .merge(internal_routes(state.clone()))
+        .layer(from_fn(audit_context_layer))
         .with_state(state)
 }
 

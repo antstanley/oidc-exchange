@@ -1,10 +1,11 @@
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::response::IntoResponse;
 use axum::Form;
 use axum::Json;
 use serde::Deserialize;
 
 use crate::error::ApiError;
+use crate::middleware::audit_context::AuditContext;
 use crate::state::AppState;
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::service::exchange::ExchangeRequest;
@@ -22,6 +23,7 @@ pub struct TokenForm {
 
 pub async fn token_handler(
     State(state): State<AppState>,
+    Extension(audit_ctx): Extension<AuditContext>,
     Form(form): Form<TokenForm>,
 ) -> Result<impl IntoResponse, ApiError> {
     match form.grant_type.as_str() {
@@ -36,7 +38,9 @@ pub async fn token_handler(
                     redirect_uri: form.redirect_uri,
                     id_token: form.id_token,
                     provider,
-                    ..Default::default()
+                    ip_address: audit_ctx.ip_address.clone(),
+                    user_agent: audit_ctx.user_agent.clone(),
+                    device_id: audit_ctx.device_id.clone(),
                 })
                 .await?;
             Ok(Json(result))
@@ -49,7 +53,9 @@ pub async fn token_handler(
                 .service
                 .refresh(RefreshRequest {
                     refresh_token,
-                    ..Default::default()
+                    ip_address: audit_ctx.ip_address.clone(),
+                    user_agent: audit_ctx.user_agent.clone(),
+                    device_id: audit_ctx.device_id.clone(),
                 })
                 .await?;
             Ok(Json(result))

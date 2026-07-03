@@ -3,10 +3,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::middleware::from_fn;
 use axum::Router;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+use oidc_exchange::middleware::audit_context::audit_context_layer;
 use oidc_exchange::routes::public_routes;
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::AppConfig;
@@ -16,7 +18,12 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
-fn build_test_app() -> Router {
+/// Build a router over the public routes with the same `audit_context`
+/// middleware `bootstrap::build_router` installs in production, so handler
+/// tests exercise `Extension<AuditContext>` the way a real request would.
+/// Returns the session-store handle alongside the router so tests can
+/// inspect what got persisted after a request.
+fn build_test_app() -> (Router, MockRepository) {
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
@@ -24,9 +31,11 @@ fn build_test_app() -> Router {
     let mut config = AppConfig::default();
     config.server.issuer = "https://auth.example.com".to_string();
 
+    let session_repo = MockRepository::new();
+
     let service = AppService::new(
         Box::new(MockRepository::new()),
-        Box::new(MockRepository::new()),
+        Box::new(session_repo.clone()),
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
@@ -39,7 +48,11 @@ fn build_test_app() -> Router {
         config: Arc::new(config),
     };
 
-    public_routes().with_state(state)
+    let app = public_routes()
+        .layer(from_fn(audit_context_layer))
+        .with_state(state);
+
+    (app, session_repo)
 }
 
 async fn body_to_json(body: Body) -> serde_json::Value {
@@ -53,7 +66,7 @@ async fn body_to_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn token_exchange_returns_200_with_access_token() {
-    let app = build_test_app();
+    let (app, _session_repo) = build_test_app();
 
     let body = "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
 
@@ -84,7 +97,7 @@ async fn token_exchange_returns_200_with_access_token() {
 
 #[tokio::test]
 async fn token_invalid_grant_type_returns_400() {
-    let app = build_test_app();
+    let (app, _session_repo) = build_test_app();
 
     let body = "grant_type=client_credentials";
 
@@ -112,7 +125,7 @@ async fn token_invalid_grant_type_returns_400() {
 
 #[tokio::test]
 async fn token_missing_code_returns_400() {
-    let app = build_test_app();
+    let (app, _session_repo) = build_test_app();
 
     let body = "grant_type=authorization_code&redirect_uri=http://localhost/callback&provider=test";
 
@@ -141,7 +154,7 @@ async fn token_missing_code_returns_400() {
 
 #[tokio::test]
 async fn revoke_returns_200() {
-    let app = build_test_app();
+    let (app, _session_repo) = build_test_app();
 
     let body = "token=some-refresh-token&token_type_hint=refresh_token";
 
@@ -166,7 +179,7 @@ async fn revoke_returns_200() {
 
 #[tokio::test]
 async fn keys_returns_jwks() {
-    let app = build_test_app();
+    let (app, _session_repo) = build_test_app();
 
     let response = app
         .oneshot(
@@ -195,7 +208,7 @@ async fn keys_returns_jwks() {
 
 #[tokio::test]
 async fn well_known_returns_discovery_doc() {
-    let app = build_test_app();
+    let (app, _session_repo) = build_test_app();
 
     let response = app
         .oneshot(
@@ -235,7 +248,7 @@ async fn well_known_returns_discovery_doc() {
 
 #[tokio::test]
 async fn health_returns_200() {
-    let app = build_test_app();
+    let (app, _session_repo) = build_test_app();
 
     let response = app
         .oneshot(
@@ -252,4 +265,73 @@ async fn health_returns_200() {
 
     let json = body_to_json(response.into_body()).await;
     assert_eq!(json["status"], "ok");
+}
+
+// ---------------------------------------------------------------------------
+// 8. POST /token with audit headers stores their values on the session
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_exchange_with_audit_headers_stores_session_context() {
+    let (app, session_repo) = build_test_app();
+
+    let body = "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("x-forwarded-for", "203.0.113.7")
+                .header("user-agent", "audit-test-client/1.0")
+                .header("x-device-id", "device-42")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let sessions = session_repo.get_all_sessions().await;
+    assert_eq!(sessions.len(), 1, "expected exactly one stored session");
+    let session = &sessions[0];
+    assert_eq!(session.ip_address.as_deref(), Some("203.0.113.7"));
+    assert_eq!(session.user_agent.as_deref(), Some("audit-test-client/1.0"));
+    assert_eq!(session.device_id.as_deref(), Some("device-42"));
+}
+
+// ---------------------------------------------------------------------------
+// 9. POST /token without audit headers stores None client context
+// (negative space: the handler must pass through the middleware's `None`
+// defaults, not synthesize empty strings).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_exchange_without_audit_headers_stores_none_session_context() {
+    let (app, session_repo) = build_test_app();
+
+    let body = "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let sessions = session_repo.get_all_sessions().await;
+    assert_eq!(sessions.len(), 1, "expected exactly one stored session");
+    let session = &sessions[0];
+    assert_eq!(session.ip_address, None);
+    assert_eq!(session.user_agent, None);
+    assert_eq!(session.device_id, None);
 }
