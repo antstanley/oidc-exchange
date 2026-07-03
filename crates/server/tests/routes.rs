@@ -174,6 +174,167 @@ async fn revoke_returns_200() {
 }
 
 // ---------------------------------------------------------------------------
+// 4a. POST /revoke returns 503 (not a false 200) when the session store fails
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoke_store_failure_returns_503_refresh_token() {
+    let (app, session_repo) = build_test_app();
+
+    // Establish a real session via /token exchange, then make the store
+    // unreachable — the mock's fail mode only fires on the revoke calls, so
+    // the session genuinely exists (proving the 503 is a store failure, not
+    // an idempotent-delete-of-nothing).
+    let exchange_body =
+        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+    let exchange_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(exchange_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exchange_response.status(), StatusCode::OK);
+    let exchange_json = body_to_json(exchange_response.into_body()).await;
+    let refresh_token = exchange_json["refresh_token"].as_str().unwrap().to_string();
+
+    session_repo.set_session_fail_mode(true).await;
+
+    let revoke_body = format!("token={refresh_token}&token_type_hint=refresh_token");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(revoke_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "server_error");
+    // Negative-space: the client-facing body must be generic — no store
+    // internals ("mock session store failure") leak into the response.
+    assert_eq!(json["error_description"], "internal server error");
+    assert!(!json["error_description"]
+        .as_str()
+        .unwrap()
+        .contains("mock session store failure"));
+}
+
+#[tokio::test]
+async fn revoke_store_failure_returns_503_access_token() {
+    let (app, session_repo) = build_test_app();
+
+    let exchange_body =
+        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+    let exchange_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(exchange_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exchange_response.status(), StatusCode::OK);
+    let exchange_json = body_to_json(exchange_response.into_body()).await;
+    let access_token = exchange_json["access_token"].as_str().unwrap().to_string();
+
+    session_repo.set_session_fail_mode(true).await;
+
+    let revoke_body = format!("token={access_token}&token_type_hint=access_token");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(revoke_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "server_error");
+    assert_eq!(json["error_description"], "internal server error");
+}
+
+// ---------------------------------------------------------------------------
+// 4b. POST /revoke swallows a token-verification failure — still 200, and
+//     never reaches the session store (best-effort carve-out is preserved)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoke_access_token_verification_failure_returns_200_no_propagation() {
+    let (app, session_repo) = build_test_app();
+
+    // Even with the store unreachable, a malformed/unsigned access token
+    // must never reach `revoke_all_user_sessions` — verification fails
+    // first, so the store failure is never observed and 200 still comes
+    // back per RFC 7009 (invalid/unknown token state is never leaked).
+    session_repo.set_session_fail_mode(true).await;
+
+    let revoke_body = "token=not.a-valid.jwt&token_type_hint=access_token";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(revoke_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// 4c. POST /revoke with an empty token is rejected as invalid_request
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoke_empty_token_returns_400() {
+    let (app, _session_repo) = build_test_app();
+
+    let body = "token=&token_type_hint=refresh_token";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "invalid_request");
+}
+
+// ---------------------------------------------------------------------------
 // 5. GET /keys returns JWKS
 // ---------------------------------------------------------------------------
 

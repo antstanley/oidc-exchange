@@ -26,6 +26,10 @@ struct MockRepositoryState {
 #[derive(Clone)]
 pub struct MockRepository {
     state: Arc<Mutex<MockRepositoryState>>,
+    /// When set, `revoke_session` and `revoke_all_user_sessions` return
+    /// `Err(StoreError)` instead of mutating state — models a session store
+    /// that is unreachable, for exercising the `/revoke` 503 path.
+    session_fail_mode: Arc<Mutex<bool>>,
 }
 
 impl MockRepository {
@@ -35,6 +39,7 @@ impl MockRepository {
                 users: HashMap::new(),
                 sessions: HashMap::new(),
             })),
+            session_fail_mode: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -46,6 +51,12 @@ impl MockRepository {
     pub async fn get_all_sessions(&self) -> Vec<Session> {
         let state = self.state.lock().await;
         state.sessions.values().cloned().collect()
+    }
+
+    /// Toggle whether `revoke_session` / `revoke_all_user_sessions` fail
+    /// with `Error::StoreError`, simulating an unreachable session store.
+    pub async fn set_session_fail_mode(&self, fail: bool) {
+        *self.session_fail_mode.lock().await = fail;
     }
 }
 
@@ -208,6 +219,11 @@ impl SessionRepository for MockRepository {
     }
 
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+        if *self.session_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store failure".into(),
+            });
+        }
         let mut state = self.state.lock().await;
         state.sessions.remove(token_hash);
         Ok(())
@@ -225,6 +241,11 @@ impl SessionRepository for MockRepository {
     }
 
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+        if *self.session_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store failure".into(),
+            });
+        }
         let mut state = self.state.lock().await;
         state.sessions.retain(|_, s| s.user_id != user_id);
         Ok(())
