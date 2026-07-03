@@ -1,6 +1,6 @@
 # Change: Release the GIL around the blocking FFI call in the Python binding
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** bindings/python
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** bindings/python
 
 Wrap the blocking FFI call in `handle_request_sync` in `py.allow_threads` so the GIL is
 released while the Tokio runtime services the request. Today the executor thread that

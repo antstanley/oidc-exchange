@@ -1,6 +1,6 @@
 # Plan: Fix user-creation races and DynamoDB write integrity
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](../../changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](../../changes/merged/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md)
 
 This plan enforces the `(provider, external_id)` uniqueness invariant across all three durable
 backends and closes the DynamoDB write-integrity gaps the change spec names. It opens with two
@@ -19,7 +19,7 @@ version-conditional on every backend, and a delete frees the external id for re-
 
 ## Source and definition-of-done baseline
 
-- **Spec.** The change spec [2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](../../changes/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md)
+- **Spec.** The change spec [2026-07-01-fix_user_creation_race_and_dynamo_integrity.md](../../changes/merged/2026-07-01-fix_user_creation_race_and_dynamo_integrity.md)
   and the canonical pages it targets: [01-domain-model.md](../../service/specs/01-domain-model.md),
   [02-ports-and-adapters.md](../../service/specs/02-ports-and-adapters.md),
   [03-service-flows.md](../../service/specs/03-service-flows.md),
@@ -128,7 +128,7 @@ guard delete.
   `create_user` becoming a two-item transaction, and existing production tables contain no
   duplicate `(provider, external_id)` users (dedup is a manual migration before the guard
   backfill, out of scope for this plan).
-- The composing change spec [2026-07-01-wire_audit_event_emission.md](../../changes/2026-07-01-wire_audit_event_emission.md)
+- The composing change spec [2026-07-01-wire_audit_event_emission.md](../../changes/merged/2026-07-01-wire_audit_event_emission.md)
   owns wiring the `UserCreated` audit emission; this plan only ensures the losing racer performs
   no second create and emits no duplicate event, and leaves the `(audited UserCreated)` annotation
   in the 03-service-flows bullet in place.

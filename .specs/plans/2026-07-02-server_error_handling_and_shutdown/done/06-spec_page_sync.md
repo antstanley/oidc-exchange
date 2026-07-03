@@ -5,7 +5,7 @@
 **Implements:** [03-service-flows.md](../../../service/specs/03-service-flows.md) §Revocation, [04-http-api.md](../../../service/specs/04-http-api.md) §Routes / §Middleware stack / §Bootstrap / §Error mapping / §Decisions, [06-configuration.md](../../../service/specs/06-configuration.md) §`[server]` / §Defaults summary, and [development-guidelines.md](../../../development-guidelines.md) §"Errors are data, not exceptions" / §"Guidelines for AI agents" rule 3
 **Depends on:** 01, 02, 03, 04, 05 (review — the pages document behaviour only after it is shipped, and are verified true against the code)
 **Produces:** the canonical spec pages and the dev-guidelines carve-out read true against the shipped code — every "Affected spec page" from the change spec is reconciled.
-**Pointers:** the "Proposed changes" blocks in `.specs/changes/2026-07-01-server_error_handling_and_shutdown.md`; the five pages named above.
+**Pointers:** the "Proposed changes" blocks in `.specs/changes/merged/2026-07-01-server_error_handling_and_shutdown.md`; the five pages named above.
 
 ## Steps
 

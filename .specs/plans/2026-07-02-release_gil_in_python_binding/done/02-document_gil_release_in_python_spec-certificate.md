@@ -31,11 +31,11 @@ names (a file location or a diff) — not by assertion.
     `handle_request` call and re-acquires it to build the result dict, matching the change spec's
     Proposed-changes block.
   - *Evidence to collect:* read `.specs/bindings/specs/03-python.md` around lines 32-34; confirm
-    the bullet's wording matches `.specs/changes/2026-07-01-release_gil_in_python_binding.md:41-46`
+    the bullet's wording matches `.specs/changes/merged/2026-07-01-release_gil_in_python_binding.md:41-46`
     (GIL release, re-acquire, other Python threads including an asyncio event loop keep running,
     `shutdown` no-op).
   - *Status:* ☑ SATISFIED — `03-python.md:32-37` now reads word-for-word the change spec's
-    Proposed-changes block (`.specs/changes/2026-07-01-release_gil_in_python_binding.md:39-46`):
+    Proposed-changes block (`.specs/changes/merged/2026-07-01-release_gil_in_python_binding.md:39-46`):
     extracts method/path/headers/body from the `PyDict`, "releases the GIL (`py.allow_threads`)
     around the blocking FFI `handle_request` call, and re-acquires it to build the result dict",
     other Python threads including an asyncio event loop keep running, `shutdown` is a no-op.
@@ -68,7 +68,7 @@ names (a file location or a diff) — not by assertion.
     the page). The diff touches only `03-python.md` (no `.rs`/`.ts`/`.py` files), so the code
     fmt/lint/test gates in development-guidelines §Definition of done have no surface. The *why*
     is stated in the change spec's Motivation
-    (`.specs/changes/2026-07-01-release_gil_in_python_binding.md` §Motivation) and the task's
+    (`.specs/changes/merged/2026-07-01-release_gil_in_python_binding.md` §Motivation) and the task's
     Produces line; the jj commit description is authored by the orchestrator at commit time,
     following the per-task pattern of the preceding commits (e.g. "gil 01/02").
 
@@ -77,7 +77,7 @@ names (a file location or a diff) — not by assertion.
     `py.allow_threads` behaviour and matches both the change spec's Proposed-changes block and the
     shipped `lib.rs`.
   - *Evidence to collect:* view the `03-python.md` diff side by side with
-    `.specs/changes/2026-07-01-release_gil_in_python_binding.md:41-46` and
+    `.specs/changes/merged/2026-07-01-release_gil_in_python_binding.md:41-46` and
     `bindings/python/src/lib.rs`; confirm the three agree on the GIL-release behaviour.
   - *Status:* ☑ SATISFIED — exercised: viewed the `jj diff` of `03-python.md` beside the change
     spec's Proposed-changes block (lines 39-46) and `bindings/python/src/lib.rs:86-101`. The

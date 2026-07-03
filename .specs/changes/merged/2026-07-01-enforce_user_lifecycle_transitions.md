@@ -1,6 +1,6 @@
 # Change: Enforce user lifecycle transitions in admin update
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/core (user_admin), crates/server error mapping
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/core (user_admin), crates/server error mapping
 
 Make `admin_update_user` enforce the user-status state machine from
 [01-domain-model.md](../service/specs/01-domain-model.md): `Deleted` becomes terminal

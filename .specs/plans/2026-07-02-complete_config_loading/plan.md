@@ -1,6 +1,6 @@
 # Plan: Complete config loading and startup validation
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-complete_config_loading.md](../../changes/2026-07-01-complete_config_loading.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-07-01-complete_config_loading.md](../../changes/merged/2026-07-01-complete_config_loading.md)
 
 This plan finishes the four-step config loading order that spec 06 already documents and adds
 fail-closed startup validation, so misconfiguration is rejected once at load instead of failing
@@ -18,7 +18,7 @@ that exercise it end to end.
 
 ## Source and definition-of-done baseline
 
-- **Spec.** Change spec [.specs/changes/2026-07-01-complete_config_loading.md](../../changes/2026-07-01-complete_config_loading.md),
+- **Spec.** Change spec [.specs/changes/merged/2026-07-01-complete_config_loading.md](../../changes/merged/2026-07-01-complete_config_loading.md),
   which targets canonical pages [06-configuration.md](../../service/specs/06-configuration.md)
   (Loading order, new Validation at load, `[internal_api]`),
   [04-http-api.md](../../service/specs/04-http-api.md) (Routes → Internal, Service roles,

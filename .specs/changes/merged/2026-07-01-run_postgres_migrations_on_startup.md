@@ -1,6 +1,6 @@
 # Change: Run Postgres migrations on startup
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/adapters, crates/server
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/adapters, crates/server
 
 Execute the Postgres adapter's `MIGRATIONS` DDL inside `create_pool`, matching the SQLite
 adapter, so a fresh Postgres deployment has its `users` and `sessions` tables created on

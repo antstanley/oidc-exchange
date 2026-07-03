@@ -1,6 +1,6 @@
 # Change: Webhook user-sync conformance (JIT notify, 2xx-only, bounded backoff)
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/core (exchange), crates/adapters (webhook)
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/core (exchange), crates/adapters (webhook)
 
 Fire the best-effort `notify_user_created` (awaited, result ignored — not spawned) when the
 exchange flow JIT-registers a user;

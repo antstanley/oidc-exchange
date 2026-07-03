@@ -1,6 +1,6 @@
 # Change: Fix KMS ECDSA signature encoding and JWK output
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/adapters
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/adapters
 
 Make the KMS key manager produce JWS-valid ES\* signatures (convert KMS's DER-encoded ECDSA
 output to raw `r || s`), emit RFC 7518-compliant RSA JWKs (no leading zero octets in `n`/`e`),

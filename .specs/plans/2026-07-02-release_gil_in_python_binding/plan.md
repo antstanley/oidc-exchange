@@ -1,6 +1,6 @@
 # Plan: Release the GIL around the blocking FFI call in the Python binding
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-release_gil_in_python_binding.md](../../changes/2026-07-01-release_gil_in_python_binding.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-07-01-release_gil_in_python_binding.md](../../changes/merged/2026-07-01-release_gil_in_python_binding.md)
 
 The change makes the PyO3 binding's `handle_request_sync` release the GIL around the blocking
 FFI `handle_request` call, so the executor thread no longer freezes the asyncio event loop and
@@ -13,7 +13,7 @@ slice that syncs the canonical `03-python.md` Implementation bullet to the shipp
 
 ## Source and definition-of-done baseline
 
-- **Spec.** Change spec [.specs/changes/2026-07-01-release_gil_in_python_binding.md](../../changes/2026-07-01-release_gil_in_python_binding.md); the single affected canonical page is [.specs/bindings/specs/03-python.md](../../bindings/specs/03-python.md). In scope: the GIL release in `handle_request_sync`, a regression test that proves it, and the `03-python.md` Implementation-bullet update.
+- **Spec.** Change spec [.specs/changes/merged/2026-07-01-release_gil_in_python_binding.md](../../changes/merged/2026-07-01-release_gil_in_python_binding.md); the single affected canonical page is [.specs/bindings/specs/03-python.md](../../bindings/specs/03-python.md). In scope: the GIL release in `handle_request_sync`, a regression test that proves it, and the `03-python.md` Implementation-bullet update.
 - **Already built (preconditions, not tasks).** The whole binding exists and works: `#[pyclass] OidcExchange` with `#[new]` and `handle_request_sync` extracting method/path/headers/body and building the response `PyDict` (`bindings/python/src/lib.rs:46-104`); the FFI `OidcExchange::handle_request(method, path, headers: Vec<(String,String)>, body: Vec<u8>) -> Result<FfiResponse, FfiError>` taking only owned/`Send` data (`crates/ffi/src/lib.rs:84-116`); the Python wrapper's async `handle_request` offloading to the default executor (`bindings/python/python/oidc_exchange/__init__.py:23-27`); and the existing pytest suite (`bindings/python/tests/test_handle_request.py`, including `test_async_health`). None of this is re-planned. The `03-python.md` "keeps the event loop responsive" decision already describes the end state — the spec is ahead of the code.
 - **Definition of done.** [.specs/development-guidelines.md](../../development-guidelines.md) §"Definition of done" and §"Limits and bounds" set the per-task bar, inherited by every task: behaviour exercised by a test, negative-space tests for new paths, at least two meaningful assertions on every touched function, Rust `cargo fmt`/`cargo clippy --workspace -- -D warnings`/`cargo nextest run --workspace` and Python `uv run ruff format --check .`/`uv run ruff check .`/`uv run pyright`/`uv run pytest` clean for every language the task touches. Task files add task-specific acceptance on top.
 

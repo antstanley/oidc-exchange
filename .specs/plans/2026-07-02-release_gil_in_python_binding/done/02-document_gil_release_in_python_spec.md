@@ -5,7 +5,7 @@
 **Implements:** [.specs/bindings/specs/03-python.md](../../../bindings/specs/03-python.md) §Implementation (the "Rust (`src/lib.rs`)" bullet)
 **Depends on:** 01
 **Produces:** the canonical `03-python.md` Implementation bullet describes the GIL release delivered by task 01, so the page and the code agree
-**Pointers:** `.specs/bindings/specs/03-python.md:32-34` (the Implementation "Rust (`src/lib.rs`)" bullet to replace) and `:3` (the `**Date:**` field to bump); `.specs/changes/2026-07-01-release_gil_in_python_binding.md:39-46` (the Proposed-changes wording to apply)
+**Pointers:** `.specs/bindings/specs/03-python.md:32-34` (the Implementation "Rust (`src/lib.rs`)" bullet to replace) and `:3` (the `**Date:**` field to bump); `.specs/changes/merged/2026-07-01-release_gil_in_python_binding.md:39-46` (the Proposed-changes wording to apply)
 
 ## Steps
 

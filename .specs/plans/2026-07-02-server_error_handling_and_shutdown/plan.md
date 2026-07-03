@@ -1,6 +1,6 @@
 # Plan: Server error handling, request-span correlation, and graceful shutdown
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-server_error_handling_and_shutdown.md](../../changes/2026-07-01-server_error_handling_and_shutdown.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-07-01-server_error_handling_and_shutdown.md](../../changes/merged/2026-07-01-server_error_handling_and_shutdown.md)
 
 This plan closes four server-layer gaps in `crates/server`: `/revoke` reports success on
 infrastructure failure, `server_error` responses drop the internal detail, request-id
@@ -16,7 +16,7 @@ pages to the shipped behaviour. Each task is a thin vertical slice with its own 
 
 ## Source and definition-of-done baseline
 
-- **Spec.** Change spec [.specs/changes/2026-07-01-server_error_handling_and_shutdown.md](../../changes/2026-07-01-server_error_handling_and_shutdown.md),
+- **Spec.** Change spec [.specs/changes/merged/2026-07-01-server_error_handling_and_shutdown.md](../../changes/merged/2026-07-01-server_error_handling_and_shutdown.md),
   targeting canonical pages [03-service-flows.md](../../service/specs/03-service-flows.md),
   [04-http-api.md](../../service/specs/04-http-api.md),
   [06-configuration.md](../../service/specs/06-configuration.md),

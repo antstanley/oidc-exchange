@@ -1,6 +1,6 @@
 # Change: Harden outbound provider HTTP (timeouts, status checks, key rotation)
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/adapters (shared), crates/providers
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/adapters (shared), crates/providers
 
 Give every outbound provider call (JWKS, discovery, token endpoint, revocation) a shared
 `reqwest::Client` with constant connect/total timeouts and redirects disabled; check

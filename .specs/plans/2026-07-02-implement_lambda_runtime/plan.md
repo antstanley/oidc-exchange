@@ -1,6 +1,6 @@
 # Plan: Implement Lambda runtime mode in the server binary
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-implement_lambda_runtime.md](../../changes/2026-07-01-implement_lambda_runtime.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-07-01-implement_lambda_runtime.md](../../changes/merged/2026-07-01-implement_lambda_runtime.md)
 
 Make the `oidc-exchange` server binary actually run as an AWS Lambda: when `AWS_LAMBDA_RUNTIME_API`
 is present, serve the same axum router through `lambda_http` instead of logging "not yet
@@ -16,7 +16,7 @@ stripped router served through `lambda_http`", which is the change spec's headli
 
 ## Source and definition-of-done baseline
 
-- **Spec.** Change spec [.specs/changes/2026-07-01-implement_lambda_runtime.md](../../changes/2026-07-01-implement_lambda_runtime.md),
+- **Spec.** Change spec [.specs/changes/merged/2026-07-01-implement_lambda_runtime.md](../../changes/merged/2026-07-01-implement_lambda_runtime.md),
   targeting canonical pages [service/specs/04-http-api.md](../../service/specs/04-http-api.md)
   §Bootstrap (step 6) and [service/specs/06-configuration.md](../../service/specs/06-configuration.md)
   §Sections → `[server]`. [service/specs/00-overview.md](../../service/specs/00-overview.md)

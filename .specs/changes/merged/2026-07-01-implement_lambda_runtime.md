@@ -1,6 +1,6 @@
 # Change: Implement Lambda runtime mode in the server binary
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/server
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/server
 
 Make the server binary actually run as an AWS Lambda: when `AWS_LAMBDA_RUNTIME_API` is present,
 serve the same axum router through `lambda_http` instead of logging "not yet implemented" and

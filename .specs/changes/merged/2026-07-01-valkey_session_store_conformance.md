@@ -1,6 +1,6 @@
 # Change: Bring the Valkey session store up to the SessionRepository contract
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/adapters
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/adapters
 
 Fix three contract divergences in the Valkey `SessionRepository`: replace `DBSIZE` with a
 maintained active-session counter, make the session write atomic and reject non-positive TTLs

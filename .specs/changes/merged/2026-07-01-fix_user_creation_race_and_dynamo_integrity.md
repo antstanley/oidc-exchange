@@ -1,6 +1,6 @@
 # Change: Fix user-creation races and DynamoDB write integrity
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/core (exchange), crates/adapters (dynamo, postgres, sqlite)
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/core (exchange), crates/adapters (dynamo, postgres, sqlite)
 
 Enforce the `(provider, external_id)` uniqueness invariant on DynamoDB with a
 transactional uniqueness-guard item that also becomes the lookup path

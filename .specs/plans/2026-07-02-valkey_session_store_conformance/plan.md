@@ -1,6 +1,6 @@
 # Plan: Valkey session store — SessionRepository contract conformance
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-07-01-valkey_session_store_conformance.md](../../changes/2026-07-01-valkey_session_store_conformance.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-07-01-valkey_session_store_conformance.md](../../changes/merged/2026-07-01-valkey_session_store_conformance.md)
 
 This plan brings the Valkey `SessionRepository` (`crates/adapters/src/valkey/mod.rs`) into line
 with the port contract the other four session backends honor, in four reviewable slices. It
@@ -17,7 +17,7 @@ read/decrement (02) → reconcile (03) → document (04).
 
 ## Source and definition-of-done baseline
 
-- **Spec.** Change spec [.specs/changes/2026-07-01-valkey_session_store_conformance.md](../../changes/2026-07-01-valkey_session_store_conformance.md),
+- **Spec.** Change spec [.specs/changes/merged/2026-07-01-valkey_session_store_conformance.md](../../changes/merged/2026-07-01-valkey_session_store_conformance.md),
   which targets two canonical pages: [08-persistence.md](../../service/specs/08-persistence.md)
   §"Session-only stores" and [02-ports-and-adapters.md](../../service/specs/02-ports-and-adapters.md)
   §"Adapter inventory". The port contract is `SessionRepository` in

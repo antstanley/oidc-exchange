@@ -1,6 +1,6 @@
 # Change: Wire audit event emission into the service flows
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/core + crates/server + crates/adapters (audit)
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/core + crates/server + crates/adapters (audit)
 
 Call `AppService::emit_audit` from every flow the spec names as audited, plumb the client
 context the `AuditContext` middleware already extracts into sessions and audit events, gate

@@ -1,6 +1,6 @@
 # Change: Server error handling, request-span correlation, and graceful shutdown
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/server
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/server
 
 Stop `/revoke` from reporting success on infrastructure failure, log the internal detail that
 `server_error` responses currently drop, make request-id correlation real by opening a

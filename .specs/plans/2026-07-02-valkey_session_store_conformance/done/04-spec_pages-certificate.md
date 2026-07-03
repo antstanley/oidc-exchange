@@ -82,7 +82,7 @@ names (a file location or a read-back comparison) — not by assertion.
     §"Definition of done" have no code surface to run against.
   - *Status:* ☑ SATISFIED — the diff touches only the two `.specs/service/specs/*.md` pages (no
     `.rs`, `.ts`, or `.py` files), so the fmt/clippy/nextest gates have no code surface. The *why*
-    is stated in the change spec's Motivation (`.specs/changes/2026-07-01-valkey_session_store_conformance.md`
+    is stated in the change spec's Motivation (`.specs/changes/merged/2026-07-01-valkey_session_store_conformance.md`
     §Motivation: sync the canonical prose to the shipped adapter's contract fixes). The jj commit
     description for this change is stamped by the orchestrator at commit time (as for tasks 01–03),
     which is workflow timing, not a defect.

@@ -1,6 +1,6 @@
 # Change: Require iss/aud presence and fix claim handling in ID-token validation
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/adapters (oidc), crates/providers (apple)
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/adapters (oidc), crates/providers (apple)
 
 Make ID-token validation in both identity providers reject tokens that _omit_ the `iss` or
 `aud` claim, validate `nbf`, infer the signing algorithm from the JWK's `kty`/`crv` when the

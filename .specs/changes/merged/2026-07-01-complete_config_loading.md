@@ -1,6 +1,6 @@
 # Change: Complete config loading (overlay, env overrides, placeholders) and startup validation
 
-**Status:** Proposed · **Date:** 2026-07-01 · **Owner:** Ant Stanley · **Target:** crates/server + crates/core
+**Status:** Merged · **Date:** 2026-07-01 · **Merged:** 2026-07-03 · **Owner:** Ant Stanley · **Target:** crates/server + crates/core
 
 Implement the full four-step config loading order that
 [06-configuration.md](../service/specs/06-configuration.md) already documents — deep-merge
