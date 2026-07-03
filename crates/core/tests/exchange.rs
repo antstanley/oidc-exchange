@@ -223,6 +223,7 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
 
     let response = svc
@@ -280,6 +281,7 @@ async fn exchange_existing_user_does_not_create_new() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let resp1 = svc
         .exchange(request1)
@@ -292,6 +294,7 @@ async fn exchange_existing_user_does_not_create_new() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let resp2 = svc
         .exchange(request2)
@@ -332,6 +335,7 @@ async fn exchange_suspended_user_is_rejected() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     svc.exchange(request)
         .await
@@ -359,6 +363,7 @@ async fn exchange_suspended_user_is_rejected() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let err = svc
         .exchange(request2)
@@ -384,6 +389,7 @@ async fn exchange_unknown_provider_is_rejected() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "nonexistent".to_string(),
+        ..Default::default()
     };
     let err = svc
         .exchange(request)
@@ -433,6 +439,7 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
 
     let err = svc
@@ -476,6 +483,7 @@ async fn exchange_wildcard_subdomain_matching() {
             redirect_uri: Some("https://app.test.com/callback".to_string()),
             id_token: None,
             provider: "mock".to_string(),
+            ..Default::default()
         };
         svc.exchange(request)
             .await
@@ -502,6 +510,7 @@ async fn exchange_wildcard_subdomain_matching() {
             redirect_uri: Some("https://app.test.com/callback".to_string()),
             id_token: None,
             provider: "mock".to_string(),
+            ..Default::default()
         };
         svc.exchange(request)
             .await
@@ -528,6 +537,7 @@ async fn exchange_wildcard_subdomain_matching() {
             redirect_uri: Some("https://app.test.com/callback".to_string()),
             id_token: None,
             provider: "mock".to_string(),
+            ..Default::default()
         };
         let err = svc
             .exchange(request)
@@ -559,6 +569,7 @@ async fn exchange_wildcard_subdomain_matching() {
             redirect_uri: Some("https://app.test.com/callback".to_string()),
             id_token: None,
             provider: "mock".to_string(),
+            ..Default::default()
         };
         let err = svc
             .exchange(request)
@@ -590,6 +601,7 @@ async fn exchange_existing_users_only_rejects_new_user() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
 
     let err = svc
@@ -636,6 +648,7 @@ async fn exchange_existing_user_bypasses_domain_allowlist() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
 
     // Should succeed because existing users bypass the registration policy
@@ -675,6 +688,7 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
 
     let err = svc
@@ -701,6 +715,7 @@ async fn exchange_with_direct_id_token_skips_code_exchange() {
         redirect_uri: None,
         id_token: Some("fake.id.token".to_string()),
         provider: "mock".to_string(),
+        ..Default::default()
     };
 
     let result = svc
@@ -730,6 +745,7 @@ async fn exchange_with_neither_code_nor_id_token_fails() {
         redirect_uri: None,
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
 
     let err = svc
@@ -754,6 +770,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let resp_a = svc_a
         .exchange(request_a)
@@ -777,6 +794,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let resp_b = svc_b
         .exchange(request_b)
@@ -813,6 +831,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     svc_a
         .exchange(request_a)
@@ -848,6 +867,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let err = svc_b
         .exchange(request_b)
@@ -886,6 +906,7 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let err = svc
         .exchange(request)
@@ -909,6 +930,69 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         1,
         "a non-Conflict create_user error must not trigger a re-lookup"
     );
+}
+
+/// An `ExchangeRequest` carrying client-context values (`ip_address`,
+/// `user_agent`, `device_id`) stores those exact values on the resulting
+/// session — no truncation, reordering, or substitution.
+#[tokio::test]
+async fn exchange_with_client_context_stores_exact_session_values() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    let request = ExchangeRequest {
+        code: Some("auth-code-123".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ip_address: Some("203.0.113.7".to_string()),
+        user_agent: Some("integration-test-agent/1.0".to_string()),
+        device_id: Some("device-abc-123".to_string()),
+    };
+
+    svc.exchange(request)
+        .await
+        .expect("exchange should succeed");
+
+    let sessions = repo.get_all_sessions().await;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].ip_address.as_deref(), Some("203.0.113.7"));
+    assert_eq!(
+        sessions[0].user_agent.as_deref(),
+        Some("integration-test-agent/1.0")
+    );
+    assert_eq!(sessions[0].device_id.as_deref(), Some("device-abc-123"));
+}
+
+/// Negative-space: an `ExchangeRequest` with all three client-context fields
+/// `None` stores a session with `None` for each — no accidental default
+/// substitution (e.g. falling back to an empty string instead of `None`).
+#[tokio::test]
+async fn exchange_without_client_context_stores_none_session_values() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let svc = make_service(repo.clone(), provider);
+
+    let request = ExchangeRequest {
+        code: Some("auth-code-123".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
+    };
+
+    svc.exchange(request)
+        .await
+        .expect("exchange should succeed");
+
+    let sessions = repo.get_all_sessions().await;
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].ip_address, None);
+    assert_eq!(sessions[0].user_agent, None);
+    assert_eq!(sessions[0].device_id, None);
 }
 
 /// Decode the `sub` claim out of a signed access token's payload segment.

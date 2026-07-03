@@ -62,6 +62,8 @@ async fn non_blocking_audit_failure_info_event_warning_threshold() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
+        None,
+        None,
     );
 
     let result = svc.emit_audit(event).await;
@@ -87,6 +89,8 @@ async fn blocking_audit_failure_warning_event_warning_threshold() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
+        None,
+        None,
     );
 
     let result = svc.emit_audit(event).await;
@@ -114,6 +118,8 @@ async fn blocking_audit_failure_error_event_warning_threshold() {
         },
         Some("user-1".to_string()),
         Some("mock".to_string()),
+        None,
+        None,
     );
 
     let result = svc.emit_audit(event).await;
@@ -139,6 +145,8 @@ async fn successful_audit_emit_records_event() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
+        Some("203.0.113.5".to_string()),
+        Some("test-agent/1.0".to_string()),
     );
 
     let result = svc.emit_audit(event).await;
@@ -150,6 +158,27 @@ async fn successful_audit_emit_records_event() {
     assert_eq!(events[0].severity, AuditSeverity::Info);
     assert_eq!(events[0].actor.as_deref(), Some("user-1"));
     assert_eq!(events[0].provider.as_deref(), Some("mock"));
+    assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.5"));
+    assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/1.0"));
+}
+
+/// Negative-space: when `create_audit_event` is called with `None` for both
+/// `ip_address` and `user_agent`, the resulting event carries `None` for
+/// both — no accidental default substitution.
+#[tokio::test]
+async fn create_audit_event_with_no_client_context_leaves_fields_none() {
+    let event = create_audit_event(
+        AuditEventType::TokenExchange,
+        AuditSeverity::Info,
+        AuditOutcome::Success,
+        Some("user-1".to_string()),
+        Some("mock".to_string()),
+        None,
+        None,
+    );
+
+    assert_eq!(event.ip_address, None);
+    assert_eq!(event.user_agent, None);
 }
 
 /// Negative-space: a Debug-severity event is strictly less severe than the
@@ -174,6 +203,8 @@ async fn audit_debug_event_under_default_emit_threshold_is_suppressed() {
         },
         None,
         Some("mock".to_string()),
+        None,
+        None,
     );
 
     let result = svc.emit_audit(event).await;
@@ -205,6 +236,8 @@ async fn audit_info_event_at_default_emit_threshold_is_dispatched() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
+        None,
+        None,
     );
 
     let result = svc.emit_audit(event).await;
@@ -238,6 +271,8 @@ async fn audit_debug_event_reaches_adapter_when_threshold_lowered_to_debug() {
         },
         None,
         Some("mock".to_string()),
+        None,
+        None,
     );
 
     let result = svc.emit_audit(event).await;

@@ -138,12 +138,19 @@ impl AppService {
     }
 }
 
+/// Build an [`AuditEvent`]. `ip_address` and `user_agent` come from the
+/// caller's client context (the `AuditContext` middleware at the HTTP edge);
+/// the `AuditEvent` shape has no `device_id` field, so device identifiers are
+/// recorded on the `Session` only, never on audit events.
+#[allow(clippy::too_many_arguments)]
 pub fn create_audit_event(
     event_type: AuditEventType,
     severity: AuditSeverity,
     outcome: AuditOutcome,
     actor: Option<String>,
     provider: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
 ) -> AuditEvent {
     AuditEvent {
         id: ulid::Ulid::new().to_string(),
@@ -152,8 +159,8 @@ pub fn create_audit_event(
         event_type,
         actor,
         provider,
-        ip_address: None,
-        user_agent: None,
+        ip_address,
+        user_agent,
         detail: HashMap::new(),
         outcome,
     }

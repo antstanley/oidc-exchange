@@ -353,6 +353,7 @@ async fn admin_delete_user_revokes_sessions() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let response = svc
         .exchange(request)
@@ -421,6 +422,7 @@ async fn service_with_active_session() -> (AppService, String, MockRepository, M
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let response = svc
         .exchange(request)

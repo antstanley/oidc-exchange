@@ -7,11 +7,21 @@ use crate::domain::{NewUser, Session, TokenResponse, UserStatus};
 use crate::error::{Error, Result};
 use crate::service::{parse_duration_secs, AppService};
 
+#[derive(Default)]
 pub struct ExchangeRequest {
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
     pub id_token: Option<String>,
     pub provider: String,
+    /// Client IP address extracted by the server's audit-context middleware
+    /// (e.g. from `X-Forwarded-For`). Stored on the resulting session.
+    pub ip_address: Option<String>,
+    /// Client `User-Agent` header, extracted by the server's audit-context
+    /// middleware. Stored on the resulting session.
+    pub user_agent: Option<String>,
+    /// Client-supplied device identifier (`X-Device-Id`), extracted by the
+    /// server's audit-context middleware. Stored on the resulting session.
+    pub device_id: Option<String>,
 }
 
 /// Check whether an email's domain matches any entry in the allowlist.
@@ -198,9 +208,9 @@ impl AppService {
             refresh_token_hash: token_hash,
             provider: request.provider.clone(),
             expires_at,
-            device_id: None,
-            user_agent: None,
-            ip_address: None,
+            device_id: request.device_id.clone(),
+            user_agent: request.user_agent.clone(),
+            ip_address: request.ip_address.clone(),
             created_at: Utc::now(),
         };
         self.session_repo.store_refresh_token(&session).await?;

@@ -5,8 +5,17 @@ use crate::domain::{TokenResponse, UserStatus};
 use crate::error::{Error, Result};
 use crate::service::AppService;
 
+#[derive(Default)]
 pub struct RefreshRequest {
     pub refresh_token: String,
+    /// Client IP address extracted by the server's audit-context middleware.
+    pub ip_address: Option<String>,
+    /// Client `User-Agent` header, extracted by the server's audit-context
+    /// middleware.
+    pub user_agent: Option<String>,
+    /// Client-supplied device identifier (`X-Device-Id`), extracted by the
+    /// server's audit-context middleware.
+    pub device_id: Option<String>,
 }
 
 impl AppService {

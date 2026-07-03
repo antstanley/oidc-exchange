@@ -57,6 +57,7 @@ async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     let response = svc
         .exchange(request)
@@ -77,6 +78,7 @@ async fn refresh_happy_path_returns_new_access_token() {
     // Now use the refresh token
     let request = RefreshRequest {
         refresh_token: refresh_token.clone(),
+        ..Default::default()
     };
     let response = svc.refresh(request).await.expect("refresh should succeed");
 
@@ -140,7 +142,10 @@ async fn refresh_expired_token_returns_invalid_token() {
         .expect("store should succeed");
 
     // Now try to refresh with the expired token
-    let request = RefreshRequest { refresh_token };
+    let request = RefreshRequest {
+        refresh_token,
+        ..Default::default()
+    };
     let err = svc
         .refresh(request)
         .await
@@ -161,6 +166,7 @@ async fn refresh_unknown_token_returns_invalid_token() {
     // Try to refresh with a token that was never stored
     let request = RefreshRequest {
         refresh_token: "this-token-does-not-exist".to_string(),
+        ..Default::default()
     };
     let err = svc
         .refresh(request)
@@ -199,7 +205,10 @@ async fn refresh_suspended_user_returns_user_suspended() {
     .expect("update should succeed");
 
     // Now try to refresh
-    let request = RefreshRequest { refresh_token };
+    let request = RefreshRequest {
+        refresh_token,
+        ..Default::default()
+    };
     let err = svc
         .refresh(request)
         .await

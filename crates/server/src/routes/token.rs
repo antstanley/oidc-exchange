@@ -36,6 +36,7 @@ pub async fn token_handler(
                     redirect_uri: form.redirect_uri,
                     id_token: form.id_token,
                     provider,
+                    ..Default::default()
                 })
                 .await?;
             Ok(Json(result))
@@ -46,7 +47,10 @@ pub async fn token_handler(
             })?;
             let result = state
                 .service
-                .refresh(RefreshRequest { refresh_token })
+                .refresh(RefreshRequest {
+                    refresh_token,
+                    ..Default::default()
+                })
                 .await?;
             Ok(Json(result))
         }

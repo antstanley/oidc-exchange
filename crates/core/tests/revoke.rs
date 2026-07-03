@@ -54,6 +54,7 @@ async fn do_exchange(svc: &AppService) -> oidc_exchange_core::domain::TokenRespo
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        ..Default::default()
     };
     svc.exchange(request)
         .await
@@ -78,6 +79,7 @@ async fn revoke_refresh_token_removes_session() {
     let revoke_req = RevokeRequest {
         token: refresh_token.clone(),
         token_type_hint: Some("refresh_token".to_string()),
+        ..Default::default()
     };
     svc.revoke(revoke_req).await.expect("revoke should succeed");
 
@@ -126,6 +128,7 @@ async fn revoke_access_token_removes_all_user_sessions() {
     let revoke_req = RevokeRequest {
         token: response1.access_token.clone(),
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     svc.revoke(revoke_req).await.expect("revoke should succeed");
 
@@ -157,6 +160,7 @@ async fn revoke_unknown_token_returns_ok() {
     let revoke_req = RevokeRequest {
         token: "this-token-does-not-exist-at-all".to_string(),
         token_type_hint: Some("refresh_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(
@@ -168,6 +172,7 @@ async fn revoke_unknown_token_returns_ok() {
     let revoke_req = RevokeRequest {
         token: "not.a.valid-jwt".to_string(),
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(
@@ -179,6 +184,7 @@ async fn revoke_unknown_token_returns_ok() {
     let revoke_req = RevokeRequest {
         token: "garbage".to_string(),
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(
@@ -205,6 +211,7 @@ async fn revoke_default_hint_treats_as_refresh_token() {
     let revoke_req = RevokeRequest {
         token: refresh_token.clone(),
         token_type_hint: None,
+        ..Default::default()
     };
     svc.revoke(revoke_req).await.expect("revoke should succeed");
 
@@ -242,6 +249,7 @@ async fn revoke_forged_access_token_does_not_revoke_sessions() {
     let revoke_req = RevokeRequest {
         token: forged_jwt,
         token_type_hint: Some("access_token".to_string()),
+        ..Default::default()
     };
     let result = svc.revoke(revoke_req).await;
     assert!(result.is_ok(), "revoke should return Ok per RFC 7009");

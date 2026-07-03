@@ -5,9 +5,18 @@ use sha2::{Digest, Sha256};
 use crate::error::Result;
 use crate::service::AppService;
 
+#[derive(Default)]
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>, // "refresh_token" or "access_token"
+    /// Client IP address extracted by the server's audit-context middleware.
+    pub ip_address: Option<String>,
+    /// Client `User-Agent` header, extracted by the server's audit-context
+    /// middleware.
+    pub user_agent: Option<String>,
+    /// Client-supplied device identifier (`X-Device-Id`), extracted by the
+    /// server's audit-context middleware.
+    pub device_id: Option<String>,
 }
 
 impl AppService {

@@ -22,6 +22,7 @@ pub async fn revoke_handler(
         .revoke(RevokeRequest {
             token: form.token,
             token_type_hint: form.token_type_hint,
+            ..Default::default()
         })
         .await;
     // Per RFC 7009: always return 200
