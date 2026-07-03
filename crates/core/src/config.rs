@@ -284,12 +284,43 @@ pub struct UserSyncConfig {
     pub webhook: Option<WebhookConfig>,
 }
 
+/// Upper bound on `[user_sync.webhook].retries`. A misconfigured `retries`
+/// must never turn a synchronous request (an admin call, or the JIT notify
+/// on token exchange) into an hours-long hang or overflow the backoff shift;
+/// [`WebhookConfig::effective_retries`] clamps to this at config load time.
+/// See `06-configuration.md` → `[user_sync]`.
+pub const MAX_WEBHOOK_RETRIES: u32 = 10;
+
+/// Default `retries` when `[user_sync.webhook].retries` is unset.
+const DEFAULT_WEBHOOK_RETRIES: u32 = 2;
+
 #[derive(Clone, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
     pub secret: String,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
+}
+
+impl WebhookConfig {
+    /// The `retries` value that reaches the webhook adapter: the configured
+    /// value clamped to [`MAX_WEBHOOK_RETRIES`], or [`DEFAULT_WEBHOOK_RETRIES`]
+    /// when unset. Logs a warning naming the configured and clamped values
+    /// when clamping actually reduces the configured value.
+    pub fn effective_retries(&self) -> u32 {
+        let configured = self.retries.unwrap_or(DEFAULT_WEBHOOK_RETRIES);
+        if configured > MAX_WEBHOOK_RETRIES {
+            tracing::warn!(
+                configured_retries = configured,
+                clamped_retries = MAX_WEBHOOK_RETRIES,
+                "user_sync.webhook.retries exceeds the maximum of {MAX_WEBHOOK_RETRIES}; \
+                 clamping"
+            );
+            MAX_WEBHOOK_RETRIES
+        } else {
+            configured
+        }
+    }
 }
 
 impl std::fmt::Debug for WebhookConfig {
@@ -587,6 +618,59 @@ url = "postgres://localhost/oidc"
         )
         .expect("omitting run_migrations must still deserialize");
         assert_eq!(absent.repository.postgres.unwrap().run_migrations, None);
+    }
+
+    #[test]
+    fn effective_retries_clamps_over_max_passes_through_in_range_and_default() {
+        let over_max = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: Some(20),
+        };
+        assert_eq!(
+            over_max.effective_retries(),
+            MAX_WEBHOOK_RETRIES,
+            "retries = 20 must clamp down to the named maximum of {MAX_WEBHOOK_RETRIES}"
+        );
+
+        let in_range = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: Some(5),
+        };
+        assert_eq!(
+            in_range.effective_retries(),
+            5,
+            "an in-range retries value must pass through unchanged"
+        );
+
+        let unset = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: None,
+        };
+        assert_eq!(
+            unset.effective_retries(),
+            DEFAULT_WEBHOOK_RETRIES,
+            "an unset retries must resolve to the documented default of \
+             {DEFAULT_WEBHOOK_RETRIES}"
+        );
+    }
+
+    #[test]
+    fn effective_retries_at_max_is_not_clamped() {
+        // Negative-space boundary: exactly at the maximum must not trigger
+        // the clamp path (it is not "greater than" the maximum).
+        let at_max = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: "s".to_string(),
+            timeout: None,
+            retries: Some(MAX_WEBHOOK_RETRIES),
+        };
+        assert_eq!(at_max.effective_retries(), MAX_WEBHOOK_RETRIES);
     }
 
     #[test]

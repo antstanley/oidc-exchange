@@ -618,7 +618,7 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
                     }
                 })
                 .unwrap_or(5);
-            let retries = wh_cfg.retries.unwrap_or(2);
+            let retries = wh_cfg.effective_retries();
 
             Ok(Box::new(
                 oidc_exchange_adapters::webhook::WebhookUserSync::new(
