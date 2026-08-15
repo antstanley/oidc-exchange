@@ -78,6 +78,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-07-02-webhook_user_sync_conformance/plan.md](plans/2026-07-02-webhook_user_sync_conformance/plan.md) | Done | [changes/merged/2026-07-01-webhook_user_sync_conformance.md](changes/merged/2026-07-01-webhook_user_sync_conformance.md) |
 | [plans/2026-07-02-server_error_handling_and_shutdown/plan.md](plans/2026-07-02-server_error_handling_and_shutdown/plan.md) | Done | [changes/merged/2026-07-01-server_error_handling_and_shutdown.md](changes/merged/2026-07-01-server_error_handling_and_shutdown.md) |
 | [plans/2026-07-02-implement_lambda_runtime/plan.md](plans/2026-07-02-implement_lambda_runtime/plan.md) | Done | [changes/merged/2026-07-01-implement_lambda_runtime.md](changes/merged/2026-07-01-implement_lambda_runtime.md) |
+| [plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md](plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md) | In Progress | [changes/2026-08-05-fail_closed_across_config_and_adapters.md](changes/2026-08-05-fail_closed_across_config_and_adapters.md) |
 
 ## Conventions
 
