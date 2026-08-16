@@ -320,7 +320,10 @@ impl KmsConfig {
     fn resolve(raw: RawKmsConfig) -> Result<Self, Error> {
         Ok(Self {
             key_id: NonEmptyString::parse_field("key_manager.kms.key_id", raw.key_id)?,
-            algorithm: SigningAlgorithm::parse_field("key_manager.kms.algorithm", raw.algorithm)?,
+            algorithm: SigningAlgorithm::parse_kms_field(
+                "key_manager.kms.algorithm",
+                raw.algorithm,
+            )?,
             kid: NonEmptyString::parse_field("key_manager.kms.kid", raw.kid)?,
         })
     }
@@ -348,7 +351,10 @@ impl LocalKeyConfig {
                 "key_manager.local.private_key_path",
                 raw.private_key_path,
             )?,
-            algorithm: SigningAlgorithm::parse_field("key_manager.local.algorithm", raw.algorithm)?,
+            algorithm: SigningAlgorithm::parse_local_field(
+                "key_manager.local.algorithm",
+                raw.algorithm,
+            )?,
             kid: NonEmptyString::parse_field("key_manager.local.kid", raw.kid)?,
         })
     }
@@ -802,28 +808,59 @@ impl RegistrationMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SigningAlgorithm {
     EdDSA,
-    ES256,
     RS256,
+    RS384,
+    RS512,
+    PS256,
+    PS384,
+    PS512,
+    ES256,
+    ES384,
+    ES512,
 }
 impl SigningAlgorithm {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::EdDSA => "EdDSA",
-            Self::ES256 => "ES256",
             Self::RS256 => "RS256",
+            Self::RS384 => "RS384",
+            Self::RS512 => "RS512",
+            Self::PS256 => "PS256",
+            Self::PS384 => "PS384",
+            Self::PS512 => "PS512",
+            Self::ES256 => "ES256",
+            Self::ES384 => "ES384",
+            Self::ES512 => "ES512",
         }
     }
 
-    fn parse_field(field: &str, value: String) -> Result<Self, Error> {
+    fn parse_local_field(field: &str, value: String) -> Result<Self, Error> {
         match value.as_str() {
             "EdDSA" => Ok(Self::EdDSA),
-            "ES256" => Ok(Self::ES256),
-            "RS256" => Ok(Self::RS256),
             _ => Err(Error::ConfigError {
-                detail: format!("{field}: invalid signing algorithm {value:?}"),
+                detail: format!("{field}: local Ed25519 keys require signing algorithm \"EdDSA\", got {value:?}"),
+            }),
+        }
+    }
+
+    fn parse_kms_field(field: &str, value: String) -> Result<Self, Error> {
+        match value.as_str() {
+            "RS256" => Ok(Self::RS256),
+            "RS384" => Ok(Self::RS384),
+            "RS512" => Ok(Self::RS512),
+            "PS256" => Ok(Self::PS256),
+            "PS384" => Ok(Self::PS384),
+            "PS512" => Ok(Self::PS512),
+            "ES256" => Ok(Self::ES256),
+            "ES384" => Ok(Self::ES384),
+            "ES512" => Ok(Self::ES512),
+            _ => Err(Error::ConfigError {
+                detail: format!(
+                    "{field}: invalid KMS JWS signing algorithm {value:?}; expected RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, or ES512"
+                ),
             }),
         }
     }
@@ -1113,6 +1150,60 @@ mod tests {
             }
             Config::resolve(raw)
                 .unwrap_or_else(|err| panic!("{field}={value:?} should resolve: {err}"));
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_non_jws_and_wrong_adapter_signing_algorithms_at_load() {
+        let cases = [
+            ("key_manager.kms.algorithm", "ECDSA_SHA_256"),
+            ("key_manager.kms.algorithm", "ECDSA_SHA256"),
+            ("key_manager.kms.algorithm", "EdDSA"),
+            ("key_manager.local.algorithm", "ES256"),
+            ("key_manager.local.algorithm", "RS256"),
+        ];
+
+        for (field, value) in cases {
+            let mut raw = default_raw_config();
+            if field == "key_manager.kms.algorithm" {
+                raw.key_manager.kms = Some(RawKmsConfig {
+                    key_id: "key-id".into(),
+                    algorithm: value.into(),
+                    kid: "kid".into(),
+                });
+            } else {
+                raw.key_manager.local = Some(RawLocalKeyConfig {
+                    private_key_path: "key.pem".into(),
+                    algorithm: value.into(),
+                    kid: "kid".into(),
+                });
+            }
+            assert_config_error(Config::resolve(raw), field);
+        }
+    }
+
+    #[test]
+    fn resolve_accepts_all_kms_jws_algorithms() {
+        for algorithm in [
+            "RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512",
+        ] {
+            let mut raw = default_raw_config();
+            raw.key_manager.kms = Some(RawKmsConfig {
+                key_id: "key-id".into(),
+                algorithm: algorithm.into(),
+                kid: "kid".into(),
+            });
+            let config = Config::resolve(raw)
+                .unwrap_or_else(|err| panic!("KMS algorithm {algorithm} should resolve: {err}"));
+            assert_eq!(
+                config
+                    .key_manager
+                    .kms
+                    .expect("KMS config present")
+                    .algorithm
+                    .as_str(),
+                algorithm
+            );
         }
     }
 

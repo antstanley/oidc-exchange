@@ -66,7 +66,7 @@ kid = "key-1"                          # key ID for JWT kid header
 # AWS KMS — sign with a KMS asymmetric key
 [key_manager.kms]
 key_id = "arn:aws:kms:us-east-1:123456789:key/abcd-1234"
-algorithm = "ECDSA_SHA_256"            # KMS signing algorithm (ECC_NIST_P256)
+algorithm = "ES256"                    # JWS signing algorithm (ECC_NIST_P256)
 kid = "key-2024-01"
 
 # ─── User and session storage ─────────────────────────────────────

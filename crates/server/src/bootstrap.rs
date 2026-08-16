@@ -690,7 +690,7 @@ fn build_key_manager(
             Ok(Box::new(oidc_exchange_adapters::kms::KmsKeyManager::new(
                 client,
                 kms_cfg.key_id.as_ref().to_string(),
-                kms_cfg.algorithm.as_str().to_string(),
+                kms_cfg.algorithm,
                 kms_cfg.kid.as_ref().to_string(),
             )))
         }
