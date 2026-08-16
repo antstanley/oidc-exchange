@@ -10,8 +10,8 @@ use oidc_exchange_core::config::{
     RawTokenConfig,
 };
 use oidc_exchange_core::domain::{
-    AccessTokenClaims, AuditEventType, AuditOutcome, IdentityClaims, NewUser, User, UserPatch,
-    UserStatus,
+    AccessTokenClaims, AuditEventType, AuditOutcome, AuditSeverity, IdentityClaims, NewUser, User,
+    UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -698,8 +698,8 @@ async fn exchange_existing_users_only_rejects_new_user() {
 }
 
 #[tokio::test]
-async fn exchange_existing_user_bypasses_domain_allowlist() {
-    // Configure allowlist that does NOT include the user's domain
+async fn exchange_existing_user_is_denied_after_allowlist_tightening() {
+    // Configure an allowlist that does NOT include the current assertion's domain.
     let config = Config::resolve(RawConfig {
         registration: RawRegistrationConfig {
             mode: "open".to_string(),
@@ -734,10 +734,42 @@ async fn exchange_existing_user_bypasses_domain_allowlist() {
         ..Default::default()
     };
 
-    // Should succeed because existing users bypass the registration policy
-    svc.exchange(request)
+    let err = svc
+        .exchange(request)
         .await
-        .expect("existing user should bypass domain allowlist");
+        .expect_err("existing user outside a tightened allowlist must be denied");
+    assert!(matches!(err, Error::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn exchange_open_registration_requires_verified_email_without_allowlist() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    provider
+        .set_claims(IdentityClaims {
+            subject: "unverified-subject".to_string(),
+            email: Some("user@example.com".to_string()),
+            email_verified: Some(false),
+            name: None,
+            is_private_email: None,
+            raw_claims: HashMap::new(),
+        })
+        .await;
+    let svc = make_service(repo.clone(), provider);
+
+    let err = svc
+        .exchange(ExchangeRequest {
+            code: Some("code".to_string()),
+            redirect_uri: Some("https://app.test.com/callback".to_string()),
+            id_token: None,
+            provider: "mock".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("open registration must reject an unverified email");
+
+    assert!(matches!(err, Error::AccessDenied { .. }));
+    assert!(repo.get_all_users().await.is_empty());
 }
 
 #[tokio::test]
@@ -867,10 +899,18 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
     // re-lookup path.
     let provider_b = MockIdentityProvider::new("mock");
     let stale_repo = StaleReadUserRepository::new(repo.clone(), 1);
-    let svc_b = make_service_with_user_repo(
+    let audit_b = MockAuditLog::new();
+    let audit_b_clone = audit_b.clone();
+    let provider_id = provider_b.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider_b));
+    let svc_b = AppService::new(
         Box::new(stale_repo),
-        repo.clone(),
-        provider_b,
+        Box::new(repo.clone()),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit_b),
+        Box::new(MockUserSync::new()),
+        providers,
         make_config(),
     );
     let request_b = ExchangeRequest {
@@ -895,11 +935,17 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         "exactly one user should be created despite two racing exchanges"
     );
 
+    // The losing racer must not emit a duplicate UserCreated audit event.
+    // (The winner uses a separate audit log, so this captures only racer B.)
     // Both tokens reference the same, single user.
     let sub_a = decode_sub(&resp_a.access_token);
     let sub_b = decode_sub(&resp_b.access_token);
     assert_eq!(sub_a, sub_b);
     assert_eq!(sub_a, users[0].id);
+    let events_b = audit_b_clone.events().await;
+    assert_eq!(events_b.len(), 1);
+    assert_eq!(events_b[0].event_type, AuditEventType::TokenExchange);
+    assert_eq!(events_b[0].severity, AuditSeverity::Info);
 }
 
 #[tokio::test]
@@ -1117,6 +1163,7 @@ async fn exchange_new_user_emits_user_created_then_token_exchange() {
     );
 
     assert_eq!(events[0].event_type, AuditEventType::UserCreated);
+    assert_eq!(events[0].severity, AuditSeverity::Notice);
     assert_eq!(events[0].outcome, AuditOutcome::Success);
     assert_eq!(events[0].provider.as_deref(), Some("mock"));
     assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.9"));
@@ -1127,6 +1174,7 @@ async fn exchange_new_user_emits_user_created_then_token_exchange() {
     );
 
     assert_eq!(events[1].event_type, AuditEventType::TokenExchange);
+    assert_eq!(events[1].severity, AuditSeverity::Info);
     assert_eq!(events[1].outcome, AuditOutcome::Success);
     assert_eq!(events[1].provider.as_deref(), Some("mock"));
     assert_eq!(events[1].ip_address.as_deref(), Some("203.0.113.9"));
@@ -1264,6 +1312,98 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
 /// (warning, failure) and does not proceed to emit `TokenExchange` — the
 /// user is never created and no token is ever issued.
 #[tokio::test]
+async fn exchange_existing_user_allowlist_rejection_names_user_in_audit() {
+    let config = Config::resolve(RawConfig {
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: Some(vec!["allowed.example".to_string()]),
+        },
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
+    let repo = MockRepository::new();
+    let user = repo
+        .create_user(&NewUser {
+            external_id: "test-subject".to_string(),
+            provider: "mock".to_string(),
+            email: Some("old@allowed.example".to_string()),
+            display_name: None,
+        })
+        .await
+        .expect("pre-create existing user");
+    let provider = MockIdentityProvider::new("mock");
+    provider
+        .set_claims(IdentityClaims {
+            subject: "test-subject".to_string(),
+            email: Some("current@outside.example".to_string()),
+            email_verified: Some(true),
+            name: None,
+            is_private_email: None,
+            raw_claims: HashMap::new(),
+        })
+        .await;
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, provider, config, audit);
+
+    let err = svc
+        .exchange(ExchangeRequest {
+            code: Some("code".to_string()),
+            redirect_uri: Some("https://app.test.com/callback".to_string()),
+            id_token: None,
+            provider: "mock".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("existing user outside current allowlist must be denied");
+
+    assert!(matches!(err, Error::AccessDenied { .. }));
+    let events = audit_clone.events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, AuditEventType::RegistrationDenied);
+    assert_eq!(events[0].severity, AuditSeverity::Warning);
+    assert!(matches!(events[0].outcome, AuditOutcome::Failure { .. }));
+    assert_eq!(events[0].actor.as_deref(), Some(user.id.as_str()));
+}
+
+#[tokio::test]
+async fn exchange_existing_users_only_rejection_emits_registration_denied() {
+    let config = Config::resolve(RawConfig {
+        registration: RawRegistrationConfig {
+            mode: "existing_users_only".to_string(),
+            domain_allowlist: None,
+        },
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo.clone(), provider, config, audit);
+
+    let err = svc
+        .exchange(ExchangeRequest {
+            code: Some("code".to_string()),
+            redirect_uri: Some("https://app.test.com/callback".to_string()),
+            id_token: None,
+            provider: "mock".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("new users must be denied in existing_users_only mode");
+
+    assert!(matches!(err, Error::AccessDenied { .. }));
+    assert!(repo.get_all_users().await.is_empty());
+    let events = audit_clone.events().await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, AuditEventType::RegistrationDenied);
+    assert_eq!(events[0].severity, AuditSeverity::Warning);
+    assert!(matches!(events[0].outcome, AuditOutcome::Failure { .. }));
+    assert_eq!(events[0].actor, None);
+}
+
+#[tokio::test]
 async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_token_exchange() {
     let config = Config::resolve(RawConfig {
         registration: RawRegistrationConfig {
@@ -1313,6 +1453,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
         events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
     );
     assert_eq!(events[0].event_type, AuditEventType::RegistrationDenied);
+    assert_eq!(events[0].severity, AuditSeverity::Warning);
     match &events[0].outcome {
         AuditOutcome::Failure { .. } => {}
         other => panic!("expected Failure outcome, got: {:?}", other),

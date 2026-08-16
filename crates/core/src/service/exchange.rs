@@ -61,6 +61,30 @@ fn matches_domain_allowlist(email: &str, allowlist: &[AsciiDomainPattern]) -> bo
     false
 }
 
+/// Applies the verified-email and optional domain-allowlist policy to the
+/// current identity assertion. This predicate is shared by new and existing
+/// user paths so a tightened allowlist cannot be bypassed by a prior login.
+fn registration_policy_reason(
+    email: Option<&str>,
+    email_verified: Option<bool>,
+    allowlist: Option<&[AsciiDomainPattern]>,
+) -> Option<&'static str> {
+    let Some(email) = email else {
+        return Some("verified email required for registration");
+    };
+    if email_verified != Some(true) {
+        return Some("verified email required for registration");
+    }
+
+    if let Some(allowlist) = allowlist {
+        if !matches_domain_allowlist(email, allowlist) {
+            return Some("email domain not in allowlist");
+        }
+    }
+
+    None
+}
+
 impl AppService {
     pub async fn exchange(&self, request: ExchangeRequest) -> Result<TokenResponse> {
         // 1. Resolve provider
@@ -116,74 +140,36 @@ impl AppService {
                     .await?;
                     return Err(Error::UserSuspended { user_id: user.id });
                 }
+                if let Some(reason) = registration_policy_reason(
+                    claims.email.as_deref(),
+                    claims.email_verified,
+                    self.config.registration.domain_allowlist.as_deref(),
+                ) {
+                    let reason = reason.to_string();
+                    self.emit_audit(create_audit_event(
+                        AuditEventType::RegistrationDenied,
+                        AuditSeverity::Warning,
+                        AuditOutcome::Failure {
+                            reason: reason.clone(),
+                        },
+                        Some(user.id.clone()),
+                        Some(request.provider.clone()),
+                        request.ip_address.clone(),
+                        request.user_agent.clone(),
+                    ))
+                    .await?;
+                    return Err(Error::AccessDenied { reason });
+                }
                 user
             }
             None => {
-                // Apply registration policy before creating a new user
-
-                // Check domain allowlist if configured
-                if let Some(ref allowlist) = self.config.registration.domain_allowlist {
-                    match claims.email {
-                        Some(ref email) => {
-                            // Reject unverified emails for allowlist matching
-                            if claims.email_verified != Some(true) {
-                                let reason =
-                                    "verified email required when domain allowlist is configured"
-                                        .to_string();
-                                self.emit_audit(create_audit_event(
-                                    AuditEventType::RegistrationDenied,
-                                    AuditSeverity::Warning,
-                                    AuditOutcome::Failure {
-                                        reason: reason.clone(),
-                                    },
-                                    None,
-                                    Some(request.provider.clone()),
-                                    request.ip_address.clone(),
-                                    request.user_agent.clone(),
-                                ))
-                                .await?;
-                                return Err(Error::AccessDenied { reason });
-                            }
-                            if !matches_domain_allowlist(email, allowlist) {
-                                let reason = "email domain not in allowlist".to_string();
-                                self.emit_audit(create_audit_event(
-                                    AuditEventType::RegistrationDenied,
-                                    AuditSeverity::Warning,
-                                    AuditOutcome::Failure {
-                                        reason: reason.clone(),
-                                    },
-                                    None,
-                                    Some(request.provider.clone()),
-                                    request.ip_address.clone(),
-                                    request.user_agent.clone(),
-                                ))
-                                .await?;
-                                return Err(Error::AccessDenied { reason });
-                            }
-                        }
-                        None => {
-                            let reason =
-                                "email required when domain allowlist is configured".to_string();
-                            self.emit_audit(create_audit_event(
-                                AuditEventType::RegistrationDenied,
-                                AuditSeverity::Warning,
-                                AuditOutcome::Failure {
-                                    reason: reason.clone(),
-                                },
-                                None,
-                                Some(request.provider.clone()),
-                                request.ip_address.clone(),
-                                request.user_agent.clone(),
-                            ))
-                            .await?;
-                            return Err(Error::AccessDenied { reason });
-                        }
-                    }
-                }
-
-                // Check registration mode
-                if self.config.registration.mode == RegistrationMode::ExistingUsersOnly {
-                    let reason = "registration is restricted to existing users only".to_string();
+                // Apply registration policy before creating a new user.
+                if let Some(reason) = registration_policy_reason(
+                    claims.email.as_deref(),
+                    claims.email_verified,
+                    self.config.registration.domain_allowlist.as_deref(),
+                ) {
+                    let reason = reason.to_string();
                     self.emit_audit(create_audit_event(
                         AuditEventType::RegistrationDenied,
                         AuditSeverity::Warning,
@@ -197,6 +183,27 @@ impl AppService {
                     ))
                     .await?;
                     return Err(Error::AccessDenied { reason });
+                }
+
+                match self.config.registration.mode {
+                    RegistrationMode::Open => {}
+                    RegistrationMode::ExistingUsersOnly => {
+                        let reason =
+                            "registration is restricted to existing users only".to_string();
+                        self.emit_audit(create_audit_event(
+                            AuditEventType::RegistrationDenied,
+                            AuditSeverity::Warning,
+                            AuditOutcome::Failure {
+                                reason: reason.clone(),
+                            },
+                            None,
+                            Some(request.provider.clone()),
+                            request.ip_address.clone(),
+                            request.user_agent.clone(),
+                        ))
+                        .await?;
+                        return Err(Error::AccessDenied { reason });
+                    }
                 }
 
                 let new_user = NewUser {
@@ -266,6 +273,26 @@ impl AppService {
                                     ))
                                     .await?;
                                     return Err(Error::UserSuspended { user_id: user.id });
+                                }
+                                if let Some(reason) = registration_policy_reason(
+                                    claims.email.as_deref(),
+                                    claims.email_verified,
+                                    self.config.registration.domain_allowlist.as_deref(),
+                                ) {
+                                    let reason = reason.to_string();
+                                    self.emit_audit(create_audit_event(
+                                        AuditEventType::RegistrationDenied,
+                                        AuditSeverity::Warning,
+                                        AuditOutcome::Failure {
+                                            reason: reason.clone(),
+                                        },
+                                        Some(user.id.clone()),
+                                        Some(request.provider.clone()),
+                                        request.ip_address.clone(),
+                                        request.user_agent.clone(),
+                                    ))
+                                    .await?;
+                                    return Err(Error::AccessDenied { reason });
                                 }
                                 user
                             }
