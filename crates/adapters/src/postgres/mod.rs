@@ -139,11 +139,54 @@ fn is_insufficient_privilege_code(code: Option<&str>) -> bool {
 /// out-of-band.
 ///
 /// A migration failure whose database error carries [`INSUFFICIENT_PRIVILEGE_SQLSTATE`]
-/// (`42501`, the role lacks DDL rights) degrades instead of failing outright: it logs a
-/// structured warning and probes `to_regclass('users')` / `to_regclass('sessions')`, returning
-/// the pool when both already exist (a pre-provisioned schema under a restricted role) and the
-/// *original* migration error when either is missing. Every other migration error — including
-/// a failed probe — is returned unchanged, so a genuinely broken database still fails startup.
+/// (`42501`, the role lacks DDL rights) degrades only after a probe proves the pre-provisioned
+/// schema provides every invariant established by [`MIGRATIONS`]: the `users` and `sessions`
+/// tables, the unique partial `idx_users_external_id_provider` index, and `users.version`.
+/// Every missing, malformed, or unreadable probe result returns the *original* migration error.
+/// Every other migration error fails fast unchanged.
+async fn migration_invariants_hold(pool: &PgPool) -> bool {
+    const INVARIANT_PROBE: &str = "SELECT \
+        to_regclass('users') IS NOT NULL AS users_exists, \
+        to_regclass('sessions') IS NOT NULL AS sessions_exists, \
+        EXISTS ( \
+            SELECT 1 \
+            FROM pg_index index_definition \
+            INNER JOIN pg_class index_relation ON index_relation.oid = index_definition.indexrelid \
+            WHERE index_relation.relname = 'idx_users_external_id_provider' \
+              AND index_definition.indisunique \
+              AND index_definition.indpred IS NOT NULL \
+        ) AS external_id_provider_index_valid, \
+        EXISTS ( \
+            SELECT 1 \
+            FROM pg_attribute column_definition \
+            WHERE column_definition.attrelid = to_regclass('users') \
+              AND column_definition.attname = 'version' \
+              AND column_definition.attnum > 0 \
+              AND NOT column_definition.attisdropped \
+        ) AS users_version_exists";
+
+    let Ok(row) = sqlx::query(INVARIANT_PROBE).fetch_one(pool).await else {
+        return false;
+    };
+
+    let Ok(users_exists) = row.try_get::<bool, _>("users_exists") else {
+        return false;
+    };
+    let Ok(sessions_exists) = row.try_get::<bool, _>("sessions_exists") else {
+        return false;
+    };
+    let Ok(external_id_provider_index_valid) =
+        row.try_get::<bool, _>("external_id_provider_index_valid")
+    else {
+        return false;
+    };
+    let Ok(users_version_exists) = row.try_get::<bool, _>("users_version_exists") else {
+        return false;
+    };
+
+    users_exists && sessions_exists && external_id_provider_index_valid && users_version_exists
+}
+
 pub async fn create_pool(
     url: &str,
     max_connections: u32,
@@ -163,25 +206,11 @@ pub async fn create_pool(
 
             tracing::warn!(
                 sqlstate = INSUFFICIENT_PRIVILEGE_SQLSTATE,
-                "postgres migration denied (insufficient privilege); probing for pre-existing \
-                 users/sessions tables"
+                "postgres migration denied (insufficient privilege); probing pre-provisioned \
+                 schema invariants"
             );
 
-            let tables_exist = sqlx::query(
-                "SELECT to_regclass('users')::text AS users_reg, \
-                        to_regclass('sessions')::text AS sessions_reg",
-            )
-            .fetch_one(&pool)
-            .await
-            .ok()
-            .map(|row| {
-                let users_reg: Option<String> = row.try_get("users_reg").unwrap_or(None);
-                let sessions_reg: Option<String> = row.try_get("sessions_reg").unwrap_or(None);
-                users_reg.is_some() && sessions_reg.is_some()
-            })
-            .unwrap_or(false);
-
-            if !tables_exist {
+            if !migration_invariants_hold(&pool).await {
                 // Return the original migration error, not a probe-derived one: the denied
                 // DDL is why startup is failing, and a failed or inconclusive probe must not
                 // mask that.
@@ -189,7 +218,7 @@ pub async fn create_pool(
             }
 
             tracing::warn!(
-                "proceeding despite denied migration DDL: users/sessions tables already exist"
+                "proceeding despite denied migration DDL: required schema invariants hold"
             );
         }
     }
@@ -1149,6 +1178,112 @@ mod tests {
     // -----------------------------------------------------------------
     // Denied-DDL degrade classification
     // -----------------------------------------------------------------
+
+    /// The migration-invariant probe must accept precisely the schema that `MIGRATIONS`
+    /// guarantees: both tables, a unique partial identity index, and the optimistic-locking
+    /// `version` column. This test requires a local Postgres service via `DATABASE_URL`.
+    #[tokio::test]
+    async fn migration_invariant_probe_rejects_incomplete_or_wrong_indexes() {
+        let Ok(base_url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping migration_invariant_probe_rejects_incomplete_or_wrong_indexes: \
+                 DATABASE_URL is not set"
+            );
+            return;
+        };
+
+        let schema = "oidc_adapter_test_migration_invariants";
+        reset_schema(&base_url, schema).await;
+        let url = url_with_search_path(&base_url, schema);
+        let pool = create_pool(&url, 1, true)
+            .await
+            .expect("migrate isolated schema");
+
+        assert!(
+            migration_invariants_hold(&pool).await,
+            "the complete migration schema must satisfy the probe"
+        );
+
+        sqlx::query("DROP TABLE sessions")
+            .execute(&pool)
+            .await
+            .expect("drop sessions table");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a missing sessions table must fail the probe"
+        );
+        sqlx::raw_sql(MIGRATIONS)
+            .execute(&pool)
+            .await
+            .expect("restore complete migration schema");
+
+        sqlx::query("DROP TABLE users CASCADE")
+            .execute(&pool)
+            .await
+            .expect("drop users table");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a missing users table must fail the probe"
+        );
+        sqlx::raw_sql(MIGRATIONS)
+            .execute(&pool)
+            .await
+            .expect("restore complete migration schema");
+
+        sqlx::query("DROP INDEX idx_users_external_id_provider")
+            .execute(&pool)
+            .await
+            .expect("drop partial unique index");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a missing identity index must fail the probe"
+        );
+
+        sqlx::query("CREATE INDEX idx_users_external_id_provider ON users (external_id, provider)")
+            .execute(&pool)
+            .await
+            .expect("create non-unique full index");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a non-unique full identity index must fail the probe"
+        );
+
+        sqlx::query("DROP INDEX idx_users_external_id_provider")
+            .execute(&pool)
+            .await
+            .expect("drop non-unique full index");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_users_external_id_provider \
+             ON users (external_id, provider)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create unique full index");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a unique but non-partial identity index must fail the probe"
+        );
+
+        sqlx::query("DROP INDEX idx_users_external_id_provider")
+            .execute(&pool)
+            .await
+            .expect("drop unique full index");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_users_external_id_provider \
+             ON users (external_id, provider) WHERE status != 'deleted'",
+        )
+        .execute(&pool)
+        .await
+        .expect("restore unique partial index");
+        sqlx::query("ALTER TABLE users DROP COLUMN version")
+            .execute(&pool)
+            .await
+            .expect("drop version column");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a schema without users.version must fail the probe"
+        );
+    }
 
     /// [`is_insufficient_privilege_code`] must route on the exact SQLSTATE, not "some error
     /// occurred": the insufficient-privilege code (`42501`) reads `true` (degrade path), a
