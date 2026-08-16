@@ -12,7 +12,7 @@ A Rust service that validates ID tokens from third-party OIDC providers and exch
 **One-line install script** (Linux/macOS, downloads the latest release binary):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
 **Docker:**
