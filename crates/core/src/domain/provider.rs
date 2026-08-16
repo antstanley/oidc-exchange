@@ -1,20 +1,20 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use crate::config::HttpsUrl;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct OidcProviderConfig {
     pub provider_id: String,
     /// Required -- used for discovery
-    pub issuer: String,
+    pub issuer: HttpsUrl,
     pub client_id: String,
     pub client_secret: Option<String>,
     /// Optional -- discovered from issuer if absent
-    pub jwks_uri: Option<String>,
+    pub jwks_uri: Option<HttpsUrl>,
     /// Optional -- discovered from issuer if absent
-    pub token_endpoint: Option<String>,
+    pub token_endpoint: Option<HttpsUrl>,
     /// Optional -- discovered from issuer if absent
-    pub revocation_endpoint: Option<String>,
+    pub revocation_endpoint: Option<HttpsUrl>,
     pub scopes: Vec<String>,
     pub additional_params: HashMap<String, String>,
 }

@@ -731,13 +731,47 @@ pub struct ProviderConfig {
     pub provider_id: String,
     pub adapter: ProviderAdapter,
     pub extra: HashMap<String, toml::Value>,
+    pub issuer: Option<HttpsUrl>,
+    pub jwks_uri: Option<HttpsUrl>,
+    pub token_endpoint: Option<HttpsUrl>,
+    pub revocation_endpoint: Option<HttpsUrl>,
 }
 
 impl ProviderConfig {
     fn resolve(provider_id: String, raw: RawProviderConfig) -> Result<Self, Error> {
+        let endpoint = |name: &str| {
+            raw.extra
+                .get(name)
+                .and_then(toml::Value::as_str)
+                .map(|value| {
+                    HttpsUrl::parse_field(
+                        &format!("providers.{provider_id}.{name}"),
+                        value.to_string(),
+                    )
+                })
+                .transpose()
+        };
+
+        let issuer = endpoint("issuer")?;
+        let jwks_uri = endpoint("jwks_uri")?;
+        let token_endpoint = endpoint("token_endpoint")?;
+        let revocation_endpoint = endpoint("revocation_endpoint")?;
+
+        if matches!(ProviderAdapter::parse_field("providers.adapter", raw.adapter.clone())?, ProviderAdapter::Oidc)
+            && issuer.is_none()
+        {
+            return Err(Error::ConfigError {
+                detail: format!("providers.{provider_id}.issuer: missing required HTTPS URL"),
+            });
+        }
+
         Ok(Self {
             provider_id,
             adapter: ProviderAdapter::parse_field("providers.adapter", raw.adapter)?,
+            issuer,
+            jwks_uri,
+            token_endpoint,
+            revocation_endpoint,
             extra: raw.extra,
         })
     }
@@ -992,9 +1026,25 @@ impl ProviderAdapter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpsUrl(String);
 impl HttpsUrl {
-    /// Construct a validated HTTPS URL outside config deserialization, for tests.
+    /// Construct a validated HTTPS URL outside config deserialization.
     pub fn parse(value: impl Into<String>) -> Result<Self, Error> {
         Self::parse_field("URL", value.into())
+    }
+
+    /// Construct an HTTP URL for test fixtures only.
+    #[doc(hidden)]
+    pub fn parse_for_test(value: impl Into<String>) -> Result<Self, Error> {
+        let value = value.into();
+        let trimmed = value.trim();
+        if trimmed.starts_with("http://") && trimmed.len() > "http://".len() {
+            Ok(Self(trimmed.to_string()))
+        } else {
+            Self::parse(value)
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     fn parse_field(field: &str, value: String) -> Result<Self, Error> {

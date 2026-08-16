@@ -16,10 +16,10 @@ pub struct OidcProvider {
     provider_id: String,
     client_id: String,
     client_secret: Option<String>,
-    token_endpoint: String,
+    token_endpoint: oidc_exchange_core::config::HttpsUrl,
     jwks_cache: JwksCache,
-    revocation_endpoint: Option<String>,
-    issuer: String,
+    revocation_endpoint: Option<oidc_exchange_core::config::HttpsUrl>,
+    issuer: oidc_exchange_core::config::HttpsUrl,
 }
 
 /// Infer the signing algorithm from a JWK that carries no `alg` member.
@@ -104,7 +104,7 @@ impl OidcProvider {
             client_id: config.client_id.clone(),
             client_secret: config.client_secret.clone(),
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri),
+            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string()),
             revocation_endpoint,
             issuer: config.issuer.clone(),
         })
@@ -115,7 +115,7 @@ impl OidcProvider {
 impl IdentityProvider for OidcProvider {
     async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<ProviderTokens> {
         crate::shared::token_endpoint::exchange_code(
-            &self.token_endpoint,
+            self.token_endpoint.as_str(),
             &self.client_id,
             self.client_secret.as_deref(),
             code,
@@ -191,7 +191,7 @@ impl IdentityProvider for OidcProvider {
             .map(Ok)
             .unwrap_or_else(|| infer_alg_from_jwk(&jwk))?;
         let mut validation = Validation::new(jwk_alg);
-        validation.set_issuer(&[&self.issuer]);
+        validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[&self.client_id]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         validation.validate_nbf = true;
@@ -239,7 +239,7 @@ impl IdentityProvider for OidcProvider {
         params.push(("client_id", &client_id_owned));
 
         let response = client
-            .post(endpoint)
+            .post(endpoint.as_str())
             .form(&params)
             .send()
             .await
@@ -367,12 +367,22 @@ mod tests {
     ) -> OidcProviderConfig {
         OidcProviderConfig {
             provider_id: "test-provider".into(),
-            issuer: server_uri.to_string(),
+            issuer: oidc_exchange_core::config::HttpsUrl::parse_for_test(server_uri)
+                .expect("wiremock issuer URL"),
             client_id: "test-client-id".into(),
             client_secret: Some("test-client-secret".into()),
-            jwks_uri,
-            token_endpoint,
-            revocation_endpoint,
+            jwks_uri: jwks_uri
+                .map(oidc_exchange_core::config::HttpsUrl::parse_for_test)
+                .transpose()
+                .expect("wiremock JWKS URL"),
+            token_endpoint: token_endpoint
+                .map(oidc_exchange_core::config::HttpsUrl::parse_for_test)
+                .transpose()
+                .expect("wiremock token URL"),
+            revocation_endpoint: revocation_endpoint
+                .map(oidc_exchange_core::config::HttpsUrl::parse_for_test)
+                .transpose()
+                .expect("wiremock revocation URL"),
             scopes: vec!["openid".into()],
             additional_params: HashMap::new(),
         }
@@ -724,9 +734,9 @@ mod tests {
             .expect("from_config with discovery should succeed");
 
         assert_eq!(provider.provider_id(), "google");
-        assert_eq!(provider.token_endpoint, format!("{uri}/oauth/token"));
+        assert_eq!(provider.token_endpoint.as_str(), format!("{uri}/oauth/token"));
         assert_eq!(
-            provider.revocation_endpoint.as_deref(),
+            provider.revocation_endpoint.as_ref().map(oidc_exchange_core::config::HttpsUrl::as_str),
             Some(format!("{uri}/oauth/revoke").as_str())
         );
     }

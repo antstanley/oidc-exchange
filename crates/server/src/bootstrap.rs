@@ -775,7 +775,7 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
 
             Ok(Box::new(
                 oidc_exchange_adapters::webhook::WebhookUserSync::new(
-                    wh_cfg.url.as_ref().to_string(),
+                    wh_cfg.url.clone(),
                     wh_cfg.secret.as_ref().to_string(),
                     timeout,
                     retries,
@@ -843,7 +843,7 @@ fn provider_config_to_oidc(
             .map(String::from)
     };
 
-    let issuer = get_str("issuer").ok_or_else(|| Error::ConfigError {
+    let issuer = config.issuer.clone().ok_or_else(|| Error::ConfigError {
         detail: format!("provider '{name}': missing 'issuer'"),
     })?;
 
@@ -867,9 +867,9 @@ fn provider_config_to_oidc(
         issuer,
         client_id,
         client_secret: get_str("client_secret"),
-        jwks_uri: get_str("jwks_uri"),
-        token_endpoint: get_str("token_endpoint"),
-        revocation_endpoint: get_str("revocation_endpoint"),
+        jwks_uri: config.jwks_uri.clone(),
+        token_endpoint: config.token_endpoint.clone(),
+        revocation_endpoint: config.revocation_endpoint.clone(),
         scopes,
         additional_params: HashMap::new(),
     })
