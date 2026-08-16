@@ -12,7 +12,8 @@ Configuration is loaded and merged in the following order, with later sources ov
 1. **`config/default.toml`** --- baseline defaults shipped with the binary
 2. **`config/{OIDC_EXCHANGE_ENV}.toml`** --- environment-specific overrides. The `OIDC_EXCHANGE_ENV` environment variable selects the file (e.g., `production`, `staging`, `local`). If unset, only `default.toml` is loaded.
 3. **Environment variable overrides** --- structural overrides using double-underscore delimiters: `OIDC_EXCHANGE__{section}__{key}` (e.g., `OIDC_EXCHANGE__SERVER__PORT=9090`)
-4. **`${VAR_NAME}` placeholder resolution** --- any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time
+4. **`${VAR_NAME}` placeholder resolution** --- any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time; an unset value is a configuration error
+5. **Closed-domain resolution** --- the merged configuration is narrowed into typed values; invalid security-relevant values (including non-HTTPS issuer, provider, and webhook URLs) fail before startup
 
 Secrets (client secrets, API keys, KMS ARNs) should always use `${VAR_NAME}` placeholders and be injected via environment variables. Never hardcode secrets in TOML files.
 
@@ -60,7 +61,7 @@ adapter = "local"                      # "local" or "kms"
 # Local key signing — load a PEM private key from disk
 [key_manager.local]
 private_key_path = "./keys/ed25519.pem"
-algorithm = "EdDSA"                    # "EdDSA" (Ed25519) or "ES256" (P-256)
+algorithm = "EdDSA"                    # EdDSA only: the local adapter signs Ed25519 keys
 kid = "key-1"                          # key ID for JWT kid header
 
 # AWS KMS — sign with a KMS asymmetric key
@@ -186,12 +187,15 @@ client_secret = "${GOOGLE_CLIENT_SECRET}"
 
 At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`, the config value becomes that string. If the environment variable is not set, the service fails to start with a configuration error.
 
+Use `oidc-exchange config check path/to/config.toml` to run the same side-effect-free resolver used at startup. It merges the file with committed defaults but intentionally ignores environment variables and overlays, so pass a fully materialized deployment file. It reports missing deployment inputs (such as unresolved placeholders) separately from invalid value domains, and redacts secrets in its rendered output.
+
 ## Defaults
 
 | Setting | Default |
 |---|---|
 | `server.host` | `0.0.0.0` |
 | `server.port` | `8080` |
+| `server.issuer`, `token.audience` | `https://auth.example.com` / `https://api.example.com` (deployment placeholders; replace before production) |
 | `registration.mode` | `open` |
 | `registration.domain_allowlist` | none (all domains allowed) |
 | `token.access_token_ttl` | `15m` |

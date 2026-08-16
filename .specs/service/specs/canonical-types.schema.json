@@ -76,8 +76,16 @@
       "required": ["sub", "iss", "aud", "iat", "exp"],
       "properties": {
         "sub": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
-        "iss": { "type": "string" },
-        "aud": { "type": "string", "description": "Single audience string (no array)." },
+        "iss": {
+          "type": "string",
+          "minLength": 1,
+          "description": "server.issuer; required non-empty at config load, so an empty iss is unrepresentable."
+        },
+        "aud": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Single audience string (no array). token.audience; required non-empty at config load."
+        },
         "iat": { "type": "integer" },
         "exp": { "type": "integer" }
       },

@@ -1,7 +1,7 @@
 [server]
 host = "127.0.0.1"
 port = 8080
-issuer = "http://localhost:8080"
+issuer = "https://auth.example.com"
 
 [key_manager]
 adapter = "local"

@@ -1,6 +1,6 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
@@ -61,6 +61,14 @@ fn key_id(&self) -> &str;        // JWT kid
 
 `verify` exists so the revoke flow can authenticate an access token JWT before revoking the
 user's sessions.
+
+`algorithm()` returns the algorithm **derived from the key material the adapter loaded**, not
+the operator's configured string. The local adapter parses an Ed25519 PKCS#8 PEM and reports
+`EdDSA`; the KMS adapter reports the algorithm its configured JWS name maps to, checked against
+the SPKI it fetches for the JWK. Config load compares the declared `key_manager.*.algorithm`
+against this value and fails when they disagree, so the `alg` in every issued JWT header, the
+JWK at `GET /keys`, and `id_token_signing_alg_values_supported` in the discovery document all
+describe the key that actually signs.
 
 `sign` returns signature bytes in the form the JWS serialization uses directly. For the ES\*
 algorithms the KMS adapter converts the DER-encoded `Ecdsa-Sig-Value` returned by KMS Sign
@@ -134,7 +142,10 @@ Reused by the OIDC and Apple providers:
 - `jwks::JwksCache` — fetches and caches a remote JWKS behind a read/write lock with a TTL
   (default 1h); `with_ttl` overrides.
 - `discovery::discover(issuer)` — fetches and parses `.well-known/openid-configuration` into
-  `DiscoveryDocument { issuer, token_endpoint, jwks_uri, revocation_endpoint }`.
+  `DiscoveryDocument { issuer, token_endpoint, jwks_uri, revocation_endpoint }`. A non-success
+  HTTP status is rejected before the body is read (`ProviderError` naming the issuer and status),
+  matching `JwksCache`'s handling of the same failure; the parsed `issuer` must then equal the
+  configured issuer per RFC 8414 §3.3.
 - `token_endpoint::exchange_code(endpoint, client_id, client_secret, code, redirect_uri)` —
   the standard form-encoded `grant_type=authorization_code` POST.
 

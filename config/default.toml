@@ -1,7 +1,7 @@
 [server]
 host = "0.0.0.0"
 port = 8080
-issuer = "https://localhost:8080"
+issuer = "https://auth.example.com"
 role = "all"
 request_timeout = "30s"
 
@@ -11,7 +11,7 @@ mode = "open"
 [token]
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
-audience = "oidc-exchange"
+audience = "https://api.example.com"
 
 [key_manager]
 # Deliberate raw default for a minimal config; deployment overlays select a key adapter.

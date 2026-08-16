@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
@@ -20,16 +20,24 @@
      returned `id_token`.
 3. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
    - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
-   - **Found, active** → proceed (existing users bypass registration policy).
-   - **Not found** → apply policy:
-     - If `registration.domain_allowlist` is set: the ID token must carry a **verified**
-       email (`email_verified == Some(true)`) whose domain matches the allowlist — exact
-       (`example.com`) or wildcard (`*.example.com`, at least one subdomain, case-insensitive).
-       A missing/unverified email or non-matching domain → `AccessDenied`
-       (audited `RegistrationDenied`).
-     - If `registration.mode == "existing_users_only"` → `AccessDenied` (`RegistrationDenied`).
-     - Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`);
-       if creation returns `Conflict` (a concurrent first login won the race), re-run
+   - **Found, active** → when `registration.domain_allowlist` is set, re-apply it against the
+     assertion's current claims: `email_verified == Some(true)` and a matching domain, using
+     the same predicate as the Not-found arm. A failure → `AccessDenied` (audited
+     `RegistrationDenied`, naming the user id). The live ID-token claims are used rather than
+     the stored `user.email`, which is frozen at first login. `registration.mode` is not
+     re-evaluated here: it is an admission gate and is trivially satisfied by an existing user.
+   - **Not found** → apply policy. The policy value is a `RegistrationMode`, matched
+     exhaustively; there is no unrecognised case because config load rejected it.
+     - The ID token must carry a **verified** email (`email_verified == Some(true)`) — a
+       requirement of accepting the claim at all, not merely of the allowlist branch. A missing
+       or unverified email → `AccessDenied` (audited `RegistrationDenied`).
+     - If `registration.domain_allowlist` is set, the email's domain must match it — exact
+       (`example.com`) or wildcard (`*.example.com`, at least one subdomain, ASCII
+       case-insensitive). A non-matching domain → `AccessDenied` (audited
+       `RegistrationDenied`).
+     - `RegistrationMode::ExistingUsersOnly` → `AccessDenied` (`RegistrationDenied`).
+     - `RegistrationMode::Open` → `create_user(NewUser{…})` (audited `UserCreated`); if
+       creation returns `Conflict` (a concurrent first login won the race), re-run
        `get_user_by_external_id` and continue with the existing user, re-applying the
        suspended-status check. The losing racer emits no `UserCreated` event — the winning
        create already audited it — and the flow otherwise proceeds as for a found user.
@@ -71,8 +79,9 @@ failures propagate).
 ## Build access token (`service/mod.rs::build_access_token`)
 
 1. Parse `token.access_token_ttl` to seconds (`parse_duration_secs`).
-2. Assemble `AccessTokenClaims { sub: user.id, iss: server.issuer, aud: token.audience or "",
-   iat, exp, custom }` where `custom` comes from `resolve_custom_claims`.
+2. Assemble `AccessTokenClaims { sub: user.id, iss: server.issuer, aud: token.audience,
+   iat, exp, custom }` where `custom` comes from `resolve_custom_claims`. Both values are
+   required non-empty configuration values.
 3. Header `{ alg: keys.algorithm(), typ: "JWT", kid: keys.key_id() }`.
 4. base64url(header).base64url(payload), `keys.sign` the signing input, append
    base64url(signature). Return `(jwt, ttl_secs)`.
@@ -142,10 +151,18 @@ via `tracing` and never fail the admin call.
 
 - *Refresh does not rotate.* **A successful refresh returns no new refresh token.** Reusable
   refresh tokens match common client libraries; rotation is not implemented.
-- *Domain allowlist demands a verified email.* **New-user registration under an allowlist
-  requires `email_verified == true`.** Prevents allowlist bypass via an unverified address.
-- *Existing users bypass policy.* **Registration policy applies only when no user exists.**
-  Tightening the allowlist later does not lock out already-registered users.
+- *Registration demands a verified email.* **Every just-in-time user creation requires
+  `email_verified == true`, whether or not an allowlist is configured.** The requirement is a
+  property of accepting the email claim, not of the allowlist; nesting it inside an optional
+  feature's branch meant turning the allowlist off turned identity verification off with it.
+- *The allowlist is an authorization predicate; the mode is an admission gate.* **The domain
+  allowlist is re-evaluated on every exchange, for existing users as well as new ones;
+  `registration.mode` applies only at creation.** An operator who tightens the allowlist is
+  trying to contain accounts that already exist. Re-evaluating the mode for an existing user is
+  not coherent without recording provisioning provenance; the refresh path likewise has no
+  fresh claims to evaluate the allowlist against. For both, containment remains suspending or
+  deleting the user — honored immediately on every path — and the refresh-side residual window
+  is bounded by `token.refresh_token_ttl`.
 - *Best-effort user sync.* **Sync notifications never fail an admin or exchange operation.**
   Sync is a downstream convenience, not a correctness dependency.
 - *Audit fallback always records.* **On backend failure the event is still written to a

@@ -1178,13 +1178,13 @@ mod tests {
         let config = Config::resolve(default_raw_config()).expect("failed to resolve config");
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 8080);
-        assert_eq!(config.server.issuer.as_ref(), "https://localhost:8080");
+        assert_eq!(config.server.issuer.as_ref(), "https://auth.example.com");
         assert_eq!(config.server.request_timeout.as_secs(), 30);
         assert_eq!(config.registration.mode, RegistrationMode::Open);
         assert!(config.registration.domain_allowlist.is_none());
         assert_eq!(config.token.access_token_ttl.as_secs(), 15 * 60);
         assert_eq!(config.token.refresh_token_ttl.as_secs(), 30 * 24 * 60 * 60);
-        assert_eq!(config.token.audience.as_ref(), "oidc-exchange");
+        assert_eq!(config.token.audience.as_ref(), "https://api.example.com");
         assert!(config.providers.is_empty());
     }
 

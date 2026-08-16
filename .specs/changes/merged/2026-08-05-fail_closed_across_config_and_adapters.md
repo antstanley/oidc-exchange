@@ -1,6 +1,6 @@
 # Change: Fail closed across config, adapters, and the installer
 
-**Status:** Proposed · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Target:** repo-wide (service, adapters, providers, install)
+**Status:** Merged · **Date:** 2026-08-05 · **Merged:** 2026-08-16 · **Owner:** Ant Stanley · **Target:** repo-wide (service, adapters, providers, install)
 
 Establish one rule — *a security control that cannot be evaluated must deny, and a
 configuration that cannot be validated must refuse to start* — and apply it to the seven
