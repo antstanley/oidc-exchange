@@ -163,14 +163,56 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
     AppConfig::resolve(merge_raw_defaults(defaults, raw)?).map_err(Into::into)
 }
 
-/// Parse a TOML string directly into an `AppConfig`, validating it exactly as
-/// [`load_config`] does so that config supplied through the FFI bindings
-/// (`OidcExchange::new`/`from_file`) is rejected at construction on the same
-/// terms as an invalid config on disk would be rejected at server startup.
-pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let raw: RawConfig = toml::from_str(toml_str)?;
-    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))?;
-    AppConfig::resolve(merge_raw_defaults(defaults, raw)?).map_err(Into::into)
+/// Parse raw TOML, merge it onto the committed defaults, and resolve the
+/// resulting typed configuration. This is deliberately side-effect-free:
+/// callers that only need validation never build adapters, telemetry, routers,
+/// or listeners.
+pub fn resolve_config_toml(toml_str: &str) -> Result<AppConfig, Error> {
+    let raw: RawConfig = toml::from_str(toml_str).map_err(|err| Error::ConfigError {
+        detail: format!("config TOML is invalid: {err}"),
+    })?;
+    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .map_err(|err| Error::ConfigError {
+            detail: format!("committed default config is invalid: {err}"),
+        })?;
+    AppConfig::resolve(
+        merge_raw_defaults(defaults, raw).map_err(|err| Error::ConfigError {
+            detail: format!("config defaults cannot be merged: {err}"),
+        })?,
+    )
+}
+
+/// Backwards-compatible name for the shared side-effect-free TOML resolver.
+pub fn parse_config(toml_str: &str) -> Result<AppConfig, Error> {
+    resolve_config_toml(toml_str)
+}
+
+/// Read an explicit TOML file and resolve it using the same side-effect-free
+/// path as FFI TOML construction. An explicit path intentionally does not load
+/// a sibling overlay, consult the working directory, or apply environment
+/// overrides: the supplied file is the complete deployment override, merged
+/// only with the committed defaults.
+pub fn check_config_file(path: impl AsRef<std::path::Path>) -> Result<AppConfig, Error> {
+    let path = path.as_ref();
+    if !path.is_file() {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "config check path '{}' is not a readable file",
+                path.display()
+            ),
+        });
+    }
+    let config_toml = std::fs::read_to_string(path).map_err(|err| Error::ConfigError {
+        detail: format!("config check cannot read '{}': {err}", path.display()),
+    })?;
+    resolve_config_toml(&config_toml)
+}
+
+/// Render a resolved config for `config check` without exposing secrets.
+/// Rendering raw TOML would leak any secret before the closed-domain resolver
+/// has accepted it, so this intentionally uses redacted `Debug` output only.
+pub fn render_checked_config(config: &AppConfig) -> String {
+    format!("{config:#?}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,6 +1474,79 @@ mod load_config_tests {
 
         assert_eq!(config.server.role.as_str(), "all");
     }
+
+    #[test]
+    fn check_config_file_uses_the_side_effect_free_resolver() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("deployment.toml");
+        std::fs::write(&path, include_str!("../../../config/default.toml")).expect("write config");
+
+        let config = check_config_file(&path).expect("config check should resolve valid TOML");
+
+        assert_eq!(config.server.role.as_str(), "all");
+    }
+
+    #[test]
+    fn check_config_file_rejects_the_same_invalid_closed_domain() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("deployment.toml");
+        std::fs::write(&path, "[server]\nrole = \"not-a-role\"\n").expect("write config");
+
+        let err = check_config_file(&path).expect_err("invalid role must fail closed");
+
+        assert!(err.to_string().contains("server.role"));
+    }
+
+    #[test]
+    fn check_config_file_rejects_non_file_paths_without_fallback() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let err = check_config_file(dir.path()).expect_err("directories are not config files");
+
+        assert!(err.to_string().contains("config error"));
+        assert!(err.to_string().contains("not a readable file"));
+    }
+
+    #[test]
+    fn check_config_file_ignores_cwd_overlays_and_environment_overrides() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("deployment.toml");
+        std::fs::write(&path, "[server]\nrole = \"exchange\"\n").expect("write config");
+        let old_cwd = std::env::current_dir().expect("current directory");
+        let cwd = tempfile::tempdir().expect("cwd temp dir");
+        std::fs::create_dir(cwd.path().join("config")).expect("create config directory");
+        std::fs::write(
+            cwd.path().join("config/default.toml"),
+            "[server]\nrole = \"admin\"\n",
+        )
+        .expect("write cwd default");
+        std::env::set_current_dir(cwd.path()).expect("change cwd");
+        std::env::set_var("OIDC_EXCHANGE__SERVER__ROLE", "admin");
+
+        let config = check_config_file(&path).expect("explicit config must resolve");
+
+        std::env::remove_var("OIDC_EXCHANGE__SERVER__ROLE");
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
+        assert_eq!(config.server.role.as_str(), "exchange");
+    }
+
+    #[test]
+    fn checked_config_rendering_redacts_secrets() {
+        let _env_lock = lock_test_environment();
+        let config = parse_config(
+            "[internal_api]\nenabled = true\nauth_method = \"shared_secret\"\nshared_secret = \"do-not-print-me\"\n",
+        )
+        .expect("config should resolve");
+
+        let rendered = render_checked_config(&config);
+
+        assert!(!rendered.contains("do-not-print-me"));
+        assert!(rendered.contains("<redacted>"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,7 +1558,6 @@ mod build_router_tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt;
     use std::collections::HashMap;
     use tower::ServiceExt;
 
@@ -1513,11 +1627,6 @@ enabled = {internal_enabled}
             .await
             .unwrap();
         response.status()
-    }
-
-    async fn body_to_json(body: Body) -> serde_json::Value {
-        let bytes = body.collect().await.unwrap().to_bytes();
-        serde_json::from_slice(&bytes).unwrap()
     }
 
     /// `internal_api.enabled = true` with role `admin` mounts `/internal/*`

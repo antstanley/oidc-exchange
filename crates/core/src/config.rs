@@ -672,11 +672,24 @@ pub struct RawInternalApiConfig {
     pub shared_secret: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InternalApiConfig {
     pub enabled: bool,
     pub auth_method: Option<InternalAuthMethod>,
     pub shared_secret: Option<NonEmptyString>,
+}
+
+impl std::fmt::Debug for InternalApiConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InternalApiConfig")
+            .field("enabled", &self.enabled)
+            .field("auth_method", &self.auth_method)
+            .field(
+                "shared_secret",
+                &self.shared_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl InternalApiConfig {

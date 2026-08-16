@@ -9,9 +9,22 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
         println!("oidc-exchange {VERSION}");
         return Ok(());
+    }
+
+    if let [command, subcommand, path] = args.as_slice() {
+        if command == "config" && subcommand == "check" {
+            let config = bootstrap::check_config_file(path)?;
+            println!("{}", bootstrap::render_checked_config(&config));
+            return Ok(());
+        }
+    }
+
+    if !args.is_empty() {
+        return Err("usage: oidc-exchange [--version] | config check <path>".into());
     }
 
     // 1. Load config
