@@ -1,6 +1,6 @@
 # Plan: Fail closed across config, adapters, and the installer
 
-**Status:** In Progress · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/2026-08-05-fail_closed_across_config_and_adapters.md`](../../changes/2026-08-05-fail_closed_across_config_and_adapters.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md`](../../changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md)
 
 This unstacked PR establishes the fail-closed rule in the configuration boundary, its service
 consumers, the affected adapters, and the installer. It replaces security-significant free-form
@@ -24,7 +24,7 @@ completion evidence format; there are no `*-certificate.md` files and no task li
 
 ## Source, baseline, and verification policy
 
-- **Source spec.** [Fail closed across config, adapters, and the installer](../../changes/2026-08-05-fail_closed_across_config_and_adapters.md): proposed canonical deltas, type changes,
+- **Source spec.** [Fail closed across config, adapters, and the installer](../../changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md): proposed canonical deltas, type changes,
   implementation notes, compatibility/rollout, and merge plan are authoritative.
 - **Canonical targets.** [Architecture principles](../../architecture-principles.md),
   [configuration](../../service/specs/06-configuration.md),
@@ -40,12 +40,9 @@ completion evidence format; there are no `*-certificate.md` files and no task li
   errors-as-data, no production `unwrap`/`expect`, exhaustive enum matches, two meaningful
   assertions per touched function, positive and negative tests for validation, named bounds, and
   formatting/lint/test gates for touched languages.
-- **Baseline test note.** The planning brief reports pre-existing red config/adapters failures.
-  This worktree's unmodified baseline was independently checked with
-  `cargo nextest run --workspace --no-fail-fast` and is green (387 passed, 27 skipped); retain
-  the brief's constraint not to fix unrelated config/adapters failures. Each task must still run
-  narrow relevant tests and record actual results; the final task reruns workspace checks and
-  distinguishes any discovered baseline failures from regressions.
+- **Verification result.** Final workspace verification completed with
+  `cargo nextest run --workspace --no-fail-fast` — **389 passed, 27 skipped**. Task 09 retains
+  the focused-command evidence and final result; no baseline-red classification is outstanding.
 - **Test-only HTTP.** Production `HttpsUrl` has no loopback exemption. Wiremock and equivalent
   tests use a `#[cfg(test)]`-only constructor/injection seam; no production `http://` bypass is
   permitted.
@@ -56,12 +53,12 @@ completion evidence format; there are no `*-certificate.md` files and no task li
 
 | Column | Tasks | Entry condition | Exit condition |
 |---|---|---|---|
-| Backlog | [01](backlog/01-closed_config_domain_and_resolve.md), [02](backlog/02-resolution_entrypoints_and_config_check.md), [03](backlog/03-registration_policy_re_evaluation.md), [04](backlog/04-key_algorithm_truthfulness.md), [05](backlog/05-https_provider_and_discovery_boundaries.md), [06](backlog/06-postgres_migration_invariant_probe.md), [07](backlog/07-installer_verification_gate.md), [08](backlog/08-examples_docs_and_canonical_merge.md), [09](backlog/09-integration_regression_and_handoff.md) | Dependencies in the table below are complete; sibling blockers are resolved or explicitly accepted | Task DoD is checked, narrow tests are reported, and task moves to `in-progress/`, `blocked/`, or `done/` without renaming its numeric prefix |
+| Backlog | — | Dependencies in the table below are complete; sibling blockers are resolved or explicitly accepted | Task DoD is checked, narrow tests are reported, and task moves to `in-progress/`, `blocked/`, or `done/` without renaming its numeric prefix |
 | In progress | — | Move exactly one or explicitly parallel-safe tasks from Backlog | Implementation, tests, and task DoD are complete or the task moves to Blocked |
 | Blocked | — | A declared sibling/operational dependency prevents safe progress | Blocker, owner, and resume condition are recorded in the task; do not absorb sibling scope |
-| Done | — | Task's own DoD and verification are satisfied | No certificate is created; retain the task markdown as the evidence record |
+| Done | [01](done/01-closed_config_domain_and_resolve.md), [02](done/02-resolution_entrypoints_and_config_check.md), [03](done/03-registration_policy_re_evaluation.md), [04](done/04-key_algorithm_truthfulness.md), [05](done/05-https_provider_and_discovery_boundaries.md), [06](done/06-postgres_migration_invariant_probe.md), [07](done/07-installer_verification_gate.md), [08](done/08-examples_docs_and_canonical_merge.md), [09](done/09-integration_regression_and_handoff.md) | Task's own DoD and verification are satisfied | No certificate is created; retain the task markdown as the evidence record |
 
-All nine task packages are presently in `backlog/`; therefore this plan status is **Backlog**.
+All nine task packages are in `done/`; every task is Done with completed Steps and DoD checklists. Final verification: `cargo nextest run --workspace --no-fail-fast` — **389 passed, 27 skipped**. This plan is **Done** and contains no done certificates.
 
 ---
 
