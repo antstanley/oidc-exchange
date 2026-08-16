@@ -13,6 +13,14 @@ access_token_ttl = "15m"
 refresh_token_ttl = "30d"
 audience = "oidc-exchange"
 
+[key_manager]
+# Deliberate raw default for a minimal config; deployment overlays select a key adapter.
+adapter = "oidc"
+
+[repository]
+# Deliberate raw default for a minimal config; deployment overlays select a repository adapter.
+adapter = "oidc"
+
 [audit]
 adapter = "noop"
 blocking_threshold = "warning"

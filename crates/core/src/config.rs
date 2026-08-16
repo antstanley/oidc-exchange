@@ -261,12 +261,23 @@ impl SqsAuditConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawKeyManagerConfig {
+    #[serde(default = "default_unconfigured_adapter")]
     pub adapter: String,
     pub kms: Option<RawKmsConfig>,
     pub local: Option<RawLocalKeyConfig>,
+}
+
+impl Default for RawKeyManagerConfig {
+    fn default() -> Self {
+        Self {
+            adapter: default_unconfigured_adapter(),
+            kms: None,
+            local: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -276,15 +287,14 @@ pub struct KeyManagerConfig {
     pub local: Option<LocalKeyConfig>,
 }
 
+fn default_unconfigured_adapter() -> String {
+    "oidc".to_string()
+}
+
 impl KeyManagerConfig {
     fn resolve(raw: RawKeyManagerConfig) -> Result<Self, Error> {
-        let adapter = if raw.adapter.is_empty() {
-            ProviderAdapter::Oidc
-        } else {
-            ProviderAdapter::parse_field("key_manager.adapter", raw.adapter)?
-        };
         Ok(Self {
-            adapter,
+            adapter: ProviderAdapter::parse_field("key_manager.adapter", raw.adapter)?,
             kms: raw.kms.map(KmsConfig::resolve).transpose()?,
             local: raw.local.map(LocalKeyConfig::resolve).transpose()?,
         })
@@ -344,13 +354,25 @@ impl LocalKeyConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawRepositoryConfig {
+    #[serde(default = "default_unconfigured_adapter")]
     pub adapter: String,
     pub dynamodb: Option<RawDynamoConfig>,
     pub postgres: Option<RawPostgresConfig>,
     pub sqlite: Option<RawSqliteConfig>,
+}
+
+impl Default for RawRepositoryConfig {
+    fn default() -> Self {
+        Self {
+            adapter: default_unconfigured_adapter(),
+            dynamodb: None,
+            postgres: None,
+            sqlite: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -363,13 +385,8 @@ pub struct RepositoryConfig {
 
 impl RepositoryConfig {
     fn resolve(raw: RawRepositoryConfig) -> Result<Self, Error> {
-        let adapter = if raw.adapter.is_empty() {
-            ProviderAdapter::Oidc
-        } else {
-            ProviderAdapter::parse_field("repository.adapter", raw.adapter)?
-        };
         Ok(Self {
-            adapter,
+            adapter: ProviderAdapter::parse_field("repository.adapter", raw.adapter)?,
             dynamodb: raw.dynamodb.map(DynamoConfig::resolve).transpose()?,
             postgres: raw.postgres.map(PostgresConfig::resolve).transpose()?,
             sqlite: raw.sqlite.map(SqliteConfig::resolve).transpose()?,
@@ -1029,15 +1046,24 @@ const DEFAULT_WEBHOOK_RETRIES: u32 = 2;
 mod tests {
     use super::*;
 
+    fn default_raw_config() -> RawConfig {
+        toml::from_str(include_str!("../../../config/default.toml"))
+            .expect("default config should deserialize")
+    }
+
+    fn assert_config_error(result: Result<Config, Error>, field: &str) {
+        let Error::ConfigError { detail } = result.expect_err("config should be rejected") else {
+            unreachable!("expected ConfigError");
+        };
+        assert!(
+            detail.contains(field),
+            "error {detail:?} should name {field:?}"
+        );
+    }
+
     #[test]
     fn resolve_default_toml() {
-        let toml_str = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../config/default.toml"
-        ))
-        .expect("failed to read config/default.toml");
-        let raw: RawConfig = toml::from_str(&toml_str).expect("failed to deserialize config");
-        let config = Config::resolve(raw).expect("failed to resolve config");
+        let config = Config::resolve(default_raw_config()).expect("failed to resolve config");
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 8080);
         assert_eq!(config.server.issuer.as_ref(), "https://localhost:8080");
@@ -1048,5 +1074,58 @@ mod tests {
         assert_eq!(config.token.refresh_token_ttl.as_secs(), 30 * 24 * 60 * 60);
         assert_eq!(config.token.audience.as_ref(), "oidc-exchange");
         assert!(config.providers.is_empty());
+    }
+
+    #[test]
+    fn resolve_accepts_representative_closed_config_values() {
+        let cases = [
+            ("server.role", "admin"),
+            ("registration.mode", "existing_users_only"),
+            ("key_manager.adapter", "local"),
+            ("repository.adapter", "sqlite"),
+            ("audit.adapter", "sqs"),
+            ("telemetry.exporter", "otlp"),
+        ];
+
+        for (field, value) in cases {
+            let mut raw = default_raw_config();
+            match field {
+                "server.role" => raw.server.role = value.into(),
+                "registration.mode" => raw.registration.mode = value.into(),
+                "key_manager.adapter" => raw.key_manager.adapter = value.into(),
+                "repository.adapter" => raw.repository.adapter = value.into(),
+                "audit.adapter" => raw.audit.adapter = value.into(),
+                "telemetry.exporter" => raw.telemetry.exporter = value.into(),
+                _ => unreachable!("test case field is known"),
+            }
+            Config::resolve(raw)
+                .unwrap_or_else(|err| panic!("{field}={value:?} should resolve: {err}"));
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_invalid_closed_config_values_with_field_names() {
+        let cases = [
+            ("server.role", "unknown"),
+            ("registration.mode", "existing_users"),
+            ("key_manager.adapter", ""),
+            ("repository.adapter", ""),
+            ("audit.adapter", "stdout"),
+            ("telemetry.exporter", "xray"),
+        ];
+
+        for (field, value) in cases {
+            let mut raw = default_raw_config();
+            match field {
+                "server.role" => raw.server.role = value.into(),
+                "registration.mode" => raw.registration.mode = value.into(),
+                "key_manager.adapter" => raw.key_manager.adapter = value.into(),
+                "repository.adapter" => raw.repository.adapter = value.into(),
+                "audit.adapter" => raw.audit.adapter = value.into(),
+                "telemetry.exporter" => raw.telemetry.exporter = value.into(),
+                _ => unreachable!("test case field is known"),
+            }
+            assert_config_error(Config::resolve(raw), field);
+        }
     }
 }
