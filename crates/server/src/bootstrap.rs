@@ -806,28 +806,55 @@ mod load_config_tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
 
-    /// Sets one or more environment variables for the duration of a test and
-    /// removes them on drop (including when a later assertion panics), so
-    /// config-loading tests never leak process-global env state.
+    // `std::env` is process-global. Keep every config-loading test in this
+    // module exclusive so one test cannot observe another's partial override.
+    static CONFIG_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_test_environment() -> MutexGuard<'static, ()> {
+        CONFIG_TEST_ENV_LOCK
+            .lock()
+            .expect("config test environment lock poisoned")
+    }
+
+    /// Restores every touched process-global variable to its prior state.
+    /// Callers hold `lock_test_environment()` for the whole test.
     struct EnvVarGuard {
-        keys: Vec<&'static str>,
+        snapshots: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
     impl EnvVarGuard {
         fn set(vars: &[(&'static str, &str)]) -> Self {
-            let keys = vars.iter().map(|(key, _)| *key).collect();
+            let snapshots = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect();
             for (key, value) in vars {
                 std::env::set_var(key, value);
             }
-            Self { keys }
+            Self { snapshots }
+        }
+
+        fn remove(vars: &[&'static str]) -> Self {
+            let snapshots = vars
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in vars {
+                std::env::remove_var(key);
+            }
+            Self { snapshots }
         }
     }
 
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
-            for key in &self.keys {
-                std::env::remove_var(key);
+            for (key, value) in &self.snapshots {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
         }
     }
@@ -842,6 +869,7 @@ mod load_config_tests {
 
     #[test]
     fn overlay_merges_over_default_rather_than_replacing_it() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -876,6 +904,7 @@ mod load_config_tests {
 
     #[test]
     fn env_var_override_reaches_nested_and_map_valued_paths() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -910,6 +939,7 @@ mod load_config_tests {
 
     #[test]
     fn single_underscore_provider_name_is_addressable_not_split() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -941,6 +971,7 @@ mod load_config_tests {
 
     #[test]
     fn missing_config_files_fall_back_to_compiled_in_defaults() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         // No files written at all, and no OIDC_EXCHANGE_ENV set.
 
@@ -958,6 +989,7 @@ mod load_config_tests {
 
     #[test]
     fn missing_or_empty_env_overlay_file_is_not_an_error() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -988,6 +1020,7 @@ mod load_config_tests {
     /// the overlaid and env-overridden values.
     #[test]
     fn default_overlay_and_env_var_all_apply_together() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1030,6 +1063,7 @@ mod load_config_tests {
 
     #[test]
     fn set_var_placeholder_resolves_to_its_environment_value() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1056,6 +1090,7 @@ mod load_config_tests {
 
     #[test]
     fn unset_var_placeholder_fails_closed_and_produces_no_config() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1065,10 +1100,7 @@ mod load_config_tests {
                 shared_secret = "${INTERNAL_API_SECRET}"
             "#,
         );
-        // Make sure the variable really is unset for this process (nextest
-        // runs each test in its own process, so this cannot race a sibling
-        // test that sets the same name).
-        std::env::remove_var("INTERNAL_API_SECRET");
+        let _guard = EnvVarGuard::remove(&["INTERNAL_API_SECRET"]);
 
         let result = load_config_from_dir(dir_str(dir.path()));
 
@@ -1081,6 +1113,7 @@ mod load_config_tests {
 
     #[test]
     fn escaped_placeholder_yields_literal_dollar_brace_without_env_lookup() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1093,7 +1126,7 @@ mod load_config_tests {
         // LITERAL_NOT_A_VAR is deliberately left unset: if `$${` were ever
         // treated as a placeholder opener instead of an escape, resolution
         // would fail closed here instead of loading.
-        std::env::remove_var("LITERAL_NOT_A_VAR");
+        let _guard = EnvVarGuard::remove(&["LITERAL_NOT_A_VAR"]);
 
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
@@ -1110,6 +1143,7 @@ mod load_config_tests {
 
     #[test]
     fn value_without_a_placeholder_is_unchanged() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1128,6 +1162,7 @@ mod load_config_tests {
 
     #[test]
     fn placeholder_inside_a_nested_map_valued_section_resolves() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1158,6 +1193,7 @@ mod load_config_tests {
     /// scenario in the task's Definition of done.
     #[test]
     fn set_unset_and_escaped_placeholders_together_match_reviewable_scenario() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1169,7 +1205,7 @@ mod load_config_tests {
             "#,
         );
         let _guard = EnvVarGuard::set(&[("SET_VAR", "resolved-value")]);
-        std::env::remove_var("UNSET_VAR");
+        let _unset_guard = EnvVarGuard::remove(&["UNSET_VAR"]);
 
         let err = load_config_from_dir(dir_str(dir.path()))
             .expect_err("UNSET_VAR must fail the whole load closed");
@@ -1209,6 +1245,7 @@ mod load_config_tests {
     /// config, before any adapter or router is built.
     #[test]
     fn load_config_rejects_invalid_role_before_building_anything() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1237,6 +1274,7 @@ mod load_config_tests {
     /// contract without this counterpart.
     #[test]
     fn load_config_accepts_valid_config() {
+        let _env_lock = lock_test_environment();
         let dir = tempfile::tempdir().expect("tempdir");
         write_toml(
             dir.path(),
@@ -1265,6 +1303,7 @@ mod load_config_tests {
     /// construction rather than at request time.
     #[test]
     fn parse_config_rejects_invalid_role() {
+        let _env_lock = lock_test_environment();
         let toml_str = r#"
             [server]
             role = "bogus"
@@ -1287,6 +1326,7 @@ mod load_config_tests {
     /// entry point.
     #[test]
     fn parse_config_accepts_valid_config() {
+        let _env_lock = lock_test_environment();
         let toml_str = r#"
             [server]
             role = "all"
