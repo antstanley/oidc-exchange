@@ -1017,6 +1017,7 @@ mod load_config_tests {
 
                 [providers.google]
                 adapter = "oidc"
+                issuer = "https://accounts.google.example.com"
                 client_id = "default-client"
             "#,
         );
@@ -1053,6 +1054,7 @@ mod load_config_tests {
             r#"
                 [providers.my_idp]
                 adapter = "oidc"
+                issuer = "https://idp.example.com"
                 client_id = "a"
             "#,
         );
@@ -1296,6 +1298,7 @@ mod load_config_tests {
             r#"
                 [providers.google]
                 adapter = "oidc"
+                issuer = "https://accounts.google.example.com"
                 client_secret = "${GOOGLE_CLIENT_SECRET}"
             "#,
         );
