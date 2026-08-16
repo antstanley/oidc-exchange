@@ -5,7 +5,10 @@ use base64::Engine;
 use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
 use oidc_exchange_core::domain::{
     AccessTokenClaims, AuditEventType, AuditOutcome, Session, UserPatch, UserStatus,
 };
@@ -19,22 +22,47 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
-fn make_config() -> AppConfig {
-    AppConfig {
-        server: ServerConfig {
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
             issuer: "https://auth.test.com".to_string(),
-            ..Default::default()
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
         },
-        token: TokenConfig {
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
             access_token_ttl: "15m".to_string(),
             refresh_token_ttl: "30d".to_string(),
-            audience: Some("https://api.test.com".to_string()),
-            ..Default::default()
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
         },
-        ..Default::default()
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
     }
 }
 
+fn make_config() -> Config {
+    Config::resolve(base_raw_config()).expect("test config should resolve")
+}
 fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -56,7 +84,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
 fn make_service_with_audit(
     repo: MockRepository,
     provider: MockIdentityProvider,
-    config: AppConfig,
+    config: Config,
     audit: MockAuditLog,
 ) -> AppService {
     let provider_id = provider.provider_id().to_string();
@@ -281,13 +309,16 @@ async fn refresh_unknown_token_under_default_threshold_emits_nothing() {
 /// the request's ip/ua and a `Failure` outcome.
 #[tokio::test]
 async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
@@ -326,13 +357,16 @@ async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
 /// the session (and therefore the user id) was already resolved.
 #[tokio::test]
 async fn refresh_expired_token_under_debug_threshold_emits_validation_failed_with_actor() {
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");

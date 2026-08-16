@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::state::AppState;
 
 pub async fn openid_config_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let issuer = &state.config.server.issuer;
+    let issuer = state.config.server.issuer.as_ref();
     let alg = state.service.signing_algorithm();
     Json(json!({
         "issuer": issuer,

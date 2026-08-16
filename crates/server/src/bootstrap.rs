@@ -6,7 +6,7 @@ use config::{Config, Environment, File, FileFormat, Value, ValueKind};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use oidc_exchange_core::config::{AppConfig, ProviderConfig};
+use oidc_exchange_core::config::{Config as AppConfig, ProviderConfig, RawConfig};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
@@ -54,6 +54,52 @@ const REQUEST_TIMEOUT_MAX_SECS: u64 = 60 * 60;
 /// the scan so a stray `${` inside free-form config text (e.g. a URL query
 /// string) can never force an unbounded scan.
 const PLACEHOLDER_NAME_LEN_MAX: usize = 256;
+
+fn merge_raw_defaults(
+    defaults: RawConfig,
+    override_config: RawConfig,
+) -> Result<RawConfig, Box<dyn std::error::Error>> {
+    let mut base = toml::Value::try_from(defaults)?;
+    let mut override_value = toml::Value::try_from(override_config)?;
+    remove_empty_values(&mut override_value);
+
+    fn merge(base: &mut toml::Value, override_value: toml::Value) {
+        match (base, override_value) {
+            (toml::Value::Table(base), toml::Value::Table(override_table)) => {
+                for (key, value) in override_table {
+                    match base.get_mut(&key) {
+                        Some(existing) => merge(existing, value),
+                        None => {
+                            base.insert(key, value);
+                        }
+                    }
+                }
+            }
+            (base, value) => *base = value,
+        }
+    }
+    merge(&mut base, override_value);
+    Ok(base.try_into()?)
+}
+
+fn remove_empty_values(value: &mut toml::Value) {
+    match value {
+        toml::Value::Table(table) => {
+            table.retain(|_, value| {
+                remove_empty_values(value);
+                !matches!(value, toml::Value::String(string) if string.is_empty())
+                    && !matches!(value, toml::Value::Integer(0))
+                    && !matches!(value, toml::Value::Boolean(false))
+            });
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                remove_empty_values(item);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Load configuration from config files on disk, using the `OIDC_EXCHANGE_ENV`
 /// environment variable to select the environment-specific config file, and
@@ -112,9 +158,9 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
 
     let mut merged = builder.build()?;
     resolve_placeholders(&mut merged.cache)?;
-    let config: AppConfig = merged.try_deserialize()?;
-    config.validate()?;
-    Ok(config)
+    let raw: RawConfig = merged.try_deserialize()?;
+    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))?;
+    AppConfig::resolve(merge_raw_defaults(defaults, raw)?).map_err(Into::into)
 }
 
 /// Parse a TOML string directly into an `AppConfig`, validating it exactly as
@@ -122,9 +168,9 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
 /// (`OidcExchange::new`/`from_file`) is rejected at construction on the same
 /// terms as an invalid config on disk would be rejected at server startup.
 pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let config: AppConfig = toml::from_str(toml_str)?;
-    config.validate()?;
-    Ok(config)
+    let raw: RawConfig = toml::from_str(toml_str)?;
+    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))?;
+    AppConfig::resolve(merge_raw_defaults(defaults, raw)?).map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -372,16 +418,9 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 /// before a router is ever built, so an unparseable value fails config loading closed rather
 /// than reaching this function. Reaching it here anyway (e.g. a hand-built `AppConfig` in a
 /// test that skipped `validate`) is treated as a programmer error and panics loudly instead
-/// of silently substituting [`oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT`].
+/// of silently substituting [`Duration::from_secs(30)`].
 fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
-    let secs = oidc_exchange_core::service::parse_duration_secs(&config.server.request_timeout)
-        .unwrap_or_else(|err| {
-            panic!(
-                "server.request_timeout {:?} is invalid: {err} (AppConfig::validate should \
-                     have rejected this before build_router was ever called)",
-                config.server.request_timeout
-            )
-        });
+    let secs = config.server.request_timeout.as_secs();
     assert!(
         secs > 0,
         "parsed request_timeout must be non-zero, got {secs}s from {:?}",
@@ -419,7 +458,7 @@ async fn build_dynamo_client(
 
     let sdk_config = aws_loader.load().await;
     let client = aws_sdk_dynamodb::Client::new(&sdk_config);
-    Ok((client, dynamo_cfg.table_name.clone()))
+    Ok((client, dynamo_cfg.table_name.as_ref().to_string()))
 }
 
 async fn build_user_repository(
@@ -441,7 +480,7 @@ async fn build_user_repository(
                 }
             })?;
             let pool = oidc_exchange_adapters::postgres::create_pool(
-                &pg_cfg.url,
+                pg_cfg.url.as_ref(),
                 pg_cfg.max_connections.unwrap_or(5),
                 pg_cfg.run_migrations.unwrap_or(true),
             )
@@ -460,7 +499,7 @@ async fn build_user_repository(
                         "repository.adapter is 'sqlite' but [repository.sqlite] section is missing"
                             .into(),
                 })?;
-            let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
+            let pool = oidc_exchange_adapters::sqlite::create_pool(sq_cfg.path.as_ref()).await?;
             Ok(Box::new(
                 oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
             ))
@@ -482,7 +521,8 @@ async fn build_session_repository(
     let adapter = config
         .session_repository
         .adapter
-        .as_deref()
+        .as_ref()
+        .map(|adapter| adapter.as_str())
         .unwrap_or(config.repository.adapter.as_str());
 
     match adapter {
@@ -501,7 +541,7 @@ async fn build_session_repository(
                 }
             })?;
             let pool = oidc_exchange_adapters::postgres::create_pool(
-                &pg_cfg.url,
+                pg_cfg.url.as_ref(),
                 pg_cfg.max_connections.unwrap_or(5),
                 pg_cfg.run_migrations.unwrap_or(true),
             )
@@ -518,7 +558,7 @@ async fn build_session_repository(
                             .into(),
                 }
             })?;
-            let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
+            let pool = oidc_exchange_adapters::sqlite::create_pool(sq_cfg.path.as_ref()).await?;
             Ok(Box::new(
                 oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
             ))
@@ -532,7 +572,7 @@ async fn build_session_repository(
                 }
             })?;
             let client = oidc_exchange_adapters::valkey::ValkeySessionRepository::new(
-                &vk_cfg.url,
+                vk_cfg.url.as_ref(),
                 vk_cfg
                     .key_prefix
                     .clone()
@@ -550,7 +590,7 @@ async fn build_session_repository(
                 }
             })?;
             let repo = oidc_exchange_adapters::lmdb::LmdbSessionRepository::new(
-                &lm_cfg.path,
+                lm_cfg.path.as_ref(),
                 lm_cfg.max_size_mb.unwrap_or(256),
             )?;
             Ok(Box::new(repo))
@@ -583,9 +623,9 @@ fn build_key_manager(
                     })?;
 
             let mgr = oidc_exchange_adapters::local_keys::LocalKeyManager::from_file(
-                &local_cfg.private_key_path,
-                &local_cfg.algorithm,
-                &local_cfg.kid,
+                local_cfg.private_key_path.as_ref(),
+                local_cfg.algorithm.as_str(),
+                local_cfg.kid.as_ref(),
             )?;
             Ok(Box::new(mgr))
         }
@@ -607,9 +647,9 @@ fn build_key_manager(
 
             Ok(Box::new(oidc_exchange_adapters::kms::KmsKeyManager::new(
                 client,
-                kms_cfg.key_id.clone(),
-                kms_cfg.algorithm.clone(),
-                kms_cfg.kid.clone(),
+                kms_cfg.key_id.as_ref().to_string(),
+                kms_cfg.algorithm.as_str().to_string(),
+                kms_cfg.kid.as_ref().to_string(),
             )))
         }
         "" => Err(Box::new(Error::ConfigError {
@@ -669,7 +709,12 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
         return Ok(Box::new(oidc_exchange_adapters::noop::NoopUserSync::new()));
     }
 
-    match config.user_sync.adapter.as_deref() {
+    match config
+        .user_sync
+        .adapter
+        .as_ref()
+        .map(|adapter| adapter.as_str())
+    {
         Some("webhook") => {
             let wh_cfg = config
                 .user_sync
@@ -681,25 +726,16 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
                             .into(),
                 })?;
 
-            let timeout_secs = wh_cfg
+            let timeout = wh_cfg
                 .timeout
-                .as_deref()
-                .and_then(|s| {
-                    let s = s.trim();
-                    if let Some(stripped) = s.strip_suffix('s') {
-                        stripped.parse::<u64>().ok()
-                    } else {
-                        s.parse::<u64>().ok()
-                    }
-                })
-                .unwrap_or(5);
+                .unwrap_or_else(|| std::time::Duration::from_secs(5));
             let retries = wh_cfg.effective_retries();
 
             Ok(Box::new(
                 oidc_exchange_adapters::webhook::WebhookUserSync::new(
-                    wh_cfg.url.clone(),
-                    wh_cfg.secret.clone(),
-                    std::time::Duration::from_secs(timeout_secs),
+                    wh_cfg.url.as_ref().to_string(),
+                    wh_cfg.secret.as_ref().to_string(),
+                    timeout,
                     retries,
                 ),
             ))
@@ -721,7 +757,7 @@ async fn build_providers(
 
     for (name, provider_cfg) in &config.providers {
         let provider = build_single_provider(name, provider_cfg).await?;
-        providers.insert(name.clone(), provider);
+        providers.insert(name.to_string(), provider);
     }
 
     Ok(providers)
@@ -815,7 +851,7 @@ mod load_config_tests {
     fn lock_test_environment() -> MutexGuard<'static, ()> {
         CONFIG_TEST_ENV_LOCK
             .lock()
-            .expect("config test environment lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Restores every touched process-global variable to its prior state.
@@ -878,6 +914,9 @@ mod load_config_tests {
                 [server]
                 host = "0.0.0.0"
                 port = 8080
+                issuer = "https://localhost:8080"
+                role = "all"
+                request_timeout = "30s"
 
                 [registration]
                 mode = "open"
@@ -897,7 +936,7 @@ mod load_config_tests {
 
         // A key present only in default.toml survives the overlay...
         assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(config.registration.mode, "open");
+        assert_eq!(config.registration.mode.as_str(), "open");
         // ...while a key set in both takes the overlay's value.
         assert_eq!(config.server.port, 9090);
     }
@@ -911,7 +950,28 @@ mod load_config_tests {
             "default",
             r#"
                 [server]
+                host = "0.0.0.0"
                 port = 8080
+                issuer = "https://localhost:8080"
+                role = "all"
+                request_timeout = "30s"
+
+                [registration]
+                mode = "open"
+
+                [token]
+                access_token_ttl = "15m"
+                refresh_token_ttl = "30d"
+                audience = "oidc-exchange"
+
+                [audit]
+                adapter = "noop"
+                blocking_threshold = "warning"
+                emit_threshold = "info"
+
+                [telemetry]
+                enabled = false
+                exporter = "none"
 
                 [providers.google]
                 adapter = "oidc"
@@ -930,7 +990,11 @@ mod load_config_tests {
 
         assert_eq!(config.server.port, 9999);
         let google = config.providers.get("google").expect("google provider");
-        assert_eq!(google.adapter, "oidc", "unrelated fields survive the merge");
+        assert_eq!(
+            google.adapter.as_str(),
+            "oidc",
+            "unrelated fields survive the merge"
+        );
         assert_eq!(
             google.extra.get("client_id").and_then(|v| v.as_str()),
             Some("overridden-client")
@@ -976,7 +1040,8 @@ mod load_config_tests {
         // No files written at all, and no OIDC_EXCHANGE_ENV set.
 
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
-        let defaults = AppConfig::default();
+        let defaults =
+            parse_config(include_str!("../../../config/default.toml")).expect("default config");
 
         assert_eq!(config.server.host, defaults.server.host);
         assert_eq!(config.server.port, defaults.server.port);
@@ -1029,6 +1094,9 @@ mod load_config_tests {
                 [server]
                 host = "0.0.0.0"
                 port = 8080
+                issuer = "https://localhost:8080"
+                role = "all"
+                request_timeout = "30s"
 
                 [registration]
                 mode = "open"
@@ -1050,7 +1118,7 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         // Untouched by either overlay or env var — the compiled default TOML value.
-        assert_eq!(config.registration.mode, "open");
+        assert_eq!(config.registration.mode.as_str(), "open");
         // Set by the env overlay TOML, not present in the env var.
         assert_eq!(config.server.port, 9090);
         // Set by the OIDC_EXCHANGE__ env var, on top of the overlay and default.
@@ -1078,11 +1146,19 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(AsRef::as_ref),
             Some("super-secret-value")
         );
         assert_ne!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(AsRef::as_ref),
             Some("${INTERNAL_API_SECRET}"),
             "the literal placeholder must never survive resolution"
         );
@@ -1131,11 +1207,19 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(AsRef::as_ref),
             Some("${LITERAL_NOT_A_VAR}")
         );
         assert_ne!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(AsRef::as_ref),
             Some("$${LITERAL_NOT_A_VAR}"),
             "the escape's leading '$$' must be collapsed to a single '$'"
         );
@@ -1157,7 +1241,7 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(config.server.host, "plain-value.example.com");
-        assert_eq!(config.server.port, AppConfig::default().server.port);
+        assert_eq!(config.server.port, 8080);
     }
 
     #[test]
@@ -1181,7 +1265,7 @@ mod load_config_tests {
             .providers
             .get("google")
             .expect("google provider present");
-        assert_eq!(google.adapter, "oidc");
+        assert_eq!(google.adapter.as_str(), "oidc");
         assert_eq!(
             google.extra.get("client_secret").and_then(|v| v.as_str()),
             Some("nested-secret")
@@ -1214,25 +1298,33 @@ mod load_config_tests {
             "the error must name the unset variable, got: {err}"
         );
 
-        // Replace the unset placeholder with the escape form and reload —
-        // the set variable still resolves and the escape becomes a literal.
+        // Replace the unset placeholder with a valid auth method and reload —
+        // the set variable still resolves.
         write_toml(
             dir.path(),
             "default",
             r#"
                 [internal_api]
                 shared_secret = "${SET_VAR}"
-                auth_method = "$${LITERAL}"
+                auth_method = "shared_secret"
             "#,
         );
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(AsRef::as_ref),
             Some("resolved-value")
         );
         assert_eq!(
-            config.internal_api.auth_method.as_deref(),
-            Some("${LITERAL}")
+            config
+                .internal_api
+                .auth_method
+                .as_ref()
+                .map(|method| method.as_str()),
+            Some("shared_secret")
         );
     }
 
@@ -1291,10 +1383,14 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path()))
             .expect("a well-formed config must load and validate successfully");
 
-        assert_eq!(config.server.role, "exchange");
+        assert_eq!(config.server.role.as_str(), "exchange");
         assert_eq!(
-            config.registration.domain_allowlist,
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            config
+                .registration
+                .domain_allowlist
+                .as_ref()
+                .map(|patterns| patterns.iter().map(AsRef::as_ref).collect::<Vec<_>>()),
+            Some(vec!["example.com", "*.example.org"])
         );
     }
 
@@ -1334,7 +1430,7 @@ mod load_config_tests {
 
         let config = parse_config(toml_str).expect("a well-formed config must parse and validate");
 
-        assert_eq!(config.server.role, "all");
+        assert_eq!(config.server.role.as_str(), "all");
     }
 }
 
@@ -1358,6 +1454,37 @@ mod build_router_tests {
 
     const TEST_SECRET: &str = "test-internal-secret-build-router";
 
+    fn router_config(role: &str, internal_enabled: bool, shared_secret: Option<&str>) -> AppConfig {
+        let secret = shared_secret
+            .map(|value| format!("shared_secret = {value:?}"))
+            .unwrap_or_default();
+        parse_config(&format!(
+            r#"[server]
+host = "0.0.0.0"
+port = 8080
+issuer = "https://localhost:8080"
+role = {role:?}
+request_timeout = "30s"
+[registration]
+mode = "open"
+[token]
+access_token_ttl = "15m"
+refresh_token_ttl = "30d"
+audience = "oidc-exchange"
+[audit]
+adapter = "noop"
+blocking_threshold = "warning"
+emit_threshold = "info"
+[telemetry]
+enabled = false
+exporter = "none"
+[internal_api]
+enabled = {internal_enabled}
+{secret}
+"#,
+        ))
+        .expect("test config should resolve")
+    }
     /// Build an `AppService` backed entirely by in-memory mocks, matching
     /// the given `AppConfig`.
     fn build_test_service(config: &AppConfig) -> AppService {
@@ -1397,10 +1524,7 @@ mod build_router_tests {
     /// behind the Bearer check: reachable with the right token, 401 without.
     #[tokio::test]
     async fn enabled_true_admin_mounts_internal_behind_bearer_auth() {
-        let mut config = AppConfig::default();
-        config.server.role = "admin".to_string();
-        config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let config = router_config("admin", true, Some(TEST_SECRET));
         let service = build_test_service(&config);
 
         let app = build_router(&config, service);
@@ -1420,10 +1544,7 @@ mod build_router_tests {
     /// routes and `/internal/*` behind the Bearer check.
     #[tokio::test]
     async fn enabled_true_all_mounts_public_and_internal() {
-        let mut config = AppConfig::default();
-        config.server.role = "all".to_string();
-        config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let config = router_config("all", true, Some(TEST_SECRET));
         let service = build_test_service(&config);
 
         let app = build_router(&config, service);
@@ -1439,9 +1560,7 @@ mod build_router_tests {
     /// not error and the instance stays observable.
     #[tokio::test]
     async fn enabled_false_admin_serves_only_health_no_internal_routes() {
-        let mut config = AppConfig::default();
-        config.server.role = "admin".to_string();
-        config.internal_api.enabled = false;
+        let config = router_config("admin", false, None);
         let service = build_test_service(&config);
 
         let app = build_router(&config, service);
@@ -1461,9 +1580,7 @@ mod build_router_tests {
     /// public routes and `/health`, but no `/internal/*` route.
     #[tokio::test]
     async fn enabled_false_all_serves_public_and_health_no_internal_routes() {
-        let mut config = AppConfig::default();
-        config.server.role = "all".to_string();
-        config.internal_api.enabled = false;
+        let config = router_config("all", false, None);
         let service = build_test_service(&config);
 
         let app = build_router(&config, service);
@@ -1487,24 +1604,8 @@ mod build_router_tests {
     /// serves the internal API with an empty secret.
     #[tokio::test]
     async fn empty_shared_secret_is_never_accepted_as_configured() {
-        let mut config = AppConfig::default();
-        config.server.role = "admin".to_string();
-        config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(String::new());
-        let service = build_test_service(&config);
-
-        let app = build_router(&config, service);
-        let request = Request::builder()
-            .method("GET")
-            .uri("/internal/stats")
-            .header("authorization", "Bearer ")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let json = body_to_json(response.into_body()).await;
-        assert_eq!(json["error_description"], "internal API not configured");
+        let err = parse_config("[server]\nhost = \"0.0.0.0\"\nport = 8080\nissuer = \"https://localhost:8080\"\nrole = \"admin\"\nrequest_timeout = \"30s\"\n[registration]\nmode = \"open\"\n[token]\naccess_token_ttl = \"15m\"\nrefresh_token_ttl = \"30d\"\naudience = \"oidc-exchange\"\n[audit]\nadapter = \"noop\"\nblocking_threshold = \"warning\"\nemit_threshold = \"info\"\n[telemetry]\nenabled = false\nexporter = \"none\"\n[internal_api]\nenabled = true\n");
+        assert!(err.is_err(), "an internal API without a non-empty shared secret must be rejected during config resolution");
     }
 }
 
@@ -1525,23 +1626,20 @@ mod request_timeout_tests {
     /// seconds — the value `06-configuration.md`'s Defaults summary documents.
     #[test]
     fn request_timeout_duration_resolves_documented_default() {
-        let config = AppConfig::default();
+        let config =
+            parse_config(include_str!("../../../config/default.toml")).expect("default config");
 
         let duration = request_timeout_duration(&config);
 
         assert_eq!(duration, Duration::from_secs(30));
-        assert_eq!(
-            config.server.request_timeout,
-            oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT
-        );
+        assert_eq!(config.server.request_timeout, Duration::from_secs(30));
     }
 
     /// An overridden `server.request_timeout` parses to the matching `Duration`, not just
     /// the default.
     #[test]
     fn request_timeout_duration_resolves_configured_override() {
-        let mut config = AppConfig::default();
-        config.server.request_timeout = "2m".to_string();
+        let config = parse_config("[server]\nhost = \"0.0.0.0\"\nport = 8080\nissuer = \"https://localhost:8080\"\nrole = \"all\"\nrequest_timeout = \"2m\"\n[registration]\nmode = \"open\"\n[token]\naccess_token_ttl = \"15m\"\nrefresh_token_ttl = \"30d\"\naudience = \"oidc-exchange\"\n[audit]\nadapter = \"noop\"\nblocking_threshold = \"warning\"\nemit_threshold = \"info\"\n[telemetry]\nenabled = false\nexporter = \"none\"").expect("configured config");
 
         let duration = request_timeout_duration(&config);
 
@@ -1554,16 +1652,13 @@ mod request_timeout_tests {
     /// with a bad value is a programmer error that must fail loudly.
     #[test]
     fn request_timeout_duration_panics_on_unparseable_value() {
-        let mut config = AppConfig::default();
-        config.server.request_timeout = "not-a-duration".to_string();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            request_timeout_duration(&config)
-        }));
-
+        let result = parse_config(&format!(
+            "{}\n[server]\nrequest_timeout = \"not-a-duration\"",
+            include_str!("../../../config/default.toml")
+        ));
         assert!(
             result.is_err(),
-            "an unparseable request_timeout must panic, not silently default"
+            "an unparseable request_timeout must be rejected during config resolution"
         );
     }
 
@@ -1573,17 +1668,13 @@ mod request_timeout_tests {
     /// `TimeoutLayer`.
     #[test]
     fn request_timeout_duration_panics_on_zero_seconds() {
-        let mut config = AppConfig::default();
-        config.server.request_timeout = "0s".to_string();
-
+        let config = parse_config("[server]\nhost = \"0.0.0.0\"\nport = 8080\nissuer = \"https://localhost:8080\"\nrole = \"all\"\nrequest_timeout = \"0s\"\n[registration]\nmode = \"open\"\n[token]\naccess_token_ttl = \"15m\"\nrefresh_token_ttl = \"30d\"\naudience = \"oidc-exchange\"\n[audit]\nadapter = \"noop\"\nblocking_threshold = \"warning\"\nemit_threshold = \"info\"\n[telemetry]\nenabled = false\nexporter = \"none\"").expect("zero timeout config");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             request_timeout_duration(&config)
         }));
-
         assert!(
             result.is_err(),
-            "a zero-second request_timeout must panic rather than build a degenerate timeout \
-             layer"
+            "a zero-second request_timeout must panic rather than build a degenerate timeout layer"
         );
     }
 
@@ -1665,7 +1756,6 @@ mod request_timeout_tests {
 mod postgres_bootstrap_tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use oidc_exchange_core::config::PostgresConfig;
     use oidc_exchange_core::domain::{NewUser, Session};
     use uuid::Uuid;
 
@@ -1673,14 +1763,12 @@ mod postgres_bootstrap_tests {
     /// left unset, the session repository via its documented fallback) both target
     /// Postgres at `url`, with `run_migrations` left as given.
     fn postgres_config(url: &str, run_migrations: Option<bool>) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.repository.adapter = "postgres".to_string();
-        config.repository.postgres = Some(PostgresConfig {
-            url: url.to_string(),
-            max_connections: None,
-            run_migrations,
-        });
-        config
+        parse_config(&format!(
+            "{}\n[repository]\nadapter = \"postgres\"\n[repository.postgres]\nurl = {url:?}\nrun_migrations = {}",
+            include_str!("../../../config/default.toml"),
+            run_migrations.map(|value| value.to_string()).unwrap_or_else(|| "false".to_string()),
+        ))
+        .expect("postgres test config should resolve")
     }
 
     /// Gated on `DATABASE_URL` (skips cleanly, not a failure, when unset, so

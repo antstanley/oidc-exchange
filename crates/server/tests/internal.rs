@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -19,15 +19,21 @@ use oidc_exchange_test_utils::{
 
 const TEST_SECRET: &str = "test-internal-secret-1234";
 
+fn test_config(shared_secret: &str) -> Config {
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    raw_config.internal_api.enabled = true;
+    raw_config.internal_api.shared_secret = Some(shared_secret.to_string());
+    Config::resolve(raw_config).expect("test config should resolve")
+}
+
 fn build_test_app() -> Router {
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    let config = test_config(TEST_SECRET);
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -141,7 +147,7 @@ async fn internal_auth_passes_with_correct_secret() {
 
 // ---------------------------------------------------------------------------
 // 3b. Internal auth rejection: empty configured secret is never "configured",
-// even against an empty Bearer token (defence in depth — `AppConfig::validate`
+// even against an empty Bearer token (defence in depth — `Config::resolve`
 // already refuses to start a role that serves the internal API with an empty
 // `shared_secret`, so this only guards a config built by hand, e.g. in tests
 // or an embedder).
@@ -153,10 +159,13 @@ async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_to
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(String::new());
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    raw_config.internal_api.enabled = true;
+    raw_config.internal_api.shared_secret = Some("valid-test-secret".to_string());
+    let mut config = Config::resolve(raw_config).expect("test config should resolve");
+    config.internal_api.shared_secret = None;
 
     let service = AppService::new(
         Box::new(MockRepository::new()),

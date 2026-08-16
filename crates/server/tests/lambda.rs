@@ -10,7 +10,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use oidc_exchange::bootstrap::build_router;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -25,8 +25,10 @@ fn build_app() -> axum::Router {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw_config).expect("test config should resolve");
 
     let service = AppService::new(
         Box::new(MockRepository::new()),

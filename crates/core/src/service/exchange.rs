@@ -3,11 +3,12 @@ use base64::Engine;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
+use crate::config::{AsciiDomainPattern, RegistrationMode};
 use crate::domain::{
     AuditEventType, AuditOutcome, AuditSeverity, NewUser, Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
-use crate::service::{create_audit_event, parse_duration_secs, AppService};
+use crate::service::{create_audit_event, AppService};
 
 #[derive(Default)]
 pub struct ExchangeRequest {
@@ -32,7 +33,7 @@ pub struct ExchangeRequest {
 /// - An exact domain, e.g. `example.com` -- matches only `example.com`.
 /// - A wildcard, e.g. `*.example.com` -- matches any subdomain such as
 ///   `sub.example.com` or `a.b.example.com`, but NOT `example.com` itself.
-fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
+fn matches_domain_allowlist(email: &str, allowlist: &[AsciiDomainPattern]) -> bool {
     let domain = match email.rsplit_once('@') {
         Some((_, domain)) => domain,
         None => return false,
@@ -41,7 +42,7 @@ fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
     let domain_lower = domain.to_lowercase();
 
     for entry in allowlist {
-        let entry_lower = entry.to_lowercase();
+        let entry_lower = entry.as_str().to_lowercase();
         if let Some(suffix) = entry_lower.strip_prefix('*') {
             // Wildcard entry like "*.example.com" -> suffix is ".example.com"
             // The email domain must end with the suffix AND be strictly longer
@@ -181,7 +182,7 @@ impl AppService {
                 }
 
                 // Check registration mode
-                if self.config.registration.mode == "existing_users_only" {
+                if self.config.registration.mode == RegistrationMode::ExistingUsersOnly {
                     let reason = "registration is restricted to existing users only".to_string();
                     self.emit_audit(create_audit_event(
                         AuditEventType::RegistrationDenied,
@@ -296,7 +297,7 @@ impl AppService {
         let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
 
         // 7. Compute session expiry from config
-        let refresh_ttl_secs = parse_duration_secs(&self.config.token.refresh_token_ttl)?;
+        let refresh_ttl_secs = self.config.token.refresh_token_ttl.as_secs();
         let expires_at = Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
 
         // 8. Store session
@@ -344,6 +345,7 @@ impl AppService {
 #[cfg(test)]
 mod tests {
     use super::matches_domain_allowlist;
+    use crate::config::AsciiDomainPattern;
     use crate::service::parse_duration_secs;
 
     #[test]
@@ -359,7 +361,10 @@ mod tests {
 
     #[test]
     fn domain_allowlist_exact_match() {
-        let allowlist = vec!["example.com".to_string()];
+        let allowlist = vec!["example.com".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(!matches_domain_allowlist("user@other.com", &allowlist));
         assert!(!matches_domain_allowlist(
@@ -370,7 +375,10 @@ mod tests {
 
     #[test]
     fn domain_allowlist_wildcard_match() {
-        let allowlist = vec!["*.example.com".to_string()];
+        let allowlist = vec!["*.example.com".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@sub.example.com", &allowlist));
         assert!(matches_domain_allowlist("user@a.b.example.com", &allowlist));
         assert!(
@@ -382,26 +390,35 @@ mod tests {
 
     #[test]
     fn domain_allowlist_case_insensitive() {
-        let allowlist = vec!["Example.COM".to_string()];
+        let allowlist = vec!["Example.COM".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(matches_domain_allowlist("user@EXAMPLE.COM", &allowlist));
     }
 
     #[test]
     fn domain_allowlist_no_at_sign() {
-        let allowlist = vec!["example.com".to_string()];
+        let allowlist = vec!["example.com".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(!matches_domain_allowlist("noemailformat", &allowlist));
     }
 
     #[test]
     fn domain_allowlist_empty_list() {
-        let allowlist: Vec<String> = vec![];
+        let allowlist: Vec<AsciiDomainPattern> = vec![];
         assert!(!matches_domain_allowlist("user@example.com", &allowlist));
     }
 
     #[test]
     fn domain_allowlist_multiple_entries() {
-        let allowlist = vec!["example.com".to_string(), "*.acme.corp".to_string()];
+        let allowlist = vec!["example.com".to_string(), "*.acme.corp".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(matches_domain_allowlist("user@dev.acme.corp", &allowlist));
         assert!(!matches_domain_allowlist("user@other.org", &allowlist));

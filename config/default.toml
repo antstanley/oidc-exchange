@@ -1,6 +1,9 @@
 [server]
 host = "0.0.0.0"
 port = 8080
+issuer = "https://localhost:8080"
+role = "all"
+request_timeout = "30s"
 
 [registration]
 mode = "open"
@@ -8,6 +11,7 @@ mode = "open"
 [token]
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
+audience = "oidc-exchange"
 
 [audit]
 adapter = "noop"
