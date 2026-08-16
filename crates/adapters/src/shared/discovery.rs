@@ -62,11 +62,25 @@ pub async fn discover(issuer_url: &HttpsUrl) -> Result<DiscoveryDocument> {
     }
 
     Ok(DiscoveryDocument {
-        issuer: HttpsUrl::parse(raw.issuer)?,
-        token_endpoint: HttpsUrl::parse(raw.token_endpoint)?,
-        jwks_uri: HttpsUrl::parse(raw.jwks_uri)?,
-        revocation_endpoint: raw.revocation_endpoint.map(HttpsUrl::parse).transpose()?,
+        issuer: parse_discovered_endpoint(raw.issuer)?,
+        token_endpoint: parse_discovered_endpoint(raw.token_endpoint)?,
+        jwks_uri: parse_discovered_endpoint(raw.jwks_uri)?,
+        revocation_endpoint: raw
+            .revocation_endpoint
+            .map(parse_discovered_endpoint)
+            .transpose()?,
     })
+}
+
+/// Parse a discovery endpoint. Production accepts HTTPS only; test builds may use Wiremock HTTP.
+#[cfg(not(test))]
+fn parse_discovered_endpoint(value: String) -> Result<HttpsUrl> {
+    HttpsUrl::parse(value)
+}
+
+#[cfg(test)]
+fn parse_discovered_endpoint(value: String) -> Result<HttpsUrl> {
+    HttpsUrl::parse_for_test(value)
 }
 
 #[cfg(test)]
@@ -98,7 +112,10 @@ mod tests {
             .expect("discovery should succeed");
 
         assert_eq!(doc.issuer.as_str(), server.uri());
-        assert_eq!(doc.token_endpoint.as_str(), format!("{}/oauth/token", server.uri()));
+        assert_eq!(
+            doc.token_endpoint.as_str(),
+            format!("{}/oauth/token", server.uri())
+        );
         assert_eq!(
             doc.jwks_uri.as_str(),
             format!("{}/.well-known/jwks.json", server.uri())
@@ -164,7 +181,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_rejects_http_endpoints_after_successful_parse() {
+    async fn discover_allows_http_endpoints_only_through_test_fixture_seam() {
         let server = MockServer::start().await;
         let body = serde_json::json!({
             "issuer": server.uri(),
@@ -179,7 +196,10 @@ mod tests {
             .await;
 
         let issuer = HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL");
-        assert!(discover(&issuer).await.is_err());
+        let doc = discover(&issuer)
+            .await
+            .expect("test-only fixture seam should admit only Wiremock endpoints");
+        assert_eq!(doc.token_endpoint.as_str(), "http://provider.example/token");
     }
 
     #[tokio::test]

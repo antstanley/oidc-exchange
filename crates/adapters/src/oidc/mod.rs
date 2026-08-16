@@ -359,6 +359,11 @@ mod tests {
             .as_secs()
     }
 
+    fn test_endpoint(value: impl Into<String>) -> oidc_exchange_core::config::HttpsUrl {
+        oidc_exchange_core::config::HttpsUrl::parse_for_test(value)
+            .expect("wiremock test fixture URL")
+    }
+
     fn make_config(
         server_uri: &str,
         token_endpoint: Option<String>,
@@ -367,22 +372,12 @@ mod tests {
     ) -> OidcProviderConfig {
         OidcProviderConfig {
             provider_id: "test-provider".into(),
-            issuer: oidc_exchange_core::config::HttpsUrl::parse_for_test(server_uri)
-                .expect("wiremock issuer URL"),
+            issuer: test_endpoint(server_uri),
             client_id: "test-client-id".into(),
             client_secret: Some("test-client-secret".into()),
-            jwks_uri: jwks_uri
-                .map(oidc_exchange_core::config::HttpsUrl::parse_for_test)
-                .transpose()
-                .expect("wiremock JWKS URL"),
-            token_endpoint: token_endpoint
-                .map(oidc_exchange_core::config::HttpsUrl::parse_for_test)
-                .transpose()
-                .expect("wiremock token URL"),
-            revocation_endpoint: revocation_endpoint
-                .map(oidc_exchange_core::config::HttpsUrl::parse_for_test)
-                .transpose()
-                .expect("wiremock revocation URL"),
+            jwks_uri: jwks_uri.map(test_endpoint),
+            token_endpoint: token_endpoint.map(test_endpoint),
+            revocation_endpoint: revocation_endpoint.map(test_endpoint),
             scopes: vec!["openid".into()],
             additional_params: HashMap::new(),
         }
@@ -734,9 +729,15 @@ mod tests {
             .expect("from_config with discovery should succeed");
 
         assert_eq!(provider.provider_id(), "google");
-        assert_eq!(provider.token_endpoint.as_str(), format!("{uri}/oauth/token"));
         assert_eq!(
-            provider.revocation_endpoint.as_ref().map(oidc_exchange_core::config::HttpsUrl::as_str),
+            provider.token_endpoint.as_str(),
+            format!("{uri}/oauth/token")
+        );
+        assert_eq!(
+            provider
+                .revocation_endpoint
+                .as_ref()
+                .map(oidc_exchange_core::config::HttpsUrl::as_str),
             Some(format!("{uri}/oauth/revoke").as_str())
         );
     }

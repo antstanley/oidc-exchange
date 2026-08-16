@@ -696,10 +696,14 @@ mod tests {
 
     #[tokio::test]
     async fn from_config_rejects_http_endpoint_override() {
+        let (pem_bytes, _jwks, _kid) = generate_es256_test_keys();
         let pem = tempfile::NamedTempFile::new().expect("temporary PEM file");
-        std::fs::write(pem.path(), "not a valid key").expect("write PEM");
+        std::fs::write(pem.path(), pem_bytes).expect("write PEM");
         let mut config = HashMap::from([
-            ("client_id".into(), toml::Value::String("com.example.app".into())),
+            (
+                "client_id".into(),
+                toml::Value::String("com.example.app".into()),
+            ),
             ("team_id".into(), toml::Value::String("TEAMID".into())),
             ("key_id".into(), toml::Value::String("KEYID".into())),
             (

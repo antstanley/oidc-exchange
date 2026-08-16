@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
-use oidc_exchange_core::domain::User;
 use oidc_exchange_core::config::HttpsUrl;
+use oidc_exchange_core::domain::User;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::UserSync;
 use sha2::Sha256;

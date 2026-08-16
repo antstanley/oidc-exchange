@@ -757,8 +757,10 @@ impl ProviderConfig {
         let token_endpoint = endpoint("token_endpoint")?;
         let revocation_endpoint = endpoint("revocation_endpoint")?;
 
-        if matches!(ProviderAdapter::parse_field("providers.adapter", raw.adapter.clone())?, ProviderAdapter::Oidc)
-            && issuer.is_none()
+        if matches!(
+            ProviderAdapter::parse_field("providers.adapter", raw.adapter.clone())?,
+            ProviderAdapter::Oidc
+        ) && issuer.is_none()
         {
             return Err(Error::ConfigError {
                 detail: format!("providers.{provider_id}.issuer: missing required HTTPS URL"),
@@ -1032,6 +1034,9 @@ impl HttpsUrl {
     }
 
     /// Construct an HTTP URL for test fixtures only.
+    ///
+    /// This API is an explicit fixture seam; production configuration and endpoint parsing use
+    /// [`Self::parse`] exclusively.
     #[doc(hidden)]
     pub fn parse_for_test(value: impl Into<String>) -> Result<Self, Error> {
         let value = value.into();
@@ -1159,6 +1164,13 @@ mod tests {
             detail.contains(field),
             "error {detail:?} should name {field:?}"
         );
+    }
+
+    #[test]
+    fn https_url_parse_rejects_non_https_in_production_api() {
+        let err = HttpsUrl::parse("http://provider.example/token")
+            .expect_err("production URL constructor must reject HTTP");
+        assert!(matches!(err, Error::ConfigError { .. }));
     }
 
     #[test]
