@@ -699,13 +699,21 @@ async fn router_denies_sixty_first_request_before_provider_work_and_sets_retry_a
     config.rate_limit.max_entries = 1024;
     config.audit.durability = "best_effort".to_string();
     let provider = MockIdentityProvider::new("test");
+    let audit = MockAuditLog::new();
     let public_limiter = MockRateLimiter::new();
-    let app = build_throttled_router(
-        config,
-        provider.clone(),
-        MockRateLimiter::new(),
-        public_limiter.clone(),
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider.clone()));
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit.clone()),
+        Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
+        providers,
+        config.clone(),
     );
+    let app = build_router_with_rate_limiter(&config, service, Arc::new(public_limiter.clone()));
     let decisions = std::iter::once(RateLimitDecision::Deny {
         retry_after_secs: 60,
     })
@@ -724,6 +732,17 @@ async fn router_denies_sixty_first_request_before_provider_work_and_sets_retry_a
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(response.headers().get("retry-after").is_some());
     assert_eq!(provider.exchange_code_call_count().await, 60);
+    let events = audit.events().await;
+    let throttle_events = events
+        .iter()
+        .filter(|event| event.event_type == AuditEventType::ThrottleExceeded)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        throttle_events.len(),
+        1,
+        "direct public throttle denial emits once"
+    );
+    assert_eq!(throttle_events[0].ip_address.as_deref(), Some("192.0.2.1"));
 }
 
 #[tokio::test]

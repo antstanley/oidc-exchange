@@ -55,8 +55,10 @@ from `KeyManager::algorithm()`.
 
 ## Discovery / state
 
-`AppState { service: Arc<AppService>, config: Arc<AppConfig> }` is axum's shared state,
-extracted into every handler.
+`AppState { service: Arc<AppService>, config: Arc<AppConfig>, rate_limiter: Arc<dyn RateLimiter> }`
+is axum's shared state, extracted into every handler. The retained configured limiter is shared
+by all public route middleware instances so per-IP fixed-window state survives requests; the
+service retains its configured limiter separately for provider and subject enforcement.
 
 ## Middleware stack
 
@@ -77,9 +79,14 @@ Applied to the router, outermost first:
 Public routes additionally use, in route-layer execution order, the per-IP throttle, access
 log, and concurrency guard. The throttle runs before handler/provider work; only `Peer` and
 `Forwarded` values become rate-limit keys. A denial returns `429 slow_down` and
-`Retry-After`; asserted or unknown addresses are not throttled. The access log records method,
-matched path, status, safe OAuth error code, and address kind, never token/form/header values.
-The semaphore-based concurrency guard rejects saturation with `503`.
+`Retry-After`; every direct per-IP denial also emits the mandatory `ThrottleExceeded`
+`SecurityEvent` using the resolved `ClientAddr` and bounded User-Agent. Audit-sink failure is
+recorded through the mandatory-channel durability contract but cannot replace or otherwise alter
+the safe throttle `429`. Asserted or unknown addresses are not throttled. The access log records
+method, matched path, status, safe OAuth error code, and address kind, never token/form/header
+values. It runs inside the request-id middleware's request span and therefore inherits that span
+(and its request-id correlation) for its tracing event. The semaphore-based concurrency guard
+rejects saturation with `503`.
 
 Internal routes additionally pass through **internal auth** (`middleware/internal_auth.rs`):
 `Authorization: Bearer <secret>` compared to `internal_api.shared_secret` in constant time

@@ -6,7 +6,9 @@ use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use oidc_exchange_core::domain::{RateLimitDecision, RateLimitKey};
+use oidc_exchange_core::domain::{
+    AuditFailure, AuditOutcome, RateLimitDecision, RateLimitKey, SecurityEvent,
+};
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -76,7 +78,26 @@ pub async fn public_throttle_layer(
             }
             response
         }
-        Ok(RateLimitDecision::Deny { retry_after_secs }) => throttle_response(retry_after_secs),
+        Ok(RateLimitDecision::Deny { retry_after_secs }) => {
+            // The throttle response is terminal: audit durability must not turn a safe 429
+            // into a different response. `emit_security_event` still records sink degradation
+            // and applies the configured mandatory-channel contract internally.
+            if let Err(error) = state
+                .service
+                .emit_security_event(
+                    SecurityEvent::ThrottleExceeded,
+                    AuditOutcome::Failure(AuditFailure::ThrottleExceeded),
+                    None,
+                    None,
+                    context.client_addr.clone(),
+                    context.user_agent.clone(),
+                )
+                .await
+            {
+                tracing::error!(error = %error, "mandatory throttle audit emission failed");
+            }
+            throttle_response(retry_after_secs)
+        }
     }
 }
 

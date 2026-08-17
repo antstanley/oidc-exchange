@@ -3,9 +3,11 @@
 **Status:** Implemented · **Date:** 2026-08-17 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
-`user_sync`, a `providers` map, and `config`. The flows below live in
-`crates/core/src/service/{exchange,refresh,revoke,user_admin,claims}.rs` and the helpers in
-`service/mod.rs`.
+`user_sync`, the configured retained `rate_limiter`, a `providers` map, and `config`. The
+retained limiter enforces provider and subject budgets across service-flow calls; the server
+retains a configured public limiter in `AppState` for per-IP HTTP throttling. The flows below
+live in `crates/core/src/service/{exchange,refresh,revoke,user_admin,claims}.rs` and the helpers
+in `service/mod.rs`.
 
 ## Token exchange (`exchange.rs`)
 
@@ -89,9 +91,11 @@ emit_audit(AuditEvent)                      — best-effort
 ```
 
 Severity follows RFC 5424 (emergency 0 … debug 7); lower is more severe. Every shipped flow
-uses the mandatory channel. `emit_audit` remains available for operational events supplied by
-embedders, and only that best-effort channel is governed by `emit_threshold` and
-`blocking_threshold`.
+uses the mandatory channel. The HTTP public per-IP throttle also emits `ThrottleExceeded`
+through this same API before returning its terminal `429`; the middleware
+logs an enforce-mode emission error but preserves the `429`, so audit-sink behavior cannot make
+the denial unsafe. `emit_audit` remains available for operational events supplied by embedders,
+and only that best-effort channel is governed by `emit_threshold` and `blocking_threshold`.
 
 ## Admin operations (`user_admin.rs`)
 
