@@ -1,3 +1,4 @@
+pub mod access_log;
 pub mod audit_context;
 pub mod base_path;
 pub mod error_handler;

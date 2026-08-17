@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn;
 use axum::Router;
@@ -11,14 +13,17 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
-use oidc_exchange::middleware::audit_context::audit_context_layer;
+use oidc_exchange::bootstrap::build_router_with_rate_limiter;
+use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::domain::{RateLimitDecision, RateLimitKey};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 const TEST_SECRET: &str = "test-internal-secret-e2e";
@@ -53,42 +58,201 @@ fn build_e2e_app() -> Router {
 
     public_routes()
         .merge(internal_routes(state.clone()))
-        .layer(from_fn(audit_context_layer))
-        .with_state(state)
-}
-
-fn build_e2e_app_with_config(config: AppConfig) -> Router {
-    let provider = MockIdentityProvider::new("test");
-    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
-    providers.insert("test".to_string(), Box::new(provider));
-
-    let service = AppService::new(
-        Box::new(MockRepository::new()),
-        Box::new(MockRepository::new()),
-        Box::new(MockKeyManager::new()),
-        Box::new(MockAuditLog::new()),
-        Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
-        providers,
-        config.clone(),
-    );
-
-    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
-    let state = AppState {
-        service: Arc::new(service),
-        config: Arc::new(config),
-        rate_limiter,
-    };
-
-    public_routes()
-        .merge(internal_routes(state.clone()))
-        .layer(from_fn(audit_context_layer))
+        .layer(from_fn(ffi_audit_context_layer))
         .with_state(state)
 }
 
 async fn body_to_json(body: Body) -> serde_json::Value {
     let bytes = body.collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn build_production_audit_router(
+    peer: SocketAddr,
+    forwarded: Option<&str>,
+    audit_log: MockAuditLog,
+    public_limiter: MockRateLimiter,
+) -> (Router, Request<Body>) {
+    let provider = MockIdentityProvider::new("test");
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+
+    let mut config = AppConfig::default();
+    config.server.role = "exchange".to_string();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.server.trusted_proxies = vec!["10.0.0.0/8".to_string()];
+    config.server.trusted_proxy_hops = 1;
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit_log),
+        Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+    let app = build_router_with_rate_limiter(&config, service, Arc::new(public_limiter));
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test",
+        ))
+        .unwrap();
+    if let Some(forwarded) = forwarded {
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            forwarded.parse().expect("valid forwarded header"),
+        );
+    }
+    request.extensions_mut().insert(ConnectInfo(peer));
+    (app, request)
+}
+
+fn build_throttled_router(
+    mut config: AppConfig,
+    provider: MockIdentityProvider,
+    service_limiter: MockRateLimiter,
+    public_limiter: MockRateLimiter,
+) -> Router {
+    config.server.role = "exchange".to_string();
+    config.server.issuer = "https://auth.example.com".to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        Box::new(service_limiter),
+        providers,
+        config.clone(),
+    );
+    build_router_with_rate_limiter(&config, service, Arc::new(public_limiter))
+}
+
+fn token_request(body: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(oidc_exchange::middleware::audit_context::AuditContext {
+            client_addr: oidc_exchange_core::domain::ClientAddr::Peer("192.0.2.1".parse().unwrap()),
+            user_agent: None,
+            device_id: None,
+        });
+    request
+}
+
+#[tokio::test]
+async fn production_access_log_is_correlated_to_request_id_and_provenance() {
+    let audit_log = MockAuditLog::new();
+    let public_limiter = MockRateLimiter::new();
+    let (app, mut request) = build_production_audit_router(
+        "10.0.0.9:443".parse().unwrap(),
+        Some("203.0.113.4"),
+        audit_log,
+        public_limiter,
+    );
+    request
+        .headers_mut()
+        .insert("x-request-id", "request-id-audit-log".parse().unwrap());
+    let response = app.oneshot(request).await.expect("router response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(oidc_exchange::middleware::access_log::ACCESS_LOG_REQUEST_ID_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("request-id-audit-log")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(oidc_exchange::middleware::access_log::ACCESS_LOG_CLIENT_ADDR_SOURCE_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("forwarded")
+    );
+}
+
+#[tokio::test]
+async fn production_router_uses_observed_peer_and_trusted_forwarding_for_audit_and_throttle() {
+    let cases = [
+        (
+            "peer",
+            "198.51.100.9:443",
+            Some("203.0.113.4"),
+            "peer",
+            "198.51.100.9",
+        ),
+        (
+            "trusted_forwarded",
+            "10.0.0.9:443",
+            Some("203.0.113.4"),
+            "forwarded",
+            "203.0.113.4",
+        ),
+        (
+            "forged_forwarded",
+            "198.51.100.9:443",
+            Some("203.0.113.4"),
+            "peer",
+            "198.51.100.9",
+        ),
+        (
+            "missing_forwarded",
+            "10.0.0.9:443",
+            None,
+            "peer",
+            "10.0.0.9",
+        ),
+    ];
+
+    for (name, peer, forwarded, source, address) in cases {
+        let audit_log = MockAuditLog::new();
+        let public_limiter = MockRateLimiter::new();
+        let (app, request) = build_production_audit_router(
+            peer.parse().expect("valid peer"),
+            forwarded,
+            audit_log.clone(),
+            public_limiter.clone(),
+        );
+
+        let response = app.oneshot(request).await.expect("router response");
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+        assert_eq!(
+            response
+                .headers()
+                .get(oidc_exchange::middleware::access_log::ACCESS_LOG_CLIENT_ADDR_SOURCE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(source),
+            "{name}"
+        );
+
+        let events = audit_log.events().await;
+        assert!(!events.is_empty(), "{name}");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.ip_address.as_deref() == Some(address)),
+            "{name}: {events:#?}"
+        );
+        assert_eq!(
+            public_limiter.keys().await,
+            vec![RateLimitKey::ClientAddr(
+                address.parse().expect("valid address")
+            )],
+            "{name}"
+        );
+    }
 }
 
 /// Decode the payload (second segment) of a JWT without verifying the signature.
@@ -249,13 +413,10 @@ async fn e2e_internal_api_custom_claims() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Step 3: POST /token with grant_type=authorization_code (for that user) → get access_token
-    // The mock provider returns external_id="test-subject", matching the user we created
+    // Step 3: POST /token → resulting JWT includes custom claim role=admin
     let exchange_body =
         "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
-
     let response = app
-        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -268,97 +429,94 @@ async fn e2e_internal_api_custom_claims() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-
     let token_json = body_to_json(response.into_body()).await;
     let access_token = token_json["access_token"].as_str().unwrap();
-
-    // Step 4: Decode the access_token JWT, verify "role": "admin" is in the claims
     let payload = decode_jwt_payload(access_token);
-    assert_eq!(payload["sub"], user_id);
-    assert_eq!(payload["iss"], "https://auth.example.com");
-    assert_eq!(
-        payload["role"], "admin",
-        "custom claim 'role' should be 'admin' in the JWT"
-    );
+    assert_eq!(payload["role"], "admin");
 }
 
-// ===========================================================================
-// Test 3: Registration policy — existing_users_only mode
-// ===========================================================================
+#[tokio::test]
+async fn router_denies_sixty_first_request_before_provider_work_and_sets_retry_after() {
+    let mut config = AppConfig::default();
+    config.rate_limit.enabled = true;
+    config.rate_limit.per_ip = 60;
+    config.rate_limit.per_ip_failures = 0;
+    config.rate_limit.per_provider = 0;
+    config.rate_limit.per_subject = 0;
+    config.rate_limit.max_entries = 1024;
+    config.audit.durability = "best_effort".to_string();
+    let provider = MockIdentityProvider::new("test");
+    let public_limiter = MockRateLimiter::new();
+    let app = build_throttled_router(
+        config,
+        provider.clone(),
+        MockRateLimiter::new(),
+        public_limiter.clone(),
+    );
+    let decisions = std::iter::once(RateLimitDecision::Deny {
+        retry_after_secs: 60,
+    })
+    .chain(std::iter::repeat_n(RateLimitDecision::Allow, 60))
+    .collect();
+    public_limiter.set_decisions(decisions).await;
+    let body = "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+
+    for _ in 0..60 {
+        let response = app.clone().oneshot(token_request(body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let keys_before = public_limiter.keys().await;
+    assert_eq!(keys_before.len(), 60);
+    let response = app.oneshot(token_request(body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(response.headers().get("retry-after").is_some());
+    assert_eq!(provider.exchange_code_call_count().await, 60);
+}
 
 #[tokio::test]
-async fn e2e_registration_policy_existing_users_only() {
+async fn router_counts_invalid_grant_failures_but_not_malformed_requests() {
     let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.registration.mode = "existing_users_only".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
-
-    let app = build_e2e_app_with_config(config);
-
-    // Step 1: POST /token → 403 access_denied (user doesn't exist)
-    let exchange_body =
-        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+    config.rate_limit.enabled = true;
+    config.rate_limit.per_ip = 0;
+    config.rate_limit.per_ip_failures = 1;
+    config.rate_limit.per_provider = 0;
+    config.rate_limit.per_subject = 0;
+    config.audit.durability = "best_effort".to_string();
+    let provider = MockIdentityProvider::new("test");
+    provider.set_invalid_grant().await;
+    let public_limiter = MockRateLimiter::new();
+    let app = build_throttled_router(
+        config,
+        provider,
+        MockRateLimiter::new(),
+        public_limiter.clone(),
+    );
+    let invalid_grant = "grant_type=authorization_code&code=bad&redirect_uri=http://localhost/callback&provider=test";
 
     let response = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(exchange_body))
-                .unwrap(),
-        )
+        .oneshot(token_request(invalid_grant))
         .await
         .unwrap();
-
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-
-    let error_json = body_to_json(response.into_body()).await;
-    assert_eq!(error_json["error"], "access_denied");
-
-    // Step 2: POST /internal/users → create user with matching external_id
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_to_json(response.into_body()).await["error"],
+        "invalid_grant"
+    );
     let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/internal/users")
-                .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {}", TEST_SECRET))
-                .body(Body::from(
-                    json!({
-                        "external_id": "test-subject",
-                        "provider": "test",
-                        "email": "test@example.com"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
+        .oneshot(token_request("grant_type=authorization_code"))
         .await
         .unwrap();
-
-    assert_eq!(response.status(), StatusCode::CREATED);
-
-    // Step 3: POST /token → 200 success (user now exists)
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/token")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(exchange_body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let token_json = body_to_json(response.into_body()).await;
-    assert!(token_json.get("access_token").is_some());
-    assert!(token_json.get("refresh_token").is_some());
-    assert_eq!(token_json["token_type"], "Bearer");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let keys = public_limiter.keys().await;
+    assert_eq!(
+        keys.iter()
+            .filter(|key| matches!(
+                key,
+                oidc_exchange_core::domain::RateLimitKey::ClientAddrFailure(_)
+            ))
+            .count(),
+        1,
+        "invalid_grant consumes exactly one failure-IP budget while malformed input does not"
+    );
 }

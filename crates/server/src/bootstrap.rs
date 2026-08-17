@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use config::{Config, Environment, File, FileFormat, Value, ValueKind};
+use tokio::sync::Semaphore;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::timeout::TimeoutLayer;
 
@@ -14,9 +15,11 @@ use oidc_exchange_core::ports::{
 };
 use oidc_exchange_core::service::AppService;
 
+use crate::middleware::access_log::access_log_layer;
 use crate::middleware::audit_context::audit_context_layer;
 use crate::middleware::base_path::with_base_path_strip;
 use crate::middleware::error_handler::panic_handler;
+use crate::middleware::public_throttle::public_concurrency_layer;
 use crate::middleware::request_id::request_id_layer;
 use crate::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets};
 use crate::routes;
@@ -281,7 +284,7 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
         keys,
         audit,
         user_sync,
-        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        build_rate_limiter(config)?,
         providers,
         config.clone(),
     ))
@@ -327,24 +330,43 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 /// the wrapper still runs on every request but is a pure pass-through, so there is no separate
 /// Lambda-only branch that installs it only sometimes.
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
+    let rate_limiter = Arc::from(
+        build_rate_limiter(config).expect("validated rate-limit config at router construction"),
+    );
+    build_router_with_rate_limiter(config, service, rate_limiter)
+}
+
+/// Builds the production router with the supplied retained public limiter. This is separate
+/// from [`build_router`] so service construction can pass the same concrete limiter to both
+/// core provider/subject enforcement and public address throttling.
+pub fn build_router_with_rate_limiter(
+    config: &AppConfig,
+    service: AppService,
+    rate_limiter: Arc<dyn RateLimiter>,
+) -> Router {
     let role = config.server.role.as_str();
 
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config.clone()),
-        rate_limiter: Arc::from(
-            build_rate_limiter(config).expect("validated rate-limit config at router construction"),
-        ),
+        rate_limiter,
     };
 
     let mut app: Router<AppState> = Router::new();
 
     if role == "exchange" || role == "all" {
         app = app.merge(
-            routes::public_routes().route_layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::middleware::public_throttle::public_throttle_layer,
-            )),
+            routes::public_routes()
+                // This semaphore is shared by every public route and checked before handler
+                // work. Saturation returns 503 instead of waiting in an unbounded queue.
+                .route_layer(axum::middleware::from_fn(public_concurrency_layer(
+                    Arc::new(Semaphore::new(config.rate_limit.max_concurrent_requests)),
+                )))
+                .route_layer(axum::middleware::from_fn(access_log_layer))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::public_throttle::public_throttle_layer,
+                )),
         );
     }
     if (role == "admin" || role == "all") && config.internal_api.enabled {
@@ -362,7 +384,10 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 
     let router = app
         .layer(CatchPanicLayer::custom(panic_handler))
-        .layer(axum::middleware::from_fn(audit_context_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit_context_layer,
+        ))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             request_timeout_duration(config),
@@ -1658,9 +1683,8 @@ mod request_timeout_tests {
             .route("/fast", get(fast_handler))
             .route("/slow", get(slow_handler))
             .layer(CatchPanicLayer::custom(panic_handler))
-            .layer(axum::middleware::from_fn_with_state(
-                std::sync::Arc::new(AppConfig::default()),
-                audit_context_layer,
+            .layer(axum::middleware::from_fn(
+                crate::middleware::audit_context::ffi_audit_context_layer,
             ))
             .layer(TimeoutLayer::with_status_code(
                 StatusCode::REQUEST_TIMEOUT,

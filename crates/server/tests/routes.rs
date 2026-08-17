@@ -8,7 +8,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use oidc_exchange::middleware::audit_context::audit_context_layer;
+use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
 use oidc_exchange::routes::public_routes;
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::AppConfig;
@@ -52,7 +52,7 @@ fn build_test_app() -> (Router, MockRepository) {
     };
 
     let app = public_routes()
-        .layer(from_fn(audit_context_layer))
+        .layer(from_fn(ffi_audit_context_layer))
         .with_state(state);
 
     (app, session_repo)
@@ -534,7 +534,11 @@ async fn token_exchange_with_audit_headers_stores_session_context() {
     let sessions = session_repo.get_all_sessions().await;
     assert_eq!(sessions.len(), 1, "expected exactly one stored session");
     let session = &sessions[0];
-    assert_eq!(session.ip_address.as_deref(), Some("203.0.113.7"));
+    assert_eq!(
+        session.ip_address.as_deref(),
+        None,
+        "FFI-style in-process requests have no transport peer, so a client-supplied forwarding header is never persisted as a trusted address"
+    );
     assert_eq!(session.user_agent.as_deref(), Some("audit-test-client/1.0"));
     assert_eq!(session.device_id.as_deref(), Some("device-42"));
 }

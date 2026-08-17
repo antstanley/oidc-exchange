@@ -599,6 +599,11 @@ impl MockIdentityProvider {
         *self.exchange_error.lock().await = Some(detail.into());
     }
 
+    /// Make the next exchange fail as an OAuth invalid_grant credential rejection.
+    pub async fn set_invalid_grant(&self) {
+        *self.exchange_error.lock().await = Some("invalid_grant".into());
+    }
+
     /// Toggle a typed upstream timeout for exchange-code test paths.
     pub async fn set_exchange_timeout(&self, timeout: bool) {
         *self.exchange_timeout.lock().await = timeout;
@@ -623,6 +628,11 @@ impl IdentityProvider for MockIdentityProvider {
             });
         }
         if let Some(detail) = self.exchange_error.lock().await.clone() {
+            if detail == "invalid_grant" {
+                return Err(Error::InvalidGrant {
+                    reason: "provider rejected credentials".into(),
+                });
+            }
             return Err(Error::ProviderError {
                 provider: self.provider_id.clone(),
                 detail,

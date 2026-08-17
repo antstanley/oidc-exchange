@@ -1,16 +1,20 @@
 use std::net::{IpAddr, SocketAddr};
 
+use axum::extract::{ConnectInfo, State};
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use ipnet::IpNet;
+use lambda_http::request::RequestContext;
+
+use crate::state::AppState;
 use oidc_exchange_core::config::MAX_TRUSTED_PROXY_HOPS;
 use oidc_exchange_core::domain::ClientAddr;
 
 /// Maximum byte length copied from a client-authored forwarding header.
 pub const MAX_FORWARDED_HEADER_LEN: usize = 1_024;
 /// Maximum byte length copied from a client-authored User-Agent header.
-pub const MAX_USER_AGENT_LEN: usize = 512;
+pub const MAX_USER_AGENT_LEN: usize = 256;
 /// Maximum byte length copied from a client-authored device identifier.
 pub const MAX_DEVICE_ID_LEN: usize = 256;
 /// Maximum forwarding-chain entries inspected for a trusted proxy request.
@@ -39,6 +43,7 @@ pub fn audit_context_from_request<B>(
     hops: usize,
 ) -> AuditContext {
     let forwarded = bounded_header(request, "x-forwarded-for", MAX_FORWARDED_HEADER_LEN);
+    let peer = lambda_platform_source_ip(request).or(peer);
     let client_addr = resolve_client_addr(
         peer.map(|peer| peer.ip()),
         forwarded.as_deref(),
@@ -75,7 +80,7 @@ pub fn resolve_client_addr(
 
 fn bounded_header<B>(request: &Request<B>, name: &'static str, max_len: usize) -> Option<String> {
     let value = request.headers().get(name)?.to_str().ok()?;
-    (value.len() <= max_len).then(|| value.to_owned())
+    Some(value.chars().take(max_len).collect())
 }
 
 fn select_forwarded(forwarded: &str, hops: usize) -> Option<IpAddr> {
@@ -93,20 +98,62 @@ fn select_forwarded(forwarded: &str, hops: usize) -> Option<IpAddr> {
         .and_then(|entry| entry.parse::<IpAddr>().ok())
 }
 
-/// Default middleware for in-process and FFI callers: no peer is available, so forwarding
-/// headers are audit-only asserted data and never form an address rate key.
+/// HTTP middleware that resolves the observed connection peer using configured proxy CIDRs.
 pub async fn audit_context_layer(
+    State(state): State<AppState>,
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> impl IntoResponse {
-    let client_addr = bounded_header(&request, "x-forwarded-for", MAX_FORWARDED_HEADER_LEN)
-        .and_then(ClientAddr::asserted)
-        .unwrap_or(ClientAddr::Unknown);
-    let context = AuditContext {
-        client_addr,
-        user_agent: bounded_header(&request, "user-agent", MAX_USER_AGENT_LEN),
-        device_id: bounded_header(&request, "x-device-id", MAX_DEVICE_ID_LEN),
-    };
+    let peer = lambda_platform_source_ip(&request).or_else(|| {
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(address)| *address)
+    });
+    let trusted = state
+        .config
+        .server
+        .trusted_proxies
+        .iter()
+        .filter_map(|cidr| cidr.parse::<IpNet>().ok())
+        .collect::<Vec<_>>();
+    if request.extensions().get::<AuditContext>().is_none() {
+        let context = audit_context_from_request(
+            &request,
+            peer,
+            &trusted,
+            state.config.server.trusted_proxy_hops,
+        );
+        request.extensions_mut().insert(context);
+    }
+    next.run(request).await
+}
+
+/// Extracts the source address provided by the Lambda platform request context, never a
+/// client-controlled forwarding header. The synthesized port is immaterial because only the
+/// IP component participates in provenance and rate limiting.
+fn lambda_platform_source_ip<B>(request: &Request<B>) -> Option<SocketAddr> {
+    let source_ip = match request.extensions().get::<RequestContext>()? {
+        RequestContext::ApiGatewayV2(context) => context.http.source_ip.as_deref(),
+        RequestContext::ApiGatewayV1(context) => context.identity.source_ip.as_deref(),
+        // ALB request contexts do not contain a platform source IP. Do not substitute a
+        // forwarding header: absent a platform source, the request remains unknown.
+        RequestContext::Alb(_) => None,
+        RequestContext::WebSocket(context) => context.identity.source_ip.as_deref(),
+        _ => None,
+    }?;
+    source_ip
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, 0))
+}
+
+/// FFI middleware: no transport peer exists, so never trust client forwarding headers.
+pub async fn ffi_audit_context_layer(
+    mut request: Request<axum::body::Body>,
+    next: Next,
+) -> impl IntoResponse {
+    let context = audit_context_from_request(&request, lambda_platform_source_ip(&request), &[], 1);
     request.extensions_mut().insert(context);
     next.run(request).await
 }
@@ -187,7 +234,12 @@ mod tests {
             .header("user-agent", "x".repeat(MAX_USER_AGENT_LEN + 1))
             .body(Body::empty())
             .unwrap();
-        assert!(bounded_header(&request, "user-agent", MAX_USER_AGENT_LEN).is_none());
+        assert_eq!(
+            bounded_header(&request, "user-agent", MAX_USER_AGENT_LEN)
+                .expect("oversize user agent is truncated")
+                .len(),
+            MAX_USER_AGENT_LEN
+        );
     }
 
     #[test]
