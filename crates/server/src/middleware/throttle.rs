@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use oidc_exchange_core::domain::{RateLimitDecision, RateLimitKey};
@@ -13,7 +13,43 @@ pub struct FixedWindowRateLimiter {
     window: Duration,
     budgets: RateLimitBudgets,
     max_entries: usize,
+    clock: Arc<dyn Clock>,
     state: Mutex<HashMap<RateLimitKey, Bucket>>,
+}
+
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+#[derive(Clone)]
+pub struct TestClock {
+    now: Arc<RwLock<Instant>>,
+}
+
+impl TestClock {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            now: Arc::new(RwLock::new(now)),
+        }
+    }
+
+    pub fn advance(&self, duration: Duration) {
+        *self.now.write().expect("test clock lock is not poisoned") += duration;
+    }
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> Instant {
+        *self.now.read().expect("test clock lock is not poisoned")
+    }
 }
 
 /// Fixed-window budgets selected by the rate-limit key's scope. A zero budget
@@ -45,6 +81,15 @@ struct Bucket {
 
 impl FixedWindowRateLimiter {
     pub fn new(window: Duration, budgets: RateLimitBudgets, max_entries: usize) -> Result<Self> {
+        Self::with_clock(window, budgets, max_entries, Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(
+        window: Duration,
+        budgets: RateLimitBudgets,
+        max_entries: usize,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
         if window.is_zero() {
             return Err(Error::ConfigError {
                 detail: "rate limit window must be non-zero".to_string(),
@@ -59,11 +104,14 @@ impl FixedWindowRateLimiter {
             window,
             budgets,
             max_entries,
+            clock,
             state: Mutex::new(HashMap::new()),
         })
     }
 
-    fn check_at(&self, key: &RateLimitKey, now: Instant) -> Result<RateLimitDecision> {
+    /// Check against an explicitly supplied instant. This is intentionally public so router
+    /// integration tests can exercise the real limiter deterministically without sleeping.
+    pub fn check_at(&self, key: &RateLimitKey, now: Instant) -> Result<RateLimitDecision> {
         let budget = self.budgets.for_key(key);
         if budget == 0 {
             return Ok(RateLimitDecision::Allow);
@@ -107,7 +155,7 @@ impl FixedWindowRateLimiter {
 #[async_trait::async_trait]
 impl RateLimiter for FixedWindowRateLimiter {
     async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
-        self.check_at(key, Instant::now())
+        self.check_at(key, self.clock.now())
     }
 }
 

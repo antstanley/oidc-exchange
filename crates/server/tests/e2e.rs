@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -15,10 +16,11 @@ use tower::ServiceExt;
 
 use oidc_exchange::bootstrap::build_router_with_rate_limiter;
 use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
+use oidc_exchange::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets, TestClock};
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::AppConfig;
-use oidc_exchange_core::domain::{RateLimitDecision, RateLimitKey};
+use oidc_exchange_core::domain::{AuditEventType, RateLimitDecision, RateLimitKey};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -433,6 +435,257 @@ async fn e2e_internal_api_custom_claims() {
     let access_token = token_json["access_token"].as_str().unwrap();
     let payload = decode_jwt_payload(access_token);
     assert_eq!(payload["role"], "admin");
+}
+
+#[tokio::test]
+async fn production_router_enforce_audit_failure_cleans_up_token_session() {
+    let mut config = AppConfig::default();
+    config.server.role = "exchange".to_string();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.audit.durability = "enforce".to_string();
+    config.audit.emit_threshold = "emergency".to_string();
+    config.rate_limit.enabled = false;
+
+    let provider = MockIdentityProvider::new("test");
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+    let sessions = MockRepository::new();
+    let audit = MockAuditLog::new();
+    audit.set_fail_mode(true).await;
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(sessions.clone()),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit),
+        Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+    let app = build_router_with_rate_limiter(
+        &config,
+        service,
+        Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+    );
+
+    let response = app
+        .oneshot(token_request(
+            "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test",
+        ))
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        sessions.get_all_sessions().await.is_empty(),
+        "enforced mandatory audit failure must remove the issued session"
+    );
+}
+
+#[tokio::test]
+async fn production_router_enforce_revoke_audit_failure_is_status_indistinguishable() {
+    let mut config = AppConfig::default();
+    config.server.role = "exchange".to_string();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.audit.durability = "enforce".to_string();
+    config.rate_limit.enabled = false;
+
+    let provider = MockIdentityProvider::new("test");
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+    let sessions = MockRepository::new();
+    let audit = MockAuditLog::new();
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(sessions),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit.clone()),
+        Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+    let app = build_router_with_rate_limiter(
+        &config,
+        service,
+        Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+    );
+
+    let exchange = app
+        .clone()
+        .oneshot(token_request(
+            "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test",
+        ))
+        .await
+        .expect("exchange response");
+    assert_eq!(exchange.status(), StatusCode::OK);
+    let refresh_token = body_to_json(exchange.into_body()).await["refresh_token"]
+        .as_str()
+        .expect("refresh token")
+        .to_owned();
+    audit.set_fail_mode(true).await;
+
+    let existing = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "token={refresh_token}&token_type_hint=refresh_token"
+                )))
+                .expect("existing revoke request"),
+        )
+        .await
+        .expect("existing revoke response");
+    let unknown = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "token=never-issued&token_type_hint=refresh_token",
+                ))
+                .expect("unknown revoke request"),
+        )
+        .await
+        .expect("unknown revoke response");
+
+    assert_eq!(existing.status(), StatusCode::OK);
+    assert_eq!(unknown.status(), existing.status());
+    assert_eq!(
+        unknown
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok()),
+        existing
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok()),
+        "identical RFC 7009 responses must not expose token existence"
+    );
+}
+
+#[tokio::test]
+async fn public_router_emits_one_mandatory_authentication_failure_at_emergency_threshold() {
+    let mut config = AppConfig::default();
+    config.server.role = "exchange".to_string();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.audit.emit_threshold = "emergency".to_string();
+    config.rate_limit.enabled = false;
+
+    let provider = MockIdentityProvider::new("test");
+    provider.set_invalid_grant().await;
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+    let audit = MockAuditLog::new();
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit.clone()),
+        Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+    let app = build_router_with_rate_limiter(
+        &config,
+        service,
+        Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+    );
+
+    let response = app
+        .oneshot(token_request(
+            "grant_type=authorization_code&code=bad&redirect_uri=http://localhost/callback&provider=test",
+        ))
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_to_json(response.into_body()).await["error"],
+        "invalid_grant"
+    );
+
+    let events = audit.events().await;
+    assert_eq!(events.len(), 1, "core-reached failure must emit once");
+    assert_eq!(events[0].event_type, AuditEventType::ValidationFailed);
+}
+
+#[tokio::test]
+async fn public_router_uses_real_fixed_window_limiter_at_budget_and_after_rollover() {
+    let mut config = AppConfig::default();
+    config.server.role = "exchange".to_string();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.rate_limit.enabled = true;
+    config.rate_limit.per_ip = 2;
+    config.rate_limit.per_ip_failures = 0;
+    config.rate_limit.per_provider = 0;
+    config.rate_limit.per_subject = 0;
+    config.rate_limit.max_entries = 16;
+
+    let provider = MockIdentityProvider::new("test");
+    let provider_view = provider.clone();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+    let window = Duration::from_secs(60);
+    let clock = TestClock::new(Instant::now());
+    let limiter = Arc::new(
+        FixedWindowRateLimiter::with_clock(
+            window,
+            RateLimitBudgets {
+                per_ip: 2,
+                per_ip_failures: 0,
+                per_subject: 0,
+                per_provider: 0,
+            },
+            16,
+            Arc::new(clock.clone()),
+        )
+        .expect("valid fixed window limiter"),
+    );
+    let app = build_router_with_rate_limiter(&config, service, limiter);
+
+    for expected in [
+        StatusCode::OK,
+        StatusCode::OK,
+        StatusCode::TOO_MANY_REQUESTS,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(token_request(
+                "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test",
+            ))
+            .await
+            .expect("router response");
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(
+        provider_view.exchange_code_call_count().await,
+        2,
+        "denied public requests must not invoke the provider"
+    );
+
+    clock.advance(window);
+    let response = app
+        .oneshot(token_request(
+            "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test",
+        ))
+        .await
+        .expect("router response after window rollover");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(provider_view.exchange_code_call_count().await, 3);
 }
 
 #[tokio::test]
