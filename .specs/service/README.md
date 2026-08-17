@@ -13,7 +13,7 @@ specs — read those first:
 |---|---|
 | [specs/00-overview.md](specs/00-overview.md) | problem, goals, system shape, crate map, scope |
 | [specs/01-domain-model.md](specs/01-domain-model.md) | entities, ids, lifecycles, query patterns |
-| [specs/02-ports-and-adapters.md](specs/02-ports-and-adapters.md) | the six ports and every adapter |
+| [specs/02-ports-and-adapters.md](specs/02-ports-and-adapters.md) | the seven ports and every adapter |
 | [specs/03-service-flows.md](specs/03-service-flows.md) | exchange, refresh, revoke, admin, claims, audit blocking |
 | [specs/04-http-api.md](specs/04-http-api.md) | routes, middleware, roles, bootstrap, error mapping |
 | [specs/05-provider-system.md](specs/05-provider-system.md) | provider tiers, OIDC and Apple, the registry |

@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
+**Status:** Implemented · **Date:** 2026-08-17 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
 
 One TOML file drives the whole service. `AppConfig` (and its nested structs) in
 `crates/core/src/config.rs` deserializes it; every section uses `#[serde(default)]`, so any
@@ -21,6 +21,8 @@ omitted section falls back to its defaults.
 [server]
 host = "0.0.0.0"
 port = 8080
+trusted_proxies = []
+trusted_proxy_hops = 1
 
 [registration]
 mode = "open"
@@ -30,24 +32,40 @@ access_token_ttl = "15m"
 refresh_token_ttl = "30d"
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
 blocking_threshold = "warning"
+emit_threshold = "info"
+durability = "observe"
+
+[rate_limit]
+enabled = true
+store = "in_process"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10
+per_subject = 10
+per_provider = 600
+max_concurrent_requests = 256
+max_entries = 10000
 
 [telemetry]
 enabled = false
 exporter = "none"
 ```
 
-The default is deliberately minimal — runnable but inert (noop audit, no providers, no key
-manager). A real deployment overlays a key manager, a repository, and at least one provider.
+The default is deliberately minimal — no providers or key manager — but it is no longer
+silent: once a deployment supplies the required service configuration, audit events go to
+stdout. A real deployment overlays a key manager, a repository, and at least one provider.
 
 ## Sections
 
 ### `[server]`
 `host` (`0.0.0.0`), `port` (`8080`), `issuer` (the `iss` claim / discovery issuer, default
 empty), `role` (`all` | `exchange` | `admin`, default `all`), `request_timeout` (humantime
-duration string like the token TTLs, default `"30s"`) — the per-request timeout the
-server's timeout layer enforces.
+duration string like the token TTLs, default `"30s"`), `trusted_proxies` (CIDR list, default
+empty), and `trusted_proxy_hops` (default `1`). The hop is counted from the right of
+`X-Forwarded-For` only when the observed peer is in `trusted_proxies`; with the default empty
+list, forwarding headers are not trusted.
 
 ### `[registration]`
 `mode` (`open` | `existing_users_only`, default `open`), optional `domain_allowlist`
@@ -59,8 +77,17 @@ server's timeout layer enforces.
 [03-service-flows.md](03-service-flows.md)).
 
 ### `[audit]`
-`adapter` (`noop` | `stdout` | `sqs`, default `noop`), `blocking_threshold` (syslog severity
-name, default `warning`), optional `[audit.sqs] { queue_url, region }`.
+`adapter` (`noop` | `stdout` | `sqs`, default `stdout`), `blocking_threshold` (syslog
+severity name, default `warning`), `emit_threshold` (default `info`) for best-effort events,
+and `durability` (`observe` | `enforce`, default `observe`) for mandatory security-event write
+failures; optional `[audit.sqs] { queue_url, region }`.
+
+### `[rate_limit]`
+`enabled` (default `true`), `store` (`in_process` | `none`, default `in_process`), `window`
+(default `"1m"`), per-window budgets `per_ip` (60), `per_ip_failures` (10), `per_subject`
+(10), `per_provider` (600), `max_concurrent_requests` (256), and `max_entries` (10000).
+Budgets are per key and per process; zero disables a scope. `per_ip_failures` is consumed only
+for authentication failures, preserving the normal IP allowance for legitimate requests.
 
 ### `[key_manager]`
 `adapter` (`local` | `kms`), with `[key_manager.local] { private_key_path, algorithm, kid }`
@@ -99,9 +126,12 @@ retries? }`. The `secret` is redacted in `Debug`.
 | Setting | Default |
 |---|---|
 | `server.host` / `port` / `role` / `request_timeout` | `0.0.0.0` / `8080` / `all` / `"30s"` |
+| `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `registration.mode` | `open` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
-| `audit.adapter` / `blocking_threshold` | `noop` / `warning` |
+| `audit.adapter` / `blocking_threshold` / `emit_threshold` / `durability` | `stdout` / `warning` / `info` / `observe` |
+| `rate_limit.enabled` / `store` / `window` / `max_concurrent_requests` | `true` / `in_process` / `"1m"` / `256` |
+| `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
 | `telemetry.enabled` / `exporter` / `sample_rate` | `false` / `none` / `1.0` |
 | `user_sync.enabled`, `internal_api.enabled` | `false`, `false` |
 
@@ -112,6 +142,12 @@ retries? }`. The `secret` is redacted in `Debug`.
 - Secrets are supplied through the environment and referenced via `${VAR}`; secrets are never
   committed to a TOML file.
 - Config is read once at startup; changing it requires a restart.
+- `audit.adapter` must be a known non-empty adapter, `audit.durability` must be `observe` or
+  `enforce`, trusted proxies must be CIDRs, `trusted_proxy_hops` must be 1–16, and the
+  rate-limit window, store, budgets, entry bound, and concurrency bound are validated at load
+  time. `rate_limit.enabled = true` requires `store = "in_process"`.
+- Where a rate limit must hold globally (Lambda or horizontally scaled servers), an edge
+  gateway/WAF provides it; the in-process limiter is a per-process backstop.
 
 ### Decisions
 

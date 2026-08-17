@@ -1,14 +1,14 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-08-17 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
 
-The core declares six port traits in `crates/core/src/ports/`. Adapters in
-`crates/adapters/` and `crates/providers/` implement them. Every method returns the core's
-`Result<T>`; adapters convert native errors into the domain [`Error`](04-http-api.md) at the
-boundary.
+The core declares seven port traits in `crates/core/src/ports/`. Adapters in
+`crates/adapters/`, `crates/providers/`, and — for the in-process rate limiter —
+`crates/server/` implement them. Every method returns the core's `Result<T>`; adapters
+convert native errors into the domain [`Error`](04-http-api.md) at the boundary.
 
 ## Port traits
 
@@ -79,6 +79,29 @@ async fn revoke_token(&self, token: &str) -> Result<()>;
 fn provider_id(&self) -> &str;
 ```
 
+### RateLimiter (`ports/rate_limit.rs`)
+
+```rust
+async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision>;
+
+enum RateLimitKey {
+    ClientAddr(IpAddr),
+    ClientAddrFailure(IpAddr),
+    Subject { provider: Option<String>, subject_hash: String },
+    Provider(String),
+}
+
+enum RateLimitDecision {
+    Allow,
+    Deny { retry_after_secs: u64 },
+}
+```
+
+One call consumes one unit against one key and reports whether the caller may proceed.
+`Subject.subject_hash` is a SHA-256 hex digest of the provider subject, so limiter state never
+holds a raw provider subject. A limiter error is logged and callers proceed; the in-process
+limiter is a backstop, not a global control.
+
 ### AuditLog (`ports/audit.rs`)
 
 ```rust
@@ -105,6 +128,8 @@ async fn notify_user_deleted(&self, user_id: &str) -> Result<()>;
 | KeyManager | AWS KMS | `adapters/kms` | RS/PS/ES 256/384/512; ECDSA DER→raw JWS conversion on sign; local verify against the cached public key; JWK cached on `OnceCell`; `Sign`/`GetPublicKey` |
 | KeyManager | Local Ed25519 | `adapters/local_keys` | EdDSA only; PKCS#8 PEM from file or bytes |
 | KeyManager | Noop | `adapters/noop` | every op errors; used in admin-only role |
+| RateLimiter | In-process | `server/middleware/throttle` | fixed window per key, bounded map with expiry eviction; per-process, not global |
+| RateLimiter | Noop | `adapters/noop` | always `Allow`; selected when `rate_limit.enabled = false` |
 | AuditLog | Stdout/stderr | `adapters/stdout_audit` | JSON lines; `Auto` routes error+ to stderr, else stdout |
 | AuditLog | AWS SQS | `adapters/sqs_audit` | JSON message + `severity` attribute; FIFO auto-detected by `.fifo` suffix |
 | AuditLog | Noop | `adapters/noop` | always `Ok(())` |

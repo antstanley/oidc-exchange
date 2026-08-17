@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-08-17 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
@@ -9,64 +9,36 @@
 
 ## Token exchange (`exchange.rs`)
 
-`POST /token` with `grant_type=authorization_code` or `grant_type=id_token`.
+`POST /token` with `grant_type=authorization_code` or `grant_type=id_token`. Emission is
+terminal and single: the flow maps its result to exactly one `SecurityEvent`, with fixed
+classification strings rather than upstream error text. Success is emitted after storing the
+session and signing the access token; under `audit.durability = "enforce"`, a failed terminal
+emit revokes that just-stored session before returning the error. Principal creation is a
+separate state-change event, so a losing JIT-registration racer emits none.
 
-1. **Resolve provider** — look up `request.provider` in the `providers` map; missing →
-   `UnknownProvider`.
-2. **Obtain verified claims**
-   - If an `id_token` was supplied directly → `provider.validate_id_token(id_token)`.
-   - Otherwise require `code` and `redirect_uri` (else `InvalidRequest`),
-     `provider.exchange_code` to get `ProviderTokens`, then `validate_id_token` on the
-     returned `id_token`.
-3. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
-   - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
-   - **Found, active** → proceed (existing users bypass registration policy).
-   - **Not found** → apply policy:
-     - If `registration.domain_allowlist` is set: the ID token must carry a **verified**
-       email (`email_verified == Some(true)`) whose domain matches the allowlist — exact
-       (`example.com`) or wildcard (`*.example.com`, at least one subdomain, case-insensitive).
-       A missing/unverified email or non-matching domain → `AccessDenied`
-       (audited `RegistrationDenied`).
-     - If `registration.mode == "existing_users_only"` → `AccessDenied` (`RegistrationDenied`).
-     - Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`);
-       if creation returns `Conflict` (a concurrent first login won the race), re-run
-       `get_user_by_external_id` and continue with the existing user, re-applying the
-       suspended-status check. The losing racer emits no `UserCreated` event — the winning
-       create already audited it — and the flow otherwise proceeds as for a found user.
-4. **Mint refresh token** — 32 random bytes, base64url-no-pad for the opaque token; SHA-256
-   hex of the bytes is the stored hash.
-5. **Store session** — `expires_at = now + refresh_token_ttl`; `store_refresh_token`.
-6. **Sign access token** — `build_access_token(user)` (below).
-7. **Respond** — `TokenResponse { access_token, refresh_token: Some(opaque), token_type:
-   "Bearer", expires_in }`.
+The flow consumes a per-provider unit before outbound exchange or validation and a
+per-subject unit after validation establishes the subject. Either denial emits
+`ThrottleExceeded` and returns `TooManyRequests`; the public HTTP layer has already applied
+the per-IP check.
 
 ## Token refresh (`refresh.rs`)
 
-`POST /token` with `grant_type=refresh_token`.
-
-1. SHA-256 hex the presented token.
-2. `get_session_by_refresh_token(hash)`; missing → `InvalidToken`.
-3. `session.expires_at < now` → `InvalidToken`.
-4. `get_user_by_id(session.user_id)`; missing → `InvalidToken`; suspended → `UserSuspended`.
-5. `build_access_token(user)`.
-6. Respond with `refresh_token: None` — refresh tokens are reusable until expiry; refreshing
-   does not rotate them.
+`POST /token` with `grant_type=refresh_token`. The flow hashes the presented token, resolves
+the session and user, rejects missing/expired/suspended states, signs a new access token, and
+returns no new refresh token. It uses the same single terminal emission: success emits
+`AuthenticationSucceeded { kind: Refresh }`; missing/expired session or user emits
+`AuthenticationFailed`; a suspended user emits `PrincipalSuspended`. A per-subject unit is
+consumed after session lookup; pre-lookup guessing is bounded by the public per-IP budget.
 
 ## Revocation (`revoke.rs`)
 
-`POST /revoke` (RFC 7009 — token-state failures still succeed toward the client; backend
-failures propagate).
-
-- `token_type_hint == "access_token"` → `verify_and_extract_sub(token)`: split the JWT,
-  base64url the signature, `keys.verify(signing_input, signature)`, and on success decode
-  the payload and read `sub`; then `revoke_all_user_sessions(sub)`. A token-verification
-  failure (malformed, unsigned, expired, or unknown token) is swallowed and still returns
-  200 — individual access JWTs cannot be revoked and RFC 7009 §2.2 forbids leaking whether
-  a token existed — but a session-repo error from `revoke_all_user_sessions` propagates,
-  and the server maps it to 503.
-- hint `refresh_token`, absent, or unknown → SHA-256 hex the token and
-  `revoke_session(hash)`. A missing session is `Ok` (idempotent delete, 200); a store
-  error propagates, and the server maps it to 503.
+`POST /revoke` follows RFC 7009: token-state failures remain client-visible `200`, while
+backend failures propagate. The access-token path emits `SessionsRevoked` after successful
+signature verification; the refresh-token path emits `SessionRevoked` when a session matched.
+Rejected tokens emit `AuthenticationFailed` with a fixed classification. Every branch emits
+exactly one event so, even under `durability = "enforce"`, audit sink failure cannot make token
+existence observable. The later revoke-claim-validation change may narrow the access-token
+revocation scope, but does not change this rejected-token symmetry.
 
 ## Build access token (`service/mod.rs::build_access_token`)
 
@@ -97,25 +69,36 @@ Template language (config values only):
 Resolvable paths: `user.id`, `user.email`, `user.display_name`, `user.provider`,
 `user.external_id`, `user.metadata.<key>`, `user.claims.<key>`. No loops or conditionals.
 
-## Audit emission and blocking (`service/mod.rs::emit_audit`)
+## Audit emission (`service/mod.rs`)
+
+Two channels have different guarantees:
 
 ```
-audit.emit(event)
-   Ok  → done
-   Err → serialize event to a tracing log (fallback record)
-         if severity ≤ audit.blocking_threshold → propagate Err (fail the operation)
-         else → tracing::warn! "audit provider down", return Ok
+emit_security_event(SecurityEvent)          — mandatory
+   render to AuditEvent (severity derived from the variant)
+   audit.emit(event)
+      Err → tracing fallback with audit_fallback = true
+            durability = "enforce" → fail the operation
+            durability = "observe" → log audit_durability_degraded = true, continue
+   No threshold is consulted.
+
+emit_audit(AuditEvent)                      — best-effort
+   severity less severe than emit_threshold → drop before dispatch
+   audit.emit(event)
+      Err → tracing fallback; blocking_threshold decides as before
 ```
 
-Severity follows RFC 5424 (emergency 0 … debug 7); lower number = more severe.
-`blocking_threshold` is a severity name parsed by `parse_severity`. So with the default
-`warning` threshold, an audit-backend failure on a warning-or-more-severe event fails the
-request, while a notice/info event is logged and the request continues.
+Severity follows RFC 5424 (emergency 0 … debug 7); lower is more severe. Every shipped flow
+uses the mandatory channel. `emit_audit` remains available for operational events supplied by
+embedders, and only that best-effort channel is governed by `emit_threshold` and
+`blocking_threshold`.
 
 ## Admin operations (`user_admin.rs`)
 
 All under `/internal/*`. User-sync notifications are **best-effort** — failures are logged
-via `tracing` and never fail the admin call.
+via `tracing` and never fail the admin call. Admin mutations use the mandatory audit channel,
+so an audit write failure follows `audit.durability`; their events have
+`ip_address_source = "unknown"`.
 
 | Method | Behaviour |
 |---|---|
@@ -148,8 +131,9 @@ via `tracing` and never fail the admin call.
   Tightening the allowlist later does not lock out already-registered users.
 - *Best-effort user sync.* **Sync notifications never fail an admin or exchange operation.**
   Sync is a downstream convenience, not a correctness dependency.
-- *Audit fallback always records.* **On backend failure the event is still written to a
-  tracing log before the blocking decision.** No audited event is silently lost.
+- *Audit durability is unconditional.* **A mandatory-channel write failure follows
+  `audit.durability`, independent of severity.** A tracing fallback line is still written
+  first, but it is not a substitute for the configured durable trail.
 
 ### Open questions
 

@@ -1,6 +1,6 @@
 # Change: Audit and throttle authentication failures
 
-**Status:** Proposed · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Target:** crates/core, crates/server (service)
+**Status:** Merged · **Date:** 2026-08-05 · **Merged:** 2026-08-17 · **Owner:** Ant Stanley · **Target:** crates/core, crates/server (service)
 
 Make the record of a failed authentication unsuppressable and the attempt itself bounded.
 Split audit emission into a mandatory `SecurityEvent` channel that no threshold may filter

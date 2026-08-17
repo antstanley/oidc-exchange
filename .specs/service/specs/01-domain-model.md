@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-08-17 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -114,10 +114,12 @@ struct AuditEvent {
 `SecurityEvent` is the closed set of security-relevant outcomes. Its `severity()` and
 `event_type()` mappings are exhaustive: exchange/refresh success and session revocation are
 `Info`; authentication failure, registration denial, principal suspension, provider rejection,
-and throttle exhaustion are `Warning`; principal creation, all-session revocation, and admin
-mutations are `Notice`. `ClientAddr` retains address provenance: only `Peer(IpAddr)` and
-`Forwarded(IpAddr)` may become rate-limit keys; `Asserted { value }` and `Unknown` may not.
-Audit serialization retains the address value, when available, and its source.
+and `ThrottleExceeded` are `Warning`; principal creation, all-session revocation, and admin
+mutations are `Notice`. `ClientAddr` retains address provenance: `Peer(IpAddr)` and
+`Forwarded(IpAddr)` may become rate-limit keys; `Asserted(value)` and `Unknown` may not.
+`ClientAddrSource` serializes as `peer`, `forwarded`, `asserted`, or `unknown`, and
+`ThrottleExceeded` serializes in `AuditEventType` as `throttle_exceeded`. Audit serialization
+retains the address value, when available, and its source.
 
 ### OidcProviderConfig (`domain/provider.rs`)
 

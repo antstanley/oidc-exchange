@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-08-17 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -60,19 +60,26 @@ extracted into every handler.
 
 ## Middleware stack
 
-Applied to the router (`routes/mod.rs`), outermost first:
+Applied to the router, outermost first:
 
-1. **Request ID** (`middleware/request_id.rs`) — reuse `X-Request-Id` or generate a UUIDv4;
-   open a per-request `info_span` carrying `request_id` so all downstream logs — including
-   the `server_error` detail log — inherit it; echo in the response header.
-2. **Request timeout** (`tower_http::timeout::TimeoutLayer`) — abort any request that runs
-   longer than `server.request_timeout` (default `30s`) and respond `408`. Sits inside the
-   request-id layer, so a timeout response still carries the request id, and outside the
-   rest of the stack, so the bound covers the remaining middleware and the handler.
-3. **Audit context** (`middleware/audit_context.rs`) — extract `X-Forwarded-For`,
-   `User-Agent`, `X-Device-Id` into an `AuditContext` request extension.
-4. **Catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — a panic becomes
-   `500 {"error":"server_error","error_description":"internal server error"}`.
+1. **Request ID** (`middleware/request_id.rs`) — reuses `X-Request-Id` or generates a UUIDv4,
+   opens a request span, and echoes the response header.
+2. **Request timeout** — bounds the rest of the stack and handler at
+   `server.request_timeout` (default `30s`) and returns `408`.
+3. **Audit context / client address** (`middleware/audit_context.rs`) — resolves `ClientAddr`.
+   Under hyper, `ConnectInfo` supplies a `Peer`; Lambda uses the platform request-context
+   source IP; FFI has no peer and records `Unknown`. When the observed peer is in
+   `server.trusted_proxies`, the `X-Forwarded-For` entry `server.trusted_proxy_hops` from the
+   right is parsed as `Forwarded`. Otherwise the peer remains authoritative. User-Agent and
+   device-id values are truncated to 256 characters.
+4. **Catch panic** — renders a safe `500` response.
+
+Public routes additionally use, in route-layer execution order, the per-IP throttle, access
+log, and concurrency guard. The throttle runs before handler/provider work; only `Peer` and
+`Forwarded` values become rate-limit keys. A denial returns `429 slow_down` and
+`Retry-After`; asserted or unknown addresses are not throttled. The access log records method,
+matched path, status, safe OAuth error code, and address kind, never token/form/header values.
+The semaphore-based concurrency guard rejects saturation with `503`.
 
 Internal routes additionally pass through **internal auth** (`middleware/internal_auth.rs`):
 `Authorization: Bearer <secret>` compared to `internal_api.shared_secret` in constant time
@@ -103,11 +110,11 @@ be network-isolated independently from one binary.
 4. `bootstrap::build_service` — construct adapters by role and assemble `AppService`.
 5. `bootstrap::build_router` — build the axum router for the role with middleware and state.
 6. Detect runtime: `AWS_LAMBDA_RUNTIME_API` present → Lambda mode; otherwise bind
-   `server.host:server.port` and serve over hyper with graceful shutdown — SIGTERM or
-   ctrl-c stops accepting connections and drains in-flight requests for up to a 10 s hard
-   deadline, after which stragglers are aborted and the process exits. The middleware
-   stack's request-timeout layer bounds slow clients at `server.request_timeout`
-   (default 30 s).
+   `server.host:server.port` and serve over hyper through
+   `into_make_service_with_connect_info::<SocketAddr>()`, so middleware can classify the
+   observed connection peer. Graceful shutdown stops accepting connections and drains
+   in-flight requests for up to a 10 s hard deadline; the request timeout remains
+   `server.request_timeout` (default 30 s).
 
 `crates/ffi` calls the same `build_service` / `build_router` path, so in-process bindings get
 identical routing and middleware.
@@ -126,9 +133,13 @@ identical routing and middleware.
 | `Unauthorized` | 401 | `unauthorized` |
 | `UnsupportedGrantType` | 400 | `unsupported_grant_type` |
 | `Conflict` | 409 | `conflict` |
+| `TooManyRequests` | 429 | `slow_down` |
 | `ProviderError` | 502 | `server_error` |
 | `ProviderTimeout` | 504 | `server_error` |
 | `StoreError`, `KeyError`, `AuditError`, `SyncError`, `ConfigError` | 500 | `server_error` |
+
+A `429` carries `Retry-After` in seconds for the remainder of the current fixed window.
+`slow_down` is RFC 8628 §3.5's token-endpoint rate-limit code.
 
 `server_error` responses (500/502/504) log the internal detail via `tracing::error!` —
 inside the request span, so the log carries the request id — and return a generic message;
@@ -138,8 +149,12 @@ infrastructure detail is never leaked to the client.
 
 ### Assumptions
 
-- A reverse proxy or gateway terminates TLS and may set `X-Forwarded-For`; the service reads
-  but does not validate that header's trust chain.
+- A reverse proxy or gateway terminates TLS. `X-Forwarded-For` is honoured only when the
+  observed connection peer is inside `server.trusted_proxies`; with the shipped empty list
+  it is not a rate-limit or authorization input.
+- In-process rate-limit state is per process. A horizontally scaled deployment's effective
+  budget grows with instance count; under Lambda it bounds each execution environment, so an
+  API Gateway usage plan or WAF remains the global control.
 - The internal API is reachable only from trusted callers (admin UI, scripts) on a private
   network; the shared secret is its only authentication.
 

@@ -545,7 +545,7 @@
         "asserted",
         "unknown"
       ],
-      "description": "Provenance of AuditEvent.ip_address. Asserted addresses are client-controlled and never rate-limit keys."
+      "description": "Provenance of AuditEvent.ip_address. peer is observed by the server or runtime platform; forwarded is selected from X-Forwarded-For only behind server.trusted_proxies; asserted is client-controlled and never a rate-limit key; unknown has no usable address."
     }
   }
 }

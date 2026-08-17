@@ -26,6 +26,9 @@ The following shows every configuration section with all available options. In p
 host = "0.0.0.0"                       # bind address
 port = 8080                            # listen port
 issuer = "https://auth.example.com"    # issuer URL for JWTs (iss claim)
+# Trust X-Forwarded-For only from these peer CIDRs. Empty means never trust it.
+trusted_proxies = ["10.0.0.0/8"]
+trusted_proxy_hops = 1                 # select this many entries from X-Forwarded-For's right side
 
 # ─── Registration policy ──────────────────────────────────────────
 [registration]
@@ -101,11 +104,26 @@ max_size_mb = 64
 
 # ─── Audit logging ────────────────────────────────────────────────
 [audit]
-adapter = "noop"                       # "noop", "stdout", or "sqs"
-# Severity threshold for blocking. If the audit provider fails and the
-# event's severity is at or above this threshold, the operation fails.
-# Severities (RFC 5424): emergency, alert, critical, error, warning, notice, info, debug
+adapter = "stdout"                     # "noop", "stdout", or "sqs" (default: stdout)
+# Best-effort events below this severity are not dispatched. Shipped security events use
+# the mandatory channel, which no threshold suppresses.
+emit_threshold = "info"
+# Best-effort sink-failure policy threshold (RFC 5424 severities).
 blocking_threshold = "warning"
+# Mandatory security-event sink failures: "observe" logs degradation; "enforce" fails the operation.
+durability = "observe"
+
+# ─── Public-route rate limiting ───────────────────────────────────
+[rate_limit]
+enabled = true
+store = "in_process"                   # "in_process" or "none"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10                    # consumed only by authentication failures
+per_subject = 10
+per_provider = 600
+max_concurrent_requests = 256
+max_entries = 10000
 
 # SQS adapter — send audit events to an SQS queue (e.g., for Firehose → S3/Iceberg pipeline)
 [audit.sqs]
@@ -199,7 +217,23 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 | `telemetry.enabled` | `false` |
 | `telemetry.exporter` | `none` |
 | `telemetry.sample_rate` | `1.0` |
-| `audit.adapter` | `noop` |
+| `audit.adapter` | `stdout` |
+| `audit.durability` | `observe` |
+| `audit.emit_threshold` | `info` |
+| `rate_limit.enabled` / `store` / `window` | `true` / `in_process` / `1m` |
+| `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
+| `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `audit.blocking_threshold` | `warning` |
 | `user_sync.enabled` | `false` |
 | `internal_api` | disabled |
+
+## Trusted proxies and rate limiting
+
+The server uses the connection peer as the client address by default. It reads
+`X-Forwarded-For` only when that peer belongs to `server.trusted_proxies`; it then selects
+`trusted_proxy_hops` entries from the **right** of the comma-separated chain. This makes the
+address `forwarded`; direct peers are `peer`. A forwarding header from any other peer is
+client-asserted and is never used as a rate-limit key or authorization input.
+
+The shipped in-process limiter is per process. Use an API gateway, WAF, or other edge control
+for a global limit across replicas or Lambda execution environments.
