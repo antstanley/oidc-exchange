@@ -495,6 +495,13 @@ fn client_address_preserves_provenance_and_excludes_untrusted_rate_keys() {
         Some("forged, 203.0.113.8")
     );
     assert_eq!(asserted.rate_limit_key(), None);
+    assert_eq!(RateLimitKey::client_addr_failure(&asserted), None);
+    assert_eq!(
+        RateLimitKey::client_addr_failure(&peer),
+        Some(RateLimitKey::ClientAddrFailure(IpAddr::V4(Ipv4Addr::new(
+            203, 0, 113, 5
+        ))))
+    );
     assert_eq!(ClientAddr::Unknown.source(), ClientAddrSource::Unknown);
     assert_eq!(ClientAddr::Unknown.rate_limit_key(), None);
 }

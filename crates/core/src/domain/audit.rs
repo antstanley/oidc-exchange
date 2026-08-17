@@ -240,6 +240,8 @@ pub fn subject_hash(subject: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RateLimitKey {
     ClientAddr(IpAddr),
+    /// A separate bucket for failed authentication attempts from a trusted client address.
+    ClientAddrFailure(IpAddr),
     Subject {
         provider: Option<String>,
         subject_hash: String,
@@ -248,6 +250,11 @@ pub enum RateLimitKey {
 }
 
 impl RateLimitKey {
+    /// Builds a failed-authentication bucket from a server-established client address.
+    pub fn client_addr_failure(client_addr: &ClientAddr) -> Option<Self> {
+        client_addr.rate_limit_key().map(Self::ClientAddrFailure)
+    }
+
     /// Builds a provider bucket only when the identifier is bounded.
     pub fn provider(provider: impl Into<String>) -> Option<Self> {
         let provider = provider.into();

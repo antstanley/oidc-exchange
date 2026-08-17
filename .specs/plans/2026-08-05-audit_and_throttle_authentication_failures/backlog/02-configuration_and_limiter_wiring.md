@@ -13,7 +13,7 @@
 - [ ] Validate duration, nonzero budgets, maximum entries, proxy CIDRs/hops, and adapter/durability combinations at config-load time with typed `ConfigError`s.
 - [ ] Change the committed audit adapter default to stdout and wire enabled/disabled rate-limiter selection into `build_service` without adding a shared hot-path dependency.
 - [ ] Implement the in-process fixed-window state with named bounds, expiry eviction, and bounded cardinality; ensure limiter operational errors are observable by callers and can fail open by policy.
-- [ ] Add configuration and limiter unit tests at below/at/above bounds, malformed values, disabled/noop behavior, fixed-window expiry, and eviction limits.
+- [x] Add configuration and limiter unit tests at below/at/above bounds, malformed values, disabled/noop behavior, fixed-window expiry, and eviction limits.
 
 ## Definition of done
 

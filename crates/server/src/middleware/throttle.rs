@@ -30,10 +30,8 @@ impl RateLimitBudgets {
     fn for_key(&self, key: &RateLimitKey) -> u64 {
         match key {
             RateLimitKey::ClientAddr(_) => self.per_ip,
-            RateLimitKey::Subject { provider: None, .. } => self.per_ip_failures,
-            RateLimitKey::Subject {
-                provider: Some(_), ..
-            } => self.per_subject,
+            RateLimitKey::ClientAddrFailure(_) => self.per_ip_failures,
+            RateLimitKey::Subject { .. } => self.per_subject,
             RateLimitKey::Provider(_) => self.per_provider,
         }
     }
@@ -188,8 +186,11 @@ mod tests {
         let now = Instant::now();
         let keys = [
             (key(1), 1),
-            (RateLimitKey::subject(None, "failed-subject").unwrap(), 2),
-            (RateLimitKey::subject(Some("idp"), "subject").unwrap(), 3),
+            (
+                RateLimitKey::ClientAddrFailure(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
+                2,
+            ),
+            (RateLimitKey::subject(None, "subject").unwrap(), 3),
             (RateLimitKey::provider("idp").unwrap(), 4),
         ];
 
@@ -212,7 +213,39 @@ mod tests {
         let limiter = FixedWindowRateLimiter::new(
             Duration::from_secs(60),
             RateLimitBudgets {
-                per_ip: 0,
+                per_ip: 1,
+                per_ip_failures: 0,
+                per_subject: 1,
+                per_provider: 1,
+            },
+            4,
+        )
+        .unwrap();
+        let now = Instant::now();
+        let failure_key = RateLimitKey::ClientAddrFailure(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+        for _ in 0..3 {
+            assert_eq!(
+                limiter.check_at(&failure_key, now).unwrap(),
+                RateLimitDecision::Allow
+            );
+        }
+        assert_eq!(limiter.entry_count(), 0);
+        assert_eq!(
+            limiter.check_at(&key(1), now).unwrap(),
+            RateLimitDecision::Allow
+        );
+        assert!(matches!(
+            limiter.check_at(&key(1), now).unwrap(),
+            RateLimitDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn client_address_and_failure_scopes_are_independent() {
+        let limiter = FixedWindowRateLimiter::new(
+            Duration::from_secs(60),
+            RateLimitBudgets {
+                per_ip: 1,
                 per_ip_failures: 1,
                 per_subject: 1,
                 per_provider: 1,
@@ -221,13 +254,26 @@ mod tests {
         )
         .unwrap();
         let now = Instant::now();
-        for _ in 0..3 {
-            assert_eq!(
-                limiter.check_at(&key(1), now).unwrap(),
-                RateLimitDecision::Allow
-            );
-        }
-        assert_eq!(limiter.entry_count(), 0);
+        let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let request_key = RateLimitKey::ClientAddr(address);
+        let failure_key = RateLimitKey::ClientAddrFailure(address);
+
+        assert_eq!(
+            limiter.check_at(&request_key, now).unwrap(),
+            RateLimitDecision::Allow
+        );
+        assert_eq!(
+            limiter.check_at(&failure_key, now).unwrap(),
+            RateLimitDecision::Allow
+        );
+        assert!(matches!(
+            limiter.check_at(&request_key, now).unwrap(),
+            RateLimitDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            limiter.check_at(&failure_key, now).unwrap(),
+            RateLimitDecision::Deny { .. }
+        ));
     }
 
     #[test]
