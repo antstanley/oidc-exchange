@@ -1,7 +1,7 @@
 use axum::extract::State;
 use std::sync::Arc;
 
-use axum::body::to_bytes;
+use axum::body::{to_bytes, Body};
 use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
+use crate::error::RenderedOAuthErrorCode;
 use crate::middleware::audit_context::AuditContext;
 use crate::state::AppState;
 
@@ -57,7 +58,10 @@ pub async fn public_throttle_layer(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let Some(context) = request.extensions().get::<AuditContext>() else {
+    if !matches!(request.uri().path(), "/token" | "/revoke") {
+        return next.run(request).await;
+    }
+    let Some(context) = request.extensions().get::<AuditContext>().cloned() else {
         return next.run(request).await;
     };
     let Some(address) = context.client_addr.rate_limit_key() else {
@@ -120,14 +124,21 @@ async fn is_public_authentication_failure(response: &mut Response) -> bool {
         return false;
     }
 
-    let body = std::mem::replace(response.body_mut(), axum::body::Body::empty());
-    let Ok(bytes) = to_bytes(body, 64 * 1024).await else {
-        return false;
+    let body = std::mem::replace(response.body_mut(), Body::empty());
+    let bytes = match to_bytes(body, 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not inspect authentication failure response body");
+            *response.body_mut() = Body::from(
+                r#"{"error":"server_error","error_description":"response processing failed"}"#,
+            );
+            return false;
+        }
     };
     let failure = serde_json::from_slice::<OAuthErrorBody>(&bytes)
         .map(|body| body.error == "invalid_grant")
         .unwrap_or(false);
-    *response.body_mut() = axum::body::Body::from(bytes);
+    *response.body_mut() = Body::from(bytes);
     failure
 }
 
@@ -143,5 +154,8 @@ fn throttle_response(retry_after_secs: u64) -> Response {
     let value = HeaderValue::from_str(&retry_after_secs.max(1).to_string())
         .expect("positive retry-after seconds always form a valid header value");
     response.headers_mut().insert(header::RETRY_AFTER, value);
+    response
+        .extensions_mut()
+        .insert(RenderedOAuthErrorCode("slow_down"));
     response
 }

@@ -11,7 +11,8 @@ use oidc_exchange_core::domain::{
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, RateLimiter};
 use oidc_exchange_core::service::{
-    audit_sink_degraded, audit_sink_failures_total, create_audit_event, AppService,
+    audit_sink_consecutive_failures, audit_sink_degraded, audit_sink_failures_total,
+    create_audit_event, AppService, AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES,
 };
 
 use oidc_exchange_test_utils::{
@@ -305,14 +306,27 @@ async fn audit_debug_event_reaches_adapter_when_threshold_lowered_to_debug() {
 }
 
 #[tokio::test]
-async fn mandatory_security_audit_bypasses_emit_threshold_and_observes_failures() {
+async fn mandatory_security_audit_health_is_bounded_and_recovers_after_success() {
     let audit = MockAuditLog::new();
     audit.set_fail_mode(true).await;
+    let audit_clone = audit.clone();
     let svc = make_service_with_audit(audit, make_config_with_durability("observe"));
 
     // This process-global metric is also incremented by concurrently executing integration
     // tests. The mandatory path is proved by the sink's own observed call, which is isolated
     // to this fixture, rather than assuming a stable global counter delta.
+    audit_clone.set_fail_mode(false).await;
+    svc.emit_security_event(
+        SecurityEvent::AuthenticationFailed,
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+        None,
+        None,
+        ClientAddr::Unknown,
+        None,
+    )
+    .await
+    .unwrap();
+    audit_clone.set_fail_mode(true).await;
     let before = audit_sink_failures_total();
     assert!(svc
         .emit_security_event(
@@ -329,7 +343,42 @@ async fn mandatory_security_audit_bypasses_emit_threshold_and_observes_failures(
         audit_sink_failures_total() > before,
         "the mandatory failure must increment the process metric even when other tests emit concurrently"
     );
+    assert_eq!(audit_sink_consecutive_failures(), 1);
+    assert!(
+        !audit_sink_degraded(),
+        "one transient failure must not fail readiness"
+    );
+
+    for _ in 1..AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES {
+        svc.emit_security_event(
+            SecurityEvent::AuthenticationFailed,
+            AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+            None,
+            None,
+            ClientAddr::Unknown,
+            None,
+        )
+        .await
+        .unwrap();
+    }
     assert!(audit_sink_degraded());
+
+    audit_clone.set_fail_mode(false).await;
+    svc.emit_security_event(
+        SecurityEvent::AuthenticationFailed,
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+        None,
+        None,
+        ClientAddr::Unknown,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(audit_sink_consecutive_failures(), 0);
+    assert!(
+        !audit_sink_degraded(),
+        "a successful mandatory emission must restore health"
+    );
 }
 
 #[tokio::test]

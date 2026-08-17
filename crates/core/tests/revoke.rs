@@ -337,14 +337,14 @@ async fn revoke_enforce_audit_failure_is_indistinguishable_for_existing_and_unkn
         })
         .await;
 
-    assert!(
-        existing.is_ok(),
-        "audit failure must not reveal an existing token"
-    );
-    assert!(
-        unknown.is_ok(),
-        "audit failure must not reveal an unknown token"
-    );
+    assert!(matches!(
+        existing,
+        Err(oidc_exchange_core::error::Error::SecurityAuditDurability { .. })
+    ));
+    assert!(matches!(
+        unknown,
+        Err(oidc_exchange_core::error::Error::SecurityAuditDurability { .. })
+    ));
     assert!(
         repo.get_all_sessions().await.is_empty(),
         "existing session is still revoked"

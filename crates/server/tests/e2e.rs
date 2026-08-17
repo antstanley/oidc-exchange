@@ -552,7 +552,7 @@ async fn production_router_enforce_revoke_audit_failure_is_status_indistinguisha
         .await
         .expect("unknown revoke response");
 
-    assert_eq!(existing.status(), StatusCode::OK);
+    assert_eq!(existing.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(unknown.status(), existing.status());
     assert_eq!(
         unknown

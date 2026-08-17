@@ -5,7 +5,7 @@ pub mod revoke;
 pub mod user_admin;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -19,15 +19,35 @@ use crate::domain::{
 
 /// Total mandatory audit sink failures observed by this process.
 pub(crate) static AUDIT_SINK_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
-/// Whether a mandatory audit sink failure has degraded this process's health.
-pub(crate) static AUDIT_SINK_DEGRADED: AtomicBool = AtomicBool::new(false);
+/// Current run of consecutive mandatory audit sink failures. Any successful mandatory
+/// emission resets it, so readiness can recover after a transient sink outage.
+pub(crate) static AUDIT_SINK_CONSECUTIVE_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// A single transient failure is observable but does not fail readiness.
+pub const AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES: u64 = 3;
 
 pub fn audit_sink_failures_total() -> u64 {
     AUDIT_SINK_FAILURES_TOTAL.load(Ordering::Relaxed)
 }
 
+pub fn audit_sink_consecutive_failures() -> u64 {
+    AUDIT_SINK_CONSECUTIVE_FAILURES.load(Ordering::Acquire)
+}
+
 pub fn audit_sink_degraded() -> bool {
-    AUDIT_SINK_DEGRADED.load(Ordering::Acquire)
+    audit_sink_consecutive_failures() >= AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES
+}
+
+pub(crate) fn record_mandatory_audit_success() {
+    AUDIT_SINK_CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+}
+
+pub(crate) fn record_mandatory_audit_failure() {
+    AUDIT_SINK_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let _ = AUDIT_SINK_CONSECUTIVE_FAILURES.fetch_update(
+        Ordering::AcqRel,
+        Ordering::Acquire,
+        |value| Some(value.saturating_add(1)),
+    );
 }
 use crate::error::{Error, Result};
 use crate::ports::{
@@ -158,10 +178,12 @@ impl AppService {
     ) -> Result<()> {
         let event = event.into_audit_event(outcome, actor, provider, client_addr, user_agent);
         match self.audit.emit(&event).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                record_mandatory_audit_success();
+                Ok(())
+            }
             Err(error) => {
-                AUDIT_SINK_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
-                AUDIT_SINK_DEGRADED.store(true, Ordering::Release);
+                record_mandatory_audit_failure();
                 self.log_audit_fallback(&event);
                 if self.config.audit.durability.eq_ignore_ascii_case("enforce") {
                     Err(Error::SecurityAuditDurability {

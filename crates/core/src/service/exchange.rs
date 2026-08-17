@@ -189,7 +189,13 @@ impl AppService {
         client_addr: &ClientAddr,
     ) -> Result<()> {
         let Some(key) = key else {
-            return Ok(());
+            tracing::error!(
+                provider_length = request.provider.len(),
+                "provider identifier exceeded the bounded rate-limit key size"
+            );
+            return Err(Error::InvalidRequest {
+                reason: "invalid provider identifier".to_string(),
+            });
         };
         match self.rate_limiter.check_and_consume(&key).await {
             Ok(RateLimitDecision::Allow) => Ok(()),

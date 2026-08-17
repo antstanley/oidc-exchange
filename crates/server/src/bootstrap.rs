@@ -346,6 +346,15 @@ pub fn build_router_with_rate_limiter(
 ) -> Router {
     let role = config.server.role.as_str();
 
+    if config.rate_limit.enabled
+        && config.server.trusted_proxies.is_empty()
+        && matches!(role, "exchange" | "all")
+    {
+        tracing::warn!(
+            "public rate limiting is enabled with no trusted proxies; direct clients are safe, but deployments behind a reverse proxy must configure server.trusted_proxies and trusted_proxy_hops or all clients will share the proxy address"
+        );
+    }
+
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config.clone()),

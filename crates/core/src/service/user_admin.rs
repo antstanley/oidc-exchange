@@ -308,12 +308,12 @@ impl AppService {
         event: crate::domain::AuditEvent,
     ) -> Result<()> {
         match self.audit.emit(&event).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                crate::service::record_mandatory_audit_success();
+                Ok(())
+            }
             Err(error) => {
-                crate::service::AUDIT_SINK_FAILURES_TOTAL
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::service::AUDIT_SINK_DEGRADED
-                    .store(true, std::sync::atomic::Ordering::Release);
+                crate::service::record_mandatory_audit_failure();
                 self.log_audit_fallback(&event);
                 if self.config.audit.durability.eq_ignore_ascii_case("enforce") {
                     Err(Error::SecurityAuditDurability {

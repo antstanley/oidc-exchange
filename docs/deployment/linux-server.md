@@ -171,7 +171,7 @@ server {
 
 ## Trusted forwarding
 
-The `trusted_proxies` CIDRs must contain the address nginx uses to connect to the service.
+The `trusted_proxies` CIDRs must contain the address nginx uses to connect to the service. Enabled rate limiting with an empty trusted-proxy list emits a startup warning: that topology is safe for direct clients, but behind nginx it collapses every client into nginx's address budget. Health, discovery, and JWKS requests are excluded from authentication throttles; `/token` and `/revoke` retain both public and security budgets.
 Only then does oidc-exchange accept `X-Forwarded-For`; it counts `trusted_proxy_hops` from the
 right. Do not append an inbound client-supplied chain or rely on `X-Real-IP`: the service does
 not use `X-Real-IP`, and a direct/untrusted forwarding header remains client-asserted rather

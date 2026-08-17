@@ -157,14 +157,11 @@ impl AppService {
         client_addr: ClientAddr,
         user_agent: Option<String>,
     ) -> Result<()> {
-        // RFC 7009 requires the final response to be indistinguishable for
-        // existing, unknown, and invalid tokens. Mandatory audit failures are
-        // recorded by `emit_security_event` but intentionally do not affect a
-        // resolved revocation response.
-        let _ = self
-            .emit_security_event(event, outcome, actor, None, client_addr, user_agent)
-            .await;
-        Ok(())
+        // Apply the same durable audit contract to known and unknown tokens. The HTTP layer
+        // renders this typed durability failure identically on both branches, preserving
+        // RFC 7009 token-state indistinguishability without silently weakening enforce mode.
+        self.emit_security_event(event, outcome, actor, None, client_addr, user_agent)
+            .await
     }
 
     /// Verify a JWT's signature using the service's key manager, then extract the `sub` claim.
