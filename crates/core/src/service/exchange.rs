@@ -4,7 +4,8 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use crate::domain::{
-    AuditEventType, AuditOutcome, AuditSeverity, NewUser, Session, TokenResponse, UserStatus,
+    AuditEventType, AuditFailure, AuditOutcome, AuditSeverity, ClientAddr, NewUser, Session,
+    TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::{create_audit_event, parse_duration_secs, AppService};
@@ -104,12 +105,14 @@ impl AppService {
                     self.emit_audit(create_audit_event(
                         AuditEventType::UserSuspended,
                         AuditSeverity::Warning,
-                        AuditOutcome::Failure {
-                            reason: format!("user status is {:?}, not active", user.status),
-                        },
+                        AuditOutcome::Failure(AuditFailure::PrincipalSuspended),
                         Some(user.id.clone()),
                         Some(request.provider.clone()),
-                        request.ip_address.clone(),
+                        request
+                            .ip_address
+                            .clone()
+                            .and_then(ClientAddr::asserted)
+                            .unwrap_or(ClientAddr::Unknown),
                         request.user_agent.clone(),
                     ))
                     .await?;
@@ -132,12 +135,14 @@ impl AppService {
                                 self.emit_audit(create_audit_event(
                                     AuditEventType::RegistrationDenied,
                                     AuditSeverity::Warning,
-                                    AuditOutcome::Failure {
-                                        reason: reason.clone(),
-                                    },
+                                    AuditOutcome::Failure(AuditFailure::RegistrationDenied),
                                     None,
                                     Some(request.provider.clone()),
-                                    request.ip_address.clone(),
+                                    request
+                                        .ip_address
+                                        .clone()
+                                        .and_then(ClientAddr::asserted)
+                                        .unwrap_or(ClientAddr::Unknown),
                                     request.user_agent.clone(),
                                 ))
                                 .await?;
@@ -148,12 +153,14 @@ impl AppService {
                                 self.emit_audit(create_audit_event(
                                     AuditEventType::RegistrationDenied,
                                     AuditSeverity::Warning,
-                                    AuditOutcome::Failure {
-                                        reason: reason.clone(),
-                                    },
+                                    AuditOutcome::Failure(AuditFailure::RegistrationDenied),
                                     None,
                                     Some(request.provider.clone()),
-                                    request.ip_address.clone(),
+                                    request
+                                        .ip_address
+                                        .clone()
+                                        .and_then(ClientAddr::asserted)
+                                        .unwrap_or(ClientAddr::Unknown),
                                     request.user_agent.clone(),
                                 ))
                                 .await?;
@@ -166,12 +173,14 @@ impl AppService {
                             self.emit_audit(create_audit_event(
                                 AuditEventType::RegistrationDenied,
                                 AuditSeverity::Warning,
-                                AuditOutcome::Failure {
-                                    reason: reason.clone(),
-                                },
+                                AuditOutcome::Failure(AuditFailure::RegistrationDenied),
                                 None,
                                 Some(request.provider.clone()),
-                                request.ip_address.clone(),
+                                request
+                                    .ip_address
+                                    .clone()
+                                    .and_then(ClientAddr::asserted)
+                                    .unwrap_or(ClientAddr::Unknown),
                                 request.user_agent.clone(),
                             ))
                             .await?;
@@ -186,12 +195,14 @@ impl AppService {
                     self.emit_audit(create_audit_event(
                         AuditEventType::RegistrationDenied,
                         AuditSeverity::Warning,
-                        AuditOutcome::Failure {
-                            reason: reason.clone(),
-                        },
+                        AuditOutcome::Failure(AuditFailure::RegistrationDenied),
                         None,
                         Some(request.provider.clone()),
-                        request.ip_address.clone(),
+                        request
+                            .ip_address
+                            .clone()
+                            .and_then(ClientAddr::asserted)
+                            .unwrap_or(ClientAddr::Unknown),
                         request.user_agent.clone(),
                     ))
                     .await?;
@@ -212,7 +223,11 @@ impl AppService {
                             AuditOutcome::Success,
                             Some(created.id.clone()),
                             Some(request.provider.clone()),
-                            request.ip_address.clone(),
+                            request
+                                .ip_address
+                                .clone()
+                                .and_then(ClientAddr::asserted)
+                                .unwrap_or(ClientAddr::Unknown),
                             request.user_agent.clone(),
                         ))
                         .await?;
@@ -252,15 +267,14 @@ impl AppService {
                                     self.emit_audit(create_audit_event(
                                         AuditEventType::UserSuspended,
                                         AuditSeverity::Warning,
-                                        AuditOutcome::Failure {
-                                            reason: format!(
-                                                "user status is {:?}, not active",
-                                                user.status
-                                            ),
-                                        },
+                                        AuditOutcome::Failure(AuditFailure::PrincipalSuspended),
                                         Some(user.id.clone()),
                                         Some(request.provider.clone()),
-                                        request.ip_address.clone(),
+                                        request
+                                            .ip_address
+                                            .clone()
+                                            .and_then(ClientAddr::asserted)
+                                            .unwrap_or(ClientAddr::Unknown),
                                         request.user_agent.clone(),
                                     ))
                                     .await?;
@@ -330,7 +344,11 @@ impl AppService {
             AuditOutcome::Success,
             Some(user.id.clone()),
             Some(request.provider.clone()),
-            request.ip_address.clone(),
+            request
+                .ip_address
+                .clone()
+                .and_then(ClientAddr::asserted)
+                .unwrap_or(ClientAddr::Unknown),
             request.user_agent.clone(),
         ))
         .await?;

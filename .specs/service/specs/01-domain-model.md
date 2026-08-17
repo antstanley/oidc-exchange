@@ -94,6 +94,7 @@ struct AuditEvent {
     actor: Option<String>,            // user id if known
     provider: Option<String>,
     ip_address: Option<String>,
+    ip_address_source: ClientAddrSource, // peer | forwarded | asserted | unknown
     user_agent: Option<String>,
     detail: HashMap<String, Value>,
     outcome: AuditOutcome,            // Success | Failure { reason }
@@ -102,8 +103,21 @@ struct AuditEvent {
 
 `AuditEventType` variants: `TokenExchange`, `TokenRefresh`, `TokenRevocation`,
 `SessionRevoked`, `AllSessionsRevoked`, `UserCreated`, `UserUpdated`, `UserSuspended`,
-`UserDeleted`, `ValidationFailed`, `RegistrationDenied`, `ProviderError`, `Unauthorized`.
-`AuditOutcome` serializes to `{ "status": "success" }` or `{ "status": "failure", "reason": … }`.
+`UserDeleted`, `ValidationFailed`, `RegistrationDenied`, `ProviderError`, `Unauthorized`,
+`ThrottleExceeded`. `ip_address_source` records whether the optional address was server-observed
+(`peer`), established by a trusted proxy (`forwarded`), client-asserted (`asserted`), or unavailable
+(`unknown`). `AuditOutcome` serializes to `{ "status": "success" }` or
+`{ "status": "failure", "reason": … }`.
+
+### SecurityEvent and ClientAddr (`domain/audit.rs`)
+
+`SecurityEvent` is the closed set of security-relevant outcomes. Its `severity()` and
+`event_type()` mappings are exhaustive: exchange/refresh success and session revocation are
+`Info`; authentication failure, registration denial, principal suspension, provider rejection,
+and throttle exhaustion are `Warning`; principal creation, all-session revocation, and admin
+mutations are `Notice`. `ClientAddr` retains address provenance: only `Peer(IpAddr)` and
+`Forwarded(IpAddr)` may become rate-limit keys; `Asserted { value }` and `Unknown` may not.
+Audit serialization retains the address value, when available, and its source.
 
 ### OidcProviderConfig (`domain/provider.rs`)
 

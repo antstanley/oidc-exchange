@@ -6,12 +6,13 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 
 use oidc_exchange_core::domain::{
-    AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
-    INITIAL_USER_VERSION,
+    AuditEvent, IdentityClaims, NewUser, ProviderTokens, RateLimitDecision, RateLimitKey, Session,
+    User, UserPatch, UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 
 // ---------------------------------------------------------------------------
@@ -394,6 +395,63 @@ impl AuditLog for MockAuditLog {
         }
         self.events.lock().await.push(event.clone());
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockRateLimiter
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct MockRateLimiter {
+    decisions: Arc<Mutex<Vec<RateLimitDecision>>>,
+    keys: Arc<Mutex<Vec<RateLimitKey>>>,
+    fail_mode: Arc<Mutex<bool>>,
+}
+
+impl MockRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            decisions: Arc::new(Mutex::new(Vec::new())),
+            keys: Arc::new(Mutex::new(Vec::new())),
+            fail_mode: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    pub async fn set_decisions(&self, decisions: Vec<RateLimitDecision>) {
+        *self.decisions.lock().await = decisions;
+    }
+
+    pub async fn keys(&self) -> Vec<RateLimitKey> {
+        self.keys.lock().await.clone()
+    }
+
+    pub async fn set_fail_mode(&self, fail: bool) {
+        *self.fail_mode.lock().await = fail;
+    }
+}
+
+impl Default for MockRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl RateLimiter for MockRateLimiter {
+    async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock rate limiter failure".into(),
+            });
+        }
+        self.keys.lock().await.push(key.clone());
+        Ok(self
+            .decisions
+            .lock()
+            .await
+            .pop()
+            .unwrap_or(RateLimitDecision::Allow))
     }
 }
 

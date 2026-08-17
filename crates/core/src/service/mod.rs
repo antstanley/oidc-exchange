@@ -5,6 +5,7 @@ pub mod revoke;
 pub mod user_admin;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -12,8 +13,22 @@ use chrono::Utc;
 
 use crate::config::AppConfig;
 use crate::domain::{
-    AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
+    AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, ClientAddr,
+    SecurityEvent, User,
 };
+
+/// Total mandatory audit sink failures observed by this process.
+static AUDIT_SINK_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Whether a mandatory audit sink failure has degraded this process's health.
+static AUDIT_SINK_DEGRADED: AtomicBool = AtomicBool::new(false);
+
+pub fn audit_sink_failures_total() -> u64 {
+    AUDIT_SINK_FAILURES_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn audit_sink_degraded() -> bool {
+    AUDIT_SINK_DEGRADED.load(Ordering::Acquire)
+}
 use crate::error::{Error, Result};
 use crate::ports::{
     AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
@@ -99,10 +114,8 @@ impl AppService {
         Ok((access_token, access_ttl_secs))
     }
 
+    /// Emits an operational audit event through the threshold-filtered, best-effort path.
     pub async fn emit_audit(&self, event: AuditEvent) -> Result<()> {
-        // Pre-dispatch emit-threshold filter: events strictly less severe
-        // than `[audit] emit_threshold` are dropped before any adapter ever
-        // sees them, independently of the blocking-threshold decision below.
         let emit_threshold =
             parse_severity(&self.config.audit.emit_threshold).unwrap_or(AuditSeverity::Info);
         if event.severity as u8 > emit_threshold as u8 {
@@ -111,37 +124,68 @@ impl AppService {
 
         match self.audit.emit(&event).await {
             Ok(()) => Ok(()),
-            Err(e) => {
-                // Always emit via tracing as fallback (captured by Lambda, CloudWatch, etc.)
-                let serialized =
-                    serde_json::to_string(&event).unwrap_or_else(|_| format!("{:?}", event));
-
-                if event.severity as u8 <= AuditSeverity::Error as u8 {
-                    tracing::error!(audit_fallback = true, "{serialized}");
-                } else {
-                    tracing::info!(audit_fallback = true, "{serialized}");
-                }
-
-                // Parse blocking threshold from config
+            Err(error) => {
+                self.log_audit_fallback(&event);
                 let threshold = parse_severity(&self.config.audit.blocking_threshold)
                     .unwrap_or(AuditSeverity::Warning);
-
                 if event.severity as u8 <= threshold as u8 {
-                    // Severity meets blocking threshold — fail the operation
-                    Err(e)
+                    Err(error)
                 } else {
-                    tracing::warn!(error = %e, "audit provider down, event emitted to std stream");
+                    tracing::warn!(error = %error, "best-effort audit provider down");
                     Ok(())
                 }
             }
         }
     }
+
+    /// Emits a security event through the mandatory path, bypassing audit thresholds.
+    ///
+    /// The event classification is closed by [`SecurityEvent`]; callers can only supply
+    /// the safe context used to construct its fixed durable representation.
+    pub async fn emit_security_event(
+        &self,
+        event: SecurityEvent,
+        outcome: AuditOutcome,
+        actor: Option<String>,
+        provider: Option<String>,
+        client_addr: ClientAddr,
+        user_agent: Option<String>,
+    ) -> Result<()> {
+        let event = event.into_audit_event(outcome, actor, provider, client_addr, user_agent);
+        match self.audit.emit(&event).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                AUDIT_SINK_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+                AUDIT_SINK_DEGRADED.store(true, Ordering::Release);
+                self.log_audit_fallback(&event);
+                if self.config.audit.durability.eq_ignore_ascii_case("enforce") {
+                    Err(Error::SecurityAuditDurability {
+                        detail: error.to_string(),
+                    })
+                } else {
+                    tracing::error!(
+                        error = %error,
+                        audit_durability_degraded = true,
+                        "mandatory security audit provider down"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn log_audit_fallback(&self, event: &AuditEvent) {
+        let serialized = serde_json::to_string(event).unwrap_or_else(|_| format!("{:?}", event));
+        if event.severity as u8 <= AuditSeverity::Error as u8 {
+            tracing::error!(audit_fallback = true, "{serialized}");
+        } else {
+            tracing::info!(audit_fallback = true, "{serialized}");
+        }
+    }
 }
 
-/// Build an [`AuditEvent`]. `ip_address` and `user_agent` come from the
-/// caller's client context (the `AuditContext` middleware at the HTTP edge);
-/// the `AuditEvent` shape has no `device_id` field, so device identifiers are
-/// recorded on the `Session` only, never on audit events.
+/// Build a best-effort [`AuditEvent`]. The address is rendered with its provenance;
+/// device identifiers remain session-only data and are never included in audit records.
 #[allow(clippy::too_many_arguments)]
 pub fn create_audit_event(
     event_type: AuditEventType,
@@ -149,7 +193,7 @@ pub fn create_audit_event(
     outcome: AuditOutcome,
     actor: Option<String>,
     provider: Option<String>,
-    ip_address: Option<String>,
+    client_addr: ClientAddr,
     user_agent: Option<String>,
 ) -> AuditEvent {
     AuditEvent {
@@ -159,7 +203,8 @@ pub fn create_audit_event(
         event_type,
         actor,
         provider,
-        ip_address,
+        ip_address: client_addr.audit_address(),
+        ip_address_source: client_addr.source(),
         user_agent,
         detail: HashMap::new(),
         outcome,

@@ -314,7 +314,7 @@ async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
     );
     assert_eq!(events[0].event_type, AuditEventType::ValidationFailed);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.21"));
@@ -428,7 +428,7 @@ async fn refresh_suspended_user_emits_user_suspended_event() {
     );
     assert_eq!(events[0].event_type, AuditEventType::UserSuspended);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));

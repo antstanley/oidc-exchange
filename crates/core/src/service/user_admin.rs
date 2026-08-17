@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::domain::{
-    AuditEventType, AuditOutcome, AuditSeverity, NewUser, User, UserPatch, UserStatus,
+    AuditEventType, AuditOutcome, AuditSeverity, ClientAddr, NewUser, User, UserPatch, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::{create_audit_event, AppService};
@@ -28,7 +28,7 @@ impl AppService {
             AuditOutcome::Success,
             Some(user.id.clone()),
             Some(user.provider.clone()),
-            None,
+            ClientAddr::Unknown,
             None,
         ))
         .await?;
@@ -127,7 +127,7 @@ impl AppService {
             AuditOutcome::Success,
             Some(user.id.clone()),
             Some(user.provider.clone()),
-            None,
+            ClientAddr::Unknown,
             None,
         ))
         .await?;
@@ -167,7 +167,7 @@ impl AppService {
             AuditOutcome::Success,
             Some(user.id.clone()),
             Some(user.provider.clone()),
-            None,
+            ClientAddr::Unknown,
             None,
         ))
         .await?;
@@ -304,7 +304,7 @@ impl AppService {
             AuditOutcome::Success,
             Some(user.id.clone()),
             Some(user.provider.clone()),
-            None,
+            ClientAddr::Unknown,
             None,
         );
         event.detail.insert(

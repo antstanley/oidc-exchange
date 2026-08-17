@@ -2,7 +2,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{AuditEventType, AuditOutcome, AuditSeverity};
+use crate::domain::{AuditEventType, AuditOutcome, AuditSeverity, ClientAddr};
 use crate::error::Result;
 use crate::service::{create_audit_event, AppService};
 
@@ -57,7 +57,11 @@ impl AppService {
                         AuditOutcome::Success,
                         Some(user_id),
                         None,
-                        request.ip_address.clone(),
+                        request
+                            .ip_address
+                            .clone()
+                            .and_then(ClientAddr::asserted)
+                            .unwrap_or(ClientAddr::Unknown),
                         request.user_agent.clone(),
                     ))
                     .await?;
@@ -118,7 +122,11 @@ impl AppService {
                 AuditOutcome::Success,
                 Some(session.user_id.clone()),
                 None,
-                request.ip_address.clone(),
+                request
+                    .ip_address
+                    .clone()
+                    .and_then(ClientAddr::asserted)
+                    .unwrap_or(ClientAddr::Unknown),
                 request.user_agent.clone(),
             ))
             .await?;

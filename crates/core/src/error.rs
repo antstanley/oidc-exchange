@@ -47,6 +47,9 @@ pub enum Error {
     #[error("audit error: {detail}")]
     AuditError { detail: String },
 
+    #[error("mandatory security audit could not be persisted: {detail}")]
+    SecurityAuditDurability { detail: String },
+
     #[error("sync error: {detail}")]
     SyncError { detail: String },
 

@@ -203,6 +203,8 @@ impl Default for TokenConfig {
 pub struct AuditConfig {
     pub adapter: String,
     pub blocking_threshold: String,
+    /// Mandatory security audit failure policy: `observe` or `enforce`.
+    pub durability: String,
     /// Severity floor for emitting events at all: events strictly less
     /// severe than this threshold are dropped before any adapter dispatch,
     /// independently of `blocking_threshold`. Parsed with
@@ -216,6 +218,7 @@ impl Default for AuditConfig {
         Self {
             adapter: "noop".to_string(),
             blocking_threshold: "warning".to_string(),
+            durability: "observe".to_string(),
             emit_threshold: "info".to_string(),
             sqs: None,
         }

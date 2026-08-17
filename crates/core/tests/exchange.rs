@@ -1216,7 +1216,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
     );
     assert_eq!(events[0].event_type, AuditEventType::UserSuspended);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
@@ -1277,7 +1277,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
     );
     assert_eq!(events[0].event_type, AuditEventType::RegistrationDenied);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.12"));

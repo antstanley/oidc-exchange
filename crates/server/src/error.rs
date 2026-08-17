@@ -135,6 +135,7 @@ fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
         Error::StoreError { .. }
         | Error::KeyError { .. }
         | Error::AuditError { .. }
+        | Error::SecurityAuditDurability { .. }
         | Error::SyncError { .. }
         | Error::ConfigError { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
