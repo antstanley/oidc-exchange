@@ -9,7 +9,8 @@ use tower_http::timeout::TimeoutLayer;
 use oidc_exchange_core::config::{AppConfig, ProviderConfig};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 use oidc_exchange_core::service::AppService;
 
@@ -17,6 +18,7 @@ use crate::middleware::audit_context::audit_context_layer;
 use crate::middleware::base_path::with_base_path_strip;
 use crate::middleware::error_handler::panic_handler;
 use crate::middleware::request_id::request_id_layer;
+use crate::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets};
 use crate::routes;
 use crate::state::AppState;
 
@@ -329,6 +331,9 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config.clone()),
+        rate_limiter: Arc::from(
+            build_rate_limiter(config).expect("validated rate-limit config at router construction"),
+        ),
     };
 
     let mut app: Router<AppState> = Router::new();
@@ -621,11 +626,35 @@ fn build_key_manager(
     }
 }
 
+/// Select a limiter at the server construction boundary. The resulting port is
+/// retained in `AppState` for future core/router consumers.
+fn build_rate_limiter(
+    config: &AppConfig,
+) -> Result<Box<dyn RateLimiter>, Box<dyn std::error::Error>> {
+    if !config.rate_limit.enabled || config.rate_limit.store == "none" {
+        return Ok(Box::new(
+            oidc_exchange_adapters::noop::NoopRateLimiter::new(),
+        ));
+    }
+    let window_secs = oidc_exchange_core::service::parse_duration_secs(&config.rate_limit.window)
+        .map_err(Box::<dyn std::error::Error>::from)?;
+    Ok(Box::new(FixedWindowRateLimiter::new(
+        std::time::Duration::from_secs(window_secs),
+        RateLimitBudgets {
+            per_ip: config.rate_limit.per_ip,
+            per_ip_failures: config.rate_limit.per_ip_failures,
+            per_subject: config.rate_limit.per_subject,
+            per_provider: config.rate_limit.per_provider,
+        },
+        config.rate_limit.max_entries,
+    )?))
+}
+
 async fn build_audit_log(
     config: &AppConfig,
 ) -> Result<Box<dyn AuditLog>, Box<dyn std::error::Error>> {
     match config.audit.adapter.as_str() {
-        "noop" | "" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
+        "noop" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
         "stdout" | "stderr" | "auto" => {
             use oidc_exchange_adapters::stdout_audit::{OutputTarget, StdoutAuditLog};
             let target = match config.audit.adapter.as_str() {
@@ -1234,6 +1263,20 @@ mod load_config_tests {
             config.internal_api.auth_method.as_deref(),
             Some("${LITERAL}")
         );
+    }
+
+    #[test]
+    fn rate_limit_budget_errors_name_the_offending_field() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            "[rate_limit]\nper_subject = 1000001\n",
+        );
+
+        let err = load_config_from_dir(dir_str(dir.path())).expect_err("invalid budget rejected");
+        assert!(err.to_string().contains("rate_limit.per_subject"));
     }
 
     // -----------------------------------------------------------------

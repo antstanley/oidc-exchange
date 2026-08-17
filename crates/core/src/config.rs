@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use ipnet::IpNet;
+
 use crate::error::Error;
 
 /// Top-level application configuration, matching the TOML structure.
@@ -11,6 +13,7 @@ pub struct AppConfig {
     pub registration: RegistrationConfig,
     pub token: TokenConfig,
     pub audit: AuditConfig,
+    pub rate_limit: RateLimitConfig,
     pub key_manager: KeyManagerConfig,
     pub repository: RepositoryConfig,
     #[serde(default)]
@@ -65,6 +68,10 @@ impl AppConfig {
             "token.refresh_token_ttl",
         )?;
 
+        validate_audit_config(&self.audit)?;
+        validate_rate_limit_config(&self.rate_limit)?;
+        validate_trusted_proxies(&self.server)?;
+
         if let Some(allowlist) = &self.registration.domain_allowlist {
             for entry in allowlist {
                 validate_allowlist_entry(entry)?;
@@ -96,6 +103,105 @@ impl AppConfig {
 /// Rewrap a `parse_duration_secs` failure with the config field it came
 /// from, so the reported `ConfigError` names the offending TOML key rather
 /// than just the raw duration string.
+fn validate_audit_config(audit: &AuditConfig) -> Result<(), Error> {
+    if audit.adapter.is_empty() {
+        return Err(Error::ConfigError {
+            detail: "audit.adapter must not be empty".to_string(),
+        });
+    }
+    if !matches!(
+        audit.adapter.as_str(),
+        "noop" | "stdout" | "stderr" | "auto" | "sqs"
+    ) {
+        return Err(Error::ConfigError {
+            detail: format!("audit.adapter {:?} is not a known adapter", audit.adapter),
+        });
+    }
+    if !matches!(audit.durability.as_str(), "observe" | "enforce") {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "audit.durability {:?} must be \"observe\" or \"enforce\"",
+                audit.durability
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_rate_limit_config(rate_limit: &RateLimitConfig) -> Result<(), Error> {
+    if !matches!(rate_limit.store.as_str(), "in_process" | "none") {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "rate_limit.store {:?} must be \"in_process\" or \"none\"",
+                rate_limit.store
+            ),
+        });
+    }
+    if rate_limit.enabled && rate_limit.store == "none" {
+        return Err(Error::ConfigError {
+            detail: "rate_limit.store must be \"in_process\" when rate_limit.enabled is true"
+                .to_string(),
+        });
+    }
+    let window_secs = prefix_config_error(
+        crate::service::parse_duration_secs(&rate_limit.window),
+        "rate_limit.window",
+    )?;
+    if !(MIN_RATE_LIMIT_WINDOW_SECS..=MAX_RATE_LIMIT_WINDOW_SECS).contains(&window_secs) {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "rate_limit.window must be between {MIN_RATE_LIMIT_WINDOW_SECS}s and {MAX_RATE_LIMIT_WINDOW_SECS}s"
+            ),
+        });
+    }
+    if !(MIN_RATE_LIMIT_MAX_ENTRIES..=MAX_RATE_LIMIT_MAX_ENTRIES).contains(&rate_limit.max_entries)
+    {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "rate_limit.max_entries must be between {MIN_RATE_LIMIT_MAX_ENTRIES} and {MAX_RATE_LIMIT_MAX_ENTRIES}"
+            ),
+        });
+    }
+    if !(MIN_RATE_LIMIT_MAX_CONCURRENT_REQUESTS..=MAX_RATE_LIMIT_MAX_CONCURRENT_REQUESTS)
+        .contains(&rate_limit.max_concurrent_requests)
+    {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "rate_limit.max_concurrent_requests must be between {MIN_RATE_LIMIT_MAX_CONCURRENT_REQUESTS} and {MAX_RATE_LIMIT_MAX_CONCURRENT_REQUESTS}"
+            ),
+        });
+    }
+    for (field, budget) in [
+        ("rate_limit.per_ip", rate_limit.per_ip),
+        ("rate_limit.per_ip_failures", rate_limit.per_ip_failures),
+        ("rate_limit.per_subject", rate_limit.per_subject),
+        ("rate_limit.per_provider", rate_limit.per_provider),
+    ] {
+        if budget > MAX_RATE_LIMIT_BUDGET {
+            return Err(Error::ConfigError {
+                detail: format!("{field} must be between 0 (disabled) and {MAX_RATE_LIMIT_BUDGET}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_trusted_proxies(server: &ServerConfig) -> Result<(), Error> {
+    if !(1..=MAX_TRUSTED_PROXY_HOPS).contains(&server.trusted_proxy_hops) {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "server.trusted_proxy_hops must be between 1 and {MAX_TRUSTED_PROXY_HOPS}"
+            ),
+        });
+    }
+    for cidr in &server.trusted_proxies {
+        cidr.parse::<IpNet>().map_err(|_| Error::ConfigError {
+            detail: format!("server.trusted_proxies entry {cidr:?} must be a CIDR"),
+        })?;
+    }
+    Ok(())
+}
+
 fn prefix_config_error<T>(result: Result<T, Error>, field: &str) -> Result<T, Error> {
     result.map_err(|err| match err {
         Error::ConfigError { detail } => Error::ConfigError {
@@ -147,6 +253,10 @@ pub struct ServerConfig {
     /// an API Gateway stage, where the platform includes the stage name in the request path
     /// but the app's routes are defined without it.
     pub base_path: Option<String>,
+    /// CIDRs of peers whose forwarding headers may be trusted by HTTP middleware.
+    pub trusted_proxies: Vec<String>,
+    /// One-based number of `X-Forwarded-For` entries selected from the right.
+    pub trusted_proxy_hops: usize,
 }
 
 impl Default for ServerConfig {
@@ -158,6 +268,8 @@ impl Default for ServerConfig {
             role: "all".to_string(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT.to_string(),
             base_path: None,
+            trusted_proxies: Vec::new(),
+            trusted_proxy_hops: DEFAULT_TRUSTED_PROXY_HOPS,
         }
     }
 }
@@ -216,11 +328,58 @@ pub struct AuditConfig {
 impl Default for AuditConfig {
     fn default() -> Self {
         Self {
-            adapter: "noop".to_string(),
+            adapter: "stdout".to_string(),
             blocking_threshold: "warning".to_string(),
             durability: "observe".to_string(),
             emit_threshold: "info".to_string(),
             sqs: None,
+        }
+    }
+}
+
+/// Default number of trusted forwarding hops selected from the right.
+pub const DEFAULT_TRUSTED_PROXY_HOPS: usize = 1;
+
+/// Maximum trusted-proxy hop count accepted at startup. This bounds future header traversal.
+pub const MAX_TRUSTED_PROXY_HOPS: usize = 16;
+/// Maximum entries retained by the in-process fixed-window limiter.
+pub const DEFAULT_RATE_LIMIT_MAX_ENTRIES: usize = 10_000;
+pub const MIN_RATE_LIMIT_MAX_ENTRIES: usize = 1;
+pub const MAX_RATE_LIMIT_MAX_ENTRIES: usize = 100_000;
+pub const MIN_RATE_LIMIT_WINDOW_SECS: u64 = 1;
+pub const MAX_RATE_LIMIT_WINDOW_SECS: u64 = 24 * 60 * 60;
+pub const MIN_RATE_LIMIT_MAX_CONCURRENT_REQUESTS: usize = 1;
+pub const MAX_RATE_LIMIT_MAX_CONCURRENT_REQUESTS: usize = 4_096;
+/// Maximum requests accepted for one enabled fixed-window scope.
+pub const MAX_RATE_LIMIT_BUDGET: u64 = 1_000_000;
+
+/// Fixed-window rate-limit settings. A scope budget of zero intentionally disables that scope.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    pub enabled: bool,
+    pub store: String,
+    pub window: String,
+    pub per_ip: u64,
+    pub per_ip_failures: u64,
+    pub per_subject: u64,
+    pub per_provider: u64,
+    pub max_concurrent_requests: usize,
+    pub max_entries: usize,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            store: "in_process".to_string(),
+            window: "1m".to_string(),
+            per_ip: 60,
+            per_ip_failures: 10,
+            per_subject: 10,
+            per_provider: 600,
+            max_concurrent_requests: 256,
+            max_entries: DEFAULT_RATE_LIMIT_MAX_ENTRIES,
         }
     }
 }
@@ -438,6 +597,8 @@ mod tests {
         assert_eq!(config.server.request_timeout, DEFAULT_REQUEST_TIMEOUT);
         assert_eq!(config.server.request_timeout, "30s");
         assert!(config.server.base_path.is_none());
+        assert!(config.server.trusted_proxies.is_empty());
+        assert_eq!(config.server.trusted_proxy_hops, DEFAULT_TRUSTED_PROXY_HOPS);
 
         // Registration defaults
         assert_eq!(config.registration.mode, "open");
@@ -450,9 +611,23 @@ mod tests {
         assert!(config.token.custom_claims.is_none());
 
         // Audit defaults
-        assert_eq!(config.audit.adapter, "noop");
+        assert_eq!(config.audit.adapter, "stdout");
         assert_eq!(config.audit.blocking_threshold, "warning");
+        assert_eq!(config.audit.durability, "observe");
         assert!(config.audit.sqs.is_none());
+
+        assert!(config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.store, "in_process");
+        assert_eq!(config.rate_limit.window, "1m");
+        assert_eq!(config.rate_limit.per_ip, 60);
+        assert_eq!(config.rate_limit.per_ip_failures, 10);
+        assert_eq!(config.rate_limit.per_subject, 10);
+        assert_eq!(config.rate_limit.per_provider, 600);
+        assert_eq!(config.rate_limit.max_concurrent_requests, 256);
+        assert_eq!(
+            config.rate_limit.max_entries,
+            DEFAULT_RATE_LIMIT_MAX_ENTRIES
+        );
 
         // Telemetry defaults
         assert!(!config.telemetry.enabled);
@@ -748,6 +923,108 @@ host = "0.0.0.0"
             "well-formed config must validate: {result:?}"
         );
         assert_eq!(config.server.role, "all");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_audit_rate_limit_and_proxy_settings() {
+        let mut config = AppConfig::default();
+        config.audit.adapter = String::new();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("audit.adapter"));
+
+        let mut config = AppConfig::default();
+        config.audit.durability = "best_effort".to_string();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("audit.durability"));
+
+        let mut config = AppConfig::default();
+        config.rate_limit.window = "not-a-duration".to_string();
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("rate_limit.window"));
+
+        let mut config = AppConfig::default();
+        config.rate_limit.per_ip = MAX_RATE_LIMIT_BUDGET + 1;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("rate_limit.per_ip"));
+
+        let mut config = AppConfig::default();
+        config.rate_limit.max_entries = 0;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_entries"));
+
+        let mut config = AppConfig::default();
+        config.rate_limit.max_entries = MAX_RATE_LIMIT_MAX_ENTRIES + 1;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_entries"));
+
+        let mut config = AppConfig::default();
+        config.rate_limit.max_concurrent_requests = 0;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_concurrent_requests"));
+
+        let mut config = AppConfig::default();
+        config.server.trusted_proxies = vec!["not-a-cidr".to_string()];
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("trusted_proxies"));
+
+        let mut config = AppConfig::default();
+        config.server.trusted_proxy_hops = 0;
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("trusted_proxy_hops"));
+    }
+
+    #[test]
+    fn validate_accepts_rate_limit_and_proxy_boundaries() {
+        let mut config = AppConfig::default();
+        config.server.trusted_proxies =
+            vec!["192.0.2.0/24".to_string(), "2001:db8::/32".to_string()];
+        config.server.trusted_proxy_hops = MAX_TRUSTED_PROXY_HOPS;
+        config.rate_limit.window = format!("{MAX_RATE_LIMIT_WINDOW_SECS}s");
+        config.rate_limit.max_entries = MAX_RATE_LIMIT_MAX_ENTRIES;
+        config.rate_limit.max_concurrent_requests = MAX_RATE_LIMIT_MAX_CONCURRENT_REQUESTS;
+        config.rate_limit.per_ip = 0;
+        config.rate_limit.per_ip_failures = 0;
+        config.rate_limit.per_subject = 0;
+        config.rate_limit.per_provider = 0;
+        assert!(config.validate().is_ok());
+
+        config.rate_limit.enabled = false;
+        config.rate_limit.store = "none".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_enabled_none_rate_limit_store() {
+        let mut config = AppConfig::default();
+        config.rate_limit.store = "none".to_string();
+        assert!(config.validate().is_err());
     }
 
     #[test]

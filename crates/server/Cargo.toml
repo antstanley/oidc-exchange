@@ -8,6 +8,7 @@ oidc-exchange-core.workspace = true
 oidc-exchange-adapters.workspace = true
 oidc-exchange-providers.workspace = true
 serde.workspace = true
+async-trait.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

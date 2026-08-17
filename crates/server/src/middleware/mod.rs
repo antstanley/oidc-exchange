@@ -3,3 +3,4 @@ pub mod base_path;
 pub mod error_handler;
 pub mod internal_auth;
 pub mod request_id;
+pub mod throttle;
