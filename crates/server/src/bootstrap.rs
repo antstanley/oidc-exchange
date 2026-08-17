@@ -63,6 +63,19 @@ pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     load_config_from_dir(CONFIG_DIR)
 }
 
+/// Load and resolve a single TOML file with structural environment overrides.
+/// This is intentionally the same source shape used by inline FFI TOML.
+pub fn load_config_from_file(path: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let builder = Config::builder()
+        .add_source(File::from(std::path::Path::new(path)).format(FileFormat::Toml))
+        .add_source(
+            Environment::with_prefix(ENV_OVERRIDE_PREFIX)
+                .separator(ENV_OVERRIDE_SEPARATOR)
+                .try_parsing(true),
+        );
+    resolve_config(builder)
+}
+
 /// Core of [`load_config`], parameterized over the config directory so tests
 /// can point it at a fixture directory instead of the process's `config/`.
 ///
@@ -87,7 +100,7 @@ pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 /// With no files present and no overriding environment variables, the
 /// deserialized result is `AppConfig::default()` (every field carries
 /// `#[serde(default)]`).
-fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+pub fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let mut builder = Config::builder().add_source(
         File::with_name(&format!("{config_dir}/default"))
             .format(FileFormat::Toml)
@@ -110,11 +123,7 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
             .try_parsing(true),
     );
 
-    let mut merged = builder.build()?;
-    resolve_placeholders(&mut merged.cache)?;
-    let config: AppConfig = merged.try_deserialize()?;
-    config.validate()?;
-    Ok(config)
+    resolve_config(builder)
 }
 
 /// Parse a TOML string directly into an `AppConfig`, validating it exactly as
@@ -122,7 +131,24 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
 /// (`OidcExchange::new`/`from_file`) is rejected at construction on the same
 /// terms as an invalid config on disk would be rejected at server startup.
 pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let config: AppConfig = toml::from_str(toml_str)?;
+    let builder = Config::builder()
+        .add_source(File::from_str(toml_str, FileFormat::Toml))
+        .add_source(
+            Environment::with_prefix(ENV_OVERRIDE_PREFIX)
+                .separator(ENV_OVERRIDE_SEPARATOR)
+                .try_parsing(true),
+        );
+    resolve_config(builder)
+}
+
+/// Apply the one common configuration tail after an entry point has assembled
+/// its sources: merge, resolve placeholders, deserialize, then validate.
+fn resolve_config(
+    builder: config::ConfigBuilder<config::builder::DefaultState>,
+) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let mut merged = builder.build()?;
+    resolve_placeholders(&mut merged.cache, "<root>")?;
+    let config: AppConfig = merged.try_deserialize()?;
     config.validate()?;
     Ok(config)
 }
@@ -138,22 +164,24 @@ pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Err
 /// the whole resolution with `Error::ConfigError` — the literal placeholder
 /// text must never survive into a live secret. `$${` is the escape for a
 /// literal `${`; the escaped text is never looked up in the environment.
-fn resolve_placeholders(value: &mut Value) -> Result<(), Error> {
+fn resolve_placeholders(value: &mut Value, path: &str) -> Result<(), Error> {
     match &mut value.kind {
-        ValueKind::String(s) => {
-            *s = resolve_placeholders_in_str(s)?;
-        }
+        ValueKind::String(s) => *s = resolve_placeholders_in_str(s, path)?,
         ValueKind::Table(table) => {
-            for nested in table.values_mut() {
-                resolve_placeholders(nested)?;
+            for (key, nested) in table.iter_mut() {
+                let nested_path = if path == "<root>" {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                resolve_placeholders(nested, &nested_path)?;
             }
         }
         ValueKind::Array(items) => {
-            for item in items.iter_mut() {
-                resolve_placeholders(item)?;
+            for (index, item) in items.iter_mut().enumerate() {
+                resolve_placeholders(item, &format!("{path}[{index}]"))?;
             }
         }
-        // Non-string scalars (bool, numbers, nil) carry no placeholders.
         _ => {}
     }
     Ok(())
@@ -161,7 +189,7 @@ fn resolve_placeholders(value: &mut Value) -> Result<(), Error> {
 
 /// Resolve every `${VAR}` placeholder and `$${` escape inside a single
 /// string, returning the rewritten string.
-fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
+fn resolve_placeholders_in_str(input: &str, path: &str) -> Result<String, Error> {
     let bytes = input.as_bytes();
     let mut output = String::with_capacity(input.len());
     let mut i = 0;
@@ -182,18 +210,31 @@ fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
 
         // Placeholder open: `${NAME}`.
         if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
-            if let Some((name, consumed)) = scan_placeholder_name(&input[i + 2..]) {
-                let resolved = std::env::var(name).map_err(|_| Error::ConfigError {
-                    detail: format!(
-                        "config placeholder '${{{name}}}' references unset environment \
-                         variable '{name}'"
-                    ),
+            let (name, consumed) =
+                scan_placeholder_name(&input[i + 2..]).ok_or_else(|| Error::ConfigError {
+                    detail: format!("malformed placeholder at config path '{path}'"),
                 })?;
-                output.push_str(&resolved);
-                i += 2 + consumed;
-                debug_assert!(i > before, "placeholder branch must consume input");
-                continue;
+            if name.is_empty() {
+                return Err(Error::ConfigError {
+                    detail: format!("empty placeholder name at config path '{path}'"),
+                });
             }
+            let resolved = std::env::var(name).map_err(|_| Error::ConfigError {
+                detail: format!(
+                    "config placeholder '${{{name}}}' at config path '{path}' references unset environment variable '{name}'"
+                ),
+            })?;
+            if resolved.is_empty() {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "config placeholder '${{{name}}}' at config path '{path}' references empty environment variable '{name}'"
+                    ),
+                });
+            }
+            output.push_str(&resolved);
+            i += 2 + consumed;
+            debug_assert!(i > before, "placeholder branch must consume input");
+            continue;
         }
 
         // Ordinary text: copy one full UTF-8 scalar value forward. `i` is
@@ -218,8 +259,7 @@ fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
 /// Scan forward from just past a `${` opener for its closing `}`, bounded by
 /// [`PLACEHOLDER_NAME_LEN_MAX`]. Returns the placeholder name and the number
 /// of bytes consumed (name plus the closing brace), or `None` when no `}` is
-/// found within the bound — in which case the `${` is left as ordinary text
-/// rather than treated as a malformed placeholder.
+/// found within the bound. Callers reject that as malformed configuration.
 fn scan_placeholder_name(rest: &str) -> Option<(&str, usize)> {
     let bytes = rest.as_bytes();
     let scan_bound = bytes.len().min(PLACEHOLDER_NAME_LEN_MAX);
@@ -1335,6 +1375,70 @@ mod load_config_tests {
         let config = parse_config(toml_str).expect("a well-formed config must parse and validate");
 
         assert_eq!(config.server.role, "all");
+    }
+
+    #[test]
+    fn parse_config_resolves_placeholders_for_ffi_callers() {
+        let _env_lock = lock_test_environment();
+        let _guard = EnvVarGuard::set(&[("INTERNAL_API_SECRET", "ffi-secret")]);
+        let config = parse_config(
+            r#"
+                [server]
+                role = "all"
+                [internal_api]
+                enabled = true
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        )
+        .expect("FFI TOML placeholders must resolve before validation");
+
+        assert_eq!(
+            config.internal_api.shared_secret.as_deref(),
+            Some("ffi-secret")
+        );
+    }
+
+    #[test]
+    fn parse_config_applies_structural_environment_overrides_for_ffi_callers() {
+        let _env_lock = lock_test_environment();
+        let _guard =
+            EnvVarGuard::set(&[("OIDC_EXCHANGE__REGISTRATION__MODE", "existing_users_only")]);
+        let config = parse_config("[server]\nrole = \"all\"")
+            .expect("FFI TOML must receive structural environment overrides");
+
+        assert_eq!(config.registration.mode, "existing_users_only");
+    }
+
+    #[test]
+    fn parse_config_rejects_empty_placeholder_values_with_a_path() {
+        let _env_lock = lock_test_environment();
+        let _guard = EnvVarGuard::set(&[("INTERNAL_API_SECRET", "")]);
+        let err = parse_config(
+            r#"
+                [server]
+                role = "all"
+                [internal_api]
+                enabled = true
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        )
+        .expect_err("empty placeholder values must fail closed");
+        let message = err.to_string();
+        assert!(message.contains("empty environment variable 'INTERNAL_API_SECRET'"));
+        assert!(message.contains("internal_api.shared_secret"));
+        assert!(!message.contains("ffi-secret"));
+    }
+
+    #[test]
+    fn parse_config_rejects_malformed_and_empty_placeholders() {
+        let _env_lock = lock_test_environment();
+        for placeholder in ["${", "${}"] {
+            let err = parse_config(&format!(
+                "[server]\nrole = \"all\"\n[internal_api]\nenabled = true\nshared_secret = \"{placeholder}\""
+            ))
+            .expect_err("malformed placeholders must fail closed");
+            assert!(err.to_string().contains("internal_api.shared_secret"));
+        }
     }
 }
 
