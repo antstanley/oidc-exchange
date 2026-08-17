@@ -1,6 +1,6 @@
 # Change: Resolve `${VAR}` placeholders on every configuration entry point
 
-**Status:** Proposed · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Target:** crates/server, bindings/* (service, bindings)
+**Status:** Merged · **Date:** 2026-08-05 · **Merged:** 2026-08-05 · **Owner:** Ant Stanley · **Target:** crates/server, bindings/* (service, bindings)
 
 Route every configuration entry point through one shared resolve step — fail-closed `${VAR}`
 placeholder resolution, `OIDC_EXCHANGE__{section}__{key}` overrides, then validation — so the
@@ -29,7 +29,7 @@ repository prints verbatim in its own guides, and `internal_auth.rs` then compar
 against it in constant time — correctly, against the wrong string. `user_sync.webhook.secret`
 becomes a published HMAC key. Anything that reads that config, or an error that echoes it, yields
 a working credential. Evidence:
-[`g2-parse-config-placeholder-gap`](../../.security/oidc-exchange/53cbdec9_20260804T102454Z/findings/g2-parse-config-placeholder-gap/g2-parse-config-placeholder-gap.md).
+`g2-parse-config-placeholder-gap` (tracked in the security findings archive).
 
 The fix is not three parallel patches. Adding a `resolve_placeholders` call to `parse_config`
 restores parity between exactly today's two functions and leaves the next entry point — the
@@ -39,8 +39,8 @@ the resolver's own doc comment (`:137-140`) asserted the invariant while nothing
 both paths. What removes the class is a single resolve that owns everything after the source
 merge, so an entry point's only remaining choice is which sources it layers, and there is no way
 to obtain a config that did not pass through resolution. That is Option 2 of
-[`hardening/proposals/config-closed-domain.md`](../../.security/oidc-exchange/53cbdec9_20260804T102454Z/hardening/proposals/config-closed-domain.md)
-(invariant CV2), and it is the half of that proposal this change lands.
+the `config-closed-domain` hardening proposal (invariant CV2), and it is the half of that
+proposal this change lands.
 
 ---
 
@@ -48,9 +48,9 @@ to obtain a config that did not pass through resolution. That is Option 2 of
 
 | Canonical page | Nature of change |
 | --- | --- |
-| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md) | Modify Loading order into a source-layering list plus one shared resolve; reframe `Validation at load` from `load_config` onto the shared resolve; add `Placeholder resolution` (fail-closed table, residual guard, redaction rule), `Configuration entry points`, and `Pre-flight check (config check)` |
-| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md) | Modify Bootstrap steps 1–2 for the `config check` subcommand and the shared resolve; modify the closing `crates/ffi` paragraph to cover configuration, not just routing |
-| [`.specs/bindings/specs/01-ffi-core.md`](../bindings/specs/01-ffi-core.md) | Modify Responsibilities: config through `new`/`from_file` passes the server's resolve; add a Decision recording the one-resolve/differing-sources rule |
+| [`.specs/service/specs/06-configuration.md`](../../service/specs/06-configuration.md) | Modify Loading order into a source-layering list plus one shared resolve; reframe `Validation at load` from `load_config` onto the shared resolve; add `Placeholder resolution` (fail-closed table, residual guard, redaction rule), `Configuration entry points`, and `Pre-flight check (config check)` |
+| [`.specs/service/specs/04-http-api.md`](../../service/specs/04-http-api.md) | Modify Bootstrap steps 1–2 for the `config check` subcommand and the shared resolve; modify the closing `crates/ffi` paragraph to cover configuration, not just routing |
+| [`.specs/bindings/specs/01-ffi-core.md`](../../bindings/specs/01-ffi-core.md) | Modify Responsibilities: config through `new`/`from_file` passes the server's resolve; add a Decision recording the one-resolve/differing-sources rule |
 
 No new canonical page. The `[providers.<name>]`, `[internal_api]` and Defaults-summary sections of
 06-configuration are untouched — no TOML-visible field changes.
@@ -186,11 +186,11 @@ Steps 1 and 2 currently read "Honour `--version` …" and "`bootstrap::load_conf
 > 1. Handle the CLI surface and exit: `--version` prints the crate version; `config check`
 >    layers configuration sources and runs the same resolve as step 2, prints a redacted summary,
 >    and exits non-zero on any `ConfigError` without building adapters or binding a socket
->    ([06-configuration.md](06-configuration.md)).
+>    (see the canonical 06-configuration Bootstrap contract).
 > 2. `bootstrap::load_config` — layer `config/default.toml`, the
 >    `config/{OIDC_EXCHANGE_ENV}.toml` overlay if set, and `OIDC_EXCHANGE__{section}__{key}` env
 >    overrides, then run the shared resolve: fail-closed `${VAR}` placeholder resolution followed
->    by validation ([06-configuration.md](06-configuration.md)).
+>    by validation (see the canonical 06-configuration Bootstrap contract).
 
 ### `.specs/service/specs/04-http-api.md` → Bootstrap, closing paragraph (Modify)
 
@@ -231,7 +231,8 @@ today's `AppConfig` field-for-field. Narrowing the security-relevant fields to c
 types — `RegistrationMode`, `SigningAlgorithm`, `HttpsUrl`, `AsciiDomainPattern`, typed audit
 severities — is the other half of the hardening proposal's Option 2 and is deliberately **not**
 in this change; it hangs off the seam this change creates and is proposed separately in
-[`2026-08-05-fail_closed_across_config_and_adapters.md`](2026-08-05-fail_closed_across_config_and_adapters.md).
+the sibling `2026-08-05-fail_closed_across_config_and_adapters` change, which is outside this
+workspace.
 
 ---
 
@@ -286,7 +287,7 @@ in this change; it hangs off the seam this change creates and is proposed separa
 ## Merge plan
 
 1. The earlier merge this step used to guard has completed: the `Proposed changes` blocks of
-   [`2026-07-01-complete_config_loading.md`](merged/2026-07-01-complete_config_loading.md) are on
+   the earlier complete-config-loading change are on
    the canonical pages — 06-configuration carries the `Validation at load` section and the
    fail-closed placeholder wording, and 04-http-api's Bootstrap step 2 and internal-route
    conditions are in place. The blocks above are written against that text as it now stands.
@@ -353,7 +354,6 @@ in this change; it hangs off the seam this change creates and is proposed separa
   Lambda or container environment the addon will run in.
 - Does the empty-string rejection need a per-field opt-out for a value legitimately supplied as
   empty through the environment? No shipped config needs one today.
-- Merge coordination:
-  [`2026-08-05-fail_closed_across_config_and_adapters.md`](2026-08-05-fail_closed_across_config_and_adapters.md)
+- Merge coordination: the sibling `2026-08-05-fail_closed_across_config_and_adapters` change
   also modifies 06-configuration's Loading order and rewrites `Validation at load`; whichever of
   the two merges second must refresh its Modify blocks against the merged page.
