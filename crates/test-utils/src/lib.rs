@@ -553,6 +553,7 @@ pub struct MockIdentityProvider {
     provider_id: String,
     exchange_response: Arc<Mutex<Option<ProviderTokens>>>,
     exchange_error: Arc<Mutex<Option<String>>>,
+    exchange_timeout: Arc<Mutex<bool>>,
     claims_response: Arc<Mutex<Option<IdentityClaims>>>,
     exchange_code_calls: Arc<Mutex<usize>>,
     validate_id_token_calls: Arc<Mutex<usize>>,
@@ -579,6 +580,7 @@ impl MockIdentityProvider {
             provider_id: provider_id.to_string(),
             exchange_response: Arc::new(Mutex::new(Some(default_tokens))),
             exchange_error: Arc::new(Mutex::new(None)),
+            exchange_timeout: Arc::new(Mutex::new(false)),
             claims_response: Arc::new(Mutex::new(Some(default_claims))),
             exchange_code_calls: Arc::new(Mutex::new(0)),
             validate_id_token_calls: Arc::new(Mutex::new(0)),
@@ -597,6 +599,11 @@ impl MockIdentityProvider {
         *self.exchange_error.lock().await = Some(detail.into());
     }
 
+    /// Toggle a typed upstream timeout for exchange-code test paths.
+    pub async fn set_exchange_timeout(&self, timeout: bool) {
+        *self.exchange_timeout.lock().await = timeout;
+    }
+
     pub async fn exchange_code_call_count(&self) -> usize {
         *self.exchange_code_calls.lock().await
     }
@@ -610,6 +617,11 @@ impl MockIdentityProvider {
 impl IdentityProvider for MockIdentityProvider {
     async fn exchange_code(&self, _code: &str, _redirect_uri: &str) -> Result<ProviderTokens> {
         *self.exchange_code_calls.lock().await += 1;
+        if *self.exchange_timeout.lock().await {
+            return Err(Error::ProviderTimeout {
+                provider: self.provider_id.clone(),
+            });
+        }
         if let Some(detail) = self.exchange_error.lock().await.clone() {
             return Err(Error::ProviderError {
                 provider: self.provider_id.clone(),

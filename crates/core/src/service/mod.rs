@@ -18,9 +18,9 @@ use crate::domain::{
 };
 
 /// Total mandatory audit sink failures observed by this process.
-static AUDIT_SINK_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub(crate) static AUDIT_SINK_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Whether a mandatory audit sink failure has degraded this process's health.
-static AUDIT_SINK_DEGRADED: AtomicBool = AtomicBool::new(false);
+pub(crate) static AUDIT_SINK_DEGRADED: AtomicBool = AtomicBool::new(false);
 
 pub fn audit_sink_failures_total() -> u64 {
     AUDIT_SINK_FAILURES_TOTAL.load(Ordering::Relaxed)
@@ -179,7 +179,7 @@ impl AppService {
         }
     }
 
-    fn log_audit_fallback(&self, event: &AuditEvent) {
+    pub(crate) fn log_audit_fallback(&self, event: &AuditEvent) {
         let serialized = serde_json::to_string(event).unwrap_or_else(|_| format!("{:?}", event));
         if event.severity as u8 <= AuditSeverity::Error as u8 {
             tracing::error!(audit_fallback = true, "{serialized}");

@@ -4,7 +4,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::{AccessTokenClaims, AuditEventType, AuditOutcome};
 use oidc_exchange_core::ports::{IdentityProvider, SessionRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
@@ -50,10 +50,11 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
 
 /// Builds a service whose `AuditLog` is a caller-supplied `MockAuditLog`, so
 /// the test can inspect recorded events after the revoke call.
-fn make_service_with_audit(
+fn make_service_with_audit_and_config(
     repo: MockRepository,
     provider: MockIdentityProvider,
     audit: MockAuditLog,
+    config: AppConfig,
 ) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -67,8 +68,16 @@ fn make_service_with_audit(
         Box::new(MockUserSync::new()),
         Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
-        make_config(),
+        config,
     )
+}
+
+fn make_service_with_audit(
+    repo: MockRepository,
+    provider: MockIdentityProvider,
+    audit: MockAuditLog,
+) -> AppService {
+    make_service_with_audit_and_config(repo, provider, audit, make_config())
 }
 
 /// Helper: perform an exchange and return the full token response.
@@ -288,6 +297,61 @@ async fn revoke_forged_access_token_does_not_revoke_sessions() {
 }
 
 #[tokio::test]
+async fn revoke_enforce_audit_failure_is_indistinguishable_for_existing_and_unknown_refresh_tokens()
+{
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let config = AppConfig {
+        audit: AuditConfig {
+            durability: "enforce".to_string(),
+            ..Default::default()
+        },
+        ..make_config()
+    };
+    let repo = MockRepository::new();
+    let svc = make_service_with_audit_and_config(
+        repo.clone(),
+        MockIdentityProvider::new("mock"),
+        audit,
+        config,
+    );
+
+    let existing_token = do_exchange(&svc)
+        .await
+        .refresh_token
+        .expect("exchange returns refresh token");
+    audit_clone.set_fail_mode(true).await;
+
+    let existing = svc
+        .revoke(RevokeRequest {
+            token: existing_token,
+            token_type_hint: Some("refresh_token".to_string()),
+            ..Default::default()
+        })
+        .await;
+    let unknown = svc
+        .revoke(RevokeRequest {
+            token: "never-issued-refresh-token".to_string(),
+            token_type_hint: Some("refresh_token".to_string()),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(
+        existing.is_ok(),
+        "audit failure must not reveal an existing token"
+    );
+    assert!(
+        unknown.is_ok(),
+        "audit failure must not reveal an unknown token"
+    );
+    assert!(
+        repo.get_all_sessions().await.is_empty(),
+        "existing session is still revoked"
+    );
+}
+
+#[tokio::test]
 async fn revoke_valid_access_token_emits_all_sessions_revoked() {
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
@@ -363,7 +427,7 @@ async fn revoke_valid_refresh_token_emits_token_revocation() {
 }
 
 #[tokio::test]
-async fn revoke_failed_verification_access_token_emits_nothing() {
+async fn revoke_failed_verification_access_token_emits_authentication_failure() {
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
     let audit = MockAuditLog::new();
@@ -404,8 +468,14 @@ async fn revoke_failed_verification_access_token_emits_nothing() {
     let events = audit_clone.events().await;
     assert_eq!(
         events.len(),
-        baseline,
-        "failed signature verification must not emit any audit event"
+        baseline + 1,
+        "failed signature verification must emit exactly one terminal audit event"
+    );
+    let event = events.last().expect("a terminal event was just recorded");
+    assert_eq!(event.event_type, AuditEventType::ValidationFailed);
+    assert_eq!(
+        event.outcome,
+        AuditOutcome::Failure(oidc_exchange_core::domain::AuditFailure::AuthenticationFailed)
     );
     assert_eq!(
         repo.get_all_sessions().await.len(),
@@ -415,7 +485,7 @@ async fn revoke_failed_verification_access_token_emits_nothing() {
 }
 
 #[tokio::test]
-async fn revoke_unknown_refresh_token_emits_nothing() {
+async fn revoke_unknown_refresh_token_emits_authentication_failure() {
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
     let audit = MockAuditLog::new();
@@ -438,7 +508,13 @@ async fn revoke_unknown_refresh_token_emits_nothing() {
     let events = audit_clone.events().await;
     assert_eq!(
         events.len(),
-        0,
-        "an unknown refresh token must not emit any audit event"
+        1,
+        "an unknown refresh token must emit exactly one terminal audit event"
+    );
+    let event = events.last().expect("a terminal event was just recorded");
+    assert_eq!(event.event_type, AuditEventType::ValidationFailed);
+    assert_eq!(
+        event.outcome,
+        AuditOutcome::Failure(oidc_exchange_core::domain::AuditFailure::AuthenticationFailed)
     );
 }

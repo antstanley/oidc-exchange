@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::{
-    AccessTokenClaims, AuditEventType, AuditOutcome, IdentityClaims, NewUser, User, UserPatch,
-    UserStatus,
+    AccessTokenClaims, AuditEventType, AuditFailure, AuditOutcome, IdentityClaims, NewUser, User,
+    UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -69,6 +69,22 @@ fn make_service_with_user_repo(
     provider: MockIdentityProvider,
     config: AppConfig,
 ) -> AppService {
+    make_service_with_user_repo_and_audit(
+        user_repo,
+        session_repo,
+        provider,
+        config,
+        MockAuditLog::new(),
+    )
+}
+
+fn make_service_with_user_repo_and_audit(
+    user_repo: Box<dyn UserRepository>,
+    session_repo: MockRepository,
+    provider: MockIdentityProvider,
+    config: AppConfig,
+    audit: MockAuditLog,
+) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert(provider_id, Box::new(provider));
@@ -77,7 +93,7 @@ fn make_service_with_user_repo(
         user_repo,
         Box::new(session_repo),
         Box::new(MockKeyManager::new()),
-        Box::new(MockAuditLog::new()),
+        Box::new(audit),
         Box::new(MockUserSync::new()),
         Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
@@ -946,11 +962,14 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
     // real infrastructure failure); the exchange must propagate it directly
     // rather than treating it as a race and silently re-looking up.
     let (failing_repo, lookup_calls) = FailingCreateUserRepository::new(repo.clone());
-    let svc = make_service_with_user_repo(
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_user_repo_and_audit(
         Box::new(failing_repo),
         repo.clone(),
         provider,
         make_config(),
+        audit,
     );
 
     let request = ExchangeRequest {
@@ -970,6 +989,20 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         other => panic!("expected StoreError to propagate, got: {:?}", other),
     }
 
+    let events = audit_clone.events().await;
+    assert_eq!(events.len(), 1, "must emit exactly one terminal event");
+    let event = &events[0];
+    assert_eq!(event.event_type, AuditEventType::ValidationFailed);
+    assert_eq!(
+        event.outcome,
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed)
+    );
+    let serialized = serde_json::to_string(event).expect("audit event must serialize");
+    assert!(
+        !serialized.contains("simulated infrastructure failure"),
+        "fixed authentication failure event must not retain infrastructure detail"
+    );
+
     // No user or session was created, and the flow did not swallow the
     // infra error to attempt a silent re-lookup.
     assert_eq!(repo.get_all_users().await.len(), 0);
@@ -981,6 +1014,37 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         lookup_calls.load(Ordering::SeqCst),
         1,
         "a non-Conflict create_user error must not trigger a re-lookup"
+    );
+}
+
+#[tokio::test]
+async fn exchange_provider_timeout_emits_exactly_one_typed_terminal_event() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    provider.set_exchange_timeout(true).await;
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, provider, make_config(), audit);
+
+    let request = ExchangeRequest {
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        id_token: None,
+        provider: "mock".to_string(),
+        ..Default::default()
+    };
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("provider must reject");
+    assert!(matches!(err, Error::ProviderTimeout { .. }));
+
+    let events = audit_clone.events().await;
+    assert_eq!(events.len(), 1, "must emit exactly one terminal event");
+    assert_eq!(events[0].event_type, AuditEventType::ProviderError);
+    assert_eq!(
+        events[0].outcome,
+        AuditOutcome::Failure(AuditFailure::ProviderRejected)
     );
 }
 

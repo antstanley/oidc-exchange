@@ -2,9 +2,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-use crate::domain::{AuditEventType, AuditOutcome, AuditSeverity, ClientAddr};
+use crate::domain::{AuditFailure, AuditOutcome, ClientAddr, SecurityEvent};
 use crate::error::Result;
-use crate::service::{create_audit_event, AppService};
+use crate::service::AppService;
 
 /// Length in hex characters of a SHA-256 digest (32 bytes -> 64 hex chars).
 /// Named so the `revoke_refresh_token` postcondition assertion documents its
@@ -32,11 +32,16 @@ impl AppService {
         // error further up the stack (the HTTP form field is required).
         assert!(!request.token.is_empty(), "revoke: token must not be empty");
 
+        let client_addr = request
+            .ip_address
+            .clone()
+            .and_then(ClientAddr::asserted)
+            .unwrap_or(ClientAddr::Unknown);
+        let user_agent = request.user_agent.clone();
+
         match request.token_type_hint.as_deref() {
             Some("access_token") => {
                 // Verify the JWT was issued by us before revoking sessions.
-                // If verification fails, silently succeed per RFC 7009 — no
-                // audit event is emitted for a failed/forged verification.
                 // A session-repo error from `revoke_all_user_sessions`
                 // (genuine infrastructure failure, since the port is
                 // idempotent for a missing user) propagates so the server
@@ -51,42 +56,45 @@ impl AppService {
                         "revoke: verified token sub claim must not be empty"
                     );
                     self.session_repo.revoke_all_user_sessions(&user_id).await?;
-                    self.emit_audit(create_audit_event(
-                        AuditEventType::AllSessionsRevoked,
-                        AuditSeverity::Notice,
+                    self.emit_revoke_outcome(
+                        SecurityEvent::SessionsRevoked,
                         AuditOutcome::Success,
                         Some(user_id),
+                        client_addr,
+                        user_agent,
+                    )
+                    .await?;
+                } else {
+                    // RFC 7009 requires token-state indistinguishability. In
+                    // enforce mode, an audit-sink failure for this terminal
+                    // path is therefore deliberately swallowed: returning an
+                    // error here would distinguish unknown/invalid tokens.
+                    self.emit_revoke_outcome(
+                        SecurityEvent::AuthenticationFailed,
+                        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
                         None,
-                        request
-                            .ip_address
-                            .clone()
-                            .and_then(ClientAddr::asserted)
-                            .unwrap_or(ClientAddr::Unknown),
-                        request.user_agent.clone(),
-                    ))
+                        client_addr,
+                        user_agent,
+                    )
                     .await?;
                 }
                 Ok(())
             }
-            Some("refresh_token") | None => {
-                self.revoke_refresh_token(&request).await?;
-                Ok(())
-            }
-            Some(_) => {
-                // Unknown hint — treat as refresh_token per spec
-                self.revoke_refresh_token(&request).await?;
-                Ok(())
+            Some("refresh_token") | None | Some(_) => {
+                self.revoke_refresh_token(&request, client_addr, user_agent)
+                    .await
             }
         }
     }
 
-    /// Hash and revoke a presented refresh token, emitting `TokenRevocation`
-    /// only when a session actually matched the hash. `revoke_session` on the
-    /// `SessionRepository` port is idempotent and always returns `Ok(())`
-    /// even when nothing matched, so the store is queried first to learn
-    /// whether a session was really removed — an unknown token must stay
-    /// silent per RFC 7009.
-    async fn revoke_refresh_token(&self, request: &RevokeRequest) -> Result<()> {
+    /// Hash and revoke a presented refresh token. Every resolved terminal path
+    /// emits exactly one mandatory, fixed-classification audit outcome.
+    async fn revoke_refresh_token(
+        &self,
+        request: &RevokeRequest,
+        client_addr: ClientAddr,
+        user_agent: Option<String>,
+    ) -> Result<()> {
         let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
         // Postcondition of SHA-256 hex-encoding: always exactly 64 hex
         // characters. Catching a malformed hash here — before it reaches the
@@ -105,32 +113,57 @@ impl AppService {
             .get_session_by_refresh_token(&token_hash)
             .await?;
 
-        if let Some(session) = existing {
-            // Invariant: every stored session carries the user it belongs
-            // to — the audit event below needs a real actor, not a blank one.
-            assert!(
-                !session.user_id.is_empty(),
-                "revoke: stored session must have a non-empty user_id"
-            );
-            // A missing session is `Ok` (idempotent delete, handled above by
-            // `existing == None`); a genuine backend failure here propagates
-            // so the server maps it to 503 instead of a false 200.
-            self.session_repo.revoke_session(&token_hash).await?;
-            self.emit_audit(create_audit_event(
-                AuditEventType::TokenRevocation,
-                AuditSeverity::Info,
-                AuditOutcome::Success,
-                Some(session.user_id.clone()),
-                None,
-                request
-                    .ip_address
-                    .clone()
-                    .and_then(ClientAddr::asserted)
-                    .unwrap_or(ClientAddr::Unknown),
-                request.user_agent.clone(),
-            ))
-            .await?;
+        match existing {
+            Some(session) => {
+                // Invariant: every stored session carries the user it belongs
+                // to — the audit event below needs a real actor, not a blank one.
+                assert!(
+                    !session.user_id.is_empty(),
+                    "revoke: stored session must have a non-empty user_id"
+                );
+                // A missing session is `Ok` (idempotent delete, handled above by
+                // `existing == None`); a genuine backend failure here propagates
+                // so the server maps it to 503 instead of a false 200.
+                self.session_repo.revoke_session(&token_hash).await?;
+                self.emit_revoke_outcome(
+                    SecurityEvent::SessionRevoked,
+                    AuditOutcome::Success,
+                    Some(session.user_id),
+                    client_addr,
+                    user_agent,
+                )
+                .await
+            }
+            None => {
+                // Keep the RFC 7009 response indistinguishable even when an
+                // enforce-mode audit backend is unavailable.
+                self.emit_revoke_outcome(
+                    SecurityEvent::AuthenticationFailed,
+                    AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+                    None,
+                    client_addr,
+                    user_agent,
+                )
+                .await
+            }
         }
+    }
+
+    async fn emit_revoke_outcome(
+        &self,
+        event: SecurityEvent,
+        outcome: AuditOutcome,
+        actor: Option<String>,
+        client_addr: ClientAddr,
+        user_agent: Option<String>,
+    ) -> Result<()> {
+        // RFC 7009 requires the final response to be indistinguishable for
+        // existing, unknown, and invalid tokens. Mandatory audit failures are
+        // recorded by `emit_security_event` but intentionally do not affect a
+        // resolved revocation response.
+        let _ = self
+            .emit_security_event(event, outcome, actor, None, client_addr, user_agent)
+            .await;
         Ok(())
     }
 
@@ -159,6 +192,10 @@ impl AppService {
         // Signature verified — safe to extract sub
         let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
         let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
-        payload.get("sub")?.as_str().map(|s| s.to_string())
+        payload
+            .get("sub")?
+            .as_str()
+            .filter(|sub| !sub.is_empty())
+            .map(ToOwned::to_owned)
     }
 }

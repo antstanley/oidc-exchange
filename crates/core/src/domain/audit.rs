@@ -159,6 +159,7 @@ pub enum AuthenticationKind {
 pub enum AdminMutationKind {
     Created,
     Updated,
+    Suspended,
     Deleted,
 }
 
@@ -198,6 +199,9 @@ impl SecurityEvent {
             Self::AdminMutation {
                 kind: AdminMutationKind::Updated,
             } => AuditEventType::UserUpdated,
+            Self::AdminMutation {
+                kind: AdminMutationKind::Suspended,
+            } => AuditEventType::UserSuspended,
             Self::AdminMutation {
                 kind: AdminMutationKind::Deleted,
             } => AuditEventType::UserDeleted,
