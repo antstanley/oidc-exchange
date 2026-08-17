@@ -5,6 +5,13 @@ use serde::Serialize;
 
 use oidc_exchange_core::error::Error;
 
+/// Safe, rendered OAuth protocol error classification for response-side consumers.
+///
+/// This intentionally contains only the public OAuth error code—not an error description,
+/// token, or domain error detail—so middleware can record it without inspecting the body.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderedOAuthErrorCode(pub &'static str);
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -34,7 +41,7 @@ impl IntoResponse for ApiError {
                     error: "unsupported_grant_type".to_string(),
                     error_description: "The grant_type parameter is not supported".to_string(),
                 };
-                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+                oauth_error_response(StatusCode::BAD_REQUEST, body, "unsupported_grant_type")
             }
             ApiError::Domain(err) => {
                 let retry_after = match &err {
@@ -42,11 +49,14 @@ impl IntoResponse for ApiError {
                     _ => None,
                 };
                 let (status, error_code, description) = map_domain_error(&err);
-                let body = ErrorResponse {
-                    error: error_code,
-                    error_description: description,
-                };
-                let mut response = (status, Json(body)).into_response();
+                let mut response = oauth_error_response(
+                    status,
+                    ErrorResponse {
+                        error: error_code.clone(),
+                        error_description: description,
+                    },
+                    &error_code,
+                );
                 if let Some(retry_after_secs) = retry_after {
                     let value =
                         axum::http::HeaderValue::from_str(&retry_after_secs.max(1).to_string())
@@ -61,6 +71,25 @@ impl IntoResponse for ApiError {
             }
         }
     }
+}
+
+fn oauth_error_response(status: StatusCode, body: ErrorResponse, error_code: &str) -> Response {
+    let mut response = (status, Json(body)).into_response();
+    response
+        .extensions_mut()
+        .insert(RenderedOAuthErrorCode(match error_code {
+            "invalid_request" => "invalid_request",
+            "invalid_grant" => "invalid_grant",
+            "invalid_token" => "invalid_token",
+            "unsupported_grant_type" => "unsupported_grant_type",
+            "access_denied" => "access_denied",
+            "not_found" => "not_found",
+            "conflict" => "conflict",
+            "server_error" => "server_error",
+            "slow_down" => "slow_down",
+            _ => unreachable!("map_domain_error emits a closed OAuth error code set"),
+        }));
+    response
 }
 
 fn map_domain_error(err: &Error) -> (StatusCode, String, String) {
