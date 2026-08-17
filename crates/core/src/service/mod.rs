@@ -31,7 +31,8 @@ pub fn audit_sink_degraded() -> bool {
 }
 use crate::error::{Error, Result};
 use crate::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 
 pub struct AppService {
@@ -40,17 +41,20 @@ pub struct AppService {
     pub(crate) keys: Box<dyn KeyManager>,
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
+    pub(crate) rate_limiter: Box<dyn RateLimiter>,
     pub(crate) providers: HashMap<String, Box<dyn IdentityProvider>>,
     pub(crate) config: AppConfig,
 }
 
 impl AppService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_repo: Box<dyn UserRepository>,
         session_repo: Box<dyn SessionRepository>,
         keys: Box<dyn KeyManager>,
         audit: Box<dyn AuditLog>,
         user_sync: Box<dyn UserSync>,
+        rate_limiter: Box<dyn RateLimiter>,
         providers: HashMap<String, Box<dyn IdentityProvider>>,
         config: AppConfig,
     ) -> Self {
@@ -60,6 +64,7 @@ impl AppService {
             keys,
             audit,
             user_sync,
+            rate_limiter,
             providers,
             config,
         }

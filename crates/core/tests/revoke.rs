@@ -42,6 +42,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     )
@@ -64,6 +65,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     )

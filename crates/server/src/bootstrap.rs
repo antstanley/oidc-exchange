@@ -281,6 +281,7 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
         keys,
         audit,
         user_sync,
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
         providers,
         config.clone(),
     ))
@@ -1396,7 +1397,8 @@ mod build_router_tests {
 
     use oidc_exchange_core::ports::IdentityProvider;
     use oidc_exchange_test_utils::{
-        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+        MockUserSync,
     };
 
     const TEST_SECRET: &str = "test-internal-secret-build-router";
@@ -1414,6 +1416,7 @@ mod build_router_tests {
             Box::new(MockKeyManager::new()),
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
+            Box::new(MockRateLimiter::new()),
             providers,
             config.clone(),
         )

@@ -39,13 +39,16 @@ fn build_test_app() -> (Router, MockRepository) {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
         providers,
         config.clone(),
     );
 
+    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter,
     };
 
     let app = public_routes()

@@ -122,6 +122,13 @@ fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
             "not_found".to_string(),
             detail.clone(),
         ),
+        Error::TooManyRequests {
+            retry_after_secs: _,
+        } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "slow_down".to_string(),
+            "too many authentication attempts".to_string(),
+        ),
         Error::ProviderError { .. } => (
             StatusCode::BAD_GATEWAY,
             "server_error".to_string(),

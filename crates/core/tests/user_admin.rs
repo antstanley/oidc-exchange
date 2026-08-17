@@ -47,6 +47,7 @@ fn make_service_with_mocks(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     );
@@ -69,6 +70,7 @@ fn make_service_with_provider(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     )
@@ -93,6 +95,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )

@@ -30,6 +30,9 @@ pub enum Error {
     #[error("not found: {detail}")]
     NotFound { detail: String },
 
+    #[error("too many requests; retry after {retry_after_secs} seconds")]
+    TooManyRequests { retry_after_secs: u64 },
+
     // Provider errors (upstream)
     #[error("provider error ({provider}): {detail}")]
     ProviderError { provider: String, detail: String },

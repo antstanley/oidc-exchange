@@ -548,10 +548,14 @@ impl UserSync for MockUserSync {
 // MockIdentityProvider
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct MockIdentityProvider {
     provider_id: String,
     exchange_response: Arc<Mutex<Option<ProviderTokens>>>,
+    exchange_error: Arc<Mutex<Option<String>>>,
     claims_response: Arc<Mutex<Option<IdentityClaims>>>,
+    exchange_code_calls: Arc<Mutex<usize>>,
+    validate_id_token_calls: Arc<Mutex<usize>>,
 }
 
 impl MockIdentityProvider {
@@ -574,7 +578,10 @@ impl MockIdentityProvider {
         Self {
             provider_id: provider_id.to_string(),
             exchange_response: Arc::new(Mutex::new(Some(default_tokens))),
+            exchange_error: Arc::new(Mutex::new(None)),
             claims_response: Arc::new(Mutex::new(Some(default_claims))),
+            exchange_code_calls: Arc::new(Mutex::new(0)),
+            validate_id_token_calls: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -585,11 +592,30 @@ impl MockIdentityProvider {
     pub async fn set_exchange_response(&self, tokens: ProviderTokens) {
         *self.exchange_response.lock().await = Some(tokens);
     }
+
+    pub async fn set_exchange_error(&self, detail: impl Into<String>) {
+        *self.exchange_error.lock().await = Some(detail.into());
+    }
+
+    pub async fn exchange_code_call_count(&self) -> usize {
+        *self.exchange_code_calls.lock().await
+    }
+
+    pub async fn validate_id_token_call_count(&self) -> usize {
+        *self.validate_id_token_calls.lock().await
+    }
 }
 
 #[async_trait]
 impl IdentityProvider for MockIdentityProvider {
     async fn exchange_code(&self, _code: &str, _redirect_uri: &str) -> Result<ProviderTokens> {
+        *self.exchange_code_calls.lock().await += 1;
+        if let Some(detail) = self.exchange_error.lock().await.clone() {
+            return Err(Error::ProviderError {
+                provider: self.provider_id.clone(),
+                detail,
+            });
+        }
         let response = self.exchange_response.lock().await;
         Ok(response.clone().unwrap_or(ProviderTokens {
             id_token: "mock-id-token".to_string(),
@@ -599,6 +625,7 @@ impl IdentityProvider for MockIdentityProvider {
     }
 
     async fn validate_id_token(&self, _id_token: &str) -> Result<IdentityClaims> {
+        *self.validate_id_token_calls.lock().await += 1;
         let response = self.claims_response.lock().await;
         Ok(response.clone().unwrap_or(IdentityClaims {
             subject: "test-subject".to_string(),

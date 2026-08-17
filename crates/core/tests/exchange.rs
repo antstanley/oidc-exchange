@@ -54,6 +54,7 @@ fn make_service_with_config(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -78,6 +79,7 @@ fn make_service_with_user_repo(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -102,6 +104,7 @@ fn make_service_with_user_sync(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -125,6 +128,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -1290,22 +1294,15 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
     );
 }
 
-/// A blocking audit failure on the success-path emission (`TokenExchange`)
-/// propagates as `Err` from `exchange`, even though the session was already
-/// stored — `emit_audit`'s blocking-threshold semantics apply to the flow.
-/// Uses a pre-existing (not newly created) user so the only audit emission
-/// on the success path is `TokenExchange` itself, isolating this case from
-/// the earlier `UserCreated` emission.
+/// An enforcing terminal audit failure revokes the newly stored session before
+/// propagating. The existing user isolates terminal success from `UserCreated`.
 #[tokio::test]
-async fn exchange_success_audit_failure_under_blocking_threshold_propagates_err() {
+async fn exchange_enforce_audit_failure_revokes_new_session() {
     use oidc_exchange_core::config::AuditConfig;
 
-    // `blocking_threshold: "info"` covers every severity from Emergency down
-    // to Info, so the `TokenExchange` (info) emission on this success path
-    // is blocking: a failing adapter must propagate.
     let config = AppConfig {
         audit: AuditConfig {
-            blocking_threshold: "info".to_string(),
+            durability: "enforce".to_string(),
             ..Default::default()
         },
         ..make_config()
@@ -1344,17 +1341,13 @@ async fn exchange_success_audit_failure_under_blocking_threshold_propagates_err(
         .expect_err("a blocking audit failure must propagate as Err");
 
     match err {
-        Error::AuditError { .. } => {}
-        other => panic!("expected AuditError to propagate, got: {:?}", other),
+        Error::SecurityAuditDurability { .. } => {}
+        other => panic!("expected SecurityAuditDurability, got: {:?}", other),
     }
 
-    // The session was already stored before the blocking audit failure was
-    // observed on the success-path `TokenExchange` event — the flow's
-    // blocking semantics do not retroactively undo prior writes.
-    assert_eq!(
-        repo.get_all_sessions().await.len(),
-        1,
-        "session write happens before the TokenExchange audit emission"
+    assert!(
+        repo.get_all_sessions().await.is_empty(),
+        "an enforcing terminal audit failure must revoke the newly stored session"
     );
 }
 
