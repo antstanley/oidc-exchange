@@ -64,9 +64,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let signal = ShutdownSignal::spawn();
         let graceful_signal = signal.clone();
         let serve_future = async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(graceful_signal.wait())
-                .await
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(graceful_signal.wait())
+            .await
         };
         let deadline = std::time::Duration::from_secs(SHUTDOWN_DRAIN_DEADLINE_SECS);
 

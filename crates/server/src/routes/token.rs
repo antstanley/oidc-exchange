@@ -38,7 +38,7 @@ pub async fn token_handler(
                     redirect_uri: form.redirect_uri,
                     id_token: form.id_token,
                     provider,
-                    ip_address: audit_ctx.ip_address.clone(),
+                    ip_address: audit_ctx.ip_address(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
                 })
@@ -53,7 +53,7 @@ pub async fn token_handler(
                 .service
                 .refresh(RefreshRequest {
                     refresh_token,
-                    ip_address: audit_ctx.ip_address.clone(),
+                    ip_address: audit_ctx.ip_address(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
                 })

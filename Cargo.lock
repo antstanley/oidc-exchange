@@ -2743,6 +2743,7 @@ dependencies = [
  "config",
  "futures",
  "http-body-util",
+ "ipnet",
  "lambda_http",
  "oidc-exchange-adapters",
  "oidc-exchange-core",

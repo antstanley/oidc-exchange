@@ -37,12 +37,27 @@ impl IntoResponse for ApiError {
                 (StatusCode::BAD_REQUEST, Json(body)).into_response()
             }
             ApiError::Domain(err) => {
+                let retry_after = match &err {
+                    Error::TooManyRequests { retry_after_secs } => Some(*retry_after_secs),
+                    _ => None,
+                };
                 let (status, error_code, description) = map_domain_error(&err);
                 let body = ErrorResponse {
                     error: error_code,
                     error_description: description,
                 };
-                (status, Json(body)).into_response()
+                let mut response = (status, Json(body)).into_response();
+                if let Some(retry_after_secs) = retry_after {
+                    let value =
+                        axum::http::HeaderValue::from_str(&retry_after_secs.max(1).to_string())
+                            .expect(
+                                "positive retry-after seconds always form a valid header value",
+                            );
+                    response
+                        .headers_mut()
+                        .insert(axum::http::header::RETRY_AFTER, value);
+                }
+                response
             }
         }
     }

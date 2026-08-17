@@ -340,7 +340,12 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     let mut app: Router<AppState> = Router::new();
 
     if role == "exchange" || role == "all" {
-        app = app.merge(routes::public_routes());
+        app = app.merge(
+            routes::public_routes().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::middleware::public_throttle::public_throttle_layer,
+            )),
+        );
     }
     if (role == "admin" || role == "all") && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
@@ -1653,7 +1658,10 @@ mod request_timeout_tests {
             .route("/fast", get(fast_handler))
             .route("/slow", get(slow_handler))
             .layer(CatchPanicLayer::custom(panic_handler))
-            .layer(axum::middleware::from_fn(audit_context_layer))
+            .layer(axum::middleware::from_fn_with_state(
+                std::sync::Arc::new(AppConfig::default()),
+                audit_context_layer,
+            ))
             .layer(TimeoutLayer::with_status_code(
                 StatusCode::REQUEST_TIMEOUT,
                 timeout,

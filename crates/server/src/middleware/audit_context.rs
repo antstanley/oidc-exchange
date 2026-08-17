@@ -1,112 +1,199 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
+use ipnet::IpNet;
+use oidc_exchange_core::config::MAX_TRUSTED_PROXY_HOPS;
+use oidc_exchange_core::domain::ClientAddr;
 
-/// Request-scoped audit metadata extracted from standard HTTP headers.
-///
-/// Inserted into request extensions by [`audit_context_layer`] so that
-/// downstream handlers can access client identity information for audit logs.
-#[derive(Clone, Debug, Default)]
+/// Maximum byte length copied from a client-authored forwarding header.
+pub const MAX_FORWARDED_HEADER_LEN: usize = 1_024;
+/// Maximum byte length copied from a client-authored User-Agent header.
+pub const MAX_USER_AGENT_LEN: usize = 512;
+/// Maximum byte length copied from a client-authored device identifier.
+pub const MAX_DEVICE_ID_LEN: usize = 256;
+/// Maximum forwarding-chain entries inspected for a trusted proxy request.
+pub const MAX_FORWARDED_CHAIN_ENTRIES: usize = MAX_TRUSTED_PROXY_HOPS;
+
+/// Request-scoped audit metadata with server-established address provenance.
+#[derive(Clone, Debug)]
 pub struct AuditContext {
-    /// Client IP address from `X-Forwarded-For`.
-    pub ip_address: Option<String>,
-    /// Client user-agent string.
+    pub client_addr: ClientAddr,
     pub user_agent: Option<String>,
-    /// Device identifier from `X-Device-Id`.
     pub device_id: Option<String>,
 }
 
-/// Middleware that extracts audit-relevant headers and stores them in request
-/// extensions as an [`AuditContext`].
+impl AuditContext {
+    pub fn ip_address(&self) -> Option<String> {
+        self.client_addr.audit_address()
+    }
+}
+
+/// Builds a context from an optional observed peer. Lambda can provide its platform
+/// request-context address and FFI deliberately passes `None`.
+pub fn audit_context_from_request<B>(
+    request: &Request<B>,
+    peer: Option<SocketAddr>,
+    trusted: &[IpNet],
+    hops: usize,
+) -> AuditContext {
+    let forwarded = bounded_header(request, "x-forwarded-for", MAX_FORWARDED_HEADER_LEN);
+    let client_addr = resolve_client_addr(
+        peer.map(|peer| peer.ip()),
+        forwarded.as_deref(),
+        trusted,
+        hops,
+    );
+    AuditContext {
+        client_addr,
+        user_agent: bounded_header(request, "user-agent", MAX_USER_AGENT_LEN),
+        device_id: bounded_header(request, "x-device-id", MAX_DEVICE_ID_LEN),
+    }
+}
+
+/// Resolves only server-observed peers or forwarding chains sent by configured trusted CIDRs.
+/// Selection is right-to-left: hop one is the rightmost forwarded address.
+pub fn resolve_client_addr(
+    peer: Option<IpAddr>,
+    forwarded: Option<&str>,
+    trusted: &[IpNet],
+    hops: usize,
+) -> ClientAddr {
+    let Some(peer) = peer else {
+        return ClientAddr::Unknown;
+    };
+    if trusted.iter().any(|network| network.contains(&peer)) {
+        if let Some(forwarded) = forwarded {
+            if let Some(address) = select_forwarded(forwarded, hops) {
+                return ClientAddr::Forwarded(address);
+            }
+        }
+    }
+    ClientAddr::Peer(peer)
+}
+
+fn bounded_header<B>(request: &Request<B>, name: &'static str, max_len: usize) -> Option<String> {
+    let value = request.headers().get(name)?.to_str().ok()?;
+    (value.len() <= max_len).then(|| value.to_owned())
+}
+
+fn select_forwarded(forwarded: &str, hops: usize) -> Option<IpAddr> {
+    if !(1..=MAX_FORWARDED_CHAIN_ENTRIES).contains(&hops) {
+        return None;
+    }
+    let entries: Vec<_> = forwarded.split(',').map(str::trim).collect();
+    if entries.is_empty() || entries.len() > MAX_FORWARDED_CHAIN_ENTRIES {
+        return None;
+    }
+    entries
+        .iter()
+        .rev()
+        .nth(hops - 1)
+        .and_then(|entry| entry.parse::<IpAddr>().ok())
+}
+
+/// Default middleware for in-process and FFI callers: no peer is available, so forwarding
+/// headers are audit-only asserted data and never form an address rate key.
 pub async fn audit_context_layer(
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> impl IntoResponse {
-    let ctx = AuditContext {
-        ip_address: request
-            .headers()
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from),
-        user_agent: request
-            .headers()
-            .get("user-agent")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from),
-        device_id: request
-            .headers()
-            .get("x-device-id")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from),
+    let client_addr = bounded_header(&request, "x-forwarded-for", MAX_FORWARDED_HEADER_LEN)
+        .and_then(ClientAddr::asserted)
+        .unwrap_or(ClientAddr::Unknown);
+    let context = AuditContext {
+        client_addr,
+        user_agent: bounded_header(&request, "user-agent", MAX_USER_AGENT_LEN),
+        device_id: bounded_header(&request, "x-device-id", MAX_DEVICE_ID_LEN),
     };
-    request.extensions_mut().insert(ctx);
+    request.extensions_mut().insert(context);
     next.run(request).await
 }
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
     use axum::body::Body;
-    use axum::extract::Extension;
-    use axum::http::{Request, StatusCode};
-    use axum::middleware;
-    use axum::response::Json;
-    use axum::routing::get;
-    use axum::Router;
-    use http_body_util::BodyExt;
-    use serde_json::json;
-    use tower::ServiceExt;
 
-    async fn echo_ctx(Extension(ctx): Extension<AuditContext>) -> Json<serde_json::Value> {
-        Json(json!({
-            "ip": ctx.ip_address,
-            "ua": ctx.user_agent,
-            "device": ctx.device_id,
-        }))
+    fn ip(value: &str) -> IpAddr {
+        value.parse().unwrap()
     }
 
-    fn app() -> Router {
-        Router::new()
-            .route("/", get(echo_ctx))
-            .layer(middleware::from_fn(audit_context_layer))
+    #[test]
+    fn untrusted_peer_cannot_forge_forwarded_address() {
+        let address = resolve_client_addr(
+            Some(ip("198.51.100.9")),
+            Some("203.0.113.4"),
+            &["10.0.0.0/8".parse().unwrap()],
+            1,
+        );
+        assert_eq!(address, ClientAddr::Peer(ip("198.51.100.9")));
     }
 
-    #[tokio::test]
-    async fn extracts_all_headers() {
-        let response = app()
-            .oneshot(
-                Request::get("/")
-                    .header("x-forwarded-for", "10.0.0.1")
-                    .header("user-agent", "test-agent/1.0")
-                    .header("x-device-id", "device-abc")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
+    #[test]
+    fn trusted_peer_selects_hops_from_right() {
+        let address = resolve_client_addr(
+            Some(ip("10.0.0.9")),
+            Some("192.0.2.10, 198.51.100.7"),
+            &["10.0.0.0/8".parse().unwrap()],
+            2,
+        );
+        assert_eq!(address, ClientAddr::Forwarded(ip("192.0.2.10")));
+    }
+
+    #[test]
+    fn missing_forwarded_header_uses_trusted_peer() {
+        assert_eq!(
+            resolve_client_addr(
+                Some(ip("10.0.0.9")),
+                None,
+                &["10.0.0.0/8".parse().unwrap()],
+                1
+            ),
+            ClientAddr::Peer(ip("10.0.0.9"))
+        );
+    }
+
+    #[test]
+    fn chain_bounds_are_inclusive_and_fail_closed() {
+        let below = (0..MAX_FORWARDED_CHAIN_ENTRIES - 1)
+            .map(|_| "192.0.2.1")
+            .collect::<Vec<_>>()
+            .join(",");
+        let at = (0..MAX_FORWARDED_CHAIN_ENTRIES)
+            .map(|_| "192.0.2.1")
+            .collect::<Vec<_>>()
+            .join(",");
+        let above = (0..MAX_FORWARDED_CHAIN_ENTRIES + 1)
+            .map(|_| "192.0.2.1")
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(select_forwarded(&below, 1).is_some());
+        assert!(select_forwarded(&at, 1).is_some());
+        assert!(select_forwarded(&above, 1).is_none());
+    }
+
+    #[test]
+    fn header_bounds_are_inclusive() {
+        let request = Request::get("/")
+            .header("user-agent", "x".repeat(MAX_USER_AGENT_LEN))
+            .body(Body::empty())
             .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(value["ip"], "10.0.0.1");
-        assert_eq!(value["ua"], "test-agent/1.0");
-        assert_eq!(value["device"], "device-abc");
+        assert!(bounded_header(&request, "user-agent", MAX_USER_AGENT_LEN).is_some());
+        let request = Request::get("/")
+            .header("user-agent", "x".repeat(MAX_USER_AGENT_LEN + 1))
+            .body(Body::empty())
+            .unwrap();
+        assert!(bounded_header(&request, "user-agent", MAX_USER_AGENT_LEN).is_none());
     }
 
-    #[tokio::test]
-    async fn handles_missing_headers() {
-        let response = app()
-            .oneshot(Request::get("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert!(value["ip"].is_null());
-        // user-agent may be null if not set by the test client
-        assert!(value["device"].is_null());
+    #[test]
+    fn no_peer_is_unknown_and_never_a_rate_key() {
+        let address = resolve_client_addr(None, Some("192.0.2.1"), &[], 1);
+        assert_eq!(address, ClientAddr::Unknown);
+        assert_eq!(address.rate_limit_key(), None);
     }
 }
