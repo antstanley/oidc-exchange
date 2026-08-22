@@ -15,6 +15,8 @@ use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
 };
 
+pub mod session_contract;
+
 // ---------------------------------------------------------------------------
 // MockRepository
 // ---------------------------------------------------------------------------
@@ -779,8 +781,9 @@ impl IdentityProvider for MockIdentityProvider {
 #[cfg(test)]
 mod tests {
     use super::MockRepository;
+    use crate::session_contract;
     use oidc_exchange_core::domain::{
-        NewUser, RefreshResolution, RetiredRefreshToken, UserPatch, INITIAL_USER_VERSION,
+        NewUser, RetiredRefreshToken, UserPatch, INITIAL_USER_VERSION,
     };
     use oidc_exchange_core::error::Error;
     use oidc_exchange_core::ports::{SessionRepository, UserRepository};
@@ -931,83 +934,121 @@ mod tests {
     const FAMILY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
     const FAMILY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    /// The four classification shapes over one family's life: live generation,
-    /// superseded-but-in-grace, retired-after-successor-fell, and unknown.
+    // -----------------------------------------------------------------------
+    // SR1–SR5 conformance — MockRepository runs the shared suite
+    // -----------------------------------------------------------------------
+    //
+    // Each obligation's named assertion lives in
+    // `session_contract` and is generic over any `SessionRepository`; the
+    // tests below invoke it against `MockRepository`, one test per assertion,
+    // so a regression localizes to its obligation. `conformance_full_suite`
+    // additionally proves the orchestrator wires the whole set.
+
+    /// SR1 classification surface: Live → Superseded → Retired → Unknown.
     #[tokio::test]
-    async fn resolve_reports_live_superseded_retired_and_unknown() {
-        let repo = MockRepository::new();
-        let gen0 = session_fixture("usr_1", "hash_gen0", FAMILY_A, 0);
-        repo.store_refresh_token(&gen0).await.expect("store gen 0");
-
-        // Live: the hash is the family's current generation.
-        assert_eq!(
-            repo.resolve_refresh_token("hash_gen0")
-                .await
-                .expect("resolve gen 0"),
-            RefreshResolution::Live(gen0.clone())
-        );
-
-        let mut gen1 = session_fixture("usr_1", "hash_gen1", FAMILY_A, 1);
-        gen1.expires_at = gen0.expires_at;
-        gen1.created_at = gen0.created_at;
-        assert!(
-            repo.rotate_refresh_token("hash_gen0", &gen1)
-                .await
-                .expect("rotate to gen 1"),
-            "first rotation must win its CAS"
-        );
-
-        // Superseded: gen 0 is retired and its named successor is still live.
-        match repo
-            .resolve_refresh_token("hash_gen0")
-            .await
-            .expect("resolve retired gen 0")
-        {
-            RefreshResolution::Superseded { live, .. } => {
-                assert_eq!(live.refresh_token_hash, "hash_gen1");
-            }
-            other => panic!("gen 0 must classify as Superseded once retired, got {other:?}"),
-        }
-
-        let mut gen2 = session_fixture("usr_1", "hash_gen2", FAMILY_A, 2);
-        gen2.expires_at = gen0.expires_at;
-        gen2.created_at = gen0.created_at;
-        assert!(
-            repo.rotate_refresh_token("hash_gen1", &gen2)
-                .await
-                .expect("rotate to gen 2"),
-            "second rotation must win its CAS"
-        );
-
-        // Retired: gen 0's successor (gen 1) is no longer live — reuse, not grace.
-        match repo
-            .resolve_refresh_token("hash_gen0")
-            .await
-            .expect("resolve fallen gen 0")
-        {
-            RefreshResolution::Retired {
-                family_id, user_id, ..
-            } => {
-                assert_eq!(family_id, gen0.family_id);
-                assert_eq!(user_id, "usr_1");
-            }
-            other => panic!("fallen gen 0 must classify as Retired, got {other:?}"),
-        }
-
-        // Unknown: nothing live and nothing retained matches.
-        assert_eq!(
-            repo.resolve_refresh_token("hash_never_seen")
-                .await
-                .expect("resolve unknown"),
-            RefreshResolution::Unknown
-        );
+    async fn conformance_classification_all_four_shapes() {
+        session_contract::assert_resolution_classifies_all_four_shapes(
+            &MockRepository::new(),
+            "mock:classify",
+        )
+        .await;
     }
 
-    /// A losing compare-and-swap must be a complete no-op: every observable
-    /// piece of state — live generations, retirement records, active count —
-    /// is byte-identical before and after.
+    /// SR2 observable effects: successor installed, presented demoted.
     #[tokio::test]
-    async fn failed_cas_makes_no_state_mutation() {
+    async fn conformance_rotation_installs_successor_and_demotes_presented() {
+        session_contract::assert_rotation_installs_successor_and_demotes_presented(
+            &MockRepository::new(),
+            "mock:install",
+        )
+        .await;
+    }
+
+    /// SR2 negative space: a losing CAS is invisible through the port.
+    #[tokio::test]
+    async fn conformance_failed_cas_leaves_store_byte_identical() {
+        session_contract::assert_failed_cas_leaves_store_byte_identical(
+            &MockRepository::new(),
+            "mock:cas-port",
+        )
+        .await;
+    }
+
+    /// SR3: two concurrent rotations, exactly one winner, store agrees.
+    #[tokio::test]
+    async fn conformance_concurrent_rotation_yields_exactly_one_winner() {
+        session_contract::assert_concurrent_rotation_yields_exactly_one_winner(
+            &MockRepository::new(),
+            "mock:race",
+        )
+        .await;
+    }
+
+    /// SR4: the retirement record is readable the instant the rotation is.
+    #[tokio::test]
+    async fn conformance_retirement_readable_immediately_after_rotation() {
+        session_contract::assert_retirement_readable_immediately_after_rotation(
+            &MockRepository::new(),
+            "mock:sr4",
+        )
+        .await;
+    }
+
+    /// SR1/SR4 retained history: an older generation resolves Retired.
+    #[tokio::test]
+    async fn conformance_older_generation_resolves_as_retired() {
+        session_contract::assert_older_generation_resolves_as_retired(
+            &MockRepository::new(),
+            "mock:older",
+        )
+        .await;
+    }
+
+    /// SR5: family revocation removes everything and returns the count.
+    #[tokio::test]
+    async fn conformance_family_revocation_removes_everything_and_returns_count() {
+        session_contract::assert_family_revocation_removes_everything_and_returns_count(
+            &MockRepository::new(),
+            "mock:revoke",
+        )
+        .await;
+    }
+
+    /// SR1 negative space: Unknown immediately after revoke_session.
+    #[tokio::test]
+    async fn conformance_resolution_unknown_immediately_after_revoke() {
+        session_contract::assert_resolution_unknown_immediately_after_revoke(
+            &MockRepository::new(),
+            "mock:sr1-revoke",
+        )
+        .await;
+    }
+
+    /// Expiry inheritance: rotation never moves the absolute deadline.
+    #[tokio::test]
+    async fn conformance_rotation_preserves_absolute_expiry() {
+        session_contract::assert_rotation_preserves_absolute_expiry(
+            &MockRepository::new(),
+            "mock:expiry",
+        )
+        .await;
+    }
+
+    /// The whole suite through one orchestrator call — exactly what a
+    /// persistent adapter invokes once its implementation is complete.
+    #[tokio::test]
+    async fn conformance_full_suite() {
+        let repo = MockRepository::new();
+        session_contract::assert_full_conformance(&repo, "mock:full").await;
+    }
+
+    /// A losing compare-and-swap must be a complete no-op. The shared suite
+    /// proves this through the port surface; this mock-only companion
+    /// snapshots the store's *internal* maps (every live row and every
+    /// retirement record, not just the hashes in play) for a literal
+    /// byte-identical check.
+    #[tokio::test]
+    async fn failed_cas_leaves_internal_maps_byte_identical() {
         let repo = MockRepository::new();
         let gen0 = session_fixture("usr_1", "hash_gen0", FAMILY_A, 0);
         repo.store_refresh_token(&gen0).await.expect("store gen 0");
@@ -1071,85 +1112,6 @@ mod tests {
                 .iter()
                 .any(|r| r.refresh_token_hash == stale_replacement.refresh_token_hash),
             "the loser's replacement must never appear as a retirement record"
-        );
-    }
-
-    /// Family revocation removes exactly that family's live generation and
-    /// retained records, returns their combined count, and leaves sibling
-    /// families untouched.
-    #[tokio::test]
-    async fn revoke_family_returns_count_and_scopes_to_one_family() {
-        let repo = MockRepository::new();
-        let gen0_a = session_fixture("usr_shared", "hash_a0", FAMILY_A, 0);
-        repo.store_refresh_token(&gen0_a)
-            .await
-            .expect("store family A");
-        let gen0_b = session_fixture("usr_shared", "hash_b0", FAMILY_B, 0);
-        repo.store_refresh_token(&gen0_b)
-            .await
-            .expect("store family B");
-
-        let mut gen1_a = session_fixture("usr_shared", "hash_a1", FAMILY_A, 1);
-        gen1_a.expires_at = gen0_a.expires_at;
-        gen1_a.created_at = gen0_a.created_at;
-        assert!(
-            repo.rotate_refresh_token("hash_a0", &gen1_a)
-                .await
-                .expect("rotate A"),
-            "family A rotation must win"
-        );
-
-        // Family A now holds one live generation (a1) and one record (a0):
-        // revoke_family must remove both and report 2.
-        let removed = repo
-            .revoke_family(&format!("fam_{FAMILY_A}"))
-            .await
-            .expect("revoke family A");
-        assert_eq!(removed, 2, "count must cover the live row plus the record");
-        assert_eq!(
-            repo.resolve_refresh_token("hash_a1")
-                .await
-                .expect("resolve a1"),
-            RefreshResolution::Unknown,
-            "revoked family's live generation must read Unknown immediately"
-        );
-        assert_eq!(
-            repo.resolve_refresh_token("hash_a0")
-                .await
-                .expect("resolve a0"),
-            RefreshResolution::Unknown,
-            "revoked family's retirement record must be gone"
-        );
-        assert!(
-            repo.get_all_retired_tokens()
-                .await
-                .iter()
-                .all(|r| r.family_id != format!("fam_{FAMILY_A}")),
-            "no retirement record of family A may survive revocation"
-        );
-
-        // Sibling family B is untouched by family A's revocation.
-        assert!(
-            matches!(
-                repo.resolve_refresh_token("hash_b0")
-                    .await
-                    .expect("resolve b0"),
-                RefreshResolution::Live(_)
-            ),
-            "sibling family must stay live through another family's revocation"
-        );
-        assert_eq!(
-            repo.count_active_sessions().await.expect("count"),
-            1,
-            "only family B's session may remain active"
-        );
-
-        // Revoking an unknown but well-formed family id succeeds with zero.
-        assert_eq!(
-            repo.revoke_family("fam_cccccccccccccccccccccccccc")
-                .await
-                .expect("revoke of unknown family"),
-            0
         );
     }
 
