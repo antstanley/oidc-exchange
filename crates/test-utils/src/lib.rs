@@ -546,6 +546,12 @@ impl UserSync for MockUserSync {
 // MockIdentityProvider
 // ---------------------------------------------------------------------------
 
+/// A stand-in [`IdentityProvider`] whose responses are pinned per test.
+///
+/// `Clone` shares one underlying state (`Arc`), so a test can hold a handle,
+/// move a clone into the service under test, and still re-pin claims or
+/// exchange responses afterwards.
+#[derive(Clone)]
 pub struct MockIdentityProvider {
     provider_id: String,
     /// The audience the mock's claims are pinned to, reported through the port's
@@ -559,6 +565,11 @@ pub struct MockIdentityProvider {
 /// repo's provider test fixtures (`test-client-id`) unless overridden.
 pub const MOCK_CLIENT_ID: &str = "test-client-id";
 
+/// Remaining lifetime stamped into a default mock assertion's `exp` claim
+/// (10 minutes): comfortably inside the default `grants.max_assertion_lifetime`
+/// ceiling of 1h, so exchanges over default-config services bind cleanly.
+pub const MOCK_DEFAULT_ASSERTION_TTL_SECS: u64 = 600;
+
 impl MockIdentityProvider {
     pub fn new(provider_id: &str) -> Self {
         let default_tokens = ProviderTokens {
@@ -567,7 +578,26 @@ impl MockIdentityProvider {
             access_token: Some("mock-access-token".to_string()),
         };
 
-        let default_claims = IdentityClaims {
+        Self {
+            provider_id: provider_id.to_string(),
+            client_id: MOCK_CLIENT_ID.to_string(),
+            exchange_response: Arc::new(Mutex::new(Some(default_tokens))),
+            // `None` until a test pins explicit claims; `validate_id_token`
+            // then builds fresh defaults per call (unique `jti`, live `exp`)
+            // instead of replaying one frozen template forever.
+            claims_response: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Default verified claims for callers that never pinned explicit ones.
+    ///
+    /// Built per call, not stored: each exchange gets a fresh `jti` and an
+    /// `exp` relative to now, mirroring what real validators return — every
+    /// code-path exchange is therefore a distinct, unspent assertion. The raw
+    /// claims carry exactly what the core binding controls read (`exp`,
+    /// `jti`, `sub`) and nothing more.
+    pub fn default_claims() -> IdentityClaims {
+        IdentityClaims {
             subject: "test-subject".to_string(),
             email: Some("test@example.com".to_string()),
             email_verified: Some(true),
@@ -576,15 +606,23 @@ impl MockIdentityProvider {
             // A stand-in for the resolved JWK algorithm a real validator would report;
             // RS256 is the common upstream case and selects SHA-256 for at_hash tests.
             signing_alg: "RS256".to_string(),
-            raw_claims: HashMap::new(),
-        };
-
-        Self {
-            provider_id: provider_id.to_string(),
-            client_id: MOCK_CLIENT_ID.to_string(),
-            exchange_response: Arc::new(Mutex::new(Some(default_tokens))),
-            claims_response: Arc::new(Mutex::new(Some(default_claims))),
+            raw_claims: Self::default_raw_claims(),
         }
+    }
+
+    /// Raw claims backing [`Self::default_claims`]: a usable `exp`, a fresh
+    /// per-call `jti`, and the subject echoed as OIDC validators would.
+    fn default_raw_claims() -> std::collections::HashMap<String, serde_json::Value> {
+        use serde_json::json;
+
+        let mut raw = std::collections::HashMap::new();
+        raw.insert("sub".to_string(), json!("test-subject"));
+        raw.insert("jti".to_string(), json!(ulid::Ulid::new().to_string()));
+        raw.insert(
+            "exp".to_string(),
+            json!(chrono::Utc::now().timestamp() + MOCK_DEFAULT_ASSERTION_TTL_SECS as i64),
+        );
+        raw
     }
 
     pub async fn set_claims(&self, claims: IdentityClaims) {
@@ -618,15 +656,9 @@ impl IdentityProvider for MockIdentityProvider {
 
     async fn validate_id_token(&self, _id_token: &str) -> Result<IdentityClaims> {
         let response = self.claims_response.lock().await;
-        Ok(response.clone().unwrap_or(IdentityClaims {
-            subject: "test-subject".to_string(),
-            email: Some("test@example.com".to_string()),
-            email_verified: Some(true),
-            name: Some("Test User".to_string()),
-            is_private_email: None,
-            signing_alg: "RS256".to_string(),
-            raw_claims: HashMap::new(),
-        }))
+        Ok(response
+            .clone()
+            .unwrap_or_else(MockIdentityProvider::default_claims))
     }
 
     async fn revoke_token(&self, _token: &str) -> Result<()> {

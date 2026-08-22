@@ -19,6 +19,10 @@ pub struct TokenForm {
     pub provider: Option<String>,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
+    /// Provider access token co-issued with a directly-presented ID token.
+    /// Bearer credential: bound once by the core's `at_hash` check, never
+    /// logged or persisted.
+    pub provider_access_token: Option<String>,
 }
 
 pub async fn token_handler(
@@ -38,6 +42,7 @@ pub async fn token_handler(
                     redirect_uri: form.redirect_uri,
                     id_token: form.id_token,
                     provider,
+                    provider_access_token: form.provider_access_token,
                     ip_address: audit_ctx.ip_address.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),

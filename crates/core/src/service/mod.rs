@@ -1,3 +1,4 @@
+pub mod assertion;
 pub mod claims;
 pub mod exchange;
 pub mod refresh;

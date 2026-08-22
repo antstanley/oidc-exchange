@@ -7,14 +7,23 @@ use crate::domain::{
     AuditEventType, AuditOutcome, AuditSeverity, NewUser, Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
+use crate::service::assertion::{AssertionBindError, AssertionContext};
 use crate::service::{create_audit_event, parse_duration_secs, AppService};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ExchangeRequest {
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
     pub id_token: Option<String>,
     pub provider: String,
+    /// Provider access token co-issued with a directly-presented ID token,
+    /// carried so the core's `at_hash` binding control can verify it. A
+    /// bearer credential: never logged, never persisted, and dropped as soon
+    /// as the assertion is bound.
+    ///
+    /// On the authorization-code path this field is ignored — the access
+    /// token from `ProviderTokens` takes the same slot instead.
+    pub provider_access_token: Option<String>,
     /// Client IP address extracted by the server's audit-context middleware
     /// (e.g. from `X-Forwarded-For`). Stored on the resulting session.
     pub ip_address: Option<String>,
@@ -70,10 +79,21 @@ impl AppService {
                     provider: request.provider.clone(),
                 })?;
 
-        // 2. Get validated claims — either via code exchange or direct ID token
-        let claims = if let Some(ref id_token) = request.id_token {
+        // 2. Get validated claims — either via code exchange or direct ID token.
+        // Both branches also produce the inputs the shared binding controls
+        // consume: the compact JWT as presented (replay-marker fallback key)
+        // and any access token that can anchor an `at_hash` check.
+        let is_direct_grant = request.id_token.is_some();
+        let (claims, compact_jwt, binding_access_token) = if let Some(ref id_token) =
+            request.id_token
+        {
             // Direct ID token exchange (e.g., Google Sign-In SDK)
-            provider.validate_id_token(id_token).await?
+            let claims = provider.validate_id_token(id_token).await?;
+            (
+                claims,
+                id_token.clone(),
+                request.provider_access_token.as_deref().map(str::to_string),
+            )
         } else {
             // Authorization code exchange
             let code = request
@@ -90,8 +110,34 @@ impl AppService {
                         reason: "redirect_uri is required for authorization_code grant".to_string(),
                     })?;
             let tokens = provider.exchange_code(code, redirect_uri).await?;
-            provider.validate_id_token(&tokens.id_token).await?
+            let claims = provider.validate_id_token(&tokens.id_token).await?;
+            // Redeeming the single-use code supplied this access token over an
+            // authenticated back channel; it anchors the same `at_hash` slot.
+            (
+                claims,
+                tokens.id_token,
+                tokens.access_token.as_deref().map(str::to_string),
+            )
         };
+
+        // 3. Bind the assertion — lifetime ceiling, `azp`, applicable `at_hash`,
+        // direct-grant nonce burn, then the single-use marker — exactly once,
+        // before any user lookup or registration side effect can run.
+        self.enforce_assertion_binding(
+            &claims,
+            &AssertionContext {
+                provider_id: provider.provider_id(),
+                client_id: provider.client_id(),
+                access_token: binding_access_token.as_deref(),
+                compact_jwt: &compact_jwt,
+                require_nonce: is_direct_grant,
+                max_assertion_secs: parse_duration_secs(
+                    &self.config.grants.max_assertion_lifetime,
+                )?,
+            },
+            &request,
+        )
+        .await?;
 
         // 4. Look up user by external ID, applying registration policy for new users
         let user = match self
@@ -336,6 +382,35 @@ impl AppService {
         .await?;
 
         Ok(response)
+    }
+
+    /// Run the shared assertion-binding controls and translate their outcome:
+    /// a control rejection is audited as `ValidationFailed`/`Warning` with the
+    /// failed control named in `detail.check`, then returned as `InvalidGrant`
+    /// (the OAuth error class for a bad assertion); a single-use store failure
+    /// propagates untouched so it maps to `5xx`, never to a client fault.
+    async fn enforce_assertion_binding(
+        &self,
+        claims: &crate::domain::IdentityClaims,
+        ctx: &AssertionContext<'_>,
+        request: &ExchangeRequest,
+    ) -> Result<()> {
+        match crate::service::assertion::bind(self.session_repo.as_ref(), claims, ctx).await {
+            Ok(()) => Ok(()),
+            Err(AssertionBindError::Store(err)) => Err(err),
+            Err(AssertionBindError::Rejected(rejection)) => {
+                self.audit_binding_rejection(
+                    &rejection,
+                    Some(&request.provider),
+                    request.ip_address.as_deref(),
+                    request.user_agent.as_deref(),
+                )
+                .await?;
+                Err(Error::InvalidGrant {
+                    reason: rejection.reason,
+                })
+            }
+        }
     }
 }
 
