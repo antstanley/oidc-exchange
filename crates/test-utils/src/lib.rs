@@ -779,9 +779,11 @@ impl IdentityProvider for MockIdentityProvider {
 #[cfg(test)]
 mod tests {
     use super::MockRepository;
-    use oidc_exchange_core::domain::{NewUser, UserPatch, INITIAL_USER_VERSION};
+    use oidc_exchange_core::domain::{
+        NewUser, RefreshResolution, RetiredRefreshToken, UserPatch, INITIAL_USER_VERSION,
+    };
     use oidc_exchange_core::error::Error;
-    use oidc_exchange_core::ports::UserRepository;
+    use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
     fn make_new_user(external_id: &str, provider: &str) -> NewUser {
         NewUser {
@@ -789,6 +791,36 @@ mod tests {
             provider: provider.to_string(),
             email: Some("user@example.com".to_string()),
             display_name: Some("Test User".to_string()),
+        }
+    }
+
+    /// Deterministic fixture builder: well-formed `fam_` ids from the
+    /// Crockford alphabet so `MockRepository`'s family-id assertions accept
+    /// them, with no clock or randomness in the identifiers themselves.
+    fn session_fixture(
+        user_id: &str,
+        hash: &str,
+        family_suffix: &str,
+        generation: u32,
+    ) -> oidc_exchange_core::domain::Session {
+        assert_eq!(
+            family_suffix.len(),
+            26,
+            "fixture family suffix must be a full ULID-length string"
+        );
+        let now = chrono::Utc::now();
+        oidc_exchange_core::domain::Session {
+            user_id: user_id.to_string(),
+            refresh_token_hash: hash.to_string(),
+            family_id: format!("fam_{family_suffix}"),
+            generation,
+            provider: "mock".to_string(),
+            expires_at: now + chrono::Duration::hours(24),
+            rotated_at: (generation > 0).then_some(now),
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: now,
         }
     }
 
@@ -894,5 +926,329 @@ mod tests {
             after_second.status,
             oidc_exchange_core::domain::UserStatus::Suspended
         );
+    }
+
+    const FAMILY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const FAMILY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// The four classification shapes over one family's life: live generation,
+    /// superseded-but-in-grace, retired-after-successor-fell, and unknown.
+    #[tokio::test]
+    async fn resolve_reports_live_superseded_retired_and_unknown() {
+        let repo = MockRepository::new();
+        let gen0 = session_fixture("usr_1", "hash_gen0", FAMILY_A, 0);
+        repo.store_refresh_token(&gen0).await.expect("store gen 0");
+
+        // Live: the hash is the family's current generation.
+        assert_eq!(
+            repo.resolve_refresh_token("hash_gen0")
+                .await
+                .expect("resolve gen 0"),
+            RefreshResolution::Live(gen0.clone())
+        );
+
+        let mut gen1 = session_fixture("usr_1", "hash_gen1", FAMILY_A, 1);
+        gen1.expires_at = gen0.expires_at;
+        gen1.created_at = gen0.created_at;
+        assert!(
+            repo.rotate_refresh_token("hash_gen0", &gen1)
+                .await
+                .expect("rotate to gen 1"),
+            "first rotation must win its CAS"
+        );
+
+        // Superseded: gen 0 is retired and its named successor is still live.
+        match repo
+            .resolve_refresh_token("hash_gen0")
+            .await
+            .expect("resolve retired gen 0")
+        {
+            RefreshResolution::Superseded { live, .. } => {
+                assert_eq!(live.refresh_token_hash, "hash_gen1");
+            }
+            other => panic!("gen 0 must classify as Superseded once retired, got {other:?}"),
+        }
+
+        let mut gen2 = session_fixture("usr_1", "hash_gen2", FAMILY_A, 2);
+        gen2.expires_at = gen0.expires_at;
+        gen2.created_at = gen0.created_at;
+        assert!(
+            repo.rotate_refresh_token("hash_gen1", &gen2)
+                .await
+                .expect("rotate to gen 2"),
+            "second rotation must win its CAS"
+        );
+
+        // Retired: gen 0's successor (gen 1) is no longer live — reuse, not grace.
+        match repo
+            .resolve_refresh_token("hash_gen0")
+            .await
+            .expect("resolve fallen gen 0")
+        {
+            RefreshResolution::Retired {
+                family_id, user_id, ..
+            } => {
+                assert_eq!(family_id, gen0.family_id);
+                assert_eq!(user_id, "usr_1");
+            }
+            other => panic!("fallen gen 0 must classify as Retired, got {other:?}"),
+        }
+
+        // Unknown: nothing live and nothing retained matches.
+        assert_eq!(
+            repo.resolve_refresh_token("hash_never_seen")
+                .await
+                .expect("resolve unknown"),
+            RefreshResolution::Unknown
+        );
+    }
+
+    /// A losing compare-and-swap must be a complete no-op: every observable
+    /// piece of state — live generations, retirement records, active count —
+    /// is byte-identical before and after.
+    #[tokio::test]
+    async fn failed_cas_makes_no_state_mutation() {
+        let repo = MockRepository::new();
+        let gen0 = session_fixture("usr_1", "hash_gen0", FAMILY_A, 0);
+        repo.store_refresh_token(&gen0).await.expect("store gen 0");
+
+        let mut gen1 = session_fixture("usr_1", "hash_gen1", FAMILY_A, 1);
+        gen1.expires_at = gen0.expires_at;
+        gen1.created_at = gen0.created_at;
+        assert!(
+            repo.rotate_refresh_token("hash_gen0", &gen1)
+                .await
+                .expect("rotate"),
+            "the first rotation must win"
+        );
+        // Also retire a second family so the snapshot covers mixed state.
+        let other_family = session_fixture("usr_1", "hash_other", FAMILY_B, 0);
+        repo.store_refresh_token(&other_family)
+            .await
+            .expect("store other family");
+
+        let snapshot = || async {
+            (
+                repo.get_all_sessions().await,
+                repo.get_all_retired_tokens().await,
+                repo.count_active_sessions().await.expect("count"),
+            )
+        };
+        let (sessions_before, retired_before, count_before) = snapshot().await;
+
+        // Lose the race: rotate against gen 0's hash after gen 1 already
+        // replaced it. Also lose against a hash that never existed.
+        let stale_replacement = session_fixture("usr_1", "hash_stale", FAMILY_A, 2);
+        assert!(
+            !repo
+                .rotate_refresh_token("hash_gen0", &stale_replacement)
+                .await
+                .expect("stale CAS must report false, not error"),
+            "a CAS against a moved live generation must return false"
+        );
+        assert!(
+            !repo
+                .rotate_refresh_token("hash_never_seen", &stale_replacement)
+                .await
+                .expect("unknown-hash CAS must report false, not error"),
+            "a CAS against an unknown hash must return false"
+        );
+
+        let (sessions_after, retired_after, count_after) = snapshot().await;
+        assert_eq!(
+            sessions_before, sessions_after,
+            "live sessions must be untouched"
+        );
+        assert_eq!(
+            retired_before, retired_after,
+            "retirement records must be untouched by a losing CAS"
+        );
+        assert_eq!(count_before, count_after, "active count must be untouched");
+        assert!(
+            !repo
+                .get_all_retired_tokens()
+                .await
+                .iter()
+                .any(|r| r.refresh_token_hash == stale_replacement.refresh_token_hash),
+            "the loser's replacement must never appear as a retirement record"
+        );
+    }
+
+    /// Family revocation removes exactly that family's live generation and
+    /// retained records, returns their combined count, and leaves sibling
+    /// families untouched.
+    #[tokio::test]
+    async fn revoke_family_returns_count_and_scopes_to_one_family() {
+        let repo = MockRepository::new();
+        let gen0_a = session_fixture("usr_shared", "hash_a0", FAMILY_A, 0);
+        repo.store_refresh_token(&gen0_a)
+            .await
+            .expect("store family A");
+        let gen0_b = session_fixture("usr_shared", "hash_b0", FAMILY_B, 0);
+        repo.store_refresh_token(&gen0_b)
+            .await
+            .expect("store family B");
+
+        let mut gen1_a = session_fixture("usr_shared", "hash_a1", FAMILY_A, 1);
+        gen1_a.expires_at = gen0_a.expires_at;
+        gen1_a.created_at = gen0_a.created_at;
+        assert!(
+            repo.rotate_refresh_token("hash_a0", &gen1_a)
+                .await
+                .expect("rotate A"),
+            "family A rotation must win"
+        );
+
+        // Family A now holds one live generation (a1) and one record (a0):
+        // revoke_family must remove both and report 2.
+        let removed = repo
+            .revoke_family(&format!("fam_{FAMILY_A}"))
+            .await
+            .expect("revoke family A");
+        assert_eq!(removed, 2, "count must cover the live row plus the record");
+        assert_eq!(
+            repo.resolve_refresh_token("hash_a1")
+                .await
+                .expect("resolve a1"),
+            RefreshResolution::Unknown,
+            "revoked family's live generation must read Unknown immediately"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token("hash_a0")
+                .await
+                .expect("resolve a0"),
+            RefreshResolution::Unknown,
+            "revoked family's retirement record must be gone"
+        );
+        assert!(
+            repo.get_all_retired_tokens()
+                .await
+                .iter()
+                .all(|r| r.family_id != format!("fam_{FAMILY_A}")),
+            "no retirement record of family A may survive revocation"
+        );
+
+        // Sibling family B is untouched by family A's revocation.
+        assert!(
+            matches!(
+                repo.resolve_refresh_token("hash_b0")
+                    .await
+                    .expect("resolve b0"),
+                RefreshResolution::Live(_)
+            ),
+            "sibling family must stay live through another family's revocation"
+        );
+        assert_eq!(
+            repo.count_active_sessions().await.expect("count"),
+            1,
+            "only family B's session may remain active"
+        );
+
+        // Revoking an unknown but well-formed family id succeeds with zero.
+        assert_eq!(
+            repo.revoke_family("fam_cccccccccccccccccccccccccc")
+                .await
+                .expect("revoke of unknown family"),
+            0
+        );
+    }
+
+    /// Retirement records expire at min(retired_at + retention, family
+    /// expiry): the mock computes the same deadline the persistent adapters
+    /// must, so a record can never outlive its family.
+    #[tokio::test]
+    async fn retirement_records_are_capped_at_the_family_deadline() {
+        // Retention far beyond the family's remaining life: capped at expiry.
+        let long_retention = MockRepository::with_refresh_reuse_retention_secs(86_400 * 30);
+        let gen0 = session_fixture("usr_cap", "hash_cap0", FAMILY_A, 0);
+        long_retention
+            .store_refresh_token(&gen0)
+            .await
+            .expect("store gen 0");
+        let mut gen1 = session_fixture("usr_cap", "hash_cap1", FAMILY_A, 1);
+        gen1.expires_at = gen0.expires_at;
+        gen1.created_at = gen0.created_at;
+        assert!(
+            long_retention
+                .rotate_refresh_token("hash_cap0", &gen1)
+                .await
+                .expect("rotate"),
+            "rotation must win"
+        );
+        let records = long_retention.get_all_retired_tokens().await;
+        assert_eq!(records.len(), 1, "exactly one record after one rotation");
+        assert_eq!(
+            records[0].expires_at, gen0.expires_at,
+            "record expiry must be capped at the family deadline"
+        );
+        assert_eq!(
+            records[0].successor_hash, gen1.refresh_token_hash,
+            "record must name its successor"
+        );
+
+        // The constructor rejects a zero-width retention window outright:
+        // it would silently disarm reuse detection.
+        let result = std::panic::catch_unwind(|| {
+            MockRepository::with_refresh_reuse_retention_secs(0);
+        });
+        assert!(result.is_err(), "zero retention must be rejected");
+    }
+
+    /// Cleanup sweeps expired sessions and expired retirement records alike,
+    /// counting both — the shape every persistent adapter's sweep must match.
+    #[tokio::test]
+    async fn cleanup_sweeps_expired_sessions_and_counts_them() {
+        let repo = MockRepository::new();
+        let live = session_fixture("usr_sweep", "hash_live", FAMILY_A, 0);
+        repo.store_refresh_token(&live).await.expect("store live");
+
+        // An already-expired session (written directly; store_refresh_token on
+        // the mock does not police expiry) must be swept and counted.
+        let mut expired = session_fixture("usr_sweep", "hash_expired", FAMILY_A, 0);
+        expired.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        repo.store_refresh_token(&expired)
+            .await
+            .expect("store expired");
+
+        let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
+        assert_eq!(removed, 1, "cleanup must remove exactly the expired row");
+        assert!(
+            repo.get_all_sessions()
+                .await
+                .iter()
+                .all(|s| s.refresh_token_hash != "hash_expired"),
+            "expired session must be gone after cleanup"
+        );
+        assert_eq!(
+            repo.count_active_sessions().await.expect("count"),
+            1,
+            "the live session must survive cleanup"
+        );
+
+        // A second sweep has nothing left to do: the count is honest about it.
+        assert_eq!(
+            repo.cleanup_expired_sessions()
+                .await
+                .expect("second cleanup"),
+            0,
+            "an idempotent second sweep must report zero removals"
+        );
+    }
+
+    /// The mock keeps hashes-only data in its retirement records: nothing in
+    /// the retained type carries a raw refresh token (audit/telemetry safety).
+    #[test]
+    fn retired_record_debug_leaks_nothing_but_hashes() {
+        let record = RetiredRefreshToken {
+            refresh_token_hash: "hash_retired".to_string(),
+            family_id: format!("fam_{FAMILY_A}"),
+            user_id: "usr_x".to_string(),
+            successor_hash: "hash_successor".to_string(),
+            retired_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+        };
+        let debug = format!("{record:?}");
+        assert!(debug.contains("hash_retired"));
+        assert!(!debug.to_lowercase().contains("token: \""));
     }
 }

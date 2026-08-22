@@ -1121,4 +1121,203 @@ host = "0.0.0.0"
         assert!(result.is_ok(), "non-empty secret must pass: {result:?}");
         assert!(config.internal_api.enabled);
     }
+
+    /// The rotation defaults are contract, not accident: rotation on by
+    /// default, a 10s grace window, 24h reuse retention, and a 1h cleanup
+    /// interval (`06-configuration.md` → Defaults summary).
+    #[test]
+    fn rotation_defaults_match_documented_values() {
+        let token = TokenConfig::default();
+        assert!(token.refresh_rotation, "rotation must default to enabled");
+        assert_eq!(token.refresh_rotation_grace, DEFAULT_REFRESH_ROTATION_GRACE);
+        assert_eq!(
+            token.refresh_rotation_grace, "10s",
+            "grace default is the documented 10 seconds"
+        );
+        assert_eq!(
+            token.refresh_reuse_retention,
+            DEFAULT_REFRESH_REUSE_RETENTION
+        );
+        assert_eq!(
+            SessionRepositoryConfig::default().cleanup_interval,
+            DEFAULT_SESSION_CLEANUP_INTERVAL
+        );
+
+        // The shipped default.toml carries the same values, so a deployment
+        // loading it cannot silently diverge from `Default`.
+        let toml_str = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/default.toml"
+        ))
+        .expect("failed to read config/default.toml");
+        let config: AppConfig =
+            toml::from_str(&toml_str).expect("failed to deserialize default.toml");
+        assert!(config.token.refresh_rotation);
+        assert_eq!(config.token.refresh_rotation_grace, "10s");
+        assert_eq!(config.token.refresh_reuse_retention, "24h");
+        assert_eq!(config.session_repository.cleanup_interval, "1h");
+    }
+
+    /// Omitted keys deserialize to the documented defaults (not parse errors),
+    /// and explicit values override them.
+    #[test]
+    fn rotation_keys_default_when_absent_and_override_when_present() {
+        let absent: AppConfig =
+            toml::from_str("[server]\nhost = \"0.0.0.0\"").expect("empty sections must default");
+        assert!(absent.token.refresh_rotation);
+        assert_eq!(absent.token.refresh_rotation_grace, "10s");
+        assert_eq!(absent.token.refresh_reuse_retention, "24h");
+        assert_eq!(absent.session_repository.cleanup_interval, "1h");
+
+        let present: AppConfig = toml::from_str(
+            r#"
+[token]
+refresh_rotation = false
+refresh_rotation_grace = "30s"
+refresh_reuse_retention = "12h"
+
+[session_repository]
+cleanup_interval = "15m"
+"#,
+        )
+        .expect("explicit rotation keys must deserialize");
+        assert!(!present.token.refresh_rotation);
+        assert_eq!(present.token.refresh_rotation_grace, "30s");
+        assert_eq!(present.token.refresh_reuse_retention, "12h");
+        assert_eq!(present.session_repository.cleanup_interval, "15m");
+    }
+
+    /// The grace window is a deliberate weakening, capped at
+    /// [`MAX_REFRESH_ROTATION_GRACE_SECS`]: exactly at the cap passes, one
+    /// second above is rejected with a field-specific error.
+    #[test]
+    fn validate_enforces_grace_cap_boundary() {
+        let mut at_cap = AppConfig::default();
+        at_cap.token.refresh_rotation_grace = format!("{MAX_REFRESH_ROTATION_GRACE_SECS}s");
+        assert!(
+            at_cap.validate().is_ok(),
+            "grace exactly at the cap ({MAX_REFRESH_ROTATION_GRACE_SECS}s) must be accepted"
+        );
+
+        let mut over_cap = AppConfig::default();
+        over_cap.token.refresh_rotation_grace = format!("{}s", MAX_REFRESH_ROTATION_GRACE_SECS + 1);
+
+        let err = over_cap
+            .validate()
+            .expect_err("grace above the cap must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("token.refresh_rotation_grace"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("61s"),
+                    "detail must echo the offending value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Zero-width windows and intervals can never do their jobs: each of the
+    /// three new duration fields is rejected at zero with an error naming the
+    /// field.
+    #[test]
+    fn validate_rejects_zero_durations_by_field() {
+        type FieldMutator = (&'static str, fn(&mut AppConfig));
+        let zero_cases: [FieldMutator; 3] = [
+            ("token.refresh_rotation_grace", |c| {
+                c.token.refresh_rotation_grace = "0s".to_string()
+            }),
+            ("token.refresh_reuse_retention", |c| {
+                c.token.refresh_reuse_retention = "0s".to_string()
+            }),
+            ("session_repository.cleanup_interval", |c| {
+                c.session_repository.cleanup_interval = "0s".to_string()
+            }),
+        ];
+
+        for (field, mutate) in zero_cases {
+            let mut config = AppConfig::default();
+            mutate(&mut config);
+
+            let err = config
+                .validate()
+                .expect_err("zero duration must fail startup validation");
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains(field),
+                        "{field}: error detail must name the offending field: {detail}"
+                    );
+                }
+                other => panic!("{field}: expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    /// Unparseable duration strings on the three new fields fail validation
+    /// naming the field, so a typo'd TOML value fails closed at load.
+    #[test]
+    fn validate_rejects_unparseable_rotation_durations_by_field() {
+        type FieldMutator = (&'static str, fn(&mut AppConfig));
+        let bad_cases: [FieldMutator; 3] = [
+            ("token.refresh_rotation_grace", |c| {
+                c.token.refresh_rotation_grace = "soon".to_string()
+            }),
+            ("token.refresh_reuse_retention", |c| {
+                c.token.refresh_reuse_retention = "24hours".to_string()
+            }),
+            ("session_repository.cleanup_interval", |c| {
+                c.session_repository.cleanup_interval = "hourly".to_string()
+            }),
+        ];
+
+        for (field, mutate) in bad_cases {
+            let mut config = AppConfig::default();
+            mutate(&mut config);
+
+            let err = config
+                .validate()
+                .expect_err("unparseable duration must fail startup validation");
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains(field),
+                        "{field}: error detail must name the offending field: {detail}"
+                    );
+                }
+                other => panic!("{field}: expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    /// The cleanup-interval resolver stays total for tests that bypass
+    /// validation: malformed input falls back to the documented default
+    /// rather than panicking or spinning the reaper.
+    #[test]
+    fn cleanup_interval_secs_resolves_default_for_malformed_input() {
+        let mut config = SessionRepositoryConfig::default();
+        assert_eq!(
+            config.cleanup_interval_secs(),
+            crate::service::parse_duration_secs(DEFAULT_SESSION_CLEANUP_INTERVAL)
+                .expect("documented default parses")
+        );
+
+        config.cleanup_interval = "not-a-duration".to_string();
+        assert_eq!(
+            config.cleanup_interval_secs(),
+            crate::service::parse_duration_secs(DEFAULT_SESSION_CLEANUP_INTERVAL)
+                .expect("documented default parses"),
+            "malformed interval must fall back to the documented default"
+        );
+
+        // An explicitly valid value resolves to itself.
+        config.cleanup_interval = "90s".to_string();
+        assert_eq!(config.cleanup_interval_secs(), 90);
+    }
 }
