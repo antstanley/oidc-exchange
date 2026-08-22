@@ -94,7 +94,8 @@ removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_ses
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
   `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag; `None`
-  for other providers), and `raw_claims`.
+  for other providers), `signing_alg` (the algorithm the resolved JWK verified with, e.g.
+  `"ES256"`), and `raw_claims`.
 
 ### AuditEvent (`domain/audit.rs`)
 

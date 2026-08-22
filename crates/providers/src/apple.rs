@@ -312,6 +312,9 @@ impl IdentityProvider for AppleProvider {
             email_verified: coerce_bool(&claims["email_verified"]),
             name: claims["name"].as_str().map(String::from),
             is_private_email: coerce_bool(&claims["is_private_email"]),
+            // The algorithm this token actually verified with, taken from the trusted
+            // Apple JWK (Apple pins ES256 today; the JWK decides, not the header).
+            signing_alg: oidc_exchange_adapters::shared::jwks::jws_alg_name(jwk_alg).to_string(),
             raw_claims: claims
                 .as_object()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -357,6 +360,10 @@ impl IdentityProvider for AppleProvider {
 
     fn provider_id(&self) -> &str {
         "apple"
+    }
+
+    fn client_id(&self) -> &str {
+        &self.client_id
     }
 }
 
@@ -608,6 +615,8 @@ mod tests {
             Some("user@privaterelay.appleid.com")
         );
         assert_eq!(identity.email_verified, Some(true));
+        // Core-facing metadata: the JWK's verified algorithm, reported as data.
+        assert_eq!(identity.signing_alg, "ES256");
     }
 
     // ---------------------------------------------------------------
@@ -1001,5 +1010,117 @@ mod tests {
             matches!(result2, Err(Error::InvalidGrant { .. })),
             "repeated unknown kid must still fail closed without a new network fetch"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // A validated token reports the JWK's algorithm as signing_alg — the
+    // core-facing data its at_hash digest selection reads
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_reports_jwk_signing_algorithm() {
+        let (pem, jwks, kid) = generate_es256_test_keys();
+        let (provider, _server) = provider_with_mock_jwks(&pem, &jwks).await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-alg",
+            "email": "alg@example.com",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, &kid, &claims);
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("well-formed token should validate");
+
+        // The reported algorithm must equal the matched JWK's `alg` member and be a
+        // faithful JWS name — never copied from (or confusable with) the header.
+        assert_eq!(jwks["keys"][0]["alg"], "ES256");
+        assert_eq!(identity.signing_alg, "ES256");
+        assert_eq!(identity.subject, "apple-user-alg");
+    }
+
+    #[tokio::test]
+    async fn validate_id_token_rejects_header_alg_mismatching_jwk() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        // The JWKS declares RS256 for the only key; the token is genuinely ES256-signed
+        // but presents that key's kid. Validation is configured from the trusted JWK
+        // alone, so the decode must reject before any signature check.
+        let rsa_jwks = json!({
+            "keys": [{
+                "kty": "RSA",
+                "kid": "apple-test-key-1",
+                "alg": "RS256",
+                "use": "sig",
+                "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+                "e": "AQAB"
+            }]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/auth/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&rsa_jwks))
+            .mount(&server)
+            .await;
+
+        let (pem, _jwks, _kid) = generate_es256_test_keys();
+        let provider = AppleProvider::new_for_test(
+            "com.example.app".into(),
+            "ABCDEF1234".into(),
+            "apple-test-key-1".into(),
+            EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
+            format!("{uri}/auth/token"),
+            format!("{uri}/auth/keys"),
+            None,
+        );
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": "https://appleid.apple.com",
+            "aud": "com.example.app",
+            "sub": "apple-user-confusion",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let id_token = sign_id_token(&pem, "apple-test-key-1", &claims);
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(
+            result.is_err(),
+            "a header alg disagreeing with the Apple JWK must never validate"
+        );
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "alg mismatch must be reported as InvalidGrant"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // client_id reports the configured Services ID through the port
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn client_id_returns_configured_services_id() {
+        let (pem, _jwks, _kid) = generate_es256_test_keys();
+
+        let provider = AppleProvider::new_for_test(
+            "com.example.app".into(),
+            "ABCDEF1234".into(),
+            "apple-test-key-1".into(),
+            EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
+            "https://appleid.apple.com/auth/token".into(),
+            "https://appleid.apple.com/auth/keys".into(),
+            None,
+        );
+
+        // The audience validation pins and the port's client_id() must be the same
+        // configured value, so the core's azp check needs no config access.
+        assert_eq!(provider.client_id(), "com.example.app");
+        assert_eq!(provider.provider_id(), "apple");
     }
 }

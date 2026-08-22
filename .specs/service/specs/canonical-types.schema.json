@@ -106,7 +106,7 @@
     },
     "IdentityClaims": {
       "type": "object",
-      "required": ["subject", "raw_claims"],
+      "required": ["subject", "signing_alg", "raw_claims"],
       "properties": {
         "subject": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "Provider sub / DID." },
         "email": { "type": ["string", "null"], "format": "email" },
@@ -115,6 +115,10 @@
         "is_private_email": {
           "type": ["boolean", "null"],
           "description": "Apple private-relay flag, coerced bool-or-string like email_verified; null for non-Apple providers."
+        },
+        "signing_alg": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+          "description": "JWS algorithm the resolved JWK verified the ID token with (never the untrusted header's). Selects the at_hash digest."
         },
         "raw_claims": { "type": "object", "additionalProperties": true }
       }

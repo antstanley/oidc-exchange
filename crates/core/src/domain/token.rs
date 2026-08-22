@@ -80,5 +80,11 @@ pub struct IdentityClaims {
     /// Apple private-relay flag, coerced bool-or-string like `email_verified`;
     /// `None` for non-Apple providers.
     pub is_private_email: Option<bool>,
+    /// The JWS algorithm the resolved JWK actually verified this ID token with
+    /// (e.g. `"RS256"`, `"ES256"`), never the untrusted JWT header's value. The
+    /// core's `at_hash` binding check reads it to select the matching digest
+    /// (SHA-256 for `*256`, SHA-384 for `*384`, SHA-512 for `*512`) without
+    /// re-deciding the algorithm itself.
+    pub signing_alg: String,
     pub raw_claims: HashMap<String, Value>,
 }

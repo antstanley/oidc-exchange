@@ -548,9 +548,16 @@ impl UserSync for MockUserSync {
 
 pub struct MockIdentityProvider {
     provider_id: String,
+    /// The audience the mock's claims are pinned to, reported through the port's
+    /// `client_id()`; configurable so binding tests can exercise `azp` mismatches.
+    client_id: String,
     exchange_response: Arc<Mutex<Option<ProviderTokens>>>,
     claims_response: Arc<Mutex<Option<IdentityClaims>>>,
 }
+
+/// Default `client_id()` the mock reports; matches the audience used across the
+/// repo's provider test fixtures (`test-client-id`) unless overridden.
+pub const MOCK_CLIENT_ID: &str = "test-client-id";
 
 impl MockIdentityProvider {
     pub fn new(provider_id: &str) -> Self {
@@ -566,11 +573,15 @@ impl MockIdentityProvider {
             email_verified: Some(true),
             name: Some("Test User".to_string()),
             is_private_email: None,
+            // A stand-in for the resolved JWK algorithm a real validator would report;
+            // RS256 is the common upstream case and selects SHA-256 for at_hash tests.
+            signing_alg: "RS256".to_string(),
             raw_claims: HashMap::new(),
         };
 
         Self {
             provider_id: provider_id.to_string(),
+            client_id: MOCK_CLIENT_ID.to_string(),
             exchange_response: Arc::new(Mutex::new(Some(default_tokens))),
             claims_response: Arc::new(Mutex::new(Some(default_claims))),
         }
@@ -582,6 +593,15 @@ impl MockIdentityProvider {
 
     pub async fn set_exchange_response(&self, tokens: ProviderTokens) {
         *self.exchange_response.lock().await = Some(tokens);
+    }
+
+    /// Override the audience reported through the port's `client_id()`. Consuming
+    /// builder (not a setter): the port hands out `&str` borrowed from this field, so
+    /// it must be fixed before the mock is shared with the service under test.
+    pub fn with_client_id(mut self, client_id: &str) -> Self {
+        assert!(!client_id.is_empty(), "mock client_id must be non-empty");
+        self.client_id = client_id.to_string();
+        self
     }
 }
 
@@ -604,6 +624,7 @@ impl IdentityProvider for MockIdentityProvider {
             email_verified: Some(true),
             name: Some("Test User".to_string()),
             is_private_email: None,
+            signing_alg: "RS256".to_string(),
             raw_claims: HashMap::new(),
         }))
     }
@@ -614,6 +635,10 @@ impl IdentityProvider for MockIdentityProvider {
 
     fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+
+    fn client_id(&self) -> &str {
+        &self.client_id
     }
 }
 
@@ -876,7 +901,7 @@ pub mod single_use_conformance {
 #[cfg(test)]
 mod tests {
     use super::single_use_conformance as conformance;
-    use super::MockRepository;
+    use super::{MockIdentityProvider, MockRepository, MOCK_CLIENT_ID};
     use oidc_exchange_core::domain::{NewUser, UserPatch, INITIAL_USER_VERSION};
     use oidc_exchange_core::error::Error;
     use oidc_exchange_core::ports::{SessionRepository, UserRepository};
@@ -999,6 +1024,37 @@ mod tests {
     #[tokio::test]
     async fn single_use_first_claim_wins_duplicate_loses() {
         conformance::first_claim_wins_duplicate_loses(&MockRepository::new()).await;
+    }
+
+    /// The mock reports its configured client identity through the port, defaulting to
+    /// the shared fixture audience and honouring the builder override — binding tests
+    /// rely on both behaviours matching the real providers.
+    #[tokio::test]
+    async fn mock_identity_provider_reports_configured_client_id() {
+        use oidc_exchange_core::ports::IdentityProvider;
+
+        let default_provider = MockIdentityProvider::new("mock");
+        assert_eq!(
+            IdentityProvider::client_id(&default_provider),
+            MOCK_CLIENT_ID,
+            "the mock's default client_id must match the documented fixture constant"
+        );
+        assert_eq!(default_provider.provider_id(), "mock");
+
+        let custom_provider = MockIdentityProvider::new("mock").with_client_id("sibling-client");
+        assert_eq!(
+            IdentityProvider::client_id(&custom_provider),
+            "sibling-client",
+            "with_client_id must override the audience the port reports"
+        );
+
+        // The mock's default claims carry a signing_alg a real validator would report,
+        // so core-side consumers never see an empty algorithm from the fixture.
+        let claims = default_provider
+            .validate_id_token("unused")
+            .await
+            .expect("mock validate should succeed");
+        assert_eq!(claims.signing_alg, "RS256");
     }
 
     #[tokio::test]

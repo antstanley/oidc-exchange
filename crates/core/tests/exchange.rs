@@ -476,6 +476,7 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
             email_verified: Some(true),
             name: Some("Test User".to_string()),
             is_private_email: None,
+            signing_alg: "RS256".to_string(),
             raw_claims: HashMap::new(),
         })
         .await;
@@ -522,6 +523,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
+                signing_alg: "RS256".to_string(),
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -549,6 +551,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
+                signing_alg: "RS256".to_string(),
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -576,6 +579,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
+                signing_alg: "RS256".to_string(),
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -608,6 +612,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
+                signing_alg: "RS256".to_string(),
                 raw_claims: HashMap::new(),
             })
             .await;
@@ -725,6 +730,7 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
             email_verified: None,
             name: Some("No Email User".to_string()),
             is_private_email: None,
+            signing_alg: "RS256".to_string(),
             raw_claims: HashMap::new(),
         })
         .await;
@@ -1246,6 +1252,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
             email_verified: Some(true),
             name: Some("Test User".to_string()),
             is_private_email: None,
+            signing_alg: "RS256".to_string(),
             raw_claims: HashMap::new(),
         })
         .await;

@@ -94,7 +94,12 @@ async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<Provider
 async fn validate_id_token(&self, id_token: &str) -> Result<IdentityClaims>;
 async fn revoke_token(&self, token: &str) -> Result<()>;
 fn provider_id(&self) -> &str;
+fn client_id(&self) -> &str;
 ```
+
+`client_id` reports the audience the provider pins, so the core's `azp` check does not
+have to reach into `[providers.<name>]` config. `validate_id_token`'s signature is
+unchanged — the binding controls read the claims it already returns.
 
 ### AuditLog (`ports/audit.rs`)
 
