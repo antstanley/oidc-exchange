@@ -447,7 +447,10 @@ async fn build_user_repository(
             )
             .await?;
             Ok(Box::new(
-                oidc_exchange_adapters::postgres::PostgresRepository::new(pool),
+                oidc_exchange_adapters::postgres::PostgresRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "sqlite" => {
@@ -510,7 +513,10 @@ async fn build_session_repository(
             )
             .await?;
             Ok(Box::new(
-                oidc_exchange_adapters::postgres::PostgresRepository::new(pool),
+                oidc_exchange_adapters::postgres::PostgresRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "sqlite" => {

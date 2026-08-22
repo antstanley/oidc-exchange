@@ -3,14 +3,15 @@ use std::future::Future;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use oidc_exchange_core::domain::{
+    is_valid_family_id, NewUser, RefreshResolution, RetiredRefreshToken, Session, User, UserPatch,
+    UserStatus,
+};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use tracing::instrument;
 
-use oidc_exchange_core::domain::{
-    NewUser, RefreshResolution, Session, User, UserPatch, UserStatus,
-};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
@@ -64,15 +65,40 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS family_id TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS retired_refresh_tokens (
+    refresh_token_hash  TEXT PRIMARY KEY,
+    family_id           TEXT NOT NULL,
+    user_id             TEXT NOT NULL,
+    successor_hash      TEXT NOT NULL,
+    retired_at          TIMESTAMPTZ NOT NULL,
+    expires_at          TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_retired_family ON retired_refresh_tokens (family_id);
+CREATE INDEX IF NOT EXISTS idx_retired_expires_at ON retired_refresh_tokens (expires_at);
 "#;
 
 pub struct PostgresRepository {
     pool: PgPool,
+    /// How long a retirement record stays readable after its rotation:
+    /// `retired_at + reuse_retention_secs`, capped per record at the family's
+    /// absolute `expires_at` by [`RetiredRefreshToken::retention_deadline`].
+    /// Resolved from `[token] refresh_reuse_retention` at bootstrap; injected
+    /// here because the store, not the caller, stamps every record's deadline.
+    reuse_retention_secs: u64,
 }
 
 impl PostgresRepository {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, reuse_retention_secs: u64) -> Self {
+        assert!(
+            reuse_retention_secs > 0,
+            "reuse retention must be greater than zero"
+        );
+        Self {
+            pool,
+            reuse_retention_secs,
+        }
     }
 
     fn store_err(e: impl std::fmt::Display) -> Error {
@@ -318,6 +344,108 @@ fn row_to_session(row: &sqlx::postgres::PgRow) -> Result<Session> {
     })
 }
 
+fn row_to_retired(row: &sqlx::postgres::PgRow) -> Result<RetiredRefreshToken> {
+    // Round-trip revalidation (store-read boundary): every column of a
+    // retirement record is NOT NULL in the DDL, so a missing or mistyped
+    // attribute is corruption, not absence, and must surface as a store error.
+    Ok(RetiredRefreshToken {
+        refresh_token_hash: row
+            .try_get("refresh_token_hash")
+            .map_err(PostgresRepository::store_err)?,
+        family_id: row.try_get("family_id").map_err(PostgresRepository::store_err)?,
+        user_id: row.try_get("user_id").map_err(PostgresRepository::store_err)?,
+        successor_hash: row
+            .try_get("successor_hash")
+            .map_err(PostgresRepository::store_err)?,
+        retired_at: row
+            .try_get("retired_at")
+            .map_err(PostgresRepository::store_err)?,
+        expires_at: row
+            .try_get("expires_at")
+            .map_err(PostgresRepository::store_err)?,
+    })
+}
+
+/// Build the retirement record a winning rotation writes for `live`. The
+/// successor inherits the family identity; the deadline is
+/// `min(now + reuse_retention, family expires_at)` so no record outlives its
+/// family. Legacy rows must never reach this helper — there is no prior
+/// generation for them to be detected against.
+fn retirement_record(
+    live_hash: &str,
+    live: &Session,
+    replacement: &Session,
+    reuse_retention_secs: u64,
+    now: DateTime<Utc>,
+) -> RetiredRefreshToken {
+    assert_eq!(
+        live.refresh_token_hash, live_hash,
+        "retirement record must name the presented hash"
+    );
+    assert!(
+        is_valid_family_id(&live.family_id),
+        "a legacy row must not produce a retirement record: {:?}",
+        live.family_id
+    );
+    RetiredRefreshToken {
+        refresh_token_hash: live_hash.to_string(),
+        family_id: live.family_id.clone(),
+        user_id: live.user_id.clone(),
+        successor_hash: replacement.refresh_token_hash.clone(),
+        retired_at: now,
+        expires_at: RetiredRefreshToken::retention_deadline(
+            now,
+            reuse_retention_secs,
+            replacement.expires_at,
+        ),
+    }
+}
+
+/// Insert one session row on an existing transaction or the pool. Shared by
+/// `store_refresh_token` and the winning arm of `rotate_refresh_token` so
+/// both write paths bind identical columns.
+///
+/// `replace` selects the conflict behaviour: the store path is idempotent
+/// (`ON CONFLICT DO UPDATE`, preserving its existing semantics), while
+/// rotation inserts plainly so a replacement hash colliding with any existing
+/// live row fails the transaction loudly instead of clobbering it.
+async fn insert_session_tx<'e, E>(executor: E, session: &Session, replace: bool) -> Result<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let conflict_clause = if replace {
+        "ON CONFLICT (refresh_token_hash) DO UPDATE SET \
+         user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, \
+         generation = EXCLUDED.generation, provider = EXCLUDED.provider, \
+         expires_at = EXCLUDED.expires_at, rotated_at = EXCLUDED.rotated_at, \
+         device_id = EXCLUDED.device_id, user_agent = EXCLUDED.user_agent, \
+         ip_address = EXCLUDED.ip_address, created_at = EXCLUDED.created_at"
+    } else {
+        ""
+    };
+
+    sqlx::query(&format!(
+        "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) {conflict_clause}"
+    ))
+    .bind(&session.refresh_token_hash)
+    .bind(&session.user_id)
+    .bind(&session.family_id)
+    .bind(session.generation as i64)
+    .bind(&session.provider)
+    .bind(session.expires_at)
+    .bind(session.rotated_at)
+    .bind(&session.device_id)
+    .bind(&session.user_agent)
+    .bind(&session.ip_address)
+    .bind(session.created_at)
+    .execute(executor)
+    .await
+    .map_err(PostgresRepository::store_err)?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl UserRepository for PostgresRepository {
     #[instrument(skip(self), fields(user_id))]
@@ -524,37 +652,7 @@ impl UserRepository for PostgresRepository {
 impl SessionRepository for PostgresRepository {
     #[instrument(skip(self, session), fields(user_id = %session.user_id))]
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             ON CONFLICT (refresh_token_hash) DO UPDATE SET
-                user_id = EXCLUDED.user_id,
-                family_id = EXCLUDED.family_id,
-                generation = EXCLUDED.generation,
-                provider = EXCLUDED.provider,
-                expires_at = EXCLUDED.expires_at,
-                rotated_at = EXCLUDED.rotated_at,
-                device_id = EXCLUDED.device_id,
-                user_agent = EXCLUDED.user_agent,
-                ip_address = EXCLUDED.ip_address,
-                created_at = EXCLUDED.created_at",
-        )
-        .bind(&session.refresh_token_hash)
-        .bind(&session.user_id)
-        .bind(&session.family_id)
-        .bind(session.generation as i64)
-        .bind(&session.provider)
-        .bind(session.expires_at)
-        .bind(session.rotated_at)
-        .bind(&session.device_id)
-        .bind(&session.user_agent)
-        .bind(&session.ip_address)
-        .bind(session.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(Self::store_err)?;
-
-        Ok(())
+        insert_session_tx(&self.pool, session, true).await
     }
 
     #[instrument(skip(self), fields(token_hash))]
@@ -571,30 +669,58 @@ impl SessionRepository for PostgresRepository {
         }
     }
 
-    /// Interim classification for task 01: these stores hold live generations
-    /// only — the `retired_refresh_tokens` table and the full
-    /// `Superseded`/`Retired`/`Unknown` classification arrive with task 03
-    /// (sql_session_adapters). Live-or-unknown is therefore the complete,
-    /// truthful answer today, and it is strongly consistent: the read sees
-    /// every committed write.
+    /// Classify `token_hash` against live generations first, then retained
+    /// retirement records (SR1). Postgres's default READ COMMITTED isolation
+    /// gives every query the latest committed snapshot, so each answer
+    /// reflects the most recent write. A record past its retention deadline
+    /// answers `Unknown` until the sweep physically deletes it — reuse
+    /// detection must not fire on a window that has closed.
     #[instrument(skip(self), fields(token_hash))]
     async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
         assert!(
             !token_hash.is_empty(),
             "resolve_refresh_token: token_hash must not be empty"
         );
-        match self.get_session_by_refresh_token(token_hash).await? {
-            Some(session) => Ok(RefreshResolution::Live(session)),
-            None => Ok(RefreshResolution::Unknown),
+        if let Some(session) = self.get_session_by_refresh_token(token_hash).await? {
+            return Ok(RefreshResolution::Live(session));
+        }
+
+        let Some(record) = self.get_retired_record(token_hash).await? else {
+            return Ok(RefreshResolution::Unknown);
+        };
+        if record.expires_at <= Utc::now() {
+            return Ok(RefreshResolution::Unknown);
+        }
+
+        match self
+            .get_session_by_refresh_token(&record.successor_hash)
+            .await?
+        {
+            Some(successor_live) => Ok(RefreshResolution::Superseded {
+                live: successor_live,
+                retired_at: record.retired_at,
+            }),
+            None => Ok(RefreshResolution::Retired {
+                family_id: record.family_id,
+                user_id: record.user_id,
+                retired_at: record.retired_at,
+            }),
         }
     }
 
-    /// Interim rotation for task 01: one transaction whose compare-and-swap
-    /// condition is the delete's affected-row count — zero rows means the live
-    /// generation moved, so the transaction rolls back and this returns
-    /// `false`, giving exactly-one-winner (SR3) and an all-or-nothing swap of
-    /// the two session rows (SR2). Task 03 extends this same transaction with
-    /// the retirement-record insert that SR4/SR5 need.
+    /// One `BEGIN … COMMIT` performing all rotation effects — delete the live
+    /// row, write the retirement record, install the replacement — conditioned
+    /// on the live row still existing (SR2/SR3/SR4). The condition is the
+    /// delete's affected-row count: zero rows means a concurrent redemption
+    /// moved the live generation first (Postgres READ COMMITTED evaluates each
+    /// statement against the latest committed snapshot), so the transaction
+    /// rolls back having written nothing and this returns `false`.
+    ///
+    /// A live row carrying the empty-family sentinel is a pre-rotation legacy
+    /// row: its first redemption deletes it and installs the replacement
+    /// *without* a retirement record — there is no prior generation to detect
+    /// reuse against — and the replacement carries whatever family the caller
+    /// minted. The store never invents one.
     #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
     async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
         assert_ne!(
@@ -602,11 +728,41 @@ impl SessionRepository for PostgresRepository {
             "rotate_refresh_token: replacement must be a fresh generation"
         );
         assert!(
-            !replacement.refresh_token_hash.is_empty(),
-            "rotate_refresh_token: replacement hash must not be empty"
+            is_valid_family_id(&replacement.family_id),
+            "rotate_refresh_token: malformed replacement family id {:?}",
+            replacement.family_id
         );
 
         let mut tx = self.pool.begin().await.map_err(Self::store_err)?;
+
+        // Read the live row inside the transaction: its existence is the CAS
+        // condition and its family/user identity decides between the normal
+        // three-effect rotation and the legacy first-redemption swap.
+        let live_row = sqlx::query("SELECT * FROM sessions WHERE refresh_token_hash = $1")
+            .bind(live_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(Self::store_err)?;
+        let Some(live_row) = live_row else {
+            // The condition failed: a concurrent redemption moved the live
+            // generation first. Roll back and write nothing.
+            tx.rollback().await.map_err(Self::store_err)?;
+            return Ok(false);
+        };
+        let live = row_to_session(&live_row)?;
+        let legacy_row = live.family_id.is_empty();
+        if !legacy_row {
+            // A rotation replaces a generation of the same family — anything
+            // else would strand credentials outside their holder's control.
+            assert_eq!(
+                live.family_id, replacement.family_id,
+                "rotate_refresh_token: family mismatch between live and replacement"
+            );
+        }
+        assert_eq!(
+            live.user_id, replacement.user_id,
+            "rotate_refresh_token: user mismatch between live and replacement"
+        );
 
         let deleted = sqlx::query("DELETE FROM sessions WHERE refresh_token_hash = $1")
             .bind(live_hash)
@@ -614,31 +770,32 @@ impl SessionRepository for PostgresRepository {
             .await
             .map_err(Self::store_err)?;
         if deleted.rows_affected() == 0 {
-            // The condition failed: a concurrent redemption moved the live
-            // generation first. Roll back and write nothing.
+            // The row the SELECT observed was concurrently removed and the
+            // delete lost the race; the transaction must still roll back.
             tx.rollback().await.map_err(Self::store_err)?;
             return Ok(false);
         }
 
-        let expires_at = replacement.expires_at;
-        sqlx::query(
-            "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-        )
-        .bind(&replacement.refresh_token_hash)
-        .bind(&replacement.user_id)
-        .bind(&replacement.family_id)
-        .bind(replacement.generation as i64)
-        .bind(&replacement.provider)
-        .bind(expires_at)
-        .bind(replacement.rotated_at)
-        .bind(&replacement.device_id)
-        .bind(&replacement.user_agent)
-        .bind(&replacement.ip_address)
-        .bind(replacement.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(Self::store_err)?;
+        if !legacy_row {
+            let now = Utc::now();
+            let record =
+                retirement_record(live_hash, &live, replacement, self.reuse_retention_secs, now);
+            sqlx::query(
+                "INSERT INTO retired_refresh_tokens (refresh_token_hash, family_id, user_id, successor_hash, retired_at, expires_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(&record.refresh_token_hash)
+            .bind(&record.family_id)
+            .bind(&record.user_id)
+            .bind(&record.successor_hash)
+            .bind(record.retired_at)
+            .bind(record.expires_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(Self::store_err)?;
+        }
+
+        insert_session_tx(&mut *tx, replacement, false).await?;
 
         tx.commit().await.map_err(Self::store_err)?;
         Ok(true)
@@ -655,25 +812,31 @@ impl SessionRepository for PostgresRepository {
         Ok(())
     }
 
-    /// Interim family revocation for task 01: removes the family's live
-    /// generations and returns how many. The retirement records `revoke_family`
-    /// must also sweep do not exist in this store until task 03 adds them, so
-    /// the count covers live rows only — exactly the removal work this store
-    /// currently holds.
+    /// Remove the family's live generation and every retained retirement
+    /// record, returning the combined count (SR5), inside one transaction so
+    /// the two sweeps cannot be observed half-applied. Idempotent: an unknown
+    /// (but well-formed) family id removes nothing and returns `Ok(0)`.
     #[instrument(skip(self), fields(family_id))]
     async fn revoke_family(&self, family_id: &str) -> Result<u64> {
         assert!(
-            !family_id.is_empty(),
-            "revoke_family: family_id must not be empty"
+            is_valid_family_id(family_id),
+            "revoke_family: malformed family id {family_id:?}"
         );
 
-        let result = sqlx::query("DELETE FROM sessions WHERE family_id = $1")
+        let mut tx = self.pool.begin().await.map_err(Self::store_err)?;
+        let live = sqlx::query("DELETE FROM sessions WHERE family_id = $1")
             .bind(family_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(Self::store_err)?;
+        let retired = sqlx::query("DELETE FROM retired_refresh_tokens WHERE family_id = $1")
+            .bind(family_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(Self::store_err)?;
+        tx.commit().await.map_err(Self::store_err)?;
 
-        Ok(result.rows_affected())
+        Ok(live.rows_affected() + retired.rows_affected())
     }
 
     #[instrument(skip(self))]
@@ -689,23 +852,64 @@ impl SessionRepository for PostgresRepository {
 
     #[instrument(skip(self), fields(user_id))]
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+        assert!(
+            !user_id.is_empty(),
+            "revoke_all_user_sessions: user_id must not be empty"
+        );
+
+        // The SR5 removal guarantee applied across all of the user's families:
+        // live rows and retained retirement records leave in one transaction.
+        let mut tx = self.pool.begin().await.map_err(Self::store_err)?;
         sqlx::query("DELETE FROM sessions WHERE user_id = $1")
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(Self::store_err)?;
+        sqlx::query("DELETE FROM retired_refresh_tokens WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(Self::store_err)?;
+        tx.commit().await.map_err(Self::store_err)?;
 
         Ok(())
     }
 
     #[instrument(skip(self))]
     async fn cleanup_expired_sessions(&self) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM sessions WHERE expires_at < NOW()")
-            .execute(&self.pool)
+        // The sweep covers sessions and retirement records alike, and its
+        // count is the combined number deleted (the port contract).
+        let mut tx = self.pool.begin().await.map_err(Self::store_err)?;
+        let sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < NOW()")
+            .execute(&mut *tx)
+            .await
+            .map_err(Self::store_err)?;
+        let retired = sqlx::query("DELETE FROM retired_refresh_tokens WHERE expires_at < NOW()")
+            .execute(&mut *tx)
+            .await
+            .map_err(Self::store_err)?;
+        tx.commit().await.map_err(Self::store_err)?;
+
+        Ok(sessions.rows_affected() + retired.rows_affected())
+    }
+}
+
+impl PostgresRepository {
+    /// Fetch one retirement record by hash, if it is still retained. Inherent
+    /// helper (not a port method): `resolve_refresh_token` needs the raw
+    /// record to evaluate the successor pointer, while `/revoke`'s liveness
+    /// lookup deliberately does not see retirement records as sessions.
+    async fn get_retired_record(&self, token_hash: &str) -> Result<Option<RetiredRefreshToken>> {
+        let row = sqlx::query("SELECT * FROM retired_refresh_tokens WHERE refresh_token_hash = $1")
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
             .await
             .map_err(Self::store_err)?;
 
-        Ok(result.rows_affected())
+        match row {
+            Some(ref r) => Ok(Some(row_to_retired(r)?)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -717,6 +921,11 @@ impl SessionRepository for PostgresRepository {
 mod tests {
     use super::*;
     use oidc_exchange_core::domain::INITIAL_USER_VERSION;
+
+    /// Reuse-retention window used by every test repository: one hour — short
+    /// enough that deadline arithmetic stays inside a test's lifetime, and
+    /// positive per the constructor's precondition.
+    const TEST_REUSE_RETENTION_SECS: u64 = 3600;
 
     /// `postgres://…` URL for a scratch database, overridable via
     /// `POSTGRES_TEST_URL`. Start one with:
@@ -762,6 +971,10 @@ mod tests {
             .execute(&mut *conn)
             .await
             .expect("drop sessions");
+        sqlx::query("DROP TABLE IF EXISTS retired_refresh_tokens")
+            .execute(&mut *conn)
+            .await
+            .expect("drop retired_refresh_tokens");
         sqlx::query("DROP TABLE IF EXISTS users")
             .execute(&mut *conn)
             .await
@@ -781,7 +994,7 @@ mod tests {
             .expect("release test schema lock");
         drop(conn);
 
-        PostgresRepository::new(pool)
+        PostgresRepository::new(pool, TEST_REUSE_RETENTION_SECS)
     }
 
     /// A [`PostgresRepository`] backed by a fresh, private Postgres schema named
@@ -825,7 +1038,7 @@ mod tests {
             .await
             .expect("run migrations in isolated schema");
 
-        PostgresRepository::new(pool)
+        PostgresRepository::new(pool, TEST_REUSE_RETENTION_SECS)
     }
 
     #[tokio::test]
@@ -1361,7 +1574,7 @@ mod tests {
         let pool = create_pool(&migrated_url, 2, true)
             .await
             .expect("create_pool(url, n, true) should connect and migrate a fresh schema");
-        let repo = PostgresRepository::new(pool);
+        let repo = PostgresRepository::new(pool, TEST_REUSE_RETENTION_SECS);
 
         let created = repo
             .create_user(&NewUser {
@@ -1408,6 +1621,387 @@ mod tests {
         assert!(
             sessions_reg.is_none(),
             "run_migrations = false must not create the sessions table"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Refresh-token rotation and reuse detection (task 03)
+    // -----------------------------------------------------------------------
+
+    use oidc_exchange_test_utils::session_contract;
+
+    /// The `sessions.user_id` foreign key requires the fixture users the
+    /// shared suite writes sessions for to exist first. Seeds them directly
+    /// (their ids are fixed by the harness, while `create_user` mints its
+    /// own), relying on the DDL defaults for status/metadata/claims.
+    async fn seed_fixture_users(repo: &PostgresRepository, user_ids: &[&str]) {
+        for user_id in user_ids {
+            let inserted = sqlx::query(
+                "INSERT INTO users (id, external_id, provider) VALUES ($1, $2, 'conformance') \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(user_id)
+            .bind(format!("external|{user_id}"))
+            .execute(&repo.pool)
+            .await
+            .expect("seed fixture user");
+            assert!(
+                inserted.rows_affected() <= 1,
+                "seeding {user_id} may not insert more than one row"
+            );
+        }
+    }
+
+    /// Insert a pre-rotation (legacy) session row exactly the way the
+    /// pre-migration schema would have written it: NULL `family_id`,
+    /// generation 0, NULL `rotated_at`.
+    async fn seed_legacy_session(repo: &PostgresRepository, token_hash: &str, user_id: &str) {
+        seed_fixture_users(repo, &[user_id]).await;
+        let now = Utc::now();
+        let expires_at = now + chrono::Duration::hours(24);
+        sqlx::query(
+            "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
+             VALUES ($1, $2, NULL, 0, 'google', $3, NULL, NULL, NULL, NULL, $4)",
+        )
+        .bind(token_hash)
+        .bind(user_id)
+        .bind(expires_at)
+        .bind(now)
+        .execute(&repo.pool)
+        .await
+        .expect("seed legacy session row");
+    }
+
+    async fn retired_count(repo: &PostgresRepository) -> i64 {
+        let row = sqlx::query("SELECT COUNT(*) AS count FROM retired_refresh_tokens")
+            .fetch_one(&repo.pool)
+            .await
+            .expect("count retirement records");
+        row.try_get::<i64, _>("count").expect("count column")
+    }
+
+    /// The full SR1–SR5 shared suite against the Postgres store. One tag
+    /// namespaces every fixture the suite creates; the isolated schema keeps
+    /// concurrent ignored-test processes from touching each other's rows.
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn postgres_session_store_meets_sr1_through_sr5() {
+        let repo = create_isolated_schema_repo("oidc_pg_session_conformance").await;
+        seed_fixture_users(&repo, &["usr_conformance", "usr_shared"]).await;
+        session_contract::assert_full_conformance(&repo, "postgres-session-conformance").await;
+    }
+
+    /// A legacy row's first redemption swaps atomically but writes no
+    /// retirement record — there is no prior generation to detect reuse
+    /// against — and the presented hash reads Unknown afterwards. The
+    /// replacement carries the caller's newly-minted family; nothing here
+    /// synthesizes one.
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn legacy_row_first_redemption_swaps_without_retirement_record() {
+        let repo = create_isolated_schema_repo("oidc_pg_legacy_first_redemption").await;
+        let legacy_hash =
+            session_contract::fixture_hash("postgres-legacy:first-redemption");
+        seed_legacy_session(&repo, &legacy_hash, "usr_legacy").await;
+
+        // Classification is storage-factual: the sentinel-carrying row is Live.
+        let live = repo
+            .resolve_refresh_token(&legacy_hash)
+            .await
+            .expect("resolve legacy row");
+        match &live {
+            RefreshResolution::Live(session) => {
+                assert_eq!(session.family_id, "", "sentinel family on read");
+                assert_eq!(session.generation, 0);
+                assert_eq!(session.rotated_at, None);
+            }
+            other => panic!("the stored legacy row must resolve Live, got {other:?}"),
+        }
+
+        let base = Utc::now();
+        let new_family = session_contract::fixture_family_id("postgres-legacy:new-fam");
+        assert!(is_valid_family_id(&new_family));
+        if let RefreshResolution::Live(legacy) = &live {
+            let replacement = Session {
+                refresh_token_hash: format!("{legacy_hash}-next"),
+                family_id: new_family.clone(),
+                generation: 0,
+                rotated_at: None,
+                expires_at: base + chrono::Duration::hours(24),
+                created_at: base,
+                ..legacy.clone()
+            };
+
+            let won = repo
+                .rotate_refresh_token(&legacy_hash, &replacement)
+                .await
+                .expect("legacy first-redemption swap");
+            assert!(won, "an uncontended legacy redemption must win its CAS");
+
+            assert_eq!(
+                repo.resolve_refresh_token(&legacy_hash).await.expect("resolve consumed hash"),
+                RefreshResolution::Unknown,
+                "a consumed legacy row has no retained record and must read Unknown"
+            );
+            match repo
+                .resolve_refresh_token(&replacement.refresh_token_hash)
+                .await
+                .expect("resolve replacement")
+            {
+                RefreshResolution::Live(session) => {
+                    assert_eq!(session.family_id, new_family);
+                    assert_eq!(session.user_id, "usr_legacy");
+                }
+                other => panic!("replacement must be Live, got {other:?}"),
+            }
+            assert_eq!(
+                retired_count(&repo).await,
+                0,
+                "a legacy first redemption must not leave a retirement record"
+            );
+        } else {
+            unreachable!("checked Live above");
+        }
+    }
+
+    /// Transaction rollback: when the replacement insert fails mid-transaction
+    /// (its hash colliding with an existing live row), the whole unit rolls
+    /// back — the live generation the delete removed comes back, and no
+    /// orphaned retirement record is left behind (SR2's all-or-nothing rule
+    /// under a real failure, not just a lost CAS).
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn failed_replacement_insert_rolls_back_delete_and_retirement() {
+        let repo = create_isolated_schema_repo("oidc_pg_rollback").await;
+        seed_fixture_users(&repo, &["usr_rollback", "usr_blocker"]).await;
+        let chain = session_contract::family_chain("postgres:rollback", 0, "usr_rollback");
+        repo.store_refresh_token(&chain.gen0).await.expect("store gen0");
+
+        // An unrelated live row already occupying the replacement's hash: the
+        // mid-transaction collision that forces the rollback.
+        let blocker = Session {
+            refresh_token_hash: chain.gen1.refresh_token_hash.clone(),
+            family_id: session_contract::fixture_family_id("postgres:rollback:blocker-fam"),
+            user_id: "usr_blocker".to_string(),
+            ..chain.gen1.clone()
+        };
+        repo.store_refresh_token(&blocker).await.expect("store blocker");
+
+        let result = repo
+            .rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            .await;
+        assert!(result.is_err(), "the colliding insert must fail the transaction");
+
+        // Rollback completeness, checked three ways: the deleted live
+        // generation is present again, no retirement record for it exists,
+        // and the blocking row is untouched.
+        assert_eq!(
+            repo.get_session_by_refresh_token(&chain.gen0.refresh_token_hash)
+                .await
+                .expect("read gen0 after rollback"),
+            Some(chain.gen0),
+            "the delete must have been rolled back with the rest of the transaction"
+        );
+        assert_eq!(
+            retired_count(&repo).await,
+            0,
+            "no orphaned retirement record may survive the rollback"
+        );
+        assert!(
+            repo.get_session_by_refresh_token(&blocker.refresh_token_hash)
+                .await
+                .expect("read blocker after rollback")
+                .is_some(),
+            "the blocking row must be untouched"
+        );
+    }
+
+    /// Cleanup sweeps expired sessions and expired retirement records alike,
+    /// its count covering both tables. Runs in an isolated schema so the
+    /// exact global counts cannot be disturbed by a concurrently running
+    /// ignored test.
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn cleanup_counts_expired_sessions_and_retired_records_together() {
+        let repo = create_isolated_schema_repo("oidc_pg_cleanup").await;
+        seed_fixture_users(&repo, &["usr_cleanup"]).await;
+        let chain = session_contract::family_chain("postgres:cleanup", 0, "usr_cleanup");
+        repo.store_refresh_token(&chain.gen0).await.expect("store gen0");
+        assert!(
+            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+                .await
+                .expect("rotate"),
+            "rotation must win"
+        );
+
+        // Force-expire everything by rewriting the timestamps in place: the
+        // live generation, and the retention deadline of the retirement record.
+        let past = Utc::now() - chrono::Duration::hours(2);
+        sqlx::query("UPDATE sessions SET expires_at = $1 WHERE refresh_token_hash = $2")
+            .bind(past)
+            .bind(chain.gen1.refresh_token_hash.clone())
+            .execute(&repo.pool)
+            .await
+            .expect("expire live generation");
+        sqlx::query(
+            "UPDATE retired_refresh_tokens SET expires_at = $1 WHERE refresh_token_hash = $2",
+        )
+        .bind(past)
+        .bind(chain.gen0.refresh_token_hash.clone())
+        .execute(&repo.pool)
+        .await
+        .expect("expire retirement record");
+
+        let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
+        assert_eq!(
+            removed, 2,
+            "cleanup must count one expired session plus one expired retirement record"
+        );
+        assert_eq!(retired_count(&repo).await, 0);
+        assert_eq!(
+            repo.count_active_sessions().await.expect("active count"),
+            0,
+            "nothing live remains after the sweep"
+        );
+        assert_eq!(
+            repo.cleanup_expired_sessions().await.expect("second cleanup"),
+            0,
+            "a second sweep over a clean store reports zero"
+        );
+    }
+
+    /// `revoke_all_user_sessions` removes the user's live generations *and*
+    /// their retained retirement records, leaving other users untouched.
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn revoke_all_user_sessions_sweeps_retired_records_of_that_user_only() {
+        let repo = create_isolated_schema_repo("oidc_pg_revoke_all").await;
+        seed_fixture_users(&repo, &["usr_mine", "usr_theirs"]).await;
+        let mine = session_contract::family_chain("postgres:revoke-all", 0, "usr_mine");
+        let theirs = session_contract::family_chain("postgres:revoke-all", 1, "usr_theirs");
+        repo.store_refresh_token(&mine.gen0).await.expect("store mine");
+        repo.store_refresh_token(&theirs.gen0).await.expect("store theirs");
+        assert!(
+            repo.rotate_refresh_token(&mine.gen0.refresh_token_hash, &mine.gen1)
+                .await
+                .expect("rotate mine"),
+            "my rotation must win"
+        );
+        assert!(
+            repo.rotate_refresh_token(&theirs.gen0.refresh_token_hash, &theirs.gen1)
+                .await
+                .expect("rotate theirs"),
+            "their rotation must win"
+        );
+        assert_eq!(retired_count(&repo).await, 2, "one record per rotation");
+
+        repo.revoke_all_user_sessions("usr_mine").await.expect("revoke all mine");
+
+        assert_eq!(
+            repo.resolve_refresh_token(&mine.gen1.refresh_token_hash)
+                .await
+                .expect("resolve my live"),
+            RefreshResolution::Unknown,
+            "my live generation must be gone"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(&mine.gen0.refresh_token_hash)
+                .await
+                .expect("resolve my retired"),
+            RefreshResolution::Unknown,
+            "my retirement record must be gone"
+        );
+        match repo
+            .resolve_refresh_token(&theirs.gen1.refresh_token_hash)
+            .await
+            .expect("resolve their live")
+        {
+            RefreshResolution::Live(session) => assert_eq!(session.user_id, "usr_theirs"),
+            other => panic!("another user's family must survive my revocation, got {other:?}"),
+        }
+        assert_eq!(
+            retired_count(&repo).await, 1,
+            "only the other user's retirement record remains"
+        );
+    }
+
+    /// The migration upgrades a `sessions` table that predates the family
+    /// columns without touching its rows, is safe to re-run, and legacy rows
+    /// read back through the domain type with the sentinel values.
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn session_family_column_migration_upgrades_legacy_table_and_is_idempotent() {
+        let repo = create_isolated_schema_repo("oidc_pg_family_migration").await;
+
+        // Simulate the pre-rotation schema: drop the family columns (and any
+        // data depending on them being set), then re-run the idempotent
+        // migration statements twice.
+        sqlx::query(
+            "INSERT INTO users (id, external_id, provider) \
+             VALUES ('usr_pg_legacy', 'external|pg_legacy', 'google')",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("seed user for legacy row");
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO sessions (refresh_token_hash, user_id, provider, expires_at, created_at) \
+             VALUES ('legacy-hash', 'usr_pg_legacy', 'google', $1, $2)",
+        )
+        .bind(now + chrono::Duration::hours(1))
+        .bind(now)
+        .execute(&repo.pool)
+        .await
+        .expect("insert legacy-shaped row");
+        sqlx::query("ALTER TABLE sessions DROP COLUMN family_id")
+            .execute(&repo.pool)
+            .await
+            .expect("drop family_id to simulate the pre-rotation table");
+        sqlx::query("ALTER TABLE sessions DROP COLUMN generation")
+            .execute(&repo.pool)
+            .await
+            .expect("drop generation to simulate the pre-rotation table");
+        sqlx::query("ALTER TABLE sessions DROP COLUMN rotated_at")
+            .execute(&repo.pool)
+            .await
+            .expect("drop rotated_at to simulate the pre-rotation table");
+
+        for _ in 0..2 {
+            sqlx::raw_sql(MIGRATIONS)
+                .execute(&repo.pool)
+                .await
+                .expect("re-running the migration block should not error");
+        }
+
+        let legacy = repo
+            .get_session_by_refresh_token("legacy-hash")
+            .await
+            .expect("read migrated legacy row")
+            .expect("migrated row must survive");
+        assert_eq!(legacy.family_id, "", "NULL column lands on the empty sentinel");
+        assert!(!is_valid_family_id(&legacy.family_id));
+        assert_eq!(legacy.generation, 0);
+        assert_eq!(legacy.rotated_at, None);
+
+        // And the upgraded table accepts canonical rows.
+        let canonical = session_contract::generation_session(
+            "usr_pg_legacy",
+            &session_contract::fixture_family_id("postgres-migration:new-row"),
+            0,
+            "canonical-hash".to_string(),
+            now + chrono::Duration::hours(1),
+            now,
+            None,
+        );
+        repo.store_refresh_token(&canonical)
+            .await
+            .expect("store canonical row post-migration");
+        assert_eq!(
+            repo.resolve_refresh_token(&canonical.refresh_token_hash)
+                .await
+                .expect("resolve canonical row"),
+            RefreshResolution::Live(canonical),
+            "the upgraded table must accept and classify canonical rows"
         );
     }
 }
