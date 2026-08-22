@@ -464,8 +464,9 @@ impl FamilyRoster {
     }
 }
 
-/// The session-revocation roster carried by the user item (`pk = USER#<id>`,
-/// `sk = PROFILE`): the `sessions` string set naming every live generation,
+/// The session-revocation roster carried by the dedicated user item
+/// (`pk = USER#<id>`, `sk = USER` — created alongside the `PROFILE` item and
+/// distinct from it): the `sessions` string set naming every live generation,
 /// and the `families` map grouping each family's generations. Every session
 /// write maintains both inside the same `TransactWriteItems` as the session
 /// items themselves, so a strongly consistent read of this struct is a
