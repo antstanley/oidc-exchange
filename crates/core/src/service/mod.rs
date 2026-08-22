@@ -128,8 +128,6 @@ impl AppService {
     ///
     /// The `Err` carries one fixed reason constant, used solely as the audit
     /// `reason`; it never reaches the client.
-    // TEMPORARY(03): unused until /revoke consumes it; removed in task 03.
-    #[allow(dead_code)]
     pub(crate) async fn validate_access_token(
         &self,
         token: &str,
@@ -272,8 +270,6 @@ pub fn parse_severity(s: &str) -> Option<AuditSeverity> {
 /// Typed view of the JWT header this service mints. `alg`, `kid` and `typ`
 /// are required struct fields, so a header missing any of them is a parse
 /// failure rather than an optional read.
-// TEMPORARY(03): unused until /revoke consumes the validator.
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct AccessTokenHeader {
     alg: String,
@@ -284,8 +280,6 @@ struct AccessTokenHeader {
 /// Typed view of the optional `nbf` payload claim. `nbf` is deliberately not
 /// a field of [`AccessTokenClaims`] — the service never mints one — so it is
 /// parsed separately, only after the required typed claims have succeeded.
-// TEMPORARY(03): unused until /revoke consumes the validator.
-#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct NotBeforeClaim {
     nbf: Option<u64>,
@@ -293,13 +287,12 @@ struct NotBeforeClaim {
 
 /// Split a compact JWS into its three segments, rejecting any shape that is
 /// not exactly three non-empty dot-separated parts.
-// TEMPORARY(03): unused until /revoke consumes the validator.
-#[allow(dead_code)]
 fn split_jws_segments(token: &str) -> std::result::Result<(&str, &str, &str), &'static str> {
-    let mut parts = token.split('.');
-    if let (Some(header), Some(payload), Some(signature), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    {
+    let segments: Vec<&str> = token.split('.').collect();
+    if segments.len() != JWT_SEGMENT_COUNT {
+        return Err(REASON_MALFORMED);
+    }
+    if let [header, payload, signature] = segments.as_slice() {
         if !header.is_empty() && !payload.is_empty() && !signature.is_empty() {
             return Ok((header, payload, signature));
         }
@@ -310,8 +303,6 @@ fn split_jws_segments(token: &str) -> std::result::Result<(&str, &str, &str), &'
 /// Decode and pin the access-token header to exactly what this service
 /// mints: the key manager's algorithm and key id, and the RFC 9068
 /// access-token media type.
-// TEMPORARY(03): unused until /revoke consumes the validator.
-#[allow(dead_code)]
 fn pin_access_token_header(
     header_bytes: &[u8],
     algorithm: &str,
@@ -346,8 +337,6 @@ fn pin_access_token_header(
 /// issued in the future when `iat > now + CLOCK_SKEW_SECS`, and not yet
 /// valid when `nbf > now + CLOCK_SKEW_SECS`. All comparisons are saturating
 /// in `u64` so an absurd claim value can never wrap into acceptance.
-// TEMPORARY(03): unused until /revoke consumes the validator.
-#[allow(dead_code)]
 fn check_claims(
     claims: &AccessTokenClaims,
     payload_bytes: &[u8],
@@ -415,14 +404,10 @@ pub(crate) const ACCESS_TOKEN_TYP: &str = "at+jwt";
 /// [`AppService::validate_access_token`]. Multi-node deployments and Lambda
 /// cold starts drift; the bound is negligible against the shortest access
 /// token TTL but keeps near-boundary tokens working across replicas.
-// TEMPORARY(03): unused until /revoke consumes the validator.
-#[allow(dead_code)]
 pub(crate) const CLOCK_SKEW_SECS: i64 = 60;
 
 /// A compact JWS is exactly three dot-separated segments: header, payload,
 /// signature.
-// TEMPORARY(03): unused until /revoke consumes the validator.
-#[allow(dead_code)]
 const JWT_SEGMENT_COUNT: usize = 3;
 
 // Fixed rejection reasons for [`AppService::validate_access_token`]. Each is
@@ -430,30 +415,17 @@ const JWT_SEGMENT_COUNT: usize = 3;
 // carries token bytes, decoded header/payload content, key-manager details,
 // or a serde error, because the string is derived solely from which check
 // failed, never from attacker-controlled data.
-// TEMPORARY(03): reasons are consumed by check_claims, itself wired in 03.
-#[allow(dead_code)]
 const REASON_MALFORMED: &str = "malformed access token";
-#[allow(dead_code)]
 const REASON_WRONG_KEY: &str = "access token pinned to the wrong key";
-#[allow(dead_code)]
 const REASON_WRONG_TYPE: &str = "not an access token";
-#[allow(dead_code)]
 const REASON_BAD_SIGNATURE: &str = "invalid signature";
-#[allow(dead_code)]
 const REASON_INVALID_CLAIMS: &str = "malformed access token claims";
-#[allow(dead_code)]
 const REASON_WRONG_ISSUER: &str = "invalid issuer";
-#[allow(dead_code)]
 const REASON_WRONG_AUDIENCE: &str = "invalid audience";
-#[allow(dead_code)]
 const REASON_EXPIRED: &str = "token expired";
-#[allow(dead_code)]
 const REASON_FUTURE_ISSUED_AT: &str = "token issued in the future";
-#[allow(dead_code)]
 const REASON_NOT_YET_VALID: &str = "token not yet valid";
-#[allow(dead_code)]
 const REASON_BLANK_SUBJECT: &str = "blank subject";
-#[allow(dead_code)]
 const REASON_BLANK_SESSION: &str = "blank session identifier";
 
 /// Parse a duration string like "15m", "1h", "30d" into seconds.
