@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::ApiError;
@@ -16,6 +17,7 @@ use oidc_exchange_core::domain::{NewUser, UserPatch};
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/internal/stats", get(stats))
+        .route("/internal/sessions/cleanup", post(cleanup_sessions))
         .route("/internal/users", get(list_users).post(create_user))
         .route(
             "/internal/users/{id}",
@@ -38,6 +40,31 @@ pub fn router(state: AppState) -> Router<AppState> {
 pub async fn stats(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let stats = state.service.admin_stats().await?;
     Ok(Json(stats))
+}
+
+// ---------------------------------------------------------------------------
+// Session-store cleanup
+// ---------------------------------------------------------------------------
+
+/// Response body of `POST /internal/sessions/cleanup`: only the deleted count.
+/// No session, token, hash, or subject data ever appears here — the endpoint
+/// is an operator lever and a scheduler target, not an inspection surface
+/// (`04-http-api.md` → Internal routes).
+#[derive(Debug, Serialize)]
+pub struct CleanupResponse {
+    pub deleted: u64,
+}
+
+/// Run `cleanup_expired_sessions` once — the same sweep the bootstrap-spawned
+/// session reaper runs on its interval — for runtimes that cannot host a
+/// periodic task (Lambda above all) and as the operator's manual lever. Safe
+/// to invoke on any schedule alongside a running reaper: it mutates nothing
+/// but expired rows (`04-http-api.md` → Bootstrap step 7 / Internal routes).
+pub async fn cleanup_sessions(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let deleted = state.service.cleanup_expired_sessions().await?;
+    Ok(Json(CleanupResponse { deleted }))
 }
 
 // ---------------------------------------------------------------------------

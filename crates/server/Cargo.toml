@@ -30,7 +30,8 @@ lambda_http = "1"
 oidc-exchange-test-utils.workspace = true
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
+async-trait.workspace = true
 base64.workspace = true
 tempfile = "3"
 chrono.workspace = true

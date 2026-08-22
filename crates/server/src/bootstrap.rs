@@ -324,10 +324,19 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 /// the wrapper still runs on every request but is a pure pass-through, so there is no separate
 /// Lambda-only branch that installs it only sometimes.
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
+    build_router_shared(config, Arc::new(service))
+}
+
+/// [`build_router`] over an already-shared service handle — the variant entry
+/// points whose process owns *another* consumer of the same `AppService` call.
+/// `main.rs` hands one `Arc` clone to the session reaper and another to the
+/// router's `AppState`, so both observe one store/audit/provider set;
+/// `build_router` itself is just this plus the wrapping.
+pub fn build_router_shared(config: &AppConfig, service: Arc<AppService>) -> Router {
     let role = config.server.role.as_str();
 
     let state = AppState {
-        service: Arc::new(service),
+        service,
         config: Arc::new(config.clone()),
     };
 

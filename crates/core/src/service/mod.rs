@@ -1,5 +1,6 @@
 pub mod claims;
 pub mod exchange;
+pub mod maintenance;
 pub mod refresh;
 pub mod revoke;
 pub mod user_admin;
