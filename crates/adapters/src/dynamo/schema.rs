@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use chrono::{DateTime, Utc};
-use oidc_exchange_core::domain::{Session, User, UserStatus, INITIAL_USER_VERSION};
+use oidc_exchange_core::domain::{
+    RetiredRefreshToken, Session, User, UserStatus, INITIAL_USER_VERSION,
+};
 use oidc_exchange_core::error::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -141,14 +143,24 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     );
     item.insert("sk".to_string(), AttributeValue::S("SESSION".to_string()));
 
-    // GSI1 — list sessions by user
+    // GSI1 — admin listing of a user's sessions by family. The `FAM#…` form
+    // groups every generation of one sign-in under its stable family id, so
+    // the listing survives rotation (the presented hash no longer identifies
+    // anything after one). Revocation paths deliberately do NOT enumerate
+    // through this index — it is eventually consistent and can omit a
+    // session written moments earlier; they read the authoritative user-item
+    // roster instead.
     item.insert(
         "GSI1pk".to_string(),
         AttributeValue::S(format!("USER#{}", session.user_id)),
     );
     item.insert(
         "GSI1sk".to_string(),
-        AttributeValue::S(format!("SESSION#{}", session.created_at.to_rfc3339())),
+        AttributeValue::S(format!(
+            "FAM#{}#SESSION#{}",
+            session.family_id,
+            session.created_at.to_rfc3339()
+        )),
     );
 
     // Data attributes
@@ -246,6 +258,87 @@ pub fn item_to_session(item: &HashMap<String, AttributeValue>) -> Result<Session
 }
 
 // ---------------------------------------------------------------------------
+// Retired refresh token <-> DynamoDB Item
+// ---------------------------------------------------------------------------
+
+/// Sort key value for every retired-refresh-token item.
+pub const RETIRED_SK: &str = "RETIRED";
+
+/// Builds the retirement-record item: `pk = RETIRED#<hash>`, `sk = RETIRED`,
+/// GSI1 filed under the owning user with a family-grouped sort key, and the
+/// same numeric `ttl` attribute sessions carry so DynamoDB reaps records
+/// natively when their retention deadline passes.
+pub fn retired_to_item(record: &RetiredRefreshToken) -> HashMap<String, AttributeValue> {
+    let mut item = HashMap::new();
+
+    item.insert(
+        "pk".to_string(),
+        AttributeValue::S(format!("RETIRED#{}", record.refresh_token_hash)),
+    );
+    item.insert("sk".to_string(), AttributeValue::S(RETIRED_SK.to_string()));
+
+    item.insert(
+        "GSI1pk".to_string(),
+        AttributeValue::S(format!("USER#{}", record.user_id)),
+    );
+    item.insert(
+        "GSI1sk".to_string(),
+        AttributeValue::S(format!(
+            "FAM#{}#RETIRED#{}",
+            record.family_id,
+            record.retired_at.to_rfc3339()
+        )),
+    );
+
+    item.insert(
+        "refresh_token_hash".to_string(),
+        AttributeValue::S(record.refresh_token_hash.clone()),
+    );
+    item.insert(
+        "family_id".to_string(),
+        AttributeValue::S(record.family_id.clone()),
+    );
+    item.insert(
+        "user_id".to_string(),
+        AttributeValue::S(record.user_id.clone()),
+    );
+    item.insert(
+        "successor_hash".to_string(),
+        AttributeValue::S(record.successor_hash.clone()),
+    );
+    item.insert(
+        "retired_at".to_string(),
+        AttributeValue::S(record.retired_at.to_rfc3339()),
+    );
+    item.insert(
+        "expires_at".to_string(),
+        AttributeValue::S(record.expires_at.to_rfc3339()),
+    );
+    // TTL for DynamoDB automatic expiration (epoch seconds).
+    item.insert(
+        "ttl".to_string(),
+        AttributeValue::N(record.expires_at.timestamp().to_string()),
+    );
+
+    item
+}
+
+/// Parses a retirement-record item. Every attribute is written by
+/// [`retired_to_item`], so a missing or mistyped one is corruption at the
+/// store-read boundary and surfaces as a store error rather than a
+/// half-record that could silently disarm reuse detection.
+pub fn item_to_retired(item: &HashMap<String, AttributeValue>) -> Result<RetiredRefreshToken> {
+    Ok(RetiredRefreshToken {
+        refresh_token_hash: get_s(item, "refresh_token_hash")?,
+        family_id: get_s(item, "family_id")?,
+        user_id: get_s(item, "user_id")?,
+        successor_hash: get_s(item, "successor_hash")?,
+        retired_at: parse_datetime(&get_s(item, "retired_at")?)?,
+        expires_at: parse_datetime(&get_s(item, "expires_at")?)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -309,6 +402,117 @@ fn get_json_map(
             detail: format!("invalid JSON in {key}: {e}"),
         }),
         None => Ok(HashMap::new()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The authoritative per-user session roster
+// ---------------------------------------------------------------------------
+
+/// One family's entry in the user item's authoritative `families` map:
+/// which generation is currently live and every generation hash (live plus
+/// retired, until revocation) the family has ever held. This is what makes
+/// `revoke_family` complete without trusting an eventually consistent index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyRoster {
+    /// The live generation's hash, or an empty string when the family
+    /// currently has none (fully revoked or not yet rotated into existence).
+    pub live: String,
+    /// Every generation hash of this family still remembered: the live one
+    /// plus each retained retirement record.
+    pub members: Vec<String>,
+}
+
+impl FamilyRoster {
+    pub fn new(live: String, members: Vec<String>) -> Self {
+        Self { live, members }
+    }
+
+    /// Serialize to the nested map attribute stored under `families.<id>`.
+    pub fn to_attribute(&self) -> AttributeValue {
+        AttributeValue::M(HashMap::from([
+            ("live".to_string(), AttributeValue::S(self.live.clone())),
+            (
+                "members".to_string(),
+                AttributeValue::Ss(self.members.clone()),
+            ),
+        ]))
+    }
+
+    /// Parse one `families.<id>` entry; a malformed entry is roster
+    /// corruption and must surface rather than silently truncate the
+    /// revocation set.
+    pub fn from_attribute(value: &AttributeValue) -> Result<Self> {
+        let map = value.as_m().map_err(|_| Error::StoreError {
+            detail: "roster families entry is not a map".to_string(),
+        })?;
+        let live = map
+            .get("live")
+            .and_then(|v| v.as_s().ok())
+            .ok_or_else(|| Error::StoreError {
+                detail: "roster families entry is missing its live pointer".to_string(),
+            })?
+            .clone();
+        let members = map
+            .get("members")
+            .and_then(|v| v.as_ss().ok())
+            .ok_or_else(|| Error::StoreError {
+                detail: "roster families entry is missing its member set".to_string(),
+            })?
+            .clone();
+        Ok(Self { live, members })
+    }
+}
+
+/// The session-revocation roster carried by the user item (`pk = USER#<id>`,
+/// `sk = PROFILE`): the `sessions` string set naming every live generation,
+/// and the `families` map grouping each family's generations. Every session
+/// write maintains both inside the same `TransactWriteItems` as the session
+/// items themselves, so a strongly consistent read of this struct is a
+/// complete picture of a user's credential state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserRoster {
+    pub sessions: Vec<String>,
+    /// Keyed by family id.
+    pub families: HashMap<String, FamilyRoster>,
+}
+
+impl UserRoster {
+    /// Extract the roster from a user item. Both attributes are absent on
+    /// users with no sessions yet (and on pre-rotation user items), which
+    /// reads as an empty roster, not an error.
+    pub fn from_item(item: &HashMap<String, AttributeValue>) -> Result<Self> {
+        let sessions = match item.get("sessions") {
+            Some(v) => v.as_ss().map_err(|_| Error::StoreError {
+                detail: "user item attribute sessions is not a string set".to_string(),
+            })?,
+            None => &[],
+        }
+        .to_vec();
+
+        let mut families = HashMap::new();
+        if let Some(value) = item.get("families") {
+            let map = value.as_m().map_err(|_| Error::StoreError {
+                detail: "user item attribute families is not a map".to_string(),
+            })?;
+            for (family_id, entry) in map {
+                families.insert(family_id.clone(), FamilyRoster::from_attribute(entry)?);
+            }
+        }
+
+        debug_assert!(
+            families.values().all(|f| f.members.iter().all(|m| !m.is_empty())),
+            "roster family members may not be empty strings"
+        );
+
+        Ok(Self { sessions, families })
+    }
+
+    /// Look up which family owns `hash` as its live generation.
+    pub fn live_family_of(&self, hash: &str) -> Option<&FamilyRoster> {
+        self.families
+            .values()
+            .find(|family| family.live == hash)
     }
 }
 
