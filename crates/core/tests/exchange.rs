@@ -12,7 +12,7 @@ use oidc_exchange_core::domain::{
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
@@ -267,11 +267,14 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     let svc = make_service(repo.clone(), provider);
 
     let request = ExchangeRequest {
-        code: Some("auth-code-123".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-123".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
 
     let response = svc
@@ -325,11 +328,14 @@ async fn exchange_existing_user_does_not_create_new() {
 
     // First exchange: creates user
     let request1 = ExchangeRequest {
-        code: Some("code-1".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-1".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let resp1 = svc
         .exchange(request1)
@@ -338,11 +344,14 @@ async fn exchange_existing_user_does_not_create_new() {
 
     // Second exchange: same external_id, should reuse user
     let request2 = ExchangeRequest {
-        code: Some("code-2".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-2".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let resp2 = svc
         .exchange(request2)
@@ -379,11 +388,14 @@ async fn exchange_suspended_user_is_rejected() {
 
     // First exchange creates the user
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     svc.exchange(request)
         .await
@@ -407,11 +419,14 @@ async fn exchange_suspended_user_is_rejected() {
 
     // Second exchange should fail
     let request2 = ExchangeRequest {
-        code: Some("code-2".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-2".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let err = svc
         .exchange(request2)
@@ -433,11 +448,14 @@ async fn exchange_unknown_provider_is_rejected() {
     let svc = make_service(repo, provider);
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "nonexistent".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let err = svc
         .exchange(request)
@@ -483,11 +501,14 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
 
     let err = svc
@@ -527,11 +548,14 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: Some("code".to_string()),
-            redirect_uri: Some("https://app.test.com/callback".to_string()),
-            id_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: "code".to_string(),
+                redirect_uri: "https://app.test.com/callback".to_string(),
+            },
             provider: "mock".to_string(),
-            ..Default::default()
+            ip_address: None,
+            user_agent: None,
+            device_id: None,
         };
         svc.exchange(request)
             .await
@@ -554,11 +578,14 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: Some("code".to_string()),
-            redirect_uri: Some("https://app.test.com/callback".to_string()),
-            id_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: "code".to_string(),
+                redirect_uri: "https://app.test.com/callback".to_string(),
+            },
             provider: "mock".to_string(),
-            ..Default::default()
+            ip_address: None,
+            user_agent: None,
+            device_id: None,
         };
         svc.exchange(request)
             .await
@@ -581,11 +608,14 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: Some("code".to_string()),
-            redirect_uri: Some("https://app.test.com/callback".to_string()),
-            id_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: "code".to_string(),
+                redirect_uri: "https://app.test.com/callback".to_string(),
+            },
             provider: "mock".to_string(),
-            ..Default::default()
+            ip_address: None,
+            user_agent: None,
+            device_id: None,
         };
         let err = svc
             .exchange(request)
@@ -613,11 +643,14 @@ async fn exchange_wildcard_subdomain_matching() {
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
         let request = ExchangeRequest {
-            code: Some("code".to_string()),
-            redirect_uri: Some("https://app.test.com/callback".to_string()),
-            id_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: "code".to_string(),
+                redirect_uri: "https://app.test.com/callback".to_string(),
+            },
             provider: "mock".to_string(),
-            ..Default::default()
+            ip_address: None,
+            user_agent: None,
+            device_id: None,
         };
         let err = svc
             .exchange(request)
@@ -645,11 +678,14 @@ async fn exchange_existing_users_only_rejects_new_user() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
 
     let err = svc
@@ -692,11 +728,14 @@ async fn exchange_existing_user_bypasses_domain_allowlist() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
 
     // Should succeed because existing users bypass the registration policy
@@ -732,11 +771,14 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
     let svc = make_service_with_config(repo, provider, config);
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
 
     let err = svc
@@ -759,11 +801,13 @@ async fn exchange_with_direct_id_token_skips_code_exchange() {
 
     // Use id_token grant — no code or redirect_uri needed
     let request = ExchangeRequest {
-        code: None,
-        redirect_uri: None,
-        id_token: Some("fake.id.token".to_string()),
+        credential: ExchangeCredential::IdTokenAssertion {
+            id_token: "fake.id.token".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
 
     let result = svc
@@ -781,30 +825,11 @@ async fn exchange_with_direct_id_token_skips_code_exchange() {
     assert_eq!(users[0].external_id, "test-subject");
 }
 
-#[tokio::test]
-async fn exchange_with_neither_code_nor_id_token_fails() {
-    let repo = MockRepository::new();
-    let provider = MockIdentityProvider::new("mock");
-
-    let svc = make_service(repo, provider);
-
-    let request = ExchangeRequest {
-        code: None,
-        redirect_uri: None,
-        id_token: None,
-        provider: "mock".to_string(),
-        ..Default::default()
-    };
-
-    let err = svc
-        .exchange(request)
-        .await
-        .expect_err("should fail without code or id_token");
-    match err {
-        Error::InvalidRequest { .. } => {}
-        other => panic!("expected InvalidRequest, got: {:?}", other),
-    }
-}
+/// A missing credential is not testable here anymore: `ExchangeRequest`
+/// carries an `ExchangeCredential` with no default, so "neither code nor
+/// id_token" does not compile — the negative space moved from a runtime
+/// branch to the type system (see task 01 of the grant-binding plan). The
+/// HTTP-boundary equivalent lives in `crates/server/tests/routes.rs`.
 
 #[tokio::test]
 async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
@@ -814,11 +839,14 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
     let provider_a = MockIdentityProvider::new("mock");
     let svc_a = make_service(repo.clone(), provider_a);
     let request_a = ExchangeRequest {
-        code: Some("code-a".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-a".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let resp_a = svc_a
         .exchange(request_a)
@@ -838,11 +866,14 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         make_config(),
     );
     let request_b = ExchangeRequest {
-        code: Some("code-b".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-b".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let resp_b = svc_b
         .exchange(request_b)
@@ -875,11 +906,14 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
     let provider_a = MockIdentityProvider::new("mock");
     let svc_a = make_service(repo.clone(), provider_a);
     let request_a = ExchangeRequest {
-        code: Some("code-a".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-a".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     svc_a
         .exchange(request_a)
@@ -911,11 +945,14 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
         make_config(),
     );
     let request_b = ExchangeRequest {
-        code: Some("code-b".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-b".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let err = svc_b
         .exchange(request_b)
@@ -950,11 +987,14 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
     );
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let err = svc
         .exchange(request)
@@ -990,9 +1030,10 @@ async fn exchange_with_client_context_stores_exact_session_values() {
     let svc = make_service(repo.clone(), provider);
 
     let request = ExchangeRequest {
-        code: Some("auth-code-123".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-123".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
         ip_address: Some("203.0.113.7".to_string()),
         user_agent: Some("integration-test-agent/1.0".to_string()),
@@ -1023,9 +1064,10 @@ async fn exchange_without_client_context_stores_none_session_values() {
     let svc = make_service(repo.clone(), provider);
 
     let request = ExchangeRequest {
-        code: Some("auth-code-123".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-123".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
         ip_address: None,
         user_agent: None,
@@ -1059,9 +1101,10 @@ async fn exchange_new_user_emits_user_created_then_token_exchange() {
     let svc = make_service_with_audit(repo, provider, make_config(), audit);
 
     let request = ExchangeRequest {
-        code: Some("auth-code-123".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-123".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
         ip_address: Some("203.0.113.9".to_string()),
         user_agent: Some("test-agent/2.0".to_string()),
@@ -1111,11 +1154,14 @@ async fn exchange_existing_user_emits_only_token_exchange() {
 
     // First exchange creates the user (audit log discarded here).
     let request1 = ExchangeRequest {
-        code: Some("code-1".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-1".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     svc.exchange(request1)
         .await
@@ -1129,9 +1175,10 @@ async fn exchange_existing_user_emits_only_token_exchange() {
     let svc2 = make_service_with_audit(repo, provider2, make_config(), audit);
 
     let request2 = ExchangeRequest {
-        code: Some("code-2".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-2".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
         ip_address: Some("203.0.113.10".to_string()),
         user_agent: Some("test-agent/3.0".to_string()),
@@ -1164,11 +1211,14 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
 
     // First exchange creates the user.
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     svc.exchange(request)
         .await
@@ -1195,9 +1245,10 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
     let svc2 = make_service_with_audit(repo, provider2, make_config(), audit);
 
     let request2 = ExchangeRequest {
-        code: Some("code-2".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code-2".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
         ip_address: Some("203.0.113.11".to_string()),
         user_agent: Some("test-agent/4.0".to_string()),
@@ -1255,9 +1306,10 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
     let svc = make_service_with_audit(repo, provider, config, audit);
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
         ip_address: Some("203.0.113.12".to_string()),
         user_agent: Some("test-agent/5.0".to_string()),
@@ -1331,11 +1383,14 @@ async fn exchange_success_audit_failure_under_blocking_threshold_propagates_err(
     let svc = make_service_with_audit(repo.clone(), provider, config, audit);
 
     let request = ExchangeRequest {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
 
     let err = svc
@@ -1375,11 +1430,14 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
     let svc = make_service_with_user_sync(repo.clone(), provider, make_config(), user_sync);
 
     let request = ExchangeRequest {
-        code: Some("auth-code-123".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-123".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     svc.exchange(request)
         .await
@@ -1407,11 +1465,14 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
     // SAME service/mock so the second exchange's sync calls are actually
     // observed by `sync_clone` rather than routed to a throwaway mock.
     let request2 = ExchangeRequest {
-        code: Some("auth-code-456".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-456".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     svc.exchange(request2)
         .await
@@ -1446,11 +1507,14 @@ async fn exchange_jit_registration_still_returns_token_when_sync_fails_every_att
     let svc = make_service_with_user_sync(repo.clone(), provider, make_config(), user_sync);
 
     let request = ExchangeRequest {
-        code: Some("auth-code-789".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-789".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let response = svc
         .exchange(request)

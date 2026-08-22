@@ -6,7 +6,7 @@ use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConf
 use oidc_exchange_core::domain::{AuditEventType, NewUser, UserPatch, UserStatus};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
@@ -373,11 +373,14 @@ async fn admin_delete_user_revokes_sessions() {
 
     // Exchange to create a user + session
     let request = ExchangeRequest {
-        code: Some("auth-code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let response = svc
         .exchange(request)
@@ -442,11 +445,14 @@ async fn service_with_active_session() -> (AppService, String, MockRepository, M
     let svc = make_service_with_provider(repo, user_sync, provider);
 
     let request = ExchangeRequest {
-        code: Some("auth-code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let response = svc
         .exchange(request)

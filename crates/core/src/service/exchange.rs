@@ -9,11 +9,26 @@ use crate::domain::{
 use crate::error::{Error, Result};
 use crate::service::{create_audit_event, parse_duration_secs, AppService};
 
-#[derive(Default)]
+/// The typed form of the declared `grant_type`: one variant per exchange
+/// grant, each owning that grant's required parameters as non-optional
+/// fields. Which credential executes is a property of the type, so an
+/// incoherent request — a code plus an ID token, or no credential at all —
+/// is unrepresentable instead of a branch the service could take.
+///
+/// The refresh grant has its own input type, `RefreshRequest`; it is not a
+/// variant here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExchangeCredential {
+    /// Exchange an authorization `code` (plus its `redirect_uri`) at the
+    /// provider, then validate the returned ID token.
+    AuthorizationCode { code: String, redirect_uri: String },
+    /// Validate a raw ID token assertion directly (e.g. Google Identity
+    /// Services posting the credential it already holds).
+    IdTokenAssertion { id_token: String },
+}
+
 pub struct ExchangeRequest {
-    pub code: Option<String>,
-    pub redirect_uri: Option<String>,
-    pub id_token: Option<String>,
+    pub credential: ExchangeCredential,
     pub provider: String,
     /// Client IP address extracted by the server's audit-context middleware
     /// (e.g. from `X-Forwarded-For`). Stored on the resulting session.
@@ -70,28 +85,40 @@ impl AppService {
                     provider: request.provider.clone(),
                 })?;
 
-        // 2. Get validated claims — either via code exchange or direct ID token
-        let claims = if let Some(ref id_token) = request.id_token {
-            // Direct ID token exchange (e.g., Google Sign-In SDK)
-            provider.validate_id_token(id_token).await?
-        } else {
-            // Authorization code exchange
-            let code = request
-                .code
-                .as_deref()
-                .ok_or_else(|| Error::InvalidRequest {
-                    reason: "either 'code' or 'id_token' is required".to_string(),
-                })?;
-            let redirect_uri =
-                request
-                    .redirect_uri
-                    .as_deref()
-                    .ok_or_else(|| Error::InvalidRequest {
-                        reason: "redirect_uri is required for authorization_code grant".to_string(),
-                    })?;
-            let tokens = provider.exchange_code(code, redirect_uri).await?;
-            provider.validate_id_token(&tokens.id_token).await?
+        // 2. Get validated claims — the typed credential names the grant, so
+        //    selection is an exhaustive match over variants rather than a
+        //    check of optional-field presence. The match has no wildcard arm:
+        //    a new credential variant must be handled here to compile.
+        let claims = match request.credential {
+            ExchangeCredential::AuthorizationCode {
+                ref code,
+                ref redirect_uri,
+            } => {
+                // Postcondition on the port contract: every code exchange must
+                // return the ID token the flow validates next — an adapter
+                // that returned an empty one would be a contract violation,
+                // not a user-facing condition.
+                let tokens = provider.exchange_code(code, redirect_uri).await?;
+                assert!(
+                    !tokens.id_token.is_empty(),
+                    "exchange: IdentityProvider::exchange_code returned an empty id_token, violating the port contract"
+                );
+                provider.validate_id_token(&tokens.id_token).await?
+            }
+            ExchangeCredential::IdTokenAssertion { ref id_token } => {
+                // Direct assertion: no code redemption happens on this path —
+                // which is exactly why the grant/field binding is enforced at
+                // the HTTP boundary before this type can be constructed.
+                provider.validate_id_token(id_token).await?
+            }
         };
+        // Postcondition on the port contract: downstream registration and
+        // session storage are keyed on the subject, so an adapter returning
+        // an empty one would corrupt identity rather than fail loudly.
+        assert!(
+            !claims.subject.is_empty(),
+            "exchange: IdentityProvider::validate_id_token returned an empty subject, violating the port contract"
+        );
 
         // 4. Look up user by external ID, applying registration policy for new users
         let user = match self
@@ -321,6 +348,18 @@ impl AppService {
             token_type: "Bearer".to_string(),
             expires_in: access_ttl_secs,
         };
+        // Postconditions on the assembled response: the body *is* the
+        // credential, so reporting success with an empty access token or a
+        // zero expiry would be a silent contract violation toward clients.
+        assert!(
+            !response.access_token.is_empty(),
+            "exchange: success response must carry a non-empty access token"
+        );
+        assert!(
+            response.expires_in > 0,
+            "exchange: success response must carry a positive expires_in, got {}",
+            response.expires_in
+        );
 
         // 10. Audit the successful exchange, after the token response is
         // fully assembled.
