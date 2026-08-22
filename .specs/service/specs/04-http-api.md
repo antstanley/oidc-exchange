@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -22,6 +22,7 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/internal/stats` | aggregate user/session counts (`AdminStats`) |
+| POST | `/internal/sessions/cleanup` | run `cleanup_expired_sessions` once; returns `{ "deleted": <count> }` |
 | GET | `/internal/users` | list users, query `offset`/`limit` |
 | POST | `/internal/users` | create user (`NewUser`) → 201 |
 | GET | `/internal/users/{id}` | get user (404 if absent) |
@@ -44,7 +45,10 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 
 The client names the provider (`provider=google`), not a raw issuer URL. Unknown
 `grant_type` → `unsupported_grant_type`. Response body is `TokenResponse`
-([01-domain-model.md](01-domain-model.md)).
+([01-domain-model.md](01-domain-model.md)); it carries a `refresh_token` on every grant,
+including `refresh_token`, and a client must discard the token it presented once it holds
+the replacement (RFC 6749 §6). With `token.refresh_rotation = false` the refresh grant
+returns no `refresh_token` and the presented one stays valid.
 
 ### GET /.well-known/openid-configuration
 
@@ -108,9 +112,20 @@ be network-isolated independently from one binary.
    deadline, after which stragglers are aborted and the process exits. The middleware
    stack's request-timeout layer bounds slow clients at `server.request_timeout`
    (default 30 s).
+7. Under a long-lived runtime — hyper, and a `crates/ffi` embedder whose host process
+   persists — spawn the **session reaper**: a periodic task that calls
+   `SessionRepository::cleanup_expired_sessions` every
+   `session_repository.cleanup_interval` (default `"1h"`), logs the deleted count on every
+   run — a silently dead reaper must be distinguishable from one with nothing to delete —
+   and is aborted with the graceful-shutdown drain. Under Lambda there is no long-lived
+   process to host the task; the reaper is not spawned, and the same control is reachable
+   as `POST /internal/sessions/cleanup` for an external scheduler (EventBridge) to drive
+   on the deployment's own cadence.
 
 `crates/ffi` calls the same `build_service` / `build_router` path, so in-process bindings get
-identical routing and middleware.
+identical routing and middleware. An embedder instance detects its host the same way
+`main.rs` does (`AWS_LAMBDA_RUNTIME_API`) and hosts the session reaper on its own runtime
+only when that host persists; inside a Lambda function it spawns none.
 
 ## Error mapping (`error.rs`)
 
