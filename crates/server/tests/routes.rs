@@ -569,3 +569,57 @@ async fn token_exchange_without_audit_headers_stores_none_session_context() {
     assert_eq!(session.user_agent, None);
     assert_eq!(session.device_id, None);
 }
+
+// ---------------------------------------------------------------------------
+// 10. With grants.id_token disabled (the compiled default), an id_token field
+// is rejected as unsupported_grant_type whatever grant_type declares — the
+// handler-level gate, shared with Lambda and FFI through this same function.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_disabled_grant_rejects_id_token_grant_type() {
+    let (app, _session_repo) = build_test_app();
+
+    let body = "grant_type=id_token&id_token=fake.jwt.value&provider=test";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unsupported_grant_type");
+}
+
+#[tokio::test]
+async fn token_disabled_grant_rejects_id_token_field_under_authorization_code() {
+    let (app, _session_repo) = build_test_app();
+
+    // Field-presence branch selection cannot evade the switch: the id_token
+    // field alone triggers the rejection under a different declared grant.
+    let body = "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test&id_token=fake.jwt.value";
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unsupported_grant_type");
+}

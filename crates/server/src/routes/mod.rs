@@ -1,6 +1,7 @@
 pub mod health;
 pub mod internal;
 pub mod keys;
+pub mod nonce;
 pub mod revoke;
 pub mod token;
 pub mod well_known;
@@ -20,6 +21,13 @@ pub fn public_routes() -> Router<AppState> {
             "/.well-known/openid-configuration",
             get(well_known::openid_config_handler),
         )
+}
+
+/// The direct ID-token grant's nonce route. Mounted by `build_router` only
+/// when the role serves exchanges **and** `grants.id_token` is enabled — a
+/// default-disabled deployment never exposes it.
+pub fn nonce_routes() -> Router<AppState> {
+    Router::new().route("/nonce", post(nonce::nonce_handler))
 }
 
 pub fn internal_routes(state: AppState) -> Router<AppState> {

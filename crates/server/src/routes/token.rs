@@ -30,6 +30,17 @@ pub async fn token_handler(
     Extension(audit_ctx): Extension<AuditContext>,
     Form(form): Form<TokenForm>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The grants switch gates exposure, and it gates it up front: when the
+    // direct ID-token grant is disabled, a request carrying an `id_token`
+    // field is rejected as `unsupported_grant_type` whatever `grant_type`
+    // declares, so field-presence branch selection cannot evade the switch.
+    // The gate lives in this handler (not the core) because
+    // `unsupported_grant_type` is a server-layer error class, and this handler
+    // is shared by the server, Lambda, and FFI runtimes via `build_router`.
+    if form.id_token.is_some() && !state.config.grants.id_token {
+        return Err(ApiError::UnsupportedGrantType);
+    }
+
     match form.grant_type.as_str() {
         "authorization_code" | "id_token" => {
             let provider = form.provider.ok_or_else(|| Error::InvalidRequest {

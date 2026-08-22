@@ -335,6 +335,13 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 
     if role == "exchange" || role == "all" {
         app = app.merge(routes::public_routes());
+        // The nonce route is part of the direct ID-token grant's surface, so
+        // it mounts exactly when the grant does: an exchange-serving role with
+        // `grants.id_token` enabled. The shared router is the single mounting
+        // point — server, Lambda, and FFI cannot diverge.
+        if config.grants.id_token {
+            app = app.merge(routes::nonce_routes());
+        }
     }
     if (role == "admin" || role == "all") && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
