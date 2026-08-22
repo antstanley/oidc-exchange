@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub registration: RegistrationConfig,
     pub token: TokenConfig,
+    #[serde(default)]
+    pub grants: GrantsConfig,
     pub audit: AuditConfig,
     pub key_manager: KeyManagerConfig,
     pub repository: RepositoryConfig,
@@ -34,8 +36,9 @@ impl AppConfig {
     ///
     /// Checks, each returning a `ConfigError` naming the offending field:
     /// - `server.role` is one of [`ALLOWED_SERVER_ROLES`].
-    /// - `server.request_timeout`, `token.access_token_ttl`, and
-    ///   `token.refresh_token_ttl` parse via
+    /// - `server.request_timeout`, `token.access_token_ttl`,
+    ///   `token.refresh_token_ttl`, `grants.nonce_ttl`, and
+    ///   `grants.max_assertion_lifetime` parse via
     ///   [`crate::service::parse_duration_secs`].
     /// - Every `registration.domain_allowlist` entry is an exact domain or a
     ///   `*.`-prefixed wildcard.
@@ -63,6 +66,14 @@ impl AppConfig {
         prefix_config_error(
             crate::service::parse_duration_secs(&self.token.refresh_token_ttl),
             "token.refresh_token_ttl",
+        )?;
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.grants.nonce_ttl),
+            "grants.nonce_ttl",
+        )?;
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.grants.max_assertion_lifetime),
+            "grants.max_assertion_lifetime",
         )?;
 
         if let Some(allowlist) = &self.registration.domain_allowlist {
@@ -194,6 +205,57 @@ impl Default for TokenConfig {
             refresh_token_ttl: "30d".to_string(),
             audience: None,
             custom_claims: None,
+        }
+    }
+}
+
+/// Whether the direct ID-token grant is served when `[grants]` is absent from config.
+/// The compiled default keeps the grant **off**: an operator who never asks for the
+/// direct grant serves no new public surface and gains the replay protection this
+/// switch gates by default. See `06-configuration.md` → Sections → `[grants]`.
+pub const DEFAULT_GRANTS_ID_TOKEN: bool = false;
+
+/// Default for `[grants] nonce_ttl` when the key is absent: how long a nonce minted for
+/// the direct ID-token grant remains claimable. A humantime duration string parsed the
+/// same way as the `[token]` TTLs (see [`crate::service::parse_duration_secs`]).
+/// See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_NONCE_TTL: &str = "10m";
+
+/// Default for `[grants] max_assertion_lifetime` when the key is absent: the ceiling on
+/// an accepted provider ID token's remaining lifetime, so a replay marker always outlives
+/// the assertion it guards. A humantime duration string parsed via
+/// [`crate::service::parse_duration_secs`].
+/// See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_MAX_ASSERTION_LIFETIME: &str = "1h";
+
+/// Which grants `/token` serves and the replay-protection parameters of the direct
+/// ID-token grant. The authorization-code and refresh-token grants are always served and
+/// have no switch; only the direct ID-token grant — whose credential is a transferable
+/// bearer assertion — is opt-in. Both durations are validated at startup by
+/// [`AppConfig::validate`], so an unparseable value fails config load rather than being
+/// absorbed until first use. See `06-configuration.md` → Sections → `[grants]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GrantsConfig {
+    /// Whether the direct ID-token grant is served at all. Defaults to
+    /// [`DEFAULT_GRANTS_ID_TOKEN`] (`false`), keeping the grant off unless an operator
+    /// explicitly enables it.
+    pub id_token: bool,
+    /// Humantime duration string (e.g. `"10m"`) bounding how long a nonce minted for the
+    /// direct ID-token grant remains claimable. Defaults to [`DEFAULT_NONCE_TTL`].
+    pub nonce_ttl: String,
+    /// Humantime duration string (e.g. `"1h"`) bounding the remaining lifetime an accepted
+    /// provider ID token may carry; an assertion with longer to live is refused. Defaults
+    /// to [`DEFAULT_MAX_ASSERTION_LIFETIME`].
+    pub max_assertion_lifetime: String,
+}
+
+impl Default for GrantsConfig {
+    fn default() -> Self {
+        Self {
+            id_token: DEFAULT_GRANTS_ID_TOKEN,
+            nonce_ttl: DEFAULT_NONCE_TTL.to_string(),
+            max_assertion_lifetime: DEFAULT_MAX_ASSERTION_LIFETIME.to_string(),
         }
     }
 }
@@ -461,6 +523,15 @@ mod tests {
         // Internal API defaults
         assert!(!config.internal_api.enabled);
 
+        // Grants defaults: the direct ID-token grant ships disabled, with the documented
+        // replay-protection durations, even though default.toml carries no `[grants]`.
+        assert!(!config.grants.id_token);
+        assert_eq!(config.grants.nonce_ttl, DEFAULT_NONCE_TTL);
+        assert_eq!(
+            config.grants.max_assertion_lifetime,
+            DEFAULT_MAX_ASSERTION_LIFETIME
+        );
+
         // No providers in default config
         assert!(config.providers.is_empty());
     }
@@ -679,6 +750,124 @@ host = "0.0.0.0"
         )
         .expect("omitting base_path must still deserialize");
         assert!(absent.server.base_path.is_none());
+    }
+
+    /// `[grants]` deserializes to its explicit values when present; every key is
+    /// optional, so an operator can override just one duration.
+    #[test]
+    fn grants_section_deserializes_explicit_values() {
+        let explicit: AppConfig = toml::from_str(
+            r#"
+[grants]
+id_token = true
+nonce_ttl = "5m"
+max_assertion_lifetime = "30m"
+"#,
+        )
+        .expect("explicit [grants] must deserialize");
+
+        assert!(explicit.grants.id_token);
+        assert_eq!(explicit.grants.nonce_ttl, "5m");
+        assert_eq!(explicit.grants.max_assertion_lifetime, "30m");
+    }
+
+    /// Omitting `[grants]` entirely must land on the safe compiled defaults: direct
+    /// ID-token service off, and the documented `10m` / `1h` durations.
+    #[test]
+    fn omitted_grants_section_uses_disabled_direct_grant_defaults() {
+        let config = AppConfig::default();
+
+        assert!(
+            !config.grants.id_token,
+            "the direct ID-token grant must default to disabled"
+        );
+        assert_eq!(config.grants.nonce_ttl, DEFAULT_NONCE_TTL);
+        assert_eq!(
+            config.grants.max_assertion_lifetime,
+            DEFAULT_MAX_ASSERTION_LIFETIME
+        );
+
+        // Negative-space on deserialization: an empty TOML document (no sections at all)
+        // must still parse — serde defaults everywhere, per 06-configuration.md.
+        let empty: AppConfig =
+            toml::from_str("").expect("an empty config document must deserialize");
+        assert!(!empty.grants.id_token);
+    }
+
+    /// An unparseable `grants.nonce_ttl` must fail startup validation naming the exact
+    /// field, not be absorbed until some later request reads it.
+    #[test]
+    fn validate_rejects_unparseable_nonce_ttl() {
+        let mut config = AppConfig::default();
+        config.grants.nonce_ttl = "not-a-duration".to_string();
+
+        let err = config.validate().expect_err("bad nonce_ttl must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("grants.nonce_ttl"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("not-a-duration"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// An unparseable `grants.max_assertion_lifetime` fails validation the same way:
+    /// precise field name, echoed bad value.
+    #[test]
+    fn validate_rejects_unparseable_max_assertion_lifetime() {
+        let mut config = AppConfig::default();
+        config.grants.max_assertion_lifetime = "forever".to_string();
+
+        let err = config
+            .validate()
+            .expect_err("bad max_assertion_lifetime must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("grants.max_assertion_lifetime"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("forever"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Positive-space boundary: valid custom durations (including zero-length nonce TTL
+    /// and sub-second values) pass validation, and an enabled switch validates too —
+    /// only *unparseable* durations fail closed.
+    #[test]
+    fn validate_accepts_valid_grant_durations_and_enabled_switch() {
+        let mut enabled = AppConfig::default();
+        enabled.grants.id_token = true;
+        enabled.grants.nonce_ttl = "90s".to_string();
+        enabled.grants.max_assertion_lifetime = "2h".to_string();
+        assert!(
+            enabled.validate().is_ok(),
+            "valid custom durations with the grant enabled must pass"
+        );
+        assert!(enabled.grants.id_token);
+
+        // At-the-boundary value: "0s" parses fine as a duration (a zero-length claim
+        // window is operationally useless but not malformed), so validation accepts it;
+        // policy enforcement belongs above the config layer.
+        let mut zero_ttl = AppConfig::default();
+        zero_ttl.grants.nonce_ttl = "0s".to_string();
+        assert!(
+            zero_ttl.validate().is_ok(),
+            "a parseable zero duration must not fail config load"
+        );
     }
 
     #[test]

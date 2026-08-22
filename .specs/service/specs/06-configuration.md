@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
 
 One TOML file drives the whole service. `AppConfig` (and its nested structs) in
 `crates/core/src/config.rs` deserializes it; every section uses `#[serde(default)]`, so any
@@ -58,6 +58,16 @@ server's timeout layer enforces.
 `custom_claims` (`HashMap<String,String>` of claim templates, see
 [03-service-flows.md](03-service-flows.md)).
 
+### `[grants]`
+Which grants `/token` serves and the parameters of the direct ID-token grant's replay
+protection. `id_token` (bool, default `false`) — whether the direct ID-token grant is
+served at all. `nonce_ttl` (humantime duration, default `"10m"`) — how long a nonce minted
+for the direct grant remains claimable. `max_assertion_lifetime` (humantime duration,
+default `"1h"`) — the ceiling on an accepted provider ID token's remaining lifetime; an
+assertion with longer to live is refused. The authorization-code and refresh-token grants
+are always served and have no switch. Both durations are validated at startup by
+`AppConfig::validate`, so an unparseable value fails config load.
+
 ### `[audit]`
 `adapter` (`noop` | `stdout` | `sqs`, default `noop`), `blocking_threshold` (syslog severity
 name, default `warning`), optional `[audit.sqs] { queue_url, region }`.
@@ -101,6 +111,8 @@ retries? }`. The `secret` is redacted in `Debug`.
 | `server.host` / `port` / `role` / `request_timeout` | `0.0.0.0` / `8080` / `all` / `"30s"` |
 | `registration.mode` | `open` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
+| `grants.id_token` | `false` |
+| `grants.nonce_ttl` / `max_assertion_lifetime` | `10m` / `1h` |
 | `audit.adapter` / `blocking_threshold` | `noop` / `warning` |
 | `telemetry.enabled` / `exporter` / `sample_rate` | `false` / `none` / `1.0` |
 | `user_sync.enabled`, `internal_api.enabled` | `false`, `false` |
