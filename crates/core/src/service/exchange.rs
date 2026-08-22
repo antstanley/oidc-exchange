@@ -312,8 +312,13 @@ impl AppService {
         };
         self.session_repo.store_refresh_token(&session).await?;
 
-        // 9. Build access token JWT (shared logic)
-        let (access_token, access_ttl_secs) = self.build_access_token(&user).await?;
+        // 9. Build access token JWT (shared logic). The token binds to the
+        // session just stored — `token_hash` moved into
+        // `session.refresh_token_hash`, so read it back from there to keep a
+        // single authoritative copy of the value the `sid` claim carries.
+        let (access_token, access_ttl_secs) = self
+            .build_access_token(&user, &session.refresh_token_hash)
+            .await?;
 
         let response = TokenResponse {
             access_token,

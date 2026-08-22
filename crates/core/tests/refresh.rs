@@ -120,6 +120,18 @@ async fn refresh_happy_path_returns_new_access_token() {
     let parts: Vec<&str> = response.access_token.split('.').collect();
     assert_eq!(parts.len(), 3, "JWT should have 3 parts");
 
+    // Decode and verify the header: refresh mints the same RFC 9068
+    // access-token media type exchange does.
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .expect("header should be valid base64url");
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_bytes).expect("header should deserialize");
+    assert_eq!(
+        header["typ"], "at+jwt",
+        "refreshed tokens must also be at+jwt"
+    );
+
     // Decode and verify the payload claims
     let payload_bytes = URL_SAFE_NO_PAD
         .decode(parts[1])
@@ -134,6 +146,21 @@ async fn refresh_happy_path_returns_new_access_token() {
     let users = repo.get_all_users().await;
     assert_eq!(users.len(), 1);
     assert_eq!(claims.sub, users[0].id);
+
+    // The refreshed token must keep the session binding stable: its `sid`
+    // is still the hash of the original refresh token (refresh does not
+    // rotate), so revocation by access token keeps naming this session.
+    let session_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
+    assert_eq!(
+        claims.sid, session_hash,
+        "a refreshed access token must carry the same session identifier"
+    );
+    let stored = repo
+        .get_session_by_refresh_token(&session_hash)
+        .await
+        .expect("lookup should not error")
+        .expect("the session must remain live after a refresh");
+    assert_eq!(stored.refresh_token_hash, claims.sid);
 }
 
 #[tokio::test]

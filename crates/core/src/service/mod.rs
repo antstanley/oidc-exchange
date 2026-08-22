@@ -60,10 +60,29 @@ impl AppService {
         self.keys.algorithm()
     }
 
-    /// Build and sign an access token JWT for the given user.
+    /// Build and sign an access token JWT for the given user, bound to the
+    /// session identified by `sid`.
+    ///
+    /// `sid` is the session's refresh-token hash: `/revoke` looks a presented
+    /// access token up by exactly this value, so binding the hash at mint
+    /// time is what makes "revoke this token" mean "end this one session"
+    /// rather than "end every session of this subject".
     ///
     /// Returns `(jwt_string, expires_in_seconds)`.
-    pub(crate) async fn build_access_token(&self, user: &User) -> Result<(String, u64)> {
+    pub(crate) async fn build_access_token(&self, user: &User, sid: &str) -> Result<(String, u64)> {
+        // Preconditions: a token without a subject authorizes nothing and one
+        // without a session identifier could never be revoked through its own
+        // `sid`, so either would mint an unusable credential — both are
+        // programmer errors, not runtime conditions.
+        assert!(
+            !user.id.is_empty(),
+            "build_access_token: user id must not be empty"
+        );
+        assert!(
+            !sid.is_empty(),
+            "build_access_token: session id must not be empty"
+        );
+
         let now = Utc::now();
         let access_ttl_secs = parse_duration_secs(&self.config.token.access_token_ttl)?;
 
@@ -73,6 +92,7 @@ impl AppService {
             aud: self.config.token.audience.clone().unwrap_or_default(),
             iat: now.timestamp() as u64,
             exp: (now.timestamp() as u64) + access_ttl_secs,
+            sid: sid.to_string(),
             custom: claims::resolve_custom_claims(&self.config.token.custom_claims, user),
         };
 
@@ -82,7 +102,9 @@ impl AppService {
 
         let header = serde_json::json!({
             "alg": self.keys.algorithm(),
-            "typ": "JWT",
+            // RFC 9068 §2.1 media type for a JWT access token; distinguishes
+            // this artifact from every other JWT the same key might sign.
+            "typ": ACCESS_TOKEN_TYP,
             "kid": self.keys.key_id()
         });
         let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).map_err(|e| {
@@ -187,6 +209,12 @@ const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
 /// Seconds in one day, for `d`-suffixed durations.
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
+
+/// JWT header `typ` the service mints for access tokens (RFC 9068 §2.1) and
+/// the validator pins to, so an access token cannot be confused with any
+/// other JWT this key signs. Shared by minting and validation so the two
+/// boundaries cannot drift apart.
+pub(crate) const ACCESS_TOKEN_TYP: &str = "at+jwt";
 
 /// Parse a duration string like "15m", "1h", "30d" into seconds.
 ///

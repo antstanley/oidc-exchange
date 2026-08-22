@@ -289,6 +289,21 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     let parts: Vec<&str> = response.access_token.split('.').collect();
     assert_eq!(parts.len(), 3, "JWT should have 3 parts");
 
+    // Decode and verify the header: the RFC 9068 access-token media type is
+    // what later lets a validator tell this artifact apart from any other
+    // JWT the same key signs.
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .expect("header should be valid base64url");
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_bytes).expect("header should deserialize");
+    assert_eq!(
+        header["typ"], "at+jwt",
+        "access tokens must be minted as at+jwt"
+    );
+    assert_eq!(header["alg"], "EdDSA");
+    assert_eq!(header["kid"], "test-key-1");
+
     // Decode and verify the payload claims
     let payload_bytes = URL_SAFE_NO_PAD
         .decode(parts[1])
@@ -315,6 +330,19 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     assert_eq!(sessions[0].refresh_token_hash, expected_hash);
     assert_eq!(sessions[0].user_id, users[0].id);
     assert_eq!(sessions[0].provider, "mock");
+
+    // The token's `sid` must name exactly the stored session: it equals the
+    // SHA-256 of the refresh token handed to the client and the hash the
+    // store holds, so a presented access token revokes precisely this
+    // session and nothing else.
+    assert_eq!(
+        claims.sid, expected_hash,
+        "sid must be the refresh token hash"
+    );
+    assert_eq!(
+        claims.sid, sessions[0].refresh_token_hash,
+        "sid must match the stored session identifier"
+    );
 }
 
 #[tokio::test]
@@ -369,6 +397,34 @@ async fn exchange_existing_user_does_not_create_new() {
     let claims2: AccessTokenClaims = serde_json::from_slice(&payload2).unwrap();
 
     assert_eq!(claims1.sub, claims2.sub);
+
+    // Each token binds to its own session: the sid is the hash of the
+    // refresh token that exchange handed back, and the two sessions are
+    // distinct, so the sids must differ even though the subject matches.
+    let hash1 = hex::encode(Sha256::digest(
+        resp1
+            .refresh_token
+            .expect("first exchange should return a refresh token")
+            .as_bytes(),
+    ));
+    let hash2 = hex::encode(Sha256::digest(
+        resp2
+            .refresh_token
+            .expect("second exchange should return a refresh token")
+            .as_bytes(),
+    ));
+    assert_eq!(
+        claims1.sid, hash1,
+        "first token's sid must be its own session"
+    );
+    assert_eq!(
+        claims2.sid, hash2,
+        "second token's sid must be its own session"
+    );
+    assert_ne!(
+        claims1.sid, claims2.sid,
+        "separate exchanges must mint tokens for separate sessions"
+    );
 }
 
 #[tokio::test]
