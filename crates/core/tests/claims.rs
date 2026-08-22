@@ -184,3 +184,72 @@ fn empty_config_and_user_claims() {
     let result = resolve_custom_claims(&None, &user);
     assert!(result.is_empty());
 }
+
+/// The exact 24-name closed set, spelled independently of the constant so
+/// drift on either side fails here too.
+const RESERVED_CLAIM_NAMES: [&str; 24] = [
+    "iss",
+    "sub",
+    "aud",
+    "exp",
+    "nbf",
+    "iat",
+    "jti",
+    "acr",
+    "amr",
+    "at_hash",
+    "auth_time",
+    "azp",
+    "c_hash",
+    "cnf",
+    "nonce",
+    "sid",
+    "typ",
+    "client_id",
+    "scope",
+    "scp",
+    "roles",
+    "groups",
+    "entitlements",
+    "permissions",
+];
+
+/// Already-persisted defensive filter: a record written before the write-path
+/// rule may carry reserved names, and none of them — from either the persisted
+/// map or a configured template — may reach the signed token. Paired with an
+/// allowed per-user claim and template that must both survive.
+#[test]
+fn all_24_reserved_names_are_defensively_filtered_at_token_build() {
+    let mut user = make_user();
+    let mut config_claims = HashMap::new();
+
+    for name in RESERVED_CLAIM_NAMES {
+        user.claims.insert(
+            name.to_string(),
+            Value::String("persisted-override".to_string()),
+        );
+        config_claims.insert(name.to_string(), "template-override".to_string());
+    }
+    user.claims.insert(
+        "kept_user_claim".to_string(),
+        Value::String("visible".to_string()),
+    );
+    config_claims.insert("kept_template".to_string(), "{{ user.id }}".to_string());
+
+    let result = resolve_custom_claims(&Some(config_claims), &user);
+
+    for name in RESERVED_CLAIM_NAMES {
+        assert!(
+            !result.contains_key(name),
+            "reserved name {name:?} must be dropped at token build even when persisted"
+        );
+    }
+    assert_eq!(
+        result.get("kept_user_claim"),
+        Some(&Value::String("visible".to_string()))
+    );
+    assert_eq!(
+        result.get("kept_template"),
+        Some(&Value::String("usr_123".to_string()))
+    );
+}

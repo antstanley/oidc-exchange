@@ -16,9 +16,9 @@
 
 ## Definition of done
 
-- [ ] The test table enumerates all 24 exact reserved names and fails if any is accepted at any required boundary.
-- [ ] Set/merge/config/template rejection occurs before persistence or signed-token output; normal custom claims still persist, resolve, and emit.
-- [ ] The implementation preserves the revoke sibling’s `sid`/`nbf` protections and does not duplicate its revoke validation work.
-- [ ] Canonical domain/service prose and schema are updated when the merged spec workflow applies the target changes.
-- [ ] Rust format/clippy/affected nextest tests pass; unrelated failures are recorded but not fixed.
-- [ ] Reviewable: no admin-controlled claim can collide with a protocol-owned field through either write or template paths.
+- [x] The test table enumerates all 24 exact reserved names and fails if any is accepted at any required boundary.
+- [x] Set/merge/config/template rejection occurs before persistence or signed-token output; normal custom claims still persist, resolve, and emit.
+- [x] The implementation preserves the revoke sibling’s `sid`/`nbf` protections and does not duplicate its revoke validation work.
+- [x] Canonical domain/service prose and schema are updated when the merged spec workflow applies the target changes.
+- [x] Rust format/clippy/affected nextest tests pass; unrelated failures are recorded but not fixed.
+- [x] Reviewable: no admin-controlled claim can collide with a protocol-owned field through either write or template paths.

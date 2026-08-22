@@ -37,6 +37,10 @@ impl AppConfig {
     /// - `server.request_timeout`, `token.access_token_ttl`, and
     ///   `token.refresh_token_ttl` parse via
     ///   [`crate::service::parse_duration_secs`].
+    /// - Every `token.custom_claims` key is a non-reserved protocol claim name
+    ///   ([`crate::service::claims::RESERVED_CLAIMS`]) — a template claim keyed
+    ///   by a reserved name would be silently dropped at token build, so it is
+    ///   refused at startup instead.
     /// - Every `registration.domain_allowlist` entry is an exact domain or a
     ///   `*.`-prefixed wildcard.
     /// - When the internal API will be served (`server.role` is `admin` or
@@ -64,6 +68,23 @@ impl AppConfig {
             crate::service::parse_duration_secs(&self.token.refresh_token_ttl),
             "token.refresh_token_ttl",
         )?;
+
+        if let Some(custom_claims) = &self.token.custom_claims {
+            // Sorted so the reported offender is deterministic when several
+            // reserved keys are configured.
+            let mut keys: Vec<&String> = custom_claims.keys().collect();
+            keys.sort();
+            for key in keys {
+                if crate::service::claims::is_reserved_claim(key) {
+                    return Err(Error::ConfigError {
+                        detail: format!(
+                            "token.custom_claims key {key:?} is a reserved protocol claim \
+                             name and cannot be used as a custom claim"
+                        ),
+                    });
+                }
+            }
+        }
 
         if let Some(allowlist) = &self.registration.domain_allowlist {
             for entry in allowlist {
@@ -980,6 +1001,58 @@ role = "admin"
             config.registration.domain_allowlist.as_ref().unwrap().len(),
             2
         );
+    }
+
+    /// A `token.custom_claims` entry keyed by a reserved protocol name must
+    /// fail startup: token build would silently drop it, so the operator would
+    /// ship a claim they configured but never see.
+    #[test]
+    fn validate_rejects_reserved_name_in_token_custom_claims() {
+        for reserved in ["sub", "sid", "roles"] {
+            let mut config = AppConfig::default();
+            let mut custom = HashMap::new();
+            custom.insert(reserved.to_string(), "override".to_string());
+            config.token.custom_claims = Some(custom);
+
+            let err = config
+                .validate()
+                .expect_err("a reserved key in token.custom_claims must be rejected at load");
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains("token.custom_claims"),
+                        "detail must name the field: {detail}"
+                    );
+                    assert!(
+                        detail.contains(&format!("\"{reserved}\"")),
+                        "detail must name the offending key: {detail}"
+                    );
+                }
+                other => panic!("expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    /// Paired positive: non-reserved keys — including near-misses like
+    /// `role` and case variants like `Sub` — validate, keep their template
+    /// values, and survive in any order relative to reserved names.
+    #[test]
+    fn validate_accepts_non_reserved_token_custom_claim_keys() {
+        let mut config = AppConfig::default();
+        let mut custom = HashMap::new();
+        custom.insert("role".to_string(), "{{ user.metadata.role }}".to_string());
+        custom.insert("Sub".to_string(), "not-reserved".to_string());
+        custom.insert("tenant".to_string(), "acme".to_string());
+        config.token.custom_claims = Some(custom);
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "non-reserved custom-claim keys must validate: {result:?}"
+        );
+        assert_eq!(config.token.custom_claims.as_ref().unwrap().len(), 3);
     }
 
     #[test]

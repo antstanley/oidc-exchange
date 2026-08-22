@@ -6,12 +6,32 @@ use crate::domain::{
     AuditEventType, AuditOutcome, AuditSeverity, NewUser, User, UserPatch, UserStatus,
 };
 use crate::error::{Error, Result};
-use crate::service::{create_audit_event, AppService};
+use crate::service::{claims::find_reserved_claim_key, create_audit_event, AppService};
 
 /// Key under which the claims-mutation operation name (`set_claims` /
 /// `merge_claims` / `clear_claims`) is recorded in a `UserUpdated` audit
 /// event's `detail` map.
 const CLAIMS_OPERATION_DETAIL_KEY: &str = "operation";
+
+/// Reject a caller-supplied claims map carrying a reserved protocol claim
+/// name.
+///
+/// Enforced *before* persistence: a reserved name accepted here would live on
+/// the user record and stay re-exportable through a `{{ user.claims.KEY }}`
+/// template even though token build filters it — the write boundary is what
+/// keeps the stored map and the signed token in agreement. The offending key
+/// is named so the operator can fix the payload; the reason is a fixed,
+/// non-secret string plus the claim name itself.
+fn ensure_no_reserved_claims<V>(claims: &HashMap<String, V>) -> Result<()> {
+    if let Some(key) = find_reserved_claim_key(claims) {
+        return Err(Error::InvalidRequest {
+            reason: format!(
+                "claim name {key:?} is reserved by the token protocol and cannot be written"
+            ),
+        });
+    }
+    Ok(())
+}
 
 impl AppService {
     /// Create a new user via admin API.
@@ -54,6 +74,12 @@ impl AppService {
     /// [`Self::admin_update_user`] and [`Self::admin_delete_user`] so both
     /// enforce identical transition and revocation rules.
     async fn apply_validated_patch(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
+        // Claims patches are write-path ingress like set/merge claims: reject a
+        // reserved name before anything is fetched or persisted.
+        if let Some(ref patch_claims) = patch.claims {
+            ensure_no_reserved_claims(patch_claims)?;
+        }
+
         let current = self
             .user_repo
             .get_user_by_id(user_id)
@@ -196,13 +222,18 @@ impl AppService {
 
     /// Replace all custom claims for a user.
     ///
-    /// On success, emits a blocking `UserUpdated` audit event recording the
-    /// `set_claims` operation in `detail`.
+    /// Reserved claim names are rejected with `InvalidRequest` before the map
+    /// replaces the stored one. On success, emits a blocking `UserUpdated`
+    /// audit event recording the `set_claims` operation in `detail`.
     pub async fn admin_set_claims(
         &self,
         user_id: &str,
         claims: HashMap<String, Value>,
     ) -> Result<()> {
+        // Validate before touching the store: an invalid payload must fail at
+        // the boundary, deterministically, regardless of user existence.
+        ensure_no_reserved_claims(&claims)?;
+
         // Verify user exists
         let existing = self
             .user_repo
@@ -230,13 +261,20 @@ impl AppService {
     /// Merge new claims into existing user claims.
     ///
     /// New keys override existing keys; existing keys not in the patch are
-    /// preserved. On success, emits a blocking `UserUpdated` audit event
+    /// preserved. Only the incoming delta is validated — a record written
+    /// before the reserved-name rule existed can still receive merges, and its
+    /// legacy names remain token build's defensive filter's problem, not every
+    /// future merge's. On success, emits a blocking `UserUpdated` audit event
     /// recording the `merge_claims` operation in `detail`.
     pub async fn admin_merge_claims(
         &self,
         user_id: &str,
         claims: HashMap<String, Value>,
     ) -> Result<()> {
+        // Validate the delta before the store roundtrip so a reserved key is
+        // rejected without depending on whether the user exists.
+        ensure_no_reserved_claims(&claims)?;
+
         let user = self
             .user_repo
             .get_user_by_id(user_id)

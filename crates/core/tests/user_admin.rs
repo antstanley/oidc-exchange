@@ -301,6 +301,252 @@ async fn admin_clear_claims_empties_map() {
     assert!(claims.is_empty(), "claims should be empty after clear");
 }
 
+// ─── Closed reserved-claim enforcement at every write boundary ──────────────
+
+/// The exact 24-name closed set, spelled independently of
+/// `RESERVED_CLAIMS` so drift on either side fails these tests.
+const RESERVED_CLAIM_NAMES: [&str; 24] = [
+    "iss",
+    "sub",
+    "aud",
+    "exp",
+    "nbf",
+    "iat",
+    "jti",
+    "acr",
+    "amr",
+    "at_hash",
+    "auth_time",
+    "azp",
+    "c_hash",
+    "cnf",
+    "nonce",
+    "sid",
+    "typ",
+    "client_id",
+    "scope",
+    "scp",
+    "roles",
+    "groups",
+    "entitlements",
+    "permissions",
+];
+
+#[tokio::test]
+async fn admin_set_claims_rejects_every_reserved_claim_name() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, _repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let nu = new_user("ext-reserved-set", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    for name in RESERVED_CLAIM_NAMES {
+        let mut claims = HashMap::new();
+        claims.insert(name.to_string(), json!("override"));
+        // A second, legitimate key proves rejection is caused by the reserved
+        // name and not by the payload shape.
+        claims.insert("tenant".to_string(), json!("acme"));
+
+        let err = svc
+            .admin_set_claims(&user.id, claims)
+            .await
+            .expect_err("a reserved claim name must be rejected by set");
+        assert!(
+            matches!(&err, Error::InvalidRequest { .. }),
+            "{name:?} must map to InvalidRequest, got {err:?}"
+        );
+        match &err {
+            Error::InvalidRequest { reason } => {
+                assert!(
+                    reason.contains(&format!("\"{name}\"")),
+                    "the error must name the offending key {name:?}: {reason}"
+                );
+                assert!(
+                    reason.contains("reserved"),
+                    "the error must state the reservation: {reason}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    // Nothing from any rejected payload may have been persisted.
+    let stored = svc
+        .admin_get_claims(&user.id)
+        .await
+        .expect("get claims should succeed");
+    assert!(
+        stored.is_empty(),
+        "rejected set payloads must not reach persistence, got {stored:?}"
+    );
+}
+
+#[tokio::test]
+async fn admin_set_claims_still_accepts_and_persists_non_reserved_names() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, _repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let nu = new_user("ext-reserved-set-ok", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    let mut claims = HashMap::new();
+    claims.insert("role".to_string(), json!("admin"));
+    claims.insert("Sub".to_string(), json!("case-sensitive"));
+    claims.insert("tenant".to_string(), json!("acme"));
+    svc.admin_set_claims(&user.id, claims)
+        .await
+        .expect("non-reserved names must be accepted");
+
+    let stored = svc
+        .admin_get_claims(&user.id)
+        .await
+        .expect("get claims should succeed");
+    assert_eq!(stored.get("role"), Some(&json!("admin")));
+    assert_eq!(stored.get("Sub"), Some(&json!("case-sensitive")));
+    assert_eq!(stored.len(), 3);
+}
+
+#[tokio::test]
+async fn admin_merge_claims_rejects_reserved_delta_but_preserves_existing() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, _repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let nu = new_user("ext-reserved-merge", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    let mut seed = HashMap::new();
+    seed.insert("tier".to_string(), json!("gold"));
+    svc.admin_set_claims(&user.id, seed)
+        .await
+        .expect("seed set should succeed");
+
+    for name in RESERVED_CLAIM_NAMES {
+        let mut delta = HashMap::new();
+        delta.insert(name.to_string(), json!("forged"));
+
+        let err = svc
+            .admin_merge_claims(&user.id, delta)
+            .await
+            .expect_err("a reserved claim name must be rejected by merge");
+        assert!(
+            matches!(&err, Error::InvalidRequest { .. }),
+            "{name:?} must map to InvalidRequest, got {err:?}"
+        );
+
+        // The stored map must survive every rejected merge untouched.
+        let stored = svc
+            .admin_get_claims(&user.id)
+            .await
+            .expect("get claims should succeed");
+        assert_eq!(
+            stored.get("tier"),
+            Some(&json!("gold")),
+            "existing claims must survive a rejected merge of {name:?}"
+        );
+        assert!(
+            !stored.contains_key(name),
+            "the reserved name {name:?} must never land in storage"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_update_user_rejects_reserved_names_in_claims_patch() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, _repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let nu = new_user("ext-reserved-patch", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    for name in RESERVED_CLAIM_NAMES {
+        let mut patch_claims = HashMap::new();
+        patch_claims.insert(name.to_string(), json!("override"));
+
+        let patch = UserPatch {
+            email: None,
+            display_name: None,
+            metadata: None,
+            claims: Some(patch_claims),
+            status: None,
+        };
+        let err = svc
+            .admin_update_user(&user.id, &patch)
+            .await
+            .expect_err("a reserved claim name must be rejected by update");
+        assert!(
+            matches!(&err, Error::InvalidRequest { reason } if reason.contains(&format!("\"{name}\""))),
+            "{name:?} must be named by an InvalidRequest, got {err:?}"
+        );
+    }
+
+    // The version counter is store-managed evidence that no write happened.
+    let after = svc
+        .admin_get_user(&user.id)
+        .await
+        .expect("get user should succeed")
+        .expect("user should still exist");
+    assert_eq!(
+        after.version,
+        oidc_exchange_core::domain::INITIAL_USER_VERSION,
+        "no rejected patch may have reached the store"
+    );
+    let stored = svc
+        .admin_get_claims(&user.id)
+        .await
+        .expect("get claims should succeed");
+    assert!(stored.is_empty(), "no rejected patch claims may persist");
+}
+
+#[tokio::test]
+async fn admin_update_user_accepts_non_reserved_claims_patch() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let (svc, _repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
+
+    let nu = new_user("ext-patch-ok", "google");
+    let user = svc
+        .admin_create_user(&nu)
+        .await
+        .expect("create should succeed");
+
+    let mut patch_claims = HashMap::new();
+    patch_claims.insert("entitlements_custom".to_string(), json!(true));
+    patch_claims.insert("groups_v2".to_string(), json!(["team-a"]));
+    let patch = UserPatch {
+        email: None,
+        display_name: None,
+        metadata: None,
+        claims: Some(patch_claims),
+        status: None,
+    };
+    svc.admin_update_user(&user.id, &patch)
+        .await
+        .expect("a non-reserved claims patch must apply");
+
+    let stored = svc
+        .admin_get_claims(&user.id)
+        .await
+        .expect("get claims should succeed");
+    assert_eq!(stored.get("groups_v2"), Some(&json!(["team-a"])));
+    assert_eq!(stored.len(), 2);
+}
+
 // ─── Test 5b: Claims operations on unknown user id return NotFound ─────────
 
 #[tokio::test]

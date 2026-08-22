@@ -48,7 +48,8 @@ audience = "https://api.example.com"   # aud claim in access tokens
 # Static values are used as-is.
 # Template values reference the User model with {{ field }} syntax.
 # The | default: filter provides a fallback if the field is missing.
-# Reserved claims (sub, iss, aud, iat, exp) cannot be overridden.
+# Reserved protocol claim names cannot be used as keys here or as per-user
+# claims via the internal API; a configuration carrying one fails startup.
 [token.custom_claims]
 org = "example"
 role = "{{ user.metadata.role | default: 'user' }}"
