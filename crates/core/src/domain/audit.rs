@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::domain::OperatorPrincipal;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     /// ULID
@@ -11,8 +13,13 @@ pub struct AuditEvent {
     pub timestamp: DateTime<Utc>,
     pub severity: AuditSeverity,
     pub event_type: AuditEventType,
-    /// User ID if known
+    /// User id if known — the subject of the action.
     pub actor: Option<String>,
+    /// The operator principal that performed the action. Present on
+    /// `/internal/*` operations (under the shared-secret compatibility
+    /// mechanism it is present and explicitly `unattributed`), `None` on the
+    /// exchange plane, where there is no operator.
+    pub operator: Option<OperatorPrincipal>,
     pub provider: Option<String>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
@@ -50,6 +57,29 @@ pub enum AuditEventType {
     RegistrationDenied,
     ProviderError,
     Unauthorized,
+    /// VENDORED SEAM (task 03): variant added by sibling PR #24's audit-type
+    /// changes; carried here so the admin plane can record throttle lockouts.
+    /// At merge time this arm is deleted in favour of #24's identical addition.
+    ThrottleExceeded,
+}
+
+/// The fixed failure-reason vocabulary for mandatory-channel security events
+/// (`AuditOutcome::Failure { reason }`). Reasons on this channel are closed
+/// constants, never free-form text, so audit queries can rely on exact
+/// matching; the presented credential is never among them.
+///
+/// VENDORED SEAM (task 03): mirrors PR #24's typed failure-reason design in a
+/// shape compatible with this branch's string-carrying `AuditOutcome`; PR
+/// #24's typed `AuditFailure` enum replaces these constants at merge time.
+pub mod security_failure_reasons {
+    /// A rejected operator authentication: no credential presented.
+    pub const MISSING_CREDENTIAL: &str = "missing_credential";
+    /// A rejected operator authentication: credential failed verification.
+    pub const INVALID_CREDENTIAL: &str = "invalid_credential";
+    /// A rejected operator authentication: no mechanism usable/configured.
+    pub const NOT_CONFIGURED: &str = "not_configured";
+    /// The `OperatorAuth` rate-limit budget is exhausted (the lockout).
+    pub const THROTTLE_EXCEEDED: &str = "throttle_exceeded";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

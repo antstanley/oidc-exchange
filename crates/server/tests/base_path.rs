@@ -16,7 +16,8 @@ use oidc_exchange_core::config::AppConfig;
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 /// Build the real production public router (`bootstrap::build_public_router`,
@@ -37,6 +38,7 @@ fn build_app(base_path: Option<&str>) -> Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );

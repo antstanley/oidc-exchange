@@ -6,12 +6,13 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 
 use oidc_exchange_core::domain::{
-    AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
-    INITIAL_USER_VERSION,
+    AuditEvent, IdentityClaims, NewUser, ProviderTokens, RateLimitDecision, RateLimitKey, Session,
+    User, UserPatch, UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 
 // ---------------------------------------------------------------------------
@@ -348,6 +349,42 @@ impl KeyManager for MockKeyManager {
 
     fn key_id(&self) -> &str {
         "test-key-1"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MockRateLimiter
+// ---------------------------------------------------------------------------
+
+/// A scriptable rate limiter for tests: by default it allows everything (the
+/// common case), and `deny_mode` switches it to deny every consumption with a
+/// fixed Retry-After, so throttle-path tests can force the lockout branch
+/// deterministically instead of simulating clock elision.
+#[derive(Clone, Default)]
+pub struct MockRateLimiter {
+    deny_mode: Arc<Mutex<bool>>,
+}
+
+impl MockRateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Force every subsequent `check_and_consume` to return `Deny`.
+    pub async fn set_deny_mode(&self, deny: bool) {
+        *self.deny_mode.lock().await = deny;
+    }
+}
+
+#[async_trait]
+impl RateLimiter for MockRateLimiter {
+    async fn check_and_consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        if *self.deny_mode.lock().await {
+            return Ok(RateLimitDecision::Deny {
+                retry_after_secs: 60,
+            });
+        }
+        Ok(RateLimitDecision::Allow)
     }
 }
 

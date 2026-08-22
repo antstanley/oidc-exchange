@@ -9,14 +9,17 @@ use std::collections::HashMap;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use serde_json::Value;
 
 use crate::config::AppConfig;
 use crate::domain::{
-    AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
+    AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, ClientAddr,
+    SecurityEvent, User,
 };
 use crate::error::{Error, Result};
 use crate::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 
 pub struct AppService {
@@ -25,17 +28,23 @@ pub struct AppService {
     pub(crate) keys: Box<dyn KeyManager>,
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
+    /// VENDORED SEAM (task 03): the shared rate-limit port from PR #24. On
+    /// this branch only the admin plane's `OperatorAuth` budget flows through
+    /// it; the exchange plane's budgets arrive with #24's merge.
+    pub(crate) rate_limiter: Box<dyn RateLimiter>,
     pub(crate) providers: HashMap<String, Box<dyn IdentityProvider>>,
     pub(crate) config: AppConfig,
 }
 
 impl AppService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_repo: Box<dyn UserRepository>,
         session_repo: Box<dyn SessionRepository>,
         keys: Box<dyn KeyManager>,
         audit: Box<dyn AuditLog>,
         user_sync: Box<dyn UserSync>,
+        rate_limiter: Box<dyn RateLimiter>,
         providers: HashMap<String, Box<dyn IdentityProvider>>,
         config: AppConfig,
     ) -> Self {
@@ -45,6 +54,7 @@ impl AppService {
             keys,
             audit,
             user_sync,
+            rate_limiter,
             providers,
             config,
         }
@@ -58,6 +68,15 @@ impl AppService {
     /// Return the signing algorithm identifier (e.g. "EdDSA", "ES256").
     pub fn signing_algorithm(&self) -> &str {
         self.keys.algorithm()
+    }
+
+    /// The shared [`RateLimiter`] port instance.
+    ///
+    /// Exposed so the server's operator-auth layer can consult the same
+    /// budget this service was built with — the throttle state must be one
+    /// process-wide instance, never a per-consumer copy.
+    pub fn rate_limiter(&self) -> &dyn RateLimiter {
+        self.rate_limiter.as_ref()
     }
 
     /// Build and sign an access token JWT for the given user.
@@ -136,12 +155,94 @@ impl AppService {
             }
         }
     }
+
+    /// Emit a [`SecurityEvent`] through the mandatory audit channel.
+    ///
+    /// VENDORED SEAM (task 03): the mandatory channel itself, modelled on PR
+    /// #24's `emit_security_event`. "Mandatory" here means the
+    /// `emit_threshold` filter never applies — a guessing campaign against
+    /// the privilege-assignment primitive must be recorded even in a
+    /// deployment that filters routine events down to `notice`. Sink failure
+    /// keeps the existing blocking-threshold contract (fail the request when
+    /// the event's severity meets `[audit] blocking_threshold`, else log and
+    /// continue); #24's durability counters and `audit.durability` config are
+    /// that PR's own scope and are not vendored.
+    ///
+    /// The event's classification (type, severity) is fixed by the closed
+    /// [`SecurityEvent`] enum; the caller supplies only context. The failure
+    /// reason travels in `outcome` as one of the fixed
+    /// [`crate::domain::security_failure_reasons`] strings.
+    pub async fn emit_security_event(
+        &self,
+        event: SecurityEvent,
+        outcome: AuditOutcome,
+        actor: Option<String>,
+        client_addr: ClientAddr,
+        detail: HashMap<String, Value>,
+    ) -> Result<()> {
+        // Admin-plane security events carry the peer address, never a
+        // forwarded or asserted one, and never the presented credential.
+        let audit_event = AuditEvent {
+            id: ulid::Ulid::new().to_string(),
+            timestamp: Utc::now(),
+            severity: event.severity(),
+            event_type: event.event_type(),
+            actor,
+            // The security event is about the *caller's* attempt, not about
+            // any user; the operator field stays None because authentication
+            // did not (or in the throttle's case, could not) conclude.
+            operator: None,
+            provider: None,
+            ip_address: client_addr.audit_address(),
+            user_agent: None,
+            detail,
+            outcome,
+        };
+        // Postcondition: a security event never carries an operator identity —
+        // it records attempts, not completed authentications.
+        assert!(
+            audit_event.operator.is_none(),
+            "security events record authentication attempts and must never carry a principal"
+        );
+        assert_eq!(
+            audit_event.severity,
+            event.severity(),
+            "security-event severity must come from the closed enum, never from the caller"
+        );
+
+        match self.audit.emit(&audit_event).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let serialized = serde_json::to_string(&audit_event)
+                    .unwrap_or_else(|_| format!("{:?}", audit_event));
+                if audit_event.severity as u8 <= AuditSeverity::Error as u8 {
+                    tracing::error!(audit_fallback = true, "{serialized}");
+                } else {
+                    tracing::warn!(audit_fallback = true, "{serialized}");
+                }
+
+                let threshold = parse_severity(&self.config.audit.blocking_threshold)
+                    .unwrap_or(AuditSeverity::Warning);
+                if audit_event.severity as u8 <= threshold as u8 {
+                    Err(e)
+                } else {
+                    tracing::warn!(error = %e, "mandatory audit provider down, event emitted to std stream");
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
-/// Build an [`AuditEvent`]. `ip_address` and `user_agent` come from the
-/// caller's client context (the `AuditContext` middleware at the HTTP edge);
-/// the `AuditEvent` shape has no `device_id` field, so device identifiers are
-/// recorded on the `Session` only, never on audit events.
+/// Build an [`AuditEvent`] with no operator attribution.
+///
+/// `ip_address` and `user_agent` come from the caller's client context (the
+/// `AuditContext` middleware at the HTTP edge); the `AuditEvent` shape has no
+/// `device_id` field, so device identifiers are recorded on the `Session`
+/// only, never on audit events. The `operator` field starts as `None`: this
+/// constructor serves every exchange-plane event, where there is no operator,
+/// and admin flows stamp the principal onto the returned event explicitly so
+/// attribution is always a deliberate act, never a default.
 #[allow(clippy::too_many_arguments)]
 pub fn create_audit_event(
     event_type: AuditEventType,
@@ -158,6 +259,7 @@ pub fn create_audit_event(
         severity,
         event_type,
         actor,
+        operator: None,
         provider,
         ip_address,
         user_agent,

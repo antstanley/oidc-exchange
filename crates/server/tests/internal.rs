@@ -14,7 +14,8 @@ use oidc_exchange_core::config::AppConfig;
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 const TEST_SECRET: &str = "test-internal-secret-1234";
@@ -35,6 +36,7 @@ fn build_test_app() -> Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );
@@ -164,6 +166,7 @@ async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_to
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );

@@ -20,7 +20,8 @@ use oidc_exchange_core::config::{AppConfig, DEFAULT_INTERNAL_API_HOST, DEFAULT_I
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 const TEST_SECRET: &str = "test-internal-secret-listeners-e2e";
@@ -43,6 +44,7 @@ fn build_planes(role: &str, internal_enabled: bool) -> Routers {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );

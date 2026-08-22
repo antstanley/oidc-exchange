@@ -30,6 +30,15 @@ pub enum Error {
     #[error("not found: {detail}")]
     NotFound { detail: String },
 
+    /// A bounded rate-limit budget is exhausted; the caller must back off for
+    /// at least `retry_after_secs`.
+    ///
+    /// VENDORED SEAM (task 03): variant and mapping vendored from sibling PR
+    /// #24 (`2026-08-05-audit_and_throttle_authentication_failures`); deleted
+    /// in favour of #24's identical variant at merge time.
+    #[error("too many requests; retry after {retry_after_secs} seconds")]
+    TooManyRequests { retry_after_secs: u64 },
+
     // Provider errors (upstream)
     #[error("provider error ({provider}): {detail}")]
     ProviderError { provider: String, detail: String },

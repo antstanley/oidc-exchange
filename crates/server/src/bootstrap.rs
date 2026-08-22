@@ -9,9 +9,10 @@ use tower_http::timeout::TimeoutLayer;
 use oidc_exchange_core::config::{AppConfig, ProviderConfig};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
-use oidc_exchange_core::service::AppService;
+use oidc_exchange_core::service::{parse_duration_secs, AppService};
 
 use crate::middleware::audit_context::audit_context_layer;
 use crate::middleware::base_path::with_base_path_strip;
@@ -273,15 +274,51 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
         build_providers(config).await?
     };
 
+    // The failed-auth throttle is only mounted where operator authentication
+    // happens (the admin plane), so a process that never serves `/internal/*`
+    // carries the noop limiter rather than live throttle state. Bounds were
+    // already validated by `AppConfig::validate`; building eagerly here fails
+    // fast on any bound validation missed.
+    let rate_limiter: Box<dyn RateLimiter> = if internal_api_served(config) {
+        let failure_window_secs = parse_duration_secs(&config.internal_api.auth_failure_window)?;
+        let lockout_secs = parse_duration_secs(&config.internal_api.auth_lockout)?;
+        Box::new(
+            oidc_exchange_adapters::rate_limit::AdminAuthRateLimiter::new(
+                config.internal_api.max_auth_failures,
+                std::time::Duration::from_secs(failure_window_secs),
+                std::time::Duration::from_secs(lockout_secs),
+            )?,
+        )
+    } else {
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new())
+    };
+
     Ok(AppService::new(
         user_repo,
         session_repo,
         keys,
         audit,
         user_sync,
+        rate_limiter,
         providers,
         config.clone(),
     ))
+}
+
+/// Whether this process serves `/internal/*`: the role binds the admin
+/// listener and the internal API flag is on. Mirrors the condition
+/// `AppConfig::validate` uses for the `[internal_api]` contract; asserted
+/// consistent so the two can never drift apart silently.
+fn internal_api_served(config: &AppConfig) -> bool {
+    let served =
+        matches!(config.server.role.as_str(), "admin" | "all") && config.internal_api.enabled;
+    assert!(
+        served
+            || !matches!(config.server.role.as_str(), "admin" | "all")
+            || !config.internal_api.enabled,
+        "internal_api_served must mirror AppConfig::validate's serving condition"
+    );
+    served
 }
 
 // ---------------------------------------------------------------------------
@@ -1323,7 +1360,9 @@ mod load_config_tests {
         );
 
         // Replace the unset placeholder with the escape form and reload —
-        // the set variable still resolves and the escape becomes a literal.
+        // the set variable still resolves, the escape becomes a literal, and
+        // the singular `auth_method` key (kept for pre-hardening configs)
+        // reads back as a one-element `auth_methods` list.
         write_toml(
             dir.path(),
             "default",
@@ -1339,8 +1378,9 @@ mod load_config_tests {
             Some("resolved-value")
         );
         assert_eq!(
-            config.internal_api.auth_method.as_deref(),
-            Some("${LITERAL}")
+            config.internal_api.auth_methods,
+            vec!["${LITERAL}".to_string()],
+            "the singular auth_method key must read as a one-element list"
         );
     }
 
@@ -1461,7 +1501,8 @@ mod build_router_tests {
 
     use oidc_exchange_core::ports::IdentityProvider;
     use oidc_exchange_test_utils::{
-        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+        MockUserSync,
     };
 
     const TEST_SECRET: &str = "test-internal-secret-build-router";
@@ -1479,6 +1520,7 @@ mod build_router_tests {
             Box::new(MockKeyManager::new()),
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
+            Box::new(MockRateLimiter::new()),
             providers,
             config.clone(),
         )

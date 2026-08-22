@@ -6,7 +6,8 @@ use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::{create_audit_event, AppService};
 
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 fn make_config_with_threshold(threshold: &str) -> AppConfig {
@@ -41,6 +42,7 @@ fn make_service_with_audit(audit: MockAuditLog, config: AppConfig) -> AppService
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )

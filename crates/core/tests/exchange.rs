@@ -16,7 +16,8 @@ use oidc_exchange_core::service::exchange::ExchangeRequest;
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync, UserSyncCall,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync, UserSyncCall,
 };
 
 fn make_config() -> AppConfig {
@@ -54,6 +55,7 @@ fn make_service_with_config(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -78,6 +80,7 @@ fn make_service_with_user_repo(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -102,6 +105,7 @@ fn make_service_with_user_sync(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -125,6 +129,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )

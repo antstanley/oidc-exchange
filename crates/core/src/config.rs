@@ -44,8 +44,12 @@ impl AppConfig {
     /// - Every `registration.domain_allowlist` entry is an exact domain or a
     ///   `*.`-prefixed wildcard.
     /// - When the internal API will be served (`server.role` is `admin` or
-    ///   `all`, and `internal_api.enabled == true`),
-    ///   `internal_api.shared_secret` is present and non-empty.
+    ///   `all`, and `internal_api.enabled == true`), the full
+    ///   `[internal_api]` contract holds: non-empty, known, duplicate-free
+    ///   `auth_methods`; a shared secret of at least
+    ///   [`MIN_SHARED_SECRET_BYTES`] bytes while that mechanism is enabled;
+    ///   issuer/key-manager requirements for `operator_token`; parseable
+    ///   throttle bounds. See [`Self::validate_internal_api`].
     /// - When `server.role` is `all` and the internal API is enabled, the
     ///   admin listener (`internal_api.host`/`port`) does not collide with the
     ///   public listener (`server.host`/`port`) — see [`listeners_collide`].
@@ -95,22 +99,24 @@ impl AppConfig {
             }
         }
 
+        // When the internal API will be served, the whole `[internal_api]`
+        // contract applies: a non-empty mechanism list, per-mechanism
+        // requirements (the shared secret's length floor; a real issuer and a
+        // non-noop key manager for operator tokens), and parseable throttle
+        // bounds. See `06-configuration.md` → Validation at load.
         let internal_api_served =
             matches!(self.server.role.as_str(), "admin" | "all") && self.internal_api.enabled;
         if internal_api_served {
-            let secret_is_present_and_non_empty = self
-                .internal_api
-                .shared_secret
-                .as_deref()
-                .is_some_and(|secret| !secret.is_empty());
-            if !secret_is_present_and_non_empty {
-                return Err(Error::ConfigError {
-                    detail: "internal_api.shared_secret must be non-empty when the internal API \
-                             is served (server.role is \"admin\" or \"all\" and \
-                             internal_api.enabled = true)"
-                        .to_string(),
-                });
-            }
+            self.validate_internal_api()?;
+        }
+
+        if internal_api_served && self.internal_api.shared_secret_is_only_mechanism() {
+            tracing::warn!(
+                mechanisms = ?self.internal_api.auth_methods,
+                "shared_secret is the only enabled internal-API authentication mechanism; \
+                 it authenticates requests without identifying anyone - migrate to \
+                 operator_token or mtls for attributed admin actions"
+            );
         }
 
         // Only role = "all" binds both sockets, so only that role can collide.
@@ -135,6 +141,134 @@ impl AppConfig {
                     self.server.host,
                     self.server.port
                 ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate the `[internal_api]` section whenever the role binds the admin
+    /// listener and `internal_api.enabled = true` — i.e. exactly when a
+    /// rejected credential would otherwise be discovered at request time.
+    ///
+    /// Checks (each returning a `ConfigError` naming the offending field):
+    /// - `auth_methods` is non-empty, holds only known mechanism names, and
+    ///   has no duplicates (a duplicated mechanism would silently try twice).
+    /// - when `shared_secret` is among them: present and at least
+    ///   [`MIN_SHARED_SECRET_BYTES`] bytes — non-empty is not sufficient for
+    ///   the string that is the plane's entire authentication under its
+    ///   mechanism.
+    /// - when `operator_token` is among them: a non-empty `server.issuer`
+    ///   (tokens are verified against it) and a non-noop `key_manager`
+    ///   adapter (verification needs real keys; under `role = "admin"` the
+    ///   bootstrap otherwise builds a noop manager).
+    /// - parseable `auth_failure_window` and `auth_lockout`, and a non-zero
+    ///   `max_auth_failures`.
+    fn validate_internal_api(&self) -> Result<(), Error> {
+        let methods = &self.internal_api.auth_methods;
+        if methods.is_empty() {
+            return Err(Error::ConfigError {
+                detail: "internal_api.auth_methods must be non-empty when the internal API \
+                         is served"
+                    .to_string(),
+            });
+        }
+        // Sorted so the reported offender is deterministic.
+        let mut sorted: Vec<&String> = methods.iter().collect();
+        sorted.sort();
+        for window in sorted.windows(2) {
+            if window[0] == window[1] {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "internal_api.auth_methods lists {:?} more than once",
+                        window[0]
+                    ),
+                });
+            }
+        }
+        for method in methods {
+            if !ALLOWED_AUTH_METHODS.contains(&method.as_str()) {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "internal_api.auth_methods entry {method:?} is not one of \
+                         {ALLOWED_AUTH_METHODS:?}"
+                    ),
+                });
+            }
+        }
+
+        if self.internal_api.uses_shared_secret() {
+            let secret_len = self
+                .internal_api
+                .shared_secret
+                .as_deref()
+                .map(str::len)
+                .unwrap_or(0);
+            if secret_len < MIN_SHARED_SECRET_BYTES {
+                // Only the length is reported, never the value.
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "internal_api.shared_secret must be at least {MIN_SHARED_SECRET_BYTES} \
+                         bytes while the shared_secret mechanism is enabled (got {secret_len} bytes)"
+                    ),
+                });
+            }
+        }
+
+        if self.internal_api.uses_operator_token() {
+            if self.server.issuer.trim().is_empty() {
+                return Err(Error::ConfigError {
+                    detail: "server.issuer must be non-empty while the operator_token mechanism \
+                             is enabled: operator tokens are verified against it"
+                        .to_string(),
+                });
+            }
+            let adapter = self.key_manager.adapter.trim();
+            if adapter.is_empty() || adapter == "noop" {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "key_manager.adapter ({adapter:?}) cannot serve the operator_token \
+                         mechanism: token verification requires a real key manager"
+                    ),
+                });
+            }
+            if self.internal_api.token_audience.trim().is_empty() {
+                return Err(Error::ConfigError {
+                    detail: "internal_api.token_audience must be non-empty while the \
+                             operator_token mechanism is enabled"
+                        .to_string(),
+                });
+            }
+            if self.internal_api.required_claim.trim().is_empty() {
+                return Err(Error::ConfigError {
+                    detail: "internal_api.required_claim must be non-empty while the \
+                             operator_token mechanism is enabled"
+                        .to_string(),
+                });
+            }
+        }
+
+        if self.internal_api.uses_mtls()
+            && self.internal_api.mtls_subject_header().trim().is_empty()
+        {
+            return Err(Error::ConfigError {
+                detail: "internal_api.mtls.subject_header must be non-empty while the mtls \
+                         mechanism is enabled"
+                    .to_string(),
+            });
+        }
+
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.internal_api.auth_failure_window),
+            "internal_api.auth_failure_window",
+        )?;
+        prefix_config_error(
+            crate::service::parse_duration_secs(&self.internal_api.auth_lockout),
+            "internal_api.auth_lockout",
+        )?;
+        if self.internal_api.max_auth_failures == 0 {
+            return Err(Error::ConfigError {
+                detail: "internal_api.max_auth_failures must be non-zero".to_string(),
             });
         }
 
@@ -480,6 +614,106 @@ pub fn listeners_collide(
     public_wildcard || admin_wildcard || public_host == admin_host
 }
 
+/// Minimum accepted length, in bytes, of `internal_api.shared_secret` while
+/// the shared-secret mechanism is enabled (source-spec decision "A minimum
+/// secret length all the same"). Validation measures length because entropy
+/// cannot be measured at load; 32 bytes of generated randomness puts online
+/// guessing out of reach without imposing a format.
+pub const MIN_SHARED_SECRET_BYTES: usize = 32;
+
+/// Default `token_audience` an operator token must carry for the
+/// `operator_token` mechanism to accept it (`06-configuration.md`,
+/// `[internal_api]`).
+pub const DEFAULT_TOKEN_AUDIENCE: &str = "internal";
+
+/// Default claim name the `operator_token` mechanism requires on a verified
+/// token.
+pub const DEFAULT_REQUIRED_CLAIM: &str = "role";
+
+/// Default value [`DEFAULT_REQUIRED_CLAIM`] must carry on a verified operator
+/// token.
+pub const DEFAULT_REQUIRED_VALUE: &str = "admin";
+
+/// Default header a TLS-terminating proxy uses to hand over the client
+/// certificate subject for the `mtls` mechanism.
+pub const DEFAULT_MTLS_SUBJECT_HEADER: &str = "x-client-cert-subject";
+
+/// Default `[internal_api] max_auth_failures`: failed authentications one peer
+/// may spend per failure window before lockout. Far tighter than any public
+/// budget — an operator does not retry a credential sixty times a minute.
+pub const DEFAULT_MAX_AUTH_FAILURES: u64 = 5;
+
+/// Default `[internal_api] auth_failure_window` (humantime).
+pub const DEFAULT_AUTH_FAILURE_WINDOW: &str = "1m";
+
+/// Default `[internal_api] auth_lockout` (humantime): how long a locked-out
+/// peer stays denied after exhausting its failure budget.
+pub const DEFAULT_AUTH_LOCKOUT: &str = "5m";
+
+/// The only values `internal_api.auth_methods` accepts, tried in configured
+/// order. `shared_secret` is the compatibility mechanism; it identifies nobody.
+const ALLOWED_AUTH_METHODS: [&str; 3] = ["operator_token", "mtls", "shared_secret"];
+
+/// Deserialize a string-or-sequence field: accepts either a single scalar
+/// string (read as a one-element list) or a sequence of strings.
+///
+/// This is what keeps the pre-hardening singular `auth_method` key loadable
+/// alongside the list-valued `auth_methods` key (see the field's docs).
+fn string_or_seq_string<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrSeqVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StringOrSeqVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string or a sequence of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(vec![value.to_string()])
+        }
+
+        fn visit_seq<S>(self, mut seq: S) -> Result<Self::Value, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            let mut methods = Vec::new();
+            while let Some(entry) = seq.next_element::<String>()? {
+                methods.push(entry);
+            }
+            Ok(methods)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrSeqVisitor)
+}
+
+/// Per-mechanism configuration for the `mtls` authentication mechanism.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MtlsConfig {
+    /// Header carrying the client-certificate subject, set by the
+    /// TLS-terminating proxy in front of the admin listener. Trusted only
+    /// because the listener is not publicly routable by construction (the
+    /// default host is loopback); the server reads this header nowhere except
+    /// the admin router's authentication layer.
+    pub subject_header: String,
+}
+
+impl Default for MtlsConfig {
+    fn default() -> Self {
+        Self {
+            subject_header: DEFAULT_MTLS_SUBJECT_HEADER.to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct InternalApiConfig {
@@ -493,8 +727,42 @@ pub struct InternalApiConfig {
     /// role = "all" config whose admin listener collides with the public
     /// socket.
     pub port: u16,
-    pub auth_method: Option<String>,
+    /// Enabled authentication mechanisms, tried in the order given. Empty is
+    /// rejected by validation whenever the internal API is served: a served
+    /// admin plane with no way in would answer every request with
+    /// `not_configured` forever.
+    ///
+    /// The singular `auth_method = "shared_secret"` key from pre-hardening
+    /// deployments is still accepted and read as a one-element list (the
+    /// `alias`), so an unedited config keeps loading across this change; both
+    /// spellings in one file fail the load as a duplicate field rather than
+    /// silently picking one.
+    #[serde(
+        default,
+        alias = "auth_method",
+        deserialize_with = "string_or_seq_string"
+    )]
+    pub auth_methods: Vec<String>,
+    /// Compatibility shared secret for the `shared_secret` mechanism;
+    /// redacted in `Debug`. Required (at [`MIN_SHARED_SECRET_BYTES`] bytes)
+    /// whenever that mechanism is enabled and the internal API is served.
     pub shared_secret: Option<String>,
+    /// Audience a verified operator token must carry. Only meaningful when
+    /// `operator_token` is among `auth_methods`.
+    pub token_audience: String,
+    /// Claim name a verified operator token must carry.
+    pub required_claim: String,
+    /// Value [`Self::required_claim`] must carry on a verified operator token.
+    pub required_value: String,
+    /// Configuration for the `mtls` mechanism (the proxy header carrying the
+    /// client-certificate subject).
+    pub mtls: Option<MtlsConfig>,
+    /// Failed-authentication budget per peer before lockout.
+    pub max_auth_failures: u64,
+    /// Window over which failed attempts draw down the budget (humantime).
+    pub auth_failure_window: String,
+    /// Lockout duration once the failure budget is exhausted (humantime).
+    pub auth_lockout: String,
 }
 
 impl Default for InternalApiConfig {
@@ -503,13 +771,45 @@ impl Default for InternalApiConfig {
             enabled: false,
             host: DEFAULT_INTERNAL_API_HOST.to_string(),
             port: DEFAULT_INTERNAL_API_PORT,
-            auth_method: None,
+            auth_methods: vec!["shared_secret".to_string()],
             shared_secret: None,
+            token_audience: DEFAULT_TOKEN_AUDIENCE.to_string(),
+            required_claim: DEFAULT_REQUIRED_CLAIM.to_string(),
+            required_value: DEFAULT_REQUIRED_VALUE.to_string(),
+            mtls: None,
+            max_auth_failures: DEFAULT_MAX_AUTH_FAILURES,
+            auth_failure_window: DEFAULT_AUTH_FAILURE_WINDOW.to_string(),
+            auth_lockout: DEFAULT_AUTH_LOCKOUT.to_string(),
         }
     }
 }
 
 impl InternalApiConfig {
+    /// Whether the `shared_secret` compatibility mechanism is enabled.
+    pub fn uses_shared_secret(&self) -> bool {
+        self.auth_methods
+            .iter()
+            .any(|method| method == "shared_secret")
+    }
+
+    /// Whether the named-principal operator-token mechanism is enabled.
+    pub fn uses_operator_token(&self) -> bool {
+        self.auth_methods
+            .iter()
+            .any(|method| method == "operator_token")
+    }
+
+    /// Whether the proxy-asserted mTLS-subject mechanism is enabled.
+    pub fn uses_mtls(&self) -> bool {
+        self.auth_methods.iter().any(|method| method == "mtls")
+    }
+
+    /// Whether the shared secret is the *only* enabled mechanism — the state
+    /// every deployment should migrate away from; warned about at startup.
+    pub fn shared_secret_is_only_mechanism(&self) -> bool {
+        self.auth_methods.len() == 1 && self.uses_shared_secret()
+    }
+
     /// The `host:port` string the admin listener binds under the hyper
     /// runtime, asserted non-empty so a misconfigured host can never produce
     /// a degenerate bind address.
@@ -520,19 +820,39 @@ impl InternalApiConfig {
         );
         format!("{}:{}", self.host, self.port)
     }
+
+    /// The header name the `mtls` mechanism reads its subject from, resolved
+    /// from config or the documented default.
+    pub fn mtls_subject_header(&self) -> &str {
+        match &self.mtls {
+            Some(cfg) => cfg.subject_header.as_str(),
+            None => DEFAULT_MTLS_SUBJECT_HEADER,
+        }
+    }
 }
 
 impl std::fmt::Debug for InternalApiConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Credential-bearing fields are redacted: the shared secret is the
+        // plane's entire authentication under its mechanism, and
+        // `required_value` gates it under the token mechanism — neither value
+        // nor length may leak through Debug output into logs or spans.
         f.debug_struct("InternalApiConfig")
             .field("enabled", &self.enabled)
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("auth_method", &self.auth_method)
+            .field("auth_methods", &self.auth_methods)
             .field(
                 "shared_secret",
                 &self.shared_secret.as_ref().map(|_| "<redacted>"),
             )
+            .field("token_audience", &self.token_audience)
+            .field("required_claim", &self.required_claim)
+            .field("required_value", &"<redacted>")
+            .field("mtls", &self.mtls)
+            .field("max_auth_failures", &self.max_auth_failures)
+            .field("auth_failure_window", &self.auth_failure_window)
+            .field("auth_lockout", &self.auth_lockout)
             .finish()
     }
 }
@@ -550,6 +870,17 @@ pub struct ProviderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shared secret exactly at the validation floor: long enough to satisfy
+    /// `MIN_SHARED_SECRET_BYTES`, so tests that do not target the floor rule
+    /// never trip over it accidentally.
+    const TEST_SHARED_SECRET: &str = "0123456789abcdef0123456789abcdef"; // 32 bytes
+
+    #[test]
+    fn test_shared_secret_constant_meets_the_documented_floor() {
+        assert_eq!(TEST_SHARED_SECRET.len(), MIN_SHARED_SECRET_BYTES);
+        assert_eq!(TEST_SHARED_SECRET, "0123456789abcdef0123456789abcdef");
+    }
 
     #[test]
     fn deserialize_default_toml() {
@@ -1231,7 +1562,7 @@ role = "admin"
         let mut config = AppConfig::default();
         config.server.role = "all".to_string();
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some("shhh".to_string());
+        config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
 
         let result = config.validate();
 
@@ -1296,7 +1627,7 @@ role = "admin"
         config.server.role = "all".to_string();
         config.server.port = 8080;
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some("shhh".to_string());
+        config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
         config.internal_api.host = "0.0.0.0".to_string();
         config.internal_api.port = 8080;
 
@@ -1327,7 +1658,7 @@ role = "admin"
         config.server.role = "admin".to_string();
         config.server.port = 8080;
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some("shhh".to_string());
+        config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
         config.internal_api.host = "0.0.0.0".to_string();
         config.internal_api.port = 8080;
 
@@ -1346,7 +1677,7 @@ role = "admin"
         let mut config = AppConfig::default();
         config.server.role = "all".to_string();
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some("shhh".to_string());
+        config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
 
         let result = config.validate();
 

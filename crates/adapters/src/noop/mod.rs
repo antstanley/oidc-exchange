@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use oidc_exchange_core::domain::{AuditEvent, User};
+use oidc_exchange_core::domain::{AuditEvent, RateLimitDecision, RateLimitKey, User};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::error::Result;
-use oidc_exchange_core::ports::{AuditLog, KeyManager, UserSync};
+use oidc_exchange_core::ports::{AuditLog, KeyManager, RateLimiter, UserSync};
 
 /// A no-op audit log that silently discards all events.
 ///
@@ -25,6 +25,30 @@ impl Default for NoopAuditLog {
 impl AuditLog for NoopAuditLog {
     async fn emit(&self, _event: &AuditEvent) -> Result<()> {
         Ok(())
+    }
+}
+
+/// A no-op rate limiter that always permits requests without retaining state.
+///
+/// VENDORED SEAM (task 03): verbatim from sibling PR #24's noop adapter.
+pub struct NoopRateLimiter;
+
+impl NoopRateLimiter {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NoopRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl RateLimiter for NoopRateLimiter {
+    async fn check_and_consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        Ok(RateLimitDecision::Allow)
     }
 }
 
