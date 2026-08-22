@@ -831,6 +831,41 @@ async fn token_missing_grant_type_is_400_invalid_request_envelope_not_422() {
     assert_eq!(counts.validate_id_token, 0);
 }
 
+/// A body the form extractor cannot parse at all (wrong content type) is
+/// answered in the OAuth envelope too — the endpoint never leaks axum's
+/// plain-text 415/422 rejections. Negative space for the extractor's
+/// catch-all rejection mapping.
+#[tokio::test]
+async fn token_non_form_body_is_invalid_request_envelope_not_plain_text_rejection() {
+    let (app, _repo, provider) = build_test_app_with_provider();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"grant_type":"authorization_code"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/json",
+        "even an unparseable body must be answered inside the JSON OAuth error envelope"
+    );
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "invalid_request");
+    // Negative space: nothing from the unparseable body reaches the service.
+    let counts = provider.call_counts();
+    assert_eq!(counts.exchange_code, 0);
+    assert_eq!(counts.validate_id_token, 0);
+}
+
 /// Present-but-empty `grant_type` counts as present, so it classifies as
 /// `unsupported_grant_type` with the stable description.
 #[tokio::test]
