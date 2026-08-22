@@ -352,8 +352,12 @@ fn row_to_retired(row: &sqlx::postgres::PgRow) -> Result<RetiredRefreshToken> {
         refresh_token_hash: row
             .try_get("refresh_token_hash")
             .map_err(PostgresRepository::store_err)?,
-        family_id: row.try_get("family_id").map_err(PostgresRepository::store_err)?,
-        user_id: row.try_get("user_id").map_err(PostgresRepository::store_err)?,
+        family_id: row
+            .try_get("family_id")
+            .map_err(PostgresRepository::store_err)?,
+        user_id: row
+            .try_get("user_id")
+            .map_err(PostgresRepository::store_err)?,
         successor_hash: row
             .try_get("successor_hash")
             .map_err(PostgresRepository::store_err)?,
@@ -778,8 +782,13 @@ impl SessionRepository for PostgresRepository {
 
         if !legacy_row {
             let now = Utc::now();
-            let record =
-                retirement_record(live_hash, &live, replacement, self.reuse_retention_secs, now);
+            let record = retirement_record(
+                live_hash,
+                &live,
+                replacement,
+                self.reuse_retention_secs,
+                now,
+            );
             sqlx::query(
                 "INSERT INTO retired_refresh_tokens (refresh_token_hash, family_id, user_id, successor_hash, retired_at, expires_at) \
                  VALUES ($1, $2, $3, $4, $5, $6)",
@@ -1700,8 +1709,7 @@ mod tests {
     #[ignore] // Requires a live Postgres: see `test_database_url`.
     async fn legacy_row_first_redemption_swaps_without_retirement_record() {
         let repo = create_isolated_schema_repo("oidc_pg_legacy_first_redemption").await;
-        let legacy_hash =
-            session_contract::fixture_hash("postgres-legacy:first-redemption");
+        let legacy_hash = session_contract::fixture_hash("postgres-legacy:first-redemption");
         seed_legacy_session(&repo, &legacy_hash, "usr_legacy").await;
 
         // Classification is storage-factual: the sentinel-carrying row is Live.
@@ -1739,7 +1747,9 @@ mod tests {
             assert!(won, "an uncontended legacy redemption must win its CAS");
 
             assert_eq!(
-                repo.resolve_refresh_token(&legacy_hash).await.expect("resolve consumed hash"),
+                repo.resolve_refresh_token(&legacy_hash)
+                    .await
+                    .expect("resolve consumed hash"),
                 RefreshResolution::Unknown,
                 "a consumed legacy row has no retained record and must read Unknown"
             );
@@ -1775,7 +1785,9 @@ mod tests {
         let repo = create_isolated_schema_repo("oidc_pg_rollback").await;
         seed_fixture_users(&repo, &["usr_rollback", "usr_blocker"]).await;
         let chain = session_contract::family_chain("postgres:rollback", 0, "usr_rollback");
-        repo.store_refresh_token(&chain.gen0).await.expect("store gen0");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
 
         // An unrelated live row already occupying the replacement's hash: the
         // mid-transaction collision that forces the rollback.
@@ -1785,12 +1797,17 @@ mod tests {
             user_id: "usr_blocker".to_string(),
             ..chain.gen1.clone()
         };
-        repo.store_refresh_token(&blocker).await.expect("store blocker");
+        repo.store_refresh_token(&blocker)
+            .await
+            .expect("store blocker");
 
         let result = repo
             .rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
             .await;
-        assert!(result.is_err(), "the colliding insert must fail the transaction");
+        assert!(
+            result.is_err(),
+            "the colliding insert must fail the transaction"
+        );
 
         // Rollback completeness, checked three ways: the deleted live
         // generation is present again, no retirement record for it exists,
@@ -1826,7 +1843,9 @@ mod tests {
         let repo = create_isolated_schema_repo("oidc_pg_cleanup").await;
         seed_fixture_users(&repo, &["usr_cleanup"]).await;
         let chain = session_contract::family_chain("postgres:cleanup", 0, "usr_cleanup");
-        repo.store_refresh_token(&chain.gen0).await.expect("store gen0");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
         assert!(
             repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
                 .await
@@ -1864,7 +1883,9 @@ mod tests {
             "nothing live remains after the sweep"
         );
         assert_eq!(
-            repo.cleanup_expired_sessions().await.expect("second cleanup"),
+            repo.cleanup_expired_sessions()
+                .await
+                .expect("second cleanup"),
             0,
             "a second sweep over a clean store reports zero"
         );
@@ -1879,8 +1900,12 @@ mod tests {
         seed_fixture_users(&repo, &["usr_mine", "usr_theirs"]).await;
         let mine = session_contract::family_chain("postgres:revoke-all", 0, "usr_mine");
         let theirs = session_contract::family_chain("postgres:revoke-all", 1, "usr_theirs");
-        repo.store_refresh_token(&mine.gen0).await.expect("store mine");
-        repo.store_refresh_token(&theirs.gen0).await.expect("store theirs");
+        repo.store_refresh_token(&mine.gen0)
+            .await
+            .expect("store mine");
+        repo.store_refresh_token(&theirs.gen0)
+            .await
+            .expect("store theirs");
         assert!(
             repo.rotate_refresh_token(&mine.gen0.refresh_token_hash, &mine.gen1)
                 .await
@@ -1895,7 +1920,9 @@ mod tests {
         );
         assert_eq!(retired_count(&repo).await, 2, "one record per rotation");
 
-        repo.revoke_all_user_sessions("usr_mine").await.expect("revoke all mine");
+        repo.revoke_all_user_sessions("usr_mine")
+            .await
+            .expect("revoke all mine");
 
         assert_eq!(
             repo.resolve_refresh_token(&mine.gen1.refresh_token_hash)
@@ -1920,7 +1947,8 @@ mod tests {
             other => panic!("another user's family must survive my revocation, got {other:?}"),
         }
         assert_eq!(
-            retired_count(&repo).await, 1,
+            retired_count(&repo).await,
+            1,
             "only the other user's retirement record remains"
         );
     }
@@ -1978,7 +2006,10 @@ mod tests {
             .await
             .expect("read migrated legacy row")
             .expect("migrated row must survive");
-        assert_eq!(legacy.family_id, "", "NULL column lands on the empty sentinel");
+        assert_eq!(
+            legacy.family_id, "",
+            "NULL column lands on the empty sentinel"
+        );
         assert!(!is_valid_family_id(&legacy.family_id));
         assert_eq!(legacy.generation, 0);
         assert_eq!(legacy.rotated_at, None);

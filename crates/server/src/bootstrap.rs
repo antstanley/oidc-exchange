@@ -564,6 +564,7 @@ async fn build_session_repository(
             let repo = oidc_exchange_adapters::lmdb::LmdbSessionRepository::new(
                 &lm_cfg.path,
                 lm_cfg.max_size_mb.unwrap_or(256),
+                config.token.refresh_reuse_retention_secs(),
             )?;
             Ok(Box::new(repo))
         }
