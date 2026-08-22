@@ -109,8 +109,9 @@ struct AuditEvent {
 
 The normalized config the standard OIDC adapter consumes: `provider_id`, `issuer`,
 `client_id`, optional `client_secret`, optional `jwks_uri` / `token_endpoint` /
-`revocation_endpoint` (discovered from the issuer if absent), `scopes`, and
-`additional_params`. See [05-provider-system.md](05-provider-system.md).
+`revocation_endpoint` (discovered from the issuer if absent), optional `endpoint_origins`
+(extra origins a discovery document may name; see [05-provider-system.md](05-provider-system.md)),
+`scopes`, and `additional_params`.
 
 ### AdminStats (`service/user_admin.rs`)
 

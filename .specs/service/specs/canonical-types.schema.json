@@ -150,12 +150,18 @@
       "required": ["provider_id", "issuer", "client_id", "scopes"],
       "properties": {
         "provider_id": { "type": "string" },
-        "issuer": { "type": "string", "description": "Used for OIDC discovery." },
+        "issuer": { "type": "string", "description": "Used for OIDC discovery. Its origin is always in the permitted endpoint-origin set." },
         "client_id": { "type": "string" },
         "client_secret": { "type": ["string", "null"] },
         "jwks_uri": { "type": ["string", "null"] },
         "token_endpoint": { "type": ["string", "null"] },
         "revocation_endpoint": { "type": ["string", "null"] },
+        "endpoint_origins": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string", "pattern": "^https://[^/?#]+$" },
+          "description": "Extra origins a discovery document may name for token_endpoint, jwks_uri, or revocation_endpoint, beyond the issuer's own origin and those of explicitly configured endpoints. Scheme, host, optional port; no path, query, or fragment."
+        },
         "scopes": { "type": "array", "items": { "type": "string" } },
         "additional_params": { "type": "object", "additionalProperties": { "type": "string" } }
       }
@@ -179,6 +185,38 @@
           "required": ["active"],
           "properties": {
             "active": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "WebhookDelivery": {
+      "type": "object",
+      "description": "One user-sync webhook delivery. The body is the signed payload; the headers carry the material bound into the signature.",
+      "required": ["headers", "body"],
+      "additionalProperties": false,
+      "properties": {
+        "headers": {
+          "type": "object",
+          "required": ["X-Webhook-Timestamp", "X-Webhook-Delivery-Id", "X-Signature-256"],
+          "additionalProperties": true,
+          "properties": {
+            "X-Webhook-Timestamp": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
+            "X-Webhook-Delivery-Id": { "$ref": "../../canonical-types.schema.json#/$defs/Ulid" },
+            "X-Signature-256": {
+              "type": "string",
+              "pattern": "^sha256=[0-9a-f]{64}$",
+              "description": "Hex HMAC-SHA256 over `<X-Webhook-Timestamp> \".\" <X-Webhook-Delivery-Id> \".\" <raw body>` under user_sync.webhook.secret."
+            }
+          }
+        },
+        "body": {
+          "type": "object",
+          "required": ["event", "timestamp", "data"],
+          "additionalProperties": false,
+          "properties": {
+            "event": { "type": "string", "enum": ["user.created", "user.updated", "user.deleted"] },
+            "timestamp": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
+            "data": { "type": "object", "additionalProperties": true }
           }
         }
       }
