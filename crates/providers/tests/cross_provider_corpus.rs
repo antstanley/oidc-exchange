@@ -2,21 +2,24 @@
 //!
 //! Every case in `oidc_exchange_test_utils::corpus` is served — byte-identical —
 //! to both the generic OIDC validator and the Apple validator, and each
-//! validator's disposition is recorded. The baseline below is the
-//! **pre-consolidation record**: it captures what the two private `find_jwk`
-//! copies plus their per-provider `alg` matches actually do today, drift and
-//! all, so the `VerificationKeySet` consolidation is a deliberate superset
-//! decision rather than an accident. When the consolidation lands, this file's
-//! expectation table flips to uniform dispositions — that flip is the C12
-//! closure evidence.
+//! validator's disposition is asserted. This file is the **post-consolidation
+//! record**: both validators now select keys through the shared
+//! `VerificationKeySet` constructor (each with its own admitted-algorithm
+//! policy), so their selection eligibility agrees on every case. The
+//! pre-consolidation baseline this table replaced showed the validators
+//! disagreeing on 6 of 12 cases; zero disagreements here is the C12 closure
+//! evidence.
 //!
 //! Dispositions are observable without forging signatures: key selection
 //! happens strictly before signature verification, so
 //! - `SelectionRejected` — the validator errors before attempting a signature
-//!   check (ineligible key, unknown/absent algorithm with no inference arm, …);
-//! - `SelectionAccepted` — the validator reached signature verification, which
-//!   fails on the corpus's deliberately unsigned tokens ("JWT validation
-//!   failed: …").
+//!   check (ineligible key, unknown/absent algorithm with no inference arm, or
+//!   a plain `kid` miss);
+//! - `SelectionAccepted` — the validator resolved an eligible key and reached
+//!   signature verification, which fails on the corpus's deliberately unsigned
+//!   tokens ("JWT validation failed: …"). Acceptance here means "this key is a
+//!   legitimate verification candidate", not "the token is valid" — the corpus
+//!   tokens are never validly signed by construction.
 //!
 //! Two properly signed success cases prove the corpus can still say "yes": the
 //! non-regression requirement that a `use: "sig"` entry verifies on both paths.
@@ -49,94 +52,75 @@ enum Disposition {
     SelectionRejected,
 }
 
-/// The recorded pre-consolidation baseline: what each validator does with each
-/// case **today**. Disagreements between the two columns are the C12 evidence.
-const BASELINE: &[(Case, Disposition, Disposition, &str)] = &[
-    // Absent `alg` on an RSA key: the generic path infers RS256, Apple refuses.
-    // This is C12's headline divergence.
+use Disposition::SelectionAccepted as ACCEPT;
+use Disposition::SelectionRejected as REJECT;
+
+/// The post-consolidation record: what both validators do with each case now
+/// that selection lives in the shared `VerificationKeySet` constructor. The two
+/// disposition columns are asserted equal case by case — that equality is the
+/// C12 answer.
+///
+/// Per-case reasoning (constructor rules in `shared::keys`):
+/// - `RsaSigAbsentAlg` — eligible on both: absent `alg` infers RS256 from the
+///   RSA material, inside both admitted sets. The Azure-AD compatibility case.
+/// - `RsaEncAbsentAlg`, `RsaEncRs256`, `EcEncEs256` — `use: enc` is dropped.
+/// - `RsaKeyOpsEncryptWrap`, `RsaKeyOpsEncryptOnly` — `key_ops` without
+///   `verify` is dropped.
+/// - `RsaAlgEs256` — declared `alg` inconsistent with `kty` is dropped.
+/// - `RsaAlgRsaOaep`, `AlgNone` — unknown *declared* algorithms are dropped
+///   outright; they are never treated as absent, so inference never rescues
+///   them (the exact conflation the pre-consolidation OIDC path had).
+/// - `DuplicateKid{Enc,Sig}First` — the eligible `sig` entry resolves in both
+///   array orders; order decides nothing.
+/// - `OctKey` — symmetric material never verifies asymmetric assertions.
+const POST_CONSOLIDATION: &[(Case, Disposition, &str)] = &[
     (
         Case::RsaSigAbsentAlg,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionRejected,
-        "absent alg on sig RSA: OIDC infers, Apple refuses",
+        ACCEPT,
+        "absent alg on sig RSA: narrowed inference resolves RS256 on both paths",
     ),
-    (
-        Case::RsaEncAbsentAlg,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionRejected,
-        "absent alg on enc RSA: same inference divergence, wrong purpose ignored",
-    ),
-    // An encryption-purpose key with an admitted signing alg: BOTH validators
-    // accept it — neither consults `use`. The reproduced vector, agreeing for
-    // the wrong reason.
+    (Case::RsaEncAbsentAlg, REJECT, "use=enc is dropped"),
     (
         Case::RsaEncRs256,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionAccepted,
-        "use=enc with RS256: neither validator filters purpose",
+        REJECT,
+        "use=enc is dropped despite the admitted alg",
     ),
     (
         Case::RsaKeyOpsEncryptWrap,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionAccepted,
-        "key_ops without verify: neither validator filters operations",
+        REJECT,
+        "key_ops without verify is dropped",
     ),
     (
         Case::RsaKeyOpsEncryptOnly,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionAccepted,
-        "key_ops=encrypt: neither validator filters operations",
+        REJECT,
+        "key_ops=encrypt is dropped",
     ),
-    // ES256 declared on an RSA key: both accept — the alg match arms never
-    // check the declared algorithm against the key's family.
     (
         Case::RsaAlgEs256,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionAccepted,
-        "alg/kty inconsistency: neither validator cross-checks",
+        REJECT,
+        "ES256 declared on RSA material is inconsistent",
     ),
     (
         Case::RsaAlgRsaOaep,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionRejected,
-        "RSA-OAEP: OIDC's inference fallback rescues an unknown alg, Apple refuses",
+        REJECT,
+        "RSA-OAEP is an unknown declared alg: dropped, never inferred around",
     ),
-    // EC P-256 with `use: enc` and no alg: OIDC infers ES256, Apple refuses.
-    (
-        Case::EcEncEs256,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionRejected,
-        "alg-less enc EC: inference divergence again",
-    ),
-    // Duplicate kid, ineligible entry first: OIDC's first-match-wins lands on
-    // the enc key and infers RS256; Apple lands on it and refuses the alg.
-    // The same JWKS changes verdict with array order on the Apple path.
+    (Case::EcEncEs256, REJECT, "use=enc is dropped"),
     (
         Case::DuplicateKidEncFirst,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionRejected,
-        "duplicate kid, enc first: order-dependent on Apple, inference on OIDC",
+        ACCEPT,
+        "ineligible-first order still resolves the eligible sig entry",
     ),
     (
         Case::DuplicateKidSigFirst,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionAccepted,
-        "duplicate kid, sig first: both accept, proving the order dependence above",
+        ACCEPT,
+        "mirror order resolves identically: order independence proven",
     ),
-    (
-        Case::OctKey,
-        Disposition::SelectionRejected,
-        Disposition::SelectionRejected,
-        "oct key: both refuse (OIDC inference has no oct arm; Apple sees no alg)",
-    ),
-    // `alg: "none"`: OIDC's inference treats the unrecognised value as absent
-    // and resolves RS256; Apple refuses. The exact unknown-vs-absent conflation
-    // the source spec calls out.
+    (Case::OctKey, REJECT, "symmetric keys are never candidates"),
     (
         Case::AlgNone,
-        Disposition::SelectionAccepted,
-        Disposition::SelectionRejected,
-        "alg=none: OIDC conflates unknown with absent, Apple refuses",
+        REJECT,
+        "alg=none is an unknown declared alg: dropped on both paths",
     ),
 ];
 
@@ -302,36 +286,33 @@ async fn apple_disposition(case: Case) -> Disposition {
     classify(provider.validate_id_token(&token).await)
 }
 
-/// THE C12 BASELINE: run every corpus case through both validators and assert
-/// the recorded pre-consolidation dispositions, drift included. Changing a
-/// validator's behaviour without updating this table fails here first.
+/// THE C12 CLOSURE: run every corpus case through both validators and assert
+/// that selection eligibility now agrees everywhere. The pre-consolidation
+/// baseline disagreed on 6 of 12 cases; this table asserts 0.
 #[tokio::test]
-async fn baseline_records_current_dispositions_for_every_corpus_case() {
+async fn both_validators_agree_on_selection_for_every_corpus_case() {
     let mut disagreements = 0usize;
 
-    for (case, expected_oidc, expected_apple, why) in BASELINE {
+    for (case, expected, why) in POST_CONSOLIDATION {
         let oidc = oidc_disposition(*case).await;
         let apple = apple_disposition(*case).await;
 
         assert_eq!(
-            oidc, *expected_oidc,
-            "OIDC disposition drifted from the baseline for {case:?} ({why})"
+            oidc, *expected,
+            "OIDC disposition drifted from the consolidated rule for {case:?} ({why})"
         );
         assert_eq!(
-            apple, *expected_apple,
-            "Apple disposition drifted from the baseline for {case:?} ({why})"
+            apple, *expected,
+            "Apple disposition drifted from the consolidated rule for {case:?} ({why})"
         );
         if oidc != apple {
             disagreements += 1;
         }
     }
 
-    // The point of the baseline, made explicit: the two validators disagree on
-    // six of the twelve cases today, which records contradiction C12 as
-    // evidence rather than assuming it either way.
     assert_eq!(
-        disagreements, 6,
-        "the recorded number of OIDC/Apple disagreements is part of the baseline"
+        disagreements, 0,
+        "C12 is closed only while the two validators agree on every case"
     );
 }
 
@@ -360,8 +341,8 @@ async fn rsa_sig_key_verifies_on_the_oidc_path() {
     assert_eq!(claims.subject, "corpus-subject");
 }
 
-/// Non-regression: a real `use: sig` P-256 key verifies a properly signed
-/// token on the Apple path — the shape Apple's own JWKS actually ships.
+/// Non-regression: a real `use: sig` P-256 key with `alg: ES256` verifies a
+/// properly signed token on the Apple path — the shape Apple's own JWKS ships.
 #[tokio::test]
 async fn ec_sig_key_verifies_on_the_apple_path() {
     let jwks = json!({ "keys": [corpus::ec_sig_entry(corpus::EC_KID)] });
@@ -380,5 +361,29 @@ async fn ec_sig_key_verifies_on_the_apple_path() {
         .validate_id_token(&token)
         .await
         .expect("a use:sig P-256 key must still verify (non-regression)");
+    assert_eq!(claims.subject, "corpus-subject");
+}
+
+/// Non-regression on the second path: the same RSA `use: sig` key also verifies
+/// through Apple's validator, because RS256 is in Apple's admitted set — the
+/// corpus fixtures are identical across paths, and so is the outcome.
+#[tokio::test]
+async fn rsa_sig_key_verifies_on_the_apple_path() {
+    let jwks = json!({ "keys": [corpus::rsa_sig_entry(corpus::RSA_KID)] });
+    let server_uri = serve_jwks(&jwks).await;
+    let (provider, _pem_guard) = apple_provider(&server_uri).await;
+
+    let token = signed_token(
+        corpus::RSA_PRIVATE_PEM.as_bytes(),
+        true,
+        corpus::RSA_KID,
+        APPLE_ISSUER,
+        APPLE_CLIENT_ID,
+    );
+
+    let claims = provider
+        .validate_id_token(&token)
+        .await
+        .expect("RS256 stays admitted for Apple after consolidation");
     assert_eq!(claims.subject, "corpus-subject");
 }

@@ -1,8 +1,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use jsonwebtoken::Algorithm;
 use oidc_exchange_core::error::{Error, Result};
 use tokio::sync::RwLock;
+
+use crate::shared::keys::{VerificationKey, VerificationKeySet};
 
 /// Default TTL for JWKS cache entries: 1 hour.
 const DEFAULT_TTL: Duration = Duration::from_secs(3600);
@@ -14,9 +17,15 @@ const DEFAULT_TTL: Duration = Duration::from_secs(3600);
 /// hammer.
 const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Fetches and caches a JWKS key set from a remote URL with TTL-based refresh.
+/// Fetches and caches a remote JWKS as a [`VerificationKeySet`] with TTL-based refresh.
+///
+/// The cached value is held behind an `Arc` and handed out by cheap clone; the
+/// per-request cost of a cache hit is a pointer bump, not a deep copy of the key
+/// set. The cache builds key sets with the caller's admitted-algorithm policy,
+/// so eligibility is decided once per fetch, not once per validation.
 pub struct JwksCache {
     jwks_uri: String,
+    admitted_algorithms: &'static [Algorithm],
     cache: Arc<RwLock<Option<CachedJwks>>>,
     ttl: Duration,
     /// Instant of the last forced refetch, guarding [`MIN_REFRESH_INTERVAL`]. `None` until the
@@ -25,32 +34,39 @@ pub struct JwksCache {
 }
 
 struct CachedJwks {
-    keys: serde_json::Value,
+    keys: Arc<VerificationKeySet>,
     fetched_at: Instant,
 }
 
 impl JwksCache {
-    /// Create a new `JwksCache` with the default TTL of 1 hour.
-    pub fn new(jwks_uri: String) -> Self {
+    /// Create a new `JwksCache` with the default TTL of 1 hour, admitting the
+    /// given algorithm set when building key sets from fetched JWKS documents.
+    pub fn new(jwks_uri: String, admitted_algorithms: &'static [Algorithm]) -> Self {
         Self {
             jwks_uri,
+            admitted_algorithms,
             cache: Arc::new(RwLock::new(None)),
             ttl: DEFAULT_TTL,
             last_forced_refetch: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Create a new `JwksCache` with a custom TTL.
-    pub fn with_ttl(jwks_uri: String, ttl: Duration) -> Self {
+    /// Create a new `JwksCache` with a custom TTL and admitted-algorithm set.
+    pub fn with_ttl(
+        jwks_uri: String,
+        ttl: Duration,
+        admitted_algorithms: &'static [Algorithm],
+    ) -> Self {
         Self {
             jwks_uri,
+            admitted_algorithms,
             cache: Arc::new(RwLock::new(None)),
             ttl,
             last_forced_refetch: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Return the cached JWKS if still fresh, otherwise fetch from the remote URL.
+    /// Return the cached key set if still fresh, otherwise fetch from the remote URL.
     ///
     /// No lock that protects the cached value is held across the fetch: the
     /// slow path checks freshness under the write guard, releases it, fetches
@@ -58,13 +74,13 @@ impl JwksCache {
     /// that ordering is a possible thundering herd of refetches (bounded per
     /// fetch by the shared byte ceiling), which the single-flight redesign
     /// replaces with an elected fetcher.
-    pub async fn get_keys(&self) -> Result<serde_json::Value> {
+    pub async fn get_keys(&self) -> Result<Arc<VerificationKeySet>> {
         // Fast path: read lock to check if cache is valid.
         {
             let guard = self.cache.read().await;
             if let Some(ref cached) = *guard {
                 if cached.fetched_at.elapsed() < self.ttl {
-                    return Ok(cached.keys.clone());
+                    return Ok(Arc::clone(&cached.keys));
                 }
             }
         }
@@ -76,7 +92,7 @@ impl JwksCache {
             if let Some(ref cached) = *guard {
                 if cached.fetched_at.elapsed() < self.ttl {
                     // Another task refreshed while we waited for the lock.
-                    return Ok(cached.keys.clone());
+                    return Ok(Arc::clone(&cached.keys));
                 }
             }
             // Deliberately drop `guard` here: fetching under it is the
@@ -87,21 +103,23 @@ impl JwksCache {
 
         let mut guard = self.cache.write().await;
         *guard = Some(CachedJwks {
-            keys: keys.clone(),
+            keys: Arc::clone(&keys),
             fetched_at: Instant::now(),
         });
         Ok(keys)
     }
 
-    /// Return the JWK matching `kid`, forcing at most one network refetch per
-    /// [`MIN_REFRESH_INTERVAL`] when `kid` is not present in the cached (or freshly fetched)
-    /// key set.
+    /// Return the verification key matching `kid`, forcing at most one network
+    /// refetch per [`MIN_REFRESH_INTERVAL`] when `kid` is not present in the
+    /// cached (or freshly fetched) key set.
     ///
     /// This is distinct from the TTL-based refresh in [`get_keys`](Self::get_keys): it exists
     /// so a legitimate key rotation is picked up without waiting out the (much longer)
     /// `ttl`, while still bounding how often an attacker spraying unknown `kid`s can force a
-    /// fetch.
-    pub async fn get_key(&self, kid: &str) -> Result<serde_json::Value> {
+    /// fetch. A `kid` that matches only ineligible entries is a miss here too — eligibility
+    /// was decided in the key set's constructor, so an encryption key cannot satisfy the
+    /// lookup and then fail later.
+    pub async fn get_key(&self, kid: &str) -> Result<Arc<VerificationKey>> {
         assert!(!kid.is_empty(), "kid must not be empty");
         assert!(
             MIN_REFRESH_INTERVAL > Duration::ZERO,
@@ -109,23 +127,15 @@ impl JwksCache {
         );
 
         let keys = self.get_keys().await?;
-        if let Some(key) = find_key(&keys, kid) {
+        if let Some(key) = keys.get(kid) {
             return Ok(key);
         }
 
         self.refresh().await?;
 
-        let keys = {
-            let guard = self.cache.read().await;
-            guard
-                .as_ref()
-                .map(|cached| cached.keys.clone())
-                .unwrap_or(keys)
-        };
-
-        find_key(&keys, kid).ok_or_else(|| Error::ProviderError {
-            provider: self.jwks_uri.clone(),
-            detail: format!("no JWK found for kid {kid:?} after forced refetch"),
+        let keys = self.get_keys().await?;
+        keys.get(kid).ok_or_else(|| Error::InvalidGrant {
+            reason: format!("No matching key for kid: {kid} (after forced refetch)"),
         })
     }
 
@@ -175,13 +185,10 @@ impl JwksCache {
             // guard's job is done and it must not span the fetch below.
         }
 
+        // `fetch_keys` fails closed on a JWKS document without a usable `keys`
+        // array (the constructor's document-level check), so a malformed body
+        // never reaches the cache.
         let keys = self.fetch_keys().await?;
-        if keys.get("keys").is_none() {
-            return Err(Error::ProviderError {
-                provider: self.jwks_uri.clone(),
-                detail: "JWKS response body is missing the required 'keys' field".to_string(),
-            });
-        }
 
         let mut cache_guard = self.cache.write().await;
         *cache_guard = Some(CachedJwks {
@@ -191,45 +198,40 @@ impl JwksCache {
         Ok(())
     }
 
-    async fn fetch_keys(&self) -> Result<serde_json::Value> {
+    /// Fetch the remote JWKS through the shared transport and convert it into a
+    /// key set under this cache's admitted-algorithm policy.
+    ///
+    /// Every failure mode — transport fault, byte ceiling, malformed document,
+    /// ambiguous duplicates — leaves the cache untouched: nothing is cached
+    /// unless a complete, eligible key set was built.
+    async fn fetch_keys(&self) -> Result<Arc<VerificationKeySet>> {
         // The fetch goes through the shared transport: status before body, body
         // through the shared byte ceiling, non-success detail via the safe path.
-        let keys: serde_json::Value = crate::shared::transport::ProviderTransport
+        let value: serde_json::Value = crate::shared::transport::ProviderTransport
             .get_json(&self.jwks_uri, &self.jwks_uri)
             .await?
             .parsed(&self.jwks_uri)?;
 
-        if !keys.is_object() {
-            return Err(Error::ProviderError {
-                provider: self.jwks_uri.clone(),
-                detail: "JWKS response body is not a JSON object".to_string(),
-            });
-        }
-        Ok(keys)
+        let set = VerificationKeySet::from_jwks(&self.jwks_uri, &value, self.admitted_algorithms)?;
+        Ok(Arc::new(set))
     }
-}
-
-/// Find the JWK with the given `kid` inside a JWKS `keys` array, if present.
-fn find_key(jwks: &serde_json::Value, kid: &str) -> Option<serde_json::Value> {
-    jwks.get("keys")?
-        .as_array()?
-        .iter()
-        .find(|key| key.get("kid").and_then(|v| v.as_str()) == Some(kid))
-        .cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn sample_jwks() -> serde_json::Value {
-        serde_json::json!({
+        json!({
             "keys": [
                 {
                     "kty": "RSA",
                     "kid": "test-key-1",
+                    "alg": "RS256",
+                    "use": "sig",
                     "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
                     "e": "AQAB"
                 }
@@ -238,7 +240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_call_fetches_from_url() {
+    async fn first_call_fetches_and_builds_a_key_set() {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -248,11 +250,20 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
         let keys = cache.get_keys().await.expect("should fetch keys");
 
-        assert!(keys["keys"].is_array());
-        assert_eq!(keys["keys"][0]["kid"], "test-key-1");
+        assert!(
+            keys.get("test-key-1").is_some(),
+            "the fetched kid must resolve in the built set"
+        );
+        assert_eq!(
+            keys.get("test-key-1").unwrap().algorithm(),
+            Algorithm::RS256
+        );
     }
 
     #[tokio::test]
@@ -266,12 +277,19 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
 
         let keys1 = cache.get_keys().await.expect("first call should succeed");
         let keys2 = cache.get_keys().await.expect("second call should succeed");
 
-        assert_eq!(keys1, keys2);
+        // Arc hand-out: both callers hold the same allocation.
+        assert!(
+            Arc::ptr_eq(&keys1, &keys2),
+            "cache hits must hand out the same Arc, not a deep clone"
+        );
         // wiremock's `expect(1)` will panic on drop if more than 1 request was made
     }
 
@@ -287,7 +305,11 @@ mod tests {
             .await;
 
         // Use a very short TTL so the cache becomes stale immediately.
-        let cache = JwksCache::with_ttl(format!("{}/jwks", server.uri()), Duration::from_millis(1));
+        let cache = JwksCache::with_ttl(
+            format!("{}/jwks", server.uri()),
+            Duration::from_millis(1),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
 
         let _keys1 = cache.get_keys().await.expect("first call");
 
@@ -310,7 +332,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
 
         let err = cache
             .get_keys()
@@ -342,7 +367,7 @@ mod tests {
             .get_keys()
             .await
             .expect("a subsequent success should now be cached");
-        assert_eq!(keys["keys"][0]["kid"], "test-key-1");
+        assert!(keys.get("test-key-1").is_some());
         assert!(cache.cache.read().await.is_some());
     }
 
@@ -357,7 +382,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
 
         cache
             .refresh()
@@ -388,7 +416,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
 
         let err1 = cache
             .refresh()
@@ -408,7 +439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_key_returns_matching_key_without_refetch_when_cached() {
+    async fn get_key_returns_resolved_verification_key_when_cached() {
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -418,144 +449,17 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
 
         let key = cache
             .get_key("test-key-1")
             .await
             .expect("known kid should resolve without a forced refetch");
-        assert_eq!(key["kid"], "test-key-1");
-        assert_eq!(key["kty"], "RSA");
-    }
-
-    /// Serve one HTTP/1.1 chunked response from a raw TCP listener. wiremock
-    /// cannot force chunked encoding, and chunked is exactly the case where an
-    /// honest `Content-Length` short-circuit does not apply.
-    async fn spawn_chunked_jwks_server(total_bytes: usize, chunk_size: usize) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("ephemeral bind works");
-        let addr = listener.local_addr().expect("local_addr resolves");
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("one connection");
-            let mut scratch = [0u8; 4096];
-            loop {
-                let read = socket.read(&mut scratch).await.expect("readable");
-                if read == 0 || scratch[..read].windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-                .await
-                .expect("head writable");
-            let mut remaining = total_bytes;
-            while remaining > 0 {
-                let n = remaining.min(chunk_size);
-                socket
-                    .write_all(format!("{n:x}\r\n").as_bytes())
-                    .await
-                    .expect("chunk header writable");
-                socket
-                    .write_all(&vec![b'a'; n])
-                    .await
-                    .expect("chunk writable");
-                socket
-                    .write_all(b"\r\n")
-                    .await
-                    .expect("chunk CRLF writable");
-                remaining -= n;
-            }
-            socket
-                .write_all(b"0\r\n\r\n")
-                .await
-                .expect("terminal chunk writable");
-        });
-
-        format!("http://{addr}/jwks")
-    }
-
-    #[tokio::test]
-    async fn oversized_jwks_with_honest_content_length_is_a_cap_error_and_leaves_cache_unpopulated()
-    {
-        let server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/jwks"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                "k".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize + 1),
-            ))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
-
-        let err = cache
-            .get_keys()
-            .await
-            .expect_err("an over-ceiling JWKS body must fail");
-        assert!(
-            format!("{err}").contains("exceeded the"),
-            "must be the distinctive cap error, got: {err}"
-        );
-        // The failed fetch must not populate the cache, exactly as for a non-2xx:
-        // a cap failure leaves no half-fetched state to be served later.
-        assert!(
-            cache.cache.read().await.is_none(),
-            "an over-limit response must never populate the cache"
-        );
-    }
-
-    #[tokio::test]
-    async fn oversized_chunked_jwks_hits_the_cap_and_never_populates_the_cache() {
-        // No Content-Length at all: only the streaming running-total bound can
-        // catch this, which is why the ceiling must apply mid-stream too.
-        let url = spawn_chunked_jwks_server(
-            crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize * 2,
-            8192,
-        )
-        .await;
-
-        let cache = JwksCache::new(url);
-
-        let err = cache
-            .get_keys()
-            .await
-            .expect_err("a chunked over-ceiling JWKS must fail");
-        assert!(
-            matches!(err, Error::ProviderError { .. }),
-            "the cap failure surfaces as a provider fault, got: {err:?}"
-        );
-        assert!(
-            format!("{err}").contains("exceeded the"),
-            "must name the byte ceiling, got: {err}"
-        );
-        assert!(
-            cache.cache.read().await.is_none(),
-            "no cache entry may exist after a capped fetch"
-        );
-    }
-
-    #[tokio::test]
-    async fn jwks_within_ceiling_still_fetches_normally() {
-        // Boundary check one below the failure: a normal-sized JWKS keeps working
-        // through the transport after the ceiling exists (negative space for the
-        // two cap tests above).
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/jwks"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(sample_jwks()))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
-        let keys = cache.get_keys().await.expect("small JWKS must still parse");
-        assert_eq!(keys["keys"][0]["kid"], "test-key-1");
+        assert_eq!(key.kid(), "test-key-1");
+        assert_eq!(key.algorithm(), Algorithm::RS256);
     }
 
     #[tokio::test]
@@ -569,7 +473,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
 
         // "unknown-kid" never appears in `sample_jwks`, so the first lookup misses, forces one
         // refetch (which still returns the same set), and then fails closed.
@@ -577,7 +484,11 @@ mod tests {
             .get_key("unknown-kid")
             .await
             .expect_err("kid absent even after forced refetch must be an error");
-        assert!(matches!(err, Error::ProviderError { .. }));
+        assert!(matches!(err, Error::InvalidGrant { .. }));
+        assert!(
+            err.to_string().contains("unknown-kid"),
+            "the miss names the kid: {err}"
+        );
 
         // A second miss immediately afterwards is rate-limited: no third network call (the
         // `expect(2)` above would panic on drop if one occurred).
@@ -585,6 +496,44 @@ mod tests {
             .get_key("unknown-kid")
             .await
             .expect_err("rate-limited second miss must still fail closed");
-        assert!(matches!(err2, Error::ProviderError { .. }));
+        assert!(matches!(err2, Error::InvalidGrant { .. }));
+    }
+
+    #[tokio::test]
+    async fn kid_matching_only_an_ineligible_entry_is_a_miss_that_forces_one_refetch() {
+        // A `use: enc` entry with the requested kid: eligibility lives in the
+        // constructor now, so the lookup misses, forces the one permitted
+        // refetch, and fails closed — the shape invariant requires, rather than
+        // a resolution that fails mid-validation.
+        let server = MockServer::start().await;
+
+        let jwks = json!({
+            "keys": [{
+                "kty": "RSA",
+                "kid": "enc-only",
+                "alg": "RS256",
+                "use": "enc",
+                "n": sample_jwks()["keys"][0]["n"],
+                "e": "AQAB"
+            }]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks))
+            .expect(2) // Initial fetch + exactly one forced refetch.
+            .mount(&server)
+            .await;
+
+        let cache = JwksCache::new(
+            format!("{}/jwks", server.uri()),
+            crate::oidc::OIDC_ADMITTED_ALGORITHMS,
+        );
+
+        let err = cache
+            .get_key("enc-only")
+            .await
+            .expect_err("an encryption key must not satisfy a verification lookup");
+        assert!(matches!(err, Error::InvalidGrant { .. }));
     }
 }

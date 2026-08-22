@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use oidc_exchange_core::domain::provider::OidcProviderConfig;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
@@ -7,6 +7,23 @@ use oidc_exchange_core::ports::IdentityProvider;
 
 use crate::shared::claims::coerce_bool;
 use crate::shared::jwks::JwksCache;
+
+/// The algorithms the generic (Tier 1) provider admits for ID-token signatures:
+/// the nine JWS signature algorithms this adapter has always accepted. Deliberately
+/// a named per-provider policy — not derived from Apple's set and never unioned
+/// with it; see task 04a ("keep provider-specific admitted algorithm policies
+/// explicit") of the outbound-boundary plan.
+pub const OIDC_ADMITTED_ALGORITHMS: &[Algorithm] = &[
+    Algorithm::RS256,
+    Algorithm::RS384,
+    Algorithm::RS512,
+    Algorithm::ES256,
+    Algorithm::ES384,
+    Algorithm::PS256,
+    Algorithm::PS384,
+    Algorithm::PS512,
+    Algorithm::EdDSA,
+];
 
 /// Standard OIDC identity provider adapter (Tier 1 — e.g., Google).
 ///
@@ -20,50 +37,6 @@ pub struct OidcProvider {
     jwks_cache: JwksCache,
     revocation_endpoint: Option<String>,
     issuer: String,
-}
-
-/// Infer the signing algorithm from a JWK that carries no `alg` member.
-///
-/// Azure-AD-style JWKS omit `alg`; the algorithm is then derived from the trusted
-/// key material itself (`kty`, and `crv` for EC keys) rather than trusting the
-/// untrusted JWT header. An alg-less RSA key is treated as RS256 (the RSA family is
-/// not distinguishable from key parameters alone, and RS256 matches Azure AD's actual
-/// signing algorithm). Any other alg-less key type is rejected.
-fn infer_alg_from_jwk(jwk: &serde_json::Value) -> Result<Algorithm> {
-    let kty = jwk.get("kty").and_then(|k| k.as_str());
-    let crv = jwk.get("crv").and_then(|c| c.as_str());
-
-    match (kty, crv) {
-        (Some("RSA"), _) => Ok(Algorithm::RS256),
-        (Some("EC"), Some("P-256")) => Ok(Algorithm::ES256),
-        (Some("EC"), Some("P-384")) => Ok(Algorithm::ES384),
-        (Some("OKP"), _) => Ok(Algorithm::EdDSA),
-        _ => Err(Error::InvalidGrant {
-            reason: "JWK has unsupported or missing algorithm".into(),
-        }),
-    }
-}
-
-/// Find the JWK matching `kid` inside a JWKS response's `keys` array.
-///
-/// Returns `Ok(None)` on a genuine `kid` miss (the caller decides whether that is terminal
-/// or should trigger a forced refetch); errors if the response does not carry a `keys`
-/// array at all (a malformed JWKS body, distinct from a miss).
-fn find_jwk(
-    provider_id: &str,
-    jwks: &serde_json::Value,
-    kid: &str,
-) -> Result<Option<serde_json::Value>> {
-    let keys = jwks["keys"]
-        .as_array()
-        .ok_or_else(|| Error::ProviderError {
-            provider: provider_id.to_string(),
-            detail: "JWKS response missing 'keys' array".into(),
-        })?;
-    Ok(keys
-        .iter()
-        .find(|k| k["kid"].as_str() == Some(kid))
-        .cloned())
 }
 
 impl OidcProvider {
@@ -104,7 +77,7 @@ impl OidcProvider {
             client_id: config.client_id.clone(),
             client_secret: config.client_secret.clone(),
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri),
+            jwks_cache: JwksCache::new(jwks_uri, OIDC_ADMITTED_ALGORITHMS),
             revocation_endpoint,
             issuer: config.issuer.clone(),
         })
@@ -134,73 +107,32 @@ impl IdentityProvider for OidcProvider {
             reason: "JWT missing kid header".into(),
         })?;
 
-        // 2. Fetch JWKS (cached)
-        let jwks = self.jwks_cache.get_keys().await?;
-
-        // 3. Find matching key by kid. On a miss, force one rate-limited refetch (task 02's
-        // `JwksCache::refresh` API, bounded by `MIN_REFRESH_INTERVAL`) and re-search the
-        // refetched set before rejecting, so upstream key rotation is picked up immediately
-        // instead of waiting out the (much longer) cache TTL.
-        let jwk = match find_jwk(&self.provider_id, &jwks, kid)? {
-            Some(jwk) => jwk,
-            None => {
-                self.jwks_cache.refresh().await?;
-                let refreshed = self.jwks_cache.get_keys().await?;
-                // Provider responses are adversarial (dev-guidelines §Defensive coding):
-                // find_jwk fails closed with a ProviderError if `refreshed` is not a
-                // `keys` array, so we validate rather than assert/panic on a 2xx body.
-                find_jwk(&self.provider_id, &refreshed, kid)?.ok_or_else(|| {
-                    Error::InvalidGrant {
-                        reason: format!("No matching key for kid: {kid} (after forced refetch)"),
-                    }
-                })?
-            }
-        };
-        assert_eq!(
-            jwk["kid"].as_str(),
-            Some(kid),
-            "resolved JWK's kid must equal the header kid"
+        // 2. Resolve the kid through the cached key set. The cache owns the
+        // miss path: on a miss it forces one rate-limited refetch and re-looks
+        // up, so a rotated key is picked up immediately without waiting out the
+        // TTL, and a kid that matches only ineligible entries fails closed
+        // exactly like an absent one (invariant I3's shape).
+        let verification_key = self.jwks_cache.get_key(kid).await?;
+        debug_assert_eq!(
+            verification_key.kid(),
+            kid,
+            "the resolved key is the one published under the requested kid"
         );
 
-        // 4. Build decoding key from JWK
-        let jwk_value: jsonwebtoken::jwk::Jwk =
-            serde_json::from_value(jwk.clone()).map_err(|e| Error::InvalidGrant {
-                reason: format!("Invalid JWK: {e}"),
-            })?;
-
-        let decoding_key = DecodingKey::from_jwk(&jwk_value).map_err(|e| Error::InvalidGrant {
-            reason: format!("Cannot build decoding key from JWK: {e}"),
-        })?;
-
-        // 5. Configure validation — use the algorithm from the JWK (trusted), not the JWT header (untrusted)
-        let jwk_alg = jwk
-            .get("alg")
-            .and_then(|a| a.as_str())
-            .and_then(|a| match a {
-                "RS256" => Some(Algorithm::RS256),
-                "RS384" => Some(Algorithm::RS384),
-                "RS512" => Some(Algorithm::RS512),
-                "ES256" => Some(Algorithm::ES256),
-                "ES384" => Some(Algorithm::ES384),
-                "PS256" => Some(Algorithm::PS256),
-                "PS384" => Some(Algorithm::PS384),
-                "PS512" => Some(Algorithm::PS512),
-                "EdDSA" => Some(Algorithm::EdDSA),
-                _ => None,
-            })
-            .map(Ok)
-            .unwrap_or_else(|| infer_alg_from_jwk(&jwk))?;
-        let mut validation = Validation::new(jwk_alg);
+        // 3. Configure validation from the KEY SET, not from the token header:
+        // the algorithm travels with the key it belongs to.
+        let mut validation = Validation::new(verification_key.algorithm());
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.client_id]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         validation.validate_nbf = true;
 
-        // 6. Decode and validate
-        let token_data = decode::<serde_json::Value>(id_token, &decoding_key, &validation)
-            .map_err(|e| Error::InvalidGrant {
-                reason: format!("JWT validation failed: {e}"),
-            })?;
+        // 4. Decode and validate
+        let token_data =
+            decode::<serde_json::Value>(id_token, verification_key.decoding_key(), &validation)
+                .map_err(|e| Error::InvalidGrant {
+                    reason: format!("JWT validation failed: {e}"),
+                })?;
 
         let claims = &token_data.claims;
 
