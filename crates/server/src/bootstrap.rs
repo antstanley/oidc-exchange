@@ -429,7 +429,11 @@ async fn build_user_repository(
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(
+                    client,
+                    table_name,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "postgres" => {
@@ -495,7 +499,11 @@ async fn build_session_repository(
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(
+                    client,
+                    table_name,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "postgres" => {

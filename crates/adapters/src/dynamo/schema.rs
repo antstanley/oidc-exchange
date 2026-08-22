@@ -483,12 +483,14 @@ impl UserRoster {
     /// reads as an empty roster, not an error.
     pub fn from_item(item: &HashMap<String, AttributeValue>) -> Result<Self> {
         let sessions = match item.get("sessions") {
-            Some(v) => v.as_ss().map_err(|_| Error::StoreError {
-                detail: "user item attribute sessions is not a string set".to_string(),
-            })?,
-            None => &[],
-        }
-        .to_vec();
+            Some(v) => v
+                .as_ss()
+                .map_err(|_| Error::StoreError {
+                    detail: "user item attribute sessions is not a string set".to_string(),
+                })?
+                .clone(),
+            None => Vec::new(),
+        };
 
         let mut families = HashMap::new();
         if let Some(value) = item.get("families") {
@@ -501,7 +503,9 @@ impl UserRoster {
         }
 
         debug_assert!(
-            families.values().all(|f| f.members.iter().all(|m| !m.is_empty())),
+            families
+                .values()
+                .all(|f| f.members.iter().all(|m| !m.is_empty())),
             "roster family members may not be empty strings"
         );
 
@@ -510,9 +514,7 @@ impl UserRoster {
 
     /// Look up which family owns `hash` as its live generation.
     pub fn live_family_of(&self, hash: &str) -> Option<&FamilyRoster> {
-        self.families
-            .values()
-            .find(|family| family.live == hash)
+        self.families.values().find(|family| family.live == hash)
     }
 }
 
@@ -842,6 +844,97 @@ mod tests {
         );
     }
 
+    fn sample_retired() -> RetiredRefreshToken {
+        let now = Utc::now();
+        RetiredRefreshToken {
+            refresh_token_hash: "sha256_retired_gen0".to_string(),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            user_id: "usr_01abc".to_string(),
+            successor_hash: "sha256_live_gen1".to_string(),
+            retired_at: now,
+            expires_at: now + chrono::Duration::hours(24),
+        }
+    }
+
+    /// The retirement record round trip must preserve every field reuse
+    /// detection reads: the presented hash, its family/owner, the successor
+    /// pointer, and both timestamps.
+    #[test]
+    fn retired_round_trip_preserves_all_fields() {
+        let record = sample_retired();
+        let item = retired_to_item(&record);
+        let restored = item_to_retired(&item).expect("should parse retired from item");
+
+        assert_eq!(record.refresh_token_hash, restored.refresh_token_hash);
+        assert_eq!(record.family_id, restored.family_id);
+        assert_eq!(record.user_id, restored.user_id);
+        assert_eq!(record.successor_hash, restored.successor_hash);
+        assert_eq!(
+            record.retired_at.timestamp_millis(),
+            restored.retired_at.timestamp_millis()
+        );
+        assert_eq!(
+            record.expires_at.timestamp_millis(),
+            restored.expires_at.timestamp_millis()
+        );
+    }
+
+    /// Retirement items are keyed `RETIRED#<hash>` / `RETIRED`, filed under
+    /// the owner's GSI1 partition with a family-grouped sort key, and carry
+    /// the numeric `ttl` attribute DynamoDB reaps on.
+    #[test]
+    fn retired_item_has_correct_keys_and_ttl() {
+        let record = sample_retired();
+        let item = retired_to_item(&record);
+
+        assert_eq!(
+            item.get("pk").unwrap().as_s().unwrap(),
+            &format!("RETIRED#{}", record.refresh_token_hash)
+        );
+        assert_eq!(item.get("sk").unwrap().as_s().unwrap(), "RETIRED");
+        assert_eq!(
+            item.get("GSI1pk").unwrap().as_s().unwrap(),
+            &format!("USER#{}", record.user_id)
+        );
+        assert_eq!(
+            item.get("GSI1sk").unwrap().as_s().unwrap(),
+            &format!(
+                "FAM#{}#RETIRED#{}",
+                record.family_id,
+                record.retired_at.to_rfc3339()
+            )
+        );
+
+        let ttl_val: i64 = item
+            .get("ttl")
+            .expect("retired item should have ttl")
+            .as_n()
+            .expect("ttl should be N")
+            .parse()
+            .expect("ttl should be valid i64");
+        assert_eq!(ttl_val, record.expires_at.timestamp());
+    }
+
+    /// Negative-space: a retirement item missing any attribute reuse
+    /// detection needs is corruption at the store-read boundary and must be
+    /// rejected rather than parsed as a half-record.
+    #[test]
+    fn item_to_retired_missing_field_returns_error() {
+        for field in [
+            "refresh_token_hash",
+            "family_id",
+            "user_id",
+            "successor_hash",
+            "retired_at",
+            "expires_at",
+        ] {
+            let mut item = retired_to_item(&sample_retired());
+            assert!(item.remove(field).is_some(), "field {field} should exist");
+            let result = item_to_retired(&item);
+            assert!(result.is_err(), "removing {field} must fail the parse");
+        }
+    }
+
     #[test]
     fn session_item_has_correct_keys() {
         let session = sample_session();
@@ -856,12 +949,13 @@ mod tests {
             item.get("GSI1pk").unwrap().as_s().unwrap(),
             &format!("USER#{}", session.user_id)
         );
-        assert!(item
-            .get("GSI1sk")
-            .unwrap()
-            .as_s()
-            .unwrap()
-            .starts_with("SESSION#"));
+        // The family-grouped sort key keeps every generation of one sign-in
+        // under `FAM#<family_id>#…`, so the admin listing survives rotation.
+        let gsi1sk = item.get("GSI1sk").unwrap().as_s().unwrap();
+        assert!(
+            gsi1sk.starts_with(&format!("FAM#{}#SESSION#", session.family_id)),
+            "GSI1sk must be family-grouped, got {gsi1sk}"
+        );
     }
 
     #[test]
@@ -876,5 +970,118 @@ mod tests {
         let item = HashMap::new();
         let result = item_to_session(&item);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // UserRoster parsing (the authoritative revocation roster)
+    // -----------------------------------------------------------------------
+
+    fn roster_item(
+        sessions: Vec<&str>,
+        families: Vec<(&str, FamilyRoster)>,
+    ) -> HashMap<String, AttributeValue> {
+        let mut item = HashMap::new();
+        if !sessions.is_empty() {
+            item.insert(
+                "sessions".to_string(),
+                AttributeValue::Ss(sessions.iter().map(|s| s.to_string()).collect()),
+            );
+        }
+        if !families.is_empty() {
+            item.insert(
+                "families".to_string(),
+                AttributeValue::M(
+                    families
+                        .into_iter()
+                        .map(|(id, family)| (id.to_string(), family.to_attribute()))
+                        .collect(),
+                ),
+            );
+        }
+        item
+    }
+
+    /// A user item with neither roster attribute — a user with no sessions
+    /// yet, or one written before rosters existed — parses as an empty
+    /// roster rather than erroring.
+    #[test]
+    fn user_roster_missing_attributes_read_as_empty() {
+        let empty = UserRoster::from_item(&HashMap::new()).expect("empty item must parse");
+        assert!(empty.sessions.is_empty());
+        assert!(empty.families.is_empty());
+
+        let bare_profile = roster_item(vec![], vec![]);
+        let bare = UserRoster::from_item(&bare_profile).expect("bare profile must parse");
+        assert!(bare.sessions.is_empty());
+        assert!(bare.families.is_empty());
+    }
+
+    /// A populated user item round trips: the session set and every family
+    /// entry (live pointer + member set) survive the mapping unchanged.
+    #[test]
+    fn user_roster_round_trips_sessions_and_families() {
+        let family = FamilyRoster::new(
+            "hash-gen1".to_string(),
+            vec!["hash-gen0".to_string(), "hash-gen1".to_string()],
+        );
+        let item = roster_item(
+            vec!["hash-gen1"],
+            vec![("fam_0000000000000000000000000a", family.clone())],
+        );
+
+        let roster = UserRoster::from_item(&item).expect("populated roster must parse");
+        assert_eq!(roster.sessions, vec!["hash-gen1".to_string()]);
+        assert_eq!(
+            roster.families.get("fam_0000000000000000000000000a"),
+            Some(&family)
+        );
+        // The live-family lookup finds the owner of the live hash.
+        assert_eq!(
+            roster.live_family_of("hash-gen1").map(|f| f.live.as_str()),
+            Some("hash-gen1")
+        );
+        assert!(roster.live_family_of("hash-gen0").is_none());
+    }
+
+    /// Negative-space: a `sessions` attribute that is not a string set is
+    /// roster corruption and must surface as an error, not truncate the
+    /// revocation set.
+    #[test]
+    fn user_roster_non_set_sessions_returns_error() {
+        let mut item = HashMap::new();
+        item.insert(
+            "sessions".to_string(),
+            AttributeValue::S("not-a-set".to_string()),
+        );
+        let result = UserRoster::from_item(&item);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("sessions"));
+    }
+
+    /// Negative-space: a malformed family entry (missing its member set) is
+    /// rejected rather than silently shrinking what a revocation deletes.
+    #[test]
+    fn user_roster_malformed_family_entry_returns_error() {
+        let mut families = HashMap::new();
+        families.insert(
+            "live".to_string(),
+            AttributeValue::S("hash-gen1".to_string()),
+        );
+        let mut item = HashMap::new();
+        item.insert(
+            "sessions".to_string(),
+            AttributeValue::Ss(vec!["hash-gen1".to_string()]),
+        );
+        item.insert(
+            "families".to_string(),
+            AttributeValue::M(HashMap::from([(
+                "fam_0000000000000000000000000a".to_string(),
+                AttributeValue::M(families),
+            )])),
+        );
+
+        let result = UserRoster::from_item(&item);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("member set"));
     }
 }
