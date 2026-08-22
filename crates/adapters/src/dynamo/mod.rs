@@ -11,7 +11,7 @@ use chrono::Utc;
 use tracing::instrument;
 
 use oidc_exchange_core::domain::{
-    NewUser, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
+    NewUser, RefreshResolution, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
@@ -668,6 +668,70 @@ impl SessionRepository for DynamoRepository {
         }
     }
 
+    /// Interim classification for task 01: this store holds live generations
+    /// only — the `RETIRED#` items and the full `Superseded`/`Retired`/`Unknown`
+    /// classification (with the `consistent_read(true)` reads SR1 requires)
+    /// arrive with task 06 (dynamodb_session_adapter). Live-or-unknown is
+    /// therefore the complete, truthful answer today.
+    #[instrument(skip(self), fields(token_hash))]
+    async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
+        assert!(
+            !token_hash.is_empty(),
+            "resolve_refresh_token: token_hash must not be empty"
+        );
+        match self.get_session_by_refresh_token(token_hash).await? {
+            Some(session) => Ok(RefreshResolution::Live(session)),
+            None => Ok(RefreshResolution::Unknown),
+        }
+    }
+
+    /// Interim rotation for task 01: a conditional `DeleteItem`
+    /// (`attribute_exists(pk)`) decides the race — only one caller's delete
+    /// succeeds, so exactly one redemption wins (SR3) — and the loser writes
+    /// nothing. Task 06 replaces this with one `TransactWriteItems` that also
+    /// writes the retirement record atomically, removing the fail-closed
+    /// window between the delete and the replacement write that this interim
+    /// version accepts.
+    #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
+    async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
+        assert_ne!(
+            live_hash, replacement.refresh_token_hash,
+            "rotate_refresh_token: replacement must be a fresh generation"
+        );
+        assert!(
+            !replacement.refresh_token_hash.is_empty(),
+            "rotate_refresh_token: replacement hash must not be empty"
+        );
+
+        let outcome = self
+            .client
+            .delete_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(format!("SESSION#{live_hash}")))
+            .key("sk", AttributeValue::S("SESSION".to_string()))
+            .condition_expression("attribute_exists(pk)")
+            .send()
+            .await;
+
+        if let Err(err) = outcome {
+            let lost_the_race = matches!(
+                err.as_service_error(),
+                Some(
+                    aws_sdk_dynamodb::operation::delete_item::DeleteItemError::ConditionalCheckFailedException(_)
+                )
+            );
+            if lost_the_race {
+                // CAS condition failed: a concurrent redemption moved the live
+                // generation first. Nothing has been written.
+                return Ok(false);
+            }
+            return Err(Self::store_err(err));
+        }
+
+        self.store_refresh_token(replacement).await?;
+        Ok(true)
+    }
+
     #[instrument(skip(self), fields(token_hash))]
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
         self.client
@@ -680,6 +744,82 @@ impl SessionRepository for DynamoRepository {
             .map_err(Self::store_err)?;
 
         Ok(())
+    }
+
+    /// Interim family revocation for task 01: scans for `SESSION` items whose
+    /// `family_id` matches and batch-deletes them, returning how many. Task 06
+    /// re-points this at the authoritative per-user roster with
+    /// `consistent_read(true)` (SR5) and adds the `RETIRED#` items to the
+    /// sweep; today the count covers live session items only — exactly the
+    /// removal work this store currently holds.
+    #[instrument(skip(self), fields(family_id))]
+    async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        assert!(
+            !family_id.is_empty(),
+            "revoke_family: family_id must not be empty"
+        );
+
+        let mut deleted: u64 = 0;
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("sk = :sk AND family_id = :family_id")
+                .expression_attribute_values(":sk", AttributeValue::S("SESSION".to_string()))
+                .expression_attribute_values(":family_id", AttributeValue::S(family_id.to_string()))
+                .projection_expression("pk, sk");
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+            let items = result.items.unwrap_or_default();
+            assert!(
+                !items.iter().any(|item| item.get("pk").is_none()),
+                "every projected SESSION item must carry its pk for deletion"
+            );
+
+            // Count from the batches actually drained, not from the number
+            // submitted — the same discipline as `cleanup_expired_sessions`.
+            for chunk in items.chunks(25) {
+                let delete_requests: Vec<_> = chunk
+                    .iter()
+                    .map(|item| {
+                        let pk = item
+                            .get("pk")
+                            .cloned()
+                            .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
+                        let sk = item
+                            .get("sk")
+                            .cloned()
+                            .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
+
+                        aws_sdk_dynamodb::types::WriteRequest::builder()
+                            .delete_request(
+                                aws_sdk_dynamodb::types::DeleteRequest::builder()
+                                    .key("pk", pk)
+                                    .key("sk", sk)
+                                    .build()
+                                    .expect("valid delete request"),
+                            )
+                            .build()
+                    })
+                    .collect();
+
+                deleted += self.batch_write_with_retry(delete_requests).await?;
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        Ok(deleted)
     }
 
     #[instrument(skip(self))]
@@ -1255,8 +1395,11 @@ mod tests {
         let session = Session {
             user_id: created.id.clone(),
             refresh_token_hash: "hash_abc123".to_string(),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: Some("device-1".to_string()),
             user_agent: Some("test-agent".to_string()),
             ip_address: Some("10.0.0.1".to_string()),
@@ -1289,8 +1432,11 @@ mod tests {
         let session2 = Session {
             user_id: created.id.clone(),
             refresh_token_hash: "hash_def456".to_string(),
+            family_id: "fam_0000000000000000000000000b".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,

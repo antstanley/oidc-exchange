@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fred::prelude::*;
 use fred::types::ExpireOptions;
-use oidc_exchange_core::domain::Session;
+use oidc_exchange_core::domain::{RefreshResolution, Session};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::SessionRepository;
 use tracing::instrument;
@@ -77,7 +77,16 @@ impl SessionRepository for ValkeySessionRepository {
         let fields: Vec<(&str, String)> = vec![
             ("user_id", session.user_id.clone()),
             ("refresh_token_hash", session.refresh_token_hash.clone()),
+            ("family_id", session.family_id.clone()),
+            ("generation", session.generation.to_string()),
             ("provider", session.provider.clone()),
+            (
+                "rotated_at",
+                session
+                    .rotated_at
+                    .map(|ts| ts.to_rfc3339())
+                    .unwrap_or_default(),
+            ),
             ("expires_at", session.expires_at.to_rfc3339()),
             ("device_id", session.device_id.clone().unwrap_or_default()),
             ("user_agent", session.user_agent.clone().unwrap_or_default()),
@@ -196,16 +205,135 @@ impl SessionRepository for ValkeySessionRepository {
         let expires_at_str = get_field("expires_at")?;
         let created_at_str = get_field("created_at")?;
 
+        // A hash written before rotation shipped has no family fields (the
+        // hash write is not migratable in place). They read back with the same
+        // sentinel values the SQL adapters use for a NULL `family_id` column —
+        // an empty string that deliberately fails `is_valid_family_id`, so
+        // downstream family operations visibly fail rather than silently
+        // matching a family that does not exist.
+        let legacy_family_id = values.get("family_id").cloned().unwrap_or_default();
+        let legacy_generation = values
+            .get("generation")
+            .map(|g| g.parse::<u32>())
+            .transpose()
+            .map_err(|e| Error::StoreError {
+                detail: format!("invalid generation field: {e}"),
+            })?
+            .unwrap_or(0);
+        let rotated_at = match values.get("rotated_at") {
+            Some(s) if !s.is_empty() => Some(
+                DateTime::parse_from_rfc3339(s)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .map_err(|e| Error::StoreError {
+                        detail: format!("invalid rotated_at field: {e}"),
+                    })?,
+            ),
+            _ => None,
+        };
+
         Ok(Some(Session {
             user_id: get_field("user_id")?,
             refresh_token_hash: get_field("refresh_token_hash")?,
+            family_id: legacy_family_id,
+            generation: legacy_generation,
             provider: get_field("provider")?,
             expires_at: parse_dt(&expires_at_str)?,
+            rotated_at,
             device_id,
             user_agent,
             ip_address,
             created_at: parse_dt(&created_at_str)?,
         }))
+    }
+
+    /// Interim classification for task 01: this store holds live generations
+    /// only — the `retired:{hash}` keys and the full
+    /// `Superseded`/`Retired`/`Unknown` classification arrive with task 05
+    /// (valkey_session_adapter). Live-or-unknown is therefore the complete,
+    /// truthful answer today; Valkey key reads are strongly consistent.
+    #[instrument(skip(self), fields(token_hash))]
+    async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
+        assert!(
+            !token_hash.is_empty(),
+            "resolve_refresh_token: token_hash must not be empty"
+        );
+        match self.get_session_by_refresh_token(token_hash).await? {
+            Some(session) => Ok(RefreshResolution::Live(session)),
+            None => Ok(RefreshResolution::Unknown),
+        }
+    }
+
+    /// Interim rotation for task 01: a single `DEL` decides the race — only
+    /// one caller's delete returns 1, so exactly one redemption wins (SR3) —
+    /// and the loser writes nothing. Task 05 replaces this with one `EVAL`'d
+    /// Lua script that also writes the retirement record atomically, removing
+    /// the fail-closed window between the delete and the replacement write
+    /// that this interim version accepts.
+    #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
+    async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
+        assert_ne!(
+            live_hash, replacement.refresh_token_hash,
+            "rotate_refresh_token: replacement must be a fresh generation"
+        );
+        assert!(
+            !replacement.refresh_token_hash.is_empty(),
+            "rotate_refresh_token: replacement hash must not be empty"
+        );
+
+        let key = self.session_key(live_hash);
+
+        // Capture user_id before the delete so the index set can be cleaned up
+        // on the winning path.
+        let user_id: Option<String> =
+            self.client
+                .hget(&key, "user_id")
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+
+        let deleted_count: u64 = self.client.del(&key).await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+        assert!(
+            deleted_count <= 1,
+            "DEL of a single key must return 0 or 1, got {deleted_count}"
+        );
+
+        if deleted_count == 0 {
+            // CAS condition failed: a concurrent redemption moved the live
+            // generation first. Nothing has been written.
+            return Ok(false);
+        }
+
+        // Winning path: mirror `revoke_session`'s bookkeeping for the deleted
+        // live row (counter decrement + index-set cleanup), then install the
+        // replacement through the normal store path (which re-increments the
+        // counter). Between the DEL above and the store below the family has
+        // no live generation — fail-closed, never two live generations.
+        let active_sessions_key = self.active_sessions_key();
+        // The counter is reconciled state, not an invariant (see the
+        // `active_sessions` notes on `cleanup_expired_sessions`): a decrement
+        // landing below zero is drift that cleanup repairs, never a condition
+        // to panic on.
+        let _: i64 =
+            self.client
+                .decr(&active_sessions_key)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+        if let Some(user_id) = user_id {
+            self.client
+                .srem::<(), _, _>(self.user_sessions_key(&user_id), live_hash)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+        }
+
+        self.store_refresh_token(replacement).await?;
+        Ok(true)
     }
 
     #[instrument(skip(self))]
@@ -258,6 +386,98 @@ impl SessionRepository for ValkeySessionRepository {
         }
 
         Ok(())
+    }
+
+    /// Interim family revocation for task 01: scans this prefix's session keys,
+    /// deletes those whose `family_id` field matches, and returns how many.
+    /// The `{prefix}family:{family_id}` index set that removes the scan, and
+    /// the retirement records `revoke_family` must also remove, arrive with
+    /// task 05 (valkey_session_adapter); today the count covers live session
+    /// keys only — exactly the removal work this store currently holds.
+    #[instrument(skip(self), fields(family_id))]
+    async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        use futures::stream::TryStreamExt;
+
+        assert!(
+            !family_id.is_empty(),
+            "revoke_family: family_id must not be empty"
+        );
+
+        let session_pattern = format!("{}session:*", self.key_prefix);
+        let session_keys: Vec<Key> = self
+            .client
+            .scan_buffered(session_pattern.as_str(), Some(SCAN_BATCH_COUNT), None)
+            .try_collect()
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        let mut removed: u64 = 0;
+        for key in session_keys {
+            let key = key.as_str_lossy().into_owned();
+            let key_family: Option<String> =
+                self.client
+                    .hget(&key, "family_id")
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            if key_family.as_deref() != Some(family_id) {
+                continue;
+            }
+
+            // Mirror `revoke_session`'s bookkeeping for each matching key:
+            // capture user_id first so the index set stays consistent with the
+            // delete, and only decrement the counter per actual delete.
+            let user_id: Option<String> =
+                self.client
+                    .hget(&key, "user_id")
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+
+            let deleted_count: u64 =
+                self.client.del(&key).await.map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+            assert!(
+                deleted_count <= 1,
+                "DEL of a single key must return 0 or 1, got {deleted_count}"
+            );
+            if deleted_count == 0 {
+                // Expired (or otherwise removed) between the scan and here:
+                // nothing to account for.
+                continue;
+            }
+            removed += 1;
+
+            let active_sessions_key = self.active_sessions_key();
+            // Reconciled counter, not an invariant: drift below zero is
+            // repaired by cleanup, never a condition to panic on.
+            let _: i64 =
+                self.client
+                    .decr(&active_sessions_key)
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            if let Some(user_id) = user_id {
+                let hash = key
+                    .strip_prefix(&format!("{}session:", self.key_prefix))
+                    .unwrap_or(&key)
+                    .to_string();
+                self.client
+                    .srem::<(), _, _>(self.user_sessions_key(&user_id), &hash)
+                    .await
+                    .map_err(|e| Error::StoreError {
+                        detail: e.to_string(),
+                    })?;
+            }
+        }
+
+        Ok(removed)
     }
 
     #[instrument(skip(self))]
@@ -522,8 +742,11 @@ mod tests {
         Session {
             user_id: user_id.to_string(),
             refresh_token_hash: hash.to_string(),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::seconds(ttl_seconds),
+            rotated_at: None,
             device_id: Some("device-1".to_string()),
             user_agent: Some("test-agent".to_string()),
             ip_address: Some("10.0.0.1".to_string()),

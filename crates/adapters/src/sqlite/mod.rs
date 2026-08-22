@@ -9,7 +9,7 @@ use sqlx::{Row, SqlitePool};
 use tracing::instrument;
 
 use oidc_exchange_core::domain::{
-    NewUser, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
+    NewUser, RefreshResolution, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
@@ -606,6 +606,91 @@ impl SessionRepository for SqliteRepository {
         }
     }
 
+    /// Interim classification for task 01: these stores hold live generations
+    /// only — the `retired_refresh_tokens` table and the full
+    /// `Superseded`/`Retired`/`Unknown` classification arrive with task 03
+    /// (sql_session_adapters). Live-or-unknown is therefore the complete,
+    /// truthful answer today, and it is strongly consistent: the read sees
+    /// every committed write.
+    #[instrument(skip(self), fields(token_hash))]
+    async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
+        assert!(
+            !token_hash.is_empty(),
+            "resolve_refresh_token: token_hash must not be empty"
+        );
+        match self.get_session_by_refresh_token(token_hash).await? {
+            Some(session) => Ok(RefreshResolution::Live(session)),
+            None => Ok(RefreshResolution::Unknown),
+        }
+    }
+
+    /// Interim rotation for task 01: one transaction whose compare-and-swap
+    /// condition is the delete's affected-row count — zero rows means the live
+    /// generation moved, so the transaction rolls back and this returns
+    /// `false`, giving exactly-one-winner (SR3) and an all-or-nothing swap of
+    /// the two session rows (SR2). Task 03 extends this same transaction with
+    /// the retirement-record insert that SR4/SR5 need.
+    #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
+    async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
+        assert_ne!(
+            live_hash, replacement.refresh_token_hash,
+            "rotate_refresh_token: replacement must be a fresh generation"
+        );
+        assert!(
+            !replacement.refresh_token_hash.is_empty(),
+            "rotate_refresh_token: replacement hash must not be empty"
+        );
+
+        let mut tx = self.pool.begin().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+
+        let deleted = sqlx::query("DELETE FROM sessions WHERE refresh_token_hash = ?1")
+            .bind(live_hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        if deleted.rows_affected() == 0 {
+            // The condition failed: a concurrent redemption moved the live
+            // generation first. Roll back and write nothing.
+            tx.rollback().await.map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+            return Ok(false);
+        }
+
+        let expires_at_str = replacement.expires_at.to_rfc3339();
+        let created_at_str = replacement.created_at.to_rfc3339();
+        let rotated_at_str = replacement.rotated_at.map(|ts| ts.to_rfc3339());
+        sqlx::query(
+            "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(&replacement.refresh_token_hash)
+        .bind(&replacement.user_id)
+        .bind(&replacement.family_id)
+        .bind(replacement.generation as i64)
+        .bind(&replacement.provider)
+        .bind(&expires_at_str)
+        .bind(&rotated_at_str)
+        .bind(&replacement.device_id)
+        .bind(&replacement.user_agent)
+        .bind(&replacement.ip_address)
+        .bind(&created_at_str)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+
+        tx.commit().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+        Ok(true)
+    }
+
     #[instrument(skip(self), fields(token_hash))]
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE refresh_token_hash = ?1")
@@ -617,6 +702,29 @@ impl SessionRepository for SqliteRepository {
             })?;
 
         Ok(())
+    }
+
+    /// Interim family revocation for task 01: removes the family's live
+    /// generations and returns how many. The retirement records `revoke_family`
+    /// must also sweep do not exist in this store until task 03 adds them, so
+    /// the count covers live rows only — exactly the removal work this store
+    /// currently holds.
+    #[instrument(skip(self), fields(family_id))]
+    async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        assert!(
+            !family_id.is_empty(),
+            "revoke_family: family_id must not be empty"
+        );
+
+        let result = sqlx::query("DELETE FROM sessions WHERE family_id = ?1")
+            .bind(family_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        Ok(result.rows_affected())
     }
 
     #[instrument(skip(self))]
@@ -785,8 +893,11 @@ mod tests {
         let session = Session {
             user_id: "usr_test123".to_string(),
             refresh_token_hash: "hash_abc123".to_string(),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: Some("device-1".to_string()),
             user_agent: Some("test-agent".to_string()),
             ip_address: Some("10.0.0.1".to_string()),
@@ -818,8 +929,11 @@ mod tests {
         let session2 = Session {
             user_id: "usr_test123".to_string(),
             refresh_token_hash: "hash_def456".to_string(),
+            family_id: "fam_0000000000000000000000000b".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,

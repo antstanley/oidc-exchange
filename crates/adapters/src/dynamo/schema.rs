@@ -161,6 +161,14 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
         AttributeValue::S(session.refresh_token_hash.clone()),
     );
     item.insert(
+        "family_id".to_string(),
+        AttributeValue::S(session.family_id.clone()),
+    );
+    item.insert(
+        "generation".to_string(),
+        AttributeValue::N(session.generation.to_string()),
+    );
+    item.insert(
         "provider".to_string(),
         AttributeValue::S(session.provider.clone()),
     );
@@ -172,6 +180,13 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
         "created_at".to_string(),
         AttributeValue::S(session.created_at.to_rfc3339()),
     );
+
+    if let Some(ref rotated_at) = session.rotated_at {
+        item.insert(
+            "rotated_at".to_string(),
+            AttributeValue::S(rotated_at.to_rfc3339()),
+        );
+    }
 
     if let Some(ref device_id) = session.device_id {
         item.insert(
@@ -202,11 +217,27 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
 }
 
 pub fn item_to_session(item: &HashMap<String, AttributeValue>) -> Result<Session> {
+    // A session item written before rotation shipped has no family attributes.
+    // They read back with the same sentinel values the SQL adapters use for a
+    // NULL `family_id` column — an empty string that deliberately fails
+    // `is_valid_family_id`, so downstream family operations visibly fail
+    // rather than silently matching a family that does not exist. The
+    // `generation` default mirrors `get_version_or_default`'s migration
+    // handling of the pre-`version` user items.
+    let family_id = get_s_opt(item, "family_id").unwrap_or_default();
+    let rotated_at = match get_s_opt(item, "rotated_at") {
+        Some(s) => Some(parse_datetime(&s)?),
+        None => None,
+    };
+
     Ok(Session {
         user_id: get_s(item, "user_id")?,
         refresh_token_hash: get_s(item, "refresh_token_hash")?,
+        family_id,
+        generation: get_generation_or_default(item)?,
         provider: get_s(item, "provider")?,
         expires_at: parse_datetime(&get_s(item, "expires_at")?)?,
+        rotated_at,
         device_id: get_s_opt(item, "device_id"),
         user_agent: get_s_opt(item, "user_agent"),
         ip_address: get_s_opt(item, "ip_address"),
@@ -247,6 +278,25 @@ fn get_version_or_default(item: &HashMap<String, AttributeValue>) -> Result<u64>
                 detail: format!("invalid version: {e}"),
             }),
         None => Ok(INITIAL_USER_VERSION),
+    }
+}
+
+/// Reads the session item's `generation` attribute, treating a missing
+/// attribute (an item written before rotation shipped) as generation 0 — the
+/// migration default for pre-rotation rows. A present-but-non-numeric value is
+/// a distinct corruption failure and is rejected, not defaulted.
+fn get_generation_or_default(item: &HashMap<String, AttributeValue>) -> Result<u32> {
+    match item.get("generation") {
+        Some(v) => v
+            .as_n()
+            .map_err(|_| Error::StoreError {
+                detail: "invalid attribute: generation".to_string(),
+            })?
+            .parse::<u32>()
+            .map_err(|e| Error::StoreError {
+                detail: format!("invalid generation: {e}"),
+            }),
+        None => Ok(0),
     }
 }
 
@@ -330,8 +380,11 @@ mod tests {
         Session {
             user_id: "usr_01abc".to_string(),
             refresh_token_hash: "sha256_deadbeef".to_string(),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: Some("device_1".to_string()),
             user_agent: Some("Mozilla/5.0".to_string()),
             ip_address: Some("127.0.0.1".to_string()),
@@ -458,14 +511,84 @@ mod tests {
         );
     }
 
+    /// The session round trip must preserve the family identity rotation is
+    /// built on: `family_id`, `generation`, and `rotated_at` survive the item
+    /// mapping unchanged.
+    #[test]
+    fn session_round_trip_preserves_family_fields() {
+        let mut session = sample_session();
+        session.generation = 7;
+        session.rotated_at = Some(Utc::now());
+
+        let item = session_to_item(&session);
+        let restored = item_to_session(&item).expect("should parse session from item");
+
+        assert_eq!(session.family_id, restored.family_id);
+        assert_eq!(session.generation, restored.generation);
+        assert_eq!(
+            session.rotated_at.map(|ts| ts.timestamp_millis()),
+            restored.rotated_at.map(|ts| ts.timestamp_millis())
+        );
+    }
+
+    /// A session item written before rotation shipped (no family attributes)
+    /// must read back with the migration defaults — empty-string family,
+    /// generation 0, no rotation timestamp — mirroring
+    /// `item_to_user_missing_version_defaults_to_initial_version`.
+    #[test]
+    fn item_to_session_missing_family_attributes_defaults_to_legacy_shape() {
+        // Build from a fully-populated session (rotated_at set) so every
+        // family attribute is present in the item, then strip all three to
+        // simulate the pre-rotation record.
+        let mut rotated = sample_session();
+        rotated.generation = 3;
+        rotated.rotated_at = Some(Utc::now());
+        let mut item = session_to_item(&rotated);
+        assert!(item.remove("family_id").is_some());
+        assert!(item.remove("generation").is_some());
+        assert!(item.remove("rotated_at").is_some());
+
+        let restored = item_to_session(&item).expect("legacy session item must parse");
+        assert_eq!(
+            restored.family_id, "",
+            "missing family must land on the empty-string sentinel"
+        );
+        assert!(!oidc_exchange_core::domain::is_valid_family_id(
+            &restored.family_id
+        ));
+        assert_eq!(restored.generation, 0);
+        assert_eq!(restored.rotated_at, None);
+        // Sanity: every other field still round-trips without the family attrs.
+        assert_eq!(restored.refresh_token_hash, "sha256_deadbeef");
+    }
+
+    /// Negative-space: a `generation` attribute present but not a DynamoDB `N`
+    /// is a distinct corruption failure and must be rejected, not silently
+    /// defaulted to 0.
+    #[test]
+    fn item_to_session_non_numeric_generation_returns_error() {
+        let mut item = session_to_item(&sample_session());
+        item.insert(
+            "generation".to_string(),
+            AttributeValue::S("not-a-number".to_string()),
+        );
+
+        let result = item_to_session(&item);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("generation"));
+    }
+
     #[test]
     fn session_round_trip_no_optional_fields() {
         let now = Utc::now();
         let session = Session {
             user_id: "usr_01abc".to_string(),
             refresh_token_hash: "sha256_cafe".to_string(),
+            family_id: "fam_0000000000000000000000000b".to_string(),
+            generation: 0,
             provider: "atproto".to_string(),
             expires_at: now + chrono::Duration::hours(1),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,

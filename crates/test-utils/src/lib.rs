@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use tokio::sync::Mutex;
 
 use oidc_exchange_core::config::DEFAULT_REFRESH_REUSE_RETENTION;
@@ -267,22 +267,6 @@ impl UserRepository for MockRepository {
     }
 }
 
-/// Compute a retirement record's expiry the way every backend must:
-/// `retired_at + reuse_retention`, capped at the family's absolute deadline so
-/// a record never outlives its family.
-fn retirement_expires_at(
-    retired_at: DateTime<Utc>,
-    reuse_retention_secs: u64,
-    family_expires_at: DateTime<Utc>,
-) -> DateTime<Utc> {
-    let retention_deadline = retired_at + chrono::Duration::seconds(reuse_retention_secs as i64);
-    if retention_deadline < family_expires_at {
-        retention_deadline
-    } else {
-        family_expires_at
-    }
-}
-
 #[async_trait]
 impl SessionRepository for MockRepository {
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
@@ -396,14 +380,15 @@ impl SessionRepository for MockRepository {
             "rotate_refresh_token: replacement hash already exists as a retired record"
         );
 
+        let now = Utc::now();
         let retired_record = RetiredRefreshToken {
             refresh_token_hash: live_hash.to_string(),
             family_id: replacement.family_id.clone(),
             user_id: replacement.user_id.clone(),
             successor_hash: replacement.refresh_token_hash.clone(),
-            retired_at: Utc::now(),
-            expires_at: retirement_expires_at(
-                Utc::now(),
+            retired_at: now,
+            expires_at: RetiredRefreshToken::retention_deadline(
+                now,
                 self.reuse_retention_secs,
                 replacement.expires_at,
             ),
