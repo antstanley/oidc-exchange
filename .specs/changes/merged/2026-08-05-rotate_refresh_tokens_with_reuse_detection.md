@@ -1,6 +1,6 @@
 # Change: Rotate refresh tokens on redemption, with reuse detection
 
-**Status:** Proposed · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Target:** crates/core, crates/adapters (service)
+**Status:** Merged · **Date:** 2026-08-05 · **Merged:** 2026-08-22 · **Owner:** Ant Stanley · **Target:** crates/core, crates/adapters (service)
 
 Make refresh-token redemption a state transition instead of a read. Each successful refresh
 mints a replacement refresh token and retires the presented generation in one atomic store
@@ -50,14 +50,14 @@ and the structural argument in
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/service/specs/00-overview.md`](../service/specs/00-overview.md) | Scope-summary row for refresh; replace the reusable-token Decision; the external-scheduler Assumption becomes an owned reaping obligation |
-| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md) | `Session` gains family fields; add the `RetiredRefreshToken` entity; ID scheme, session lifecycle, query patterns, token types, `AuditEventType` variants; `AccessTokenClaims.sid` re-described against `family_id` |
-| [`.specs/service/specs/02-ports-and-adapters.md`](../service/specs/02-ports-and-adapters.md) | `SessionRepository` gains three methods and a stated contract; add the conformance suite |
-| [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md) | Rewrite the token-refresh flow; replace the non-rotation Decision; re-point the access token's `sid` from `refresh_token_hash` to `family_id` (Build/Validate access token, Revocation) and replace the sibling's `sid` Decision |
-| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md) | `/token` refresh response now carries a refresh token; Bootstrap spawns the session reaper; Internal routes gain `POST /internal/sessions/cleanup` |
-| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md) | Three new `[token]` keys and their defaults; `[session_repository]` gains `cleanup_interval` |
-| [`.specs/service/specs/08-persistence.md`](../service/specs/08-persistence.md) | Per-adapter retirement storage, atomic rotation, DynamoDB consistent read and an authoritative per-user session roster replacing GSI enumeration on the revocation paths; the LMDB reaper batches its deletes; the Valkey counter clamps instead of asserting |
-| [`canonical-types.schema.json`](../service/specs/canonical-types.schema.json) | Modify `Session` and `TokenResponse`; add `RetiredRefreshToken`; add `refresh_token_reuse` to `AuditEventType`; re-pattern `AccessTokenClaims.sid` to the `family_id` form |
+| [`.specs/service/specs/00-overview.md`](../../service/specs/00-overview.md) | Scope-summary row for refresh; replace the reusable-token Decision; the external-scheduler Assumption becomes an owned reaping obligation |
+| [`.specs/service/specs/01-domain-model.md`](../../service/specs/01-domain-model.md) | `Session` gains family fields; add the `RetiredRefreshToken` entity; ID scheme, session lifecycle, query patterns, token types, `AuditEventType` variants; `AccessTokenClaims.sid` re-described against `family_id` |
+| [`.specs/service/specs/02-ports-and-adapters.md`](../../service/specs/02-ports-and-adapters.md) | `SessionRepository` gains three methods and a stated contract; add the conformance suite |
+| [`.specs/service/specs/03-service-flows.md`](../../service/specs/03-service-flows.md) | Rewrite the token-refresh flow; replace the non-rotation Decision; re-point the access token's `sid` from `refresh_token_hash` to `family_id` (Build/Validate access token, Revocation) and replace the sibling's `sid` Decision |
+| [`.specs/service/specs/04-http-api.md`](../../service/specs/04-http-api.md) | `/token` refresh response now carries a refresh token; Bootstrap spawns the session reaper; Internal routes gain `POST /internal/sessions/cleanup` |
+| [`.specs/service/specs/06-configuration.md`](../../service/specs/06-configuration.md) | Three new `[token]` keys and their defaults; `[session_repository]` gains `cleanup_interval` |
+| [`.specs/service/specs/08-persistence.md`](../../service/specs/08-persistence.md) | Per-adapter retirement storage, atomic rotation, DynamoDB consistent read and an authoritative per-user session roster replacing GSI enumeration on the revocation paths; the LMDB reaper batches its deletes; the Valkey counter clamps instead of asserting |
+| [`canonical-types.schema.json`](../../service/specs/canonical-types.schema.json) | Modify `Session` and `TokenResponse`; add `RetiredRefreshToken`; add `refresh_token_reuse` to `AuditEventType`; re-pattern `AccessTokenClaims.sid` to the `family_id` form |
 
 No new canonical page. `schemas/datamodel.schema.json` (the adapter-agnostic logical model
 that 08-persistence names as cross-adapter source of truth) changes alongside the canonical
@@ -411,7 +411,7 @@ The external-scheduler Assumption — "A scheduler external to the service drive
 it. It is replaced; the boundary becomes something the service owns:
 
 > - Long-lived runtimes reap expired sessions and retirement records themselves — the
->   bootstrap-spawned session reaper ([04-http-api.md](specs/04-http-api.md)). Deployments
+>   bootstrap-spawned session reaper ([04-http-api.md](../../service/specs/04-http-api.md)). Deployments
 >   with no long-lived process (Lambda) drive `POST /internal/sessions/cleanup` from an
 >   external scheduler such as EventBridge. DynamoDB TTL and Valkey key expiry reap
 >   natively; the reaper is a backstop there.
@@ -420,7 +420,7 @@ it. It is replaced; the boundary becomes something the service owns:
 
 > The client names the provider (`provider=google`), not a raw issuer URL. Unknown
 > `grant_type` → `unsupported_grant_type`. Response body is `TokenResponse`
-> ([01-domain-model.md](01-domain-model.md)); it carries a `refresh_token` on every grant,
+> ([01-domain-model.md](../../service/specs/01-domain-model.md)); it carries a `refresh_token` on every grant,
 > including `refresh_token`, and a client must discard the token it presented once it holds
 > the replacement (RFC 6749 §6). With `token.refresh_rotation = false` the refresh grant
 > returns no `refresh_token` and the presented one stays valid.
@@ -471,7 +471,7 @@ schedule alongside a running reaper.
 > ### `[token]`
 > `access_token_ttl` (`"15m"`), `refresh_token_ttl` (`"30d"`), optional `audience`, optional
 > `custom_claims` (`HashMap<String,String>` of claim templates, see
-> [03-service-flows.md](03-service-flows.md)), `refresh_rotation` (bool, default `true`),
+> [03-service-flows.md](../../service/specs/03-service-flows.md)), `refresh_rotation` (bool, default `true`),
 > `refresh_rotation_grace` (duration string, default `"10s"`) and `refresh_reuse_retention`
 > (duration string, default `"24h"`).
 >
@@ -486,7 +486,7 @@ schedule alongside a running reaper.
 Appended to the section:
 
 > `cleanup_interval` (duration string, default `"1h"`) — how often the long-lived runtimes
-> run `cleanup_expired_sessions` ([04-http-api.md](04-http-api.md) → Bootstrap). The sweep
+> run `cleanup_expired_sessions` ([04-http-api.md](../../service/specs/04-http-api.md) → Bootstrap). The sweep
 > covers `sessions` and `retired_refresh_tokens` alike; on the natively-expiring stores
 > (DynamoDB TTL, Valkey key expiry) it is a cheap backstop for whatever native expiry has
 > not yet reaped.
@@ -612,10 +612,10 @@ and `## SQLite (adapters/sqlite)` sections. The DDL shows the Postgres types; SQ
 
 A new closing paragraph at the end of the `## Session-only stores` section — the page has no
 adapter-inventory heading of its own; this note points at the inventory in
-[02-ports-and-adapters.md](../service/specs/02-ports-and-adapters.md).
+[02-ports-and-adapters.md](../../service/specs/02-ports-and-adapters.md).
 
 > Every session adapter stores retirement records alongside sessions and passes the
-> session-store conformance suite ([02-ports-and-adapters.md](02-ports-and-adapters.md)),
+> session-store conformance suite ([02-ports-and-adapters.md](../../service/specs/02-ports-and-adapters.md)),
 > which is what makes rotation and reuse detection a property of the port rather than of
 > whichever backend a deployment happens to configure.
 

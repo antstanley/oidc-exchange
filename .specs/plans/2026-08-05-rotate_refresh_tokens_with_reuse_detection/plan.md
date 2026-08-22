@@ -1,6 +1,6 @@
 # Rotate refresh tokens with reuse detection
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](../../changes/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](../../changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md)
 
 This plan implements only the refresh-token rotation and reuse-detection change. It first establishes the typed session-family contract and shared conformance harness, then makes each of the five persistent session adapters and `MockRepository` satisfy SR1–SR5. With that atomic store substrate in place, it updates exchange, refresh, audit, and access-token family identity behaviour; adds the owned reaper and internal cleanup endpoint; and synchronizes canonical types and prose at merge. The plan deliberately does not implement work owned by sibling changes.
 
