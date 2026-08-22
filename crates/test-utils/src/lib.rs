@@ -111,6 +111,22 @@ impl MockRepository {
         retired
     }
 
+    /// Test infrastructure: rewind one retirement record's `retired_at` by
+    /// `seconds` so a flow test can place it deterministically outside the
+    /// grace window without sleeping. Returns whether a record named by
+    /// `token_hash` existed and was rewritten; callers assert on it.
+    pub async fn backdate_retirement(&self, token_hash: &str, seconds: u64) -> bool {
+        assert!(seconds > 0, "backdating by zero seconds is a no-op bug");
+        let mut state = self.state.lock().await;
+        match state.retired.get_mut(token_hash) {
+            Some(record) => {
+                record.retired_at -= chrono::Duration::seconds(seconds as i64);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Toggle whether `revoke_session`, `revoke_family`, and
     /// `revoke_all_user_sessions` fail with `Error::StoreError`, simulating an
     /// unreachable session store.
