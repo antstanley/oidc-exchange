@@ -45,11 +45,18 @@ application = oidc.wsgi_app()
 ### Direct request handling
 
 ```python
+from urllib.parse import urlencode
+
 resp = oidc.handle_request_sync({
     "method": "POST",
     "path": "/token",
-    "headers": {"content-type": "application/json"},
-    "body": b'{"grant_type": "authorization_code", "code": "…", "provider": "google"}',
+    "headers": {"content-type": "application/x-www-form-urlencoded"},
+    "body": urlencode({
+        "grant_type": "authorization_code",
+        "code": "abc123",
+        "redirect_uri": "https://app.example.com/callback",
+        "provider": "google",
+    }).encode(),
 })
 # resp -> {"status": 200, "headers": {...}, "body": b"…"}
 

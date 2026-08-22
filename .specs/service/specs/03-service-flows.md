@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-08-21 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
@@ -9,15 +9,22 @@
 
 ## Token exchange (`exchange.rs`)
 
-`POST /token` with `grant_type=authorization_code` or `grant_type=id_token`.
+`POST /token` with `grant_type=authorization_code` or `grant_type=id_token`. The handler has
+already parsed the form into a `TokenGrant`, so `AppService::exchange` receives an
+`ExchangeRequest` whose `credential` names the grant that was declared
+([04-http-api.md](04-http-api.md)).
 
 1. **Resolve provider** — look up `request.provider` in the `providers` map; missing →
    `UnknownProvider`.
-2. **Obtain verified claims**
-   - If an `id_token` was supplied directly → `provider.validate_id_token(id_token)`.
-   - Otherwise require `code` and `redirect_uri` (else `InvalidRequest`),
-     `provider.exchange_code` to get `ProviderTokens`, then `validate_id_token` on the
-     returned `id_token`.
+2. **Obtain verified claims** — match on `request.credential`:
+   - `ExchangeCredential::AuthorizationCode { code, redirect_uri }` → `provider.exchange_code`
+     to get `ProviderTokens`, then `validate_id_token` on the returned `id_token`.
+   - `ExchangeCredential::IdTokenAssertion { id_token }` → `provider.validate_id_token`.
+
+   Both fields of the authorization-code variant are non-optional, so the `redirect_uri`
+   binding is a property of the type rather than a runtime check: there is no field
+   combination that reaches this step carrying a credential for one grant while executing
+   another.
 3. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
    - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
    - **Found, active** → proceed (existing users bypass registration policy).
@@ -140,6 +147,11 @@ via `tracing` and never fail the admin call.
 
 ### Decisions
 
+- *The declared grant is the flow selector.* **`ExchangeRequest` carries an
+  `ExchangeCredential` enum parsed at the HTTP boundary; the service matches on it and never
+  inspects field presence.** An incoherent grant/field combination fails to parse at the edge
+  instead of choosing a branch, so a later refactor cannot re-flatten the decision without
+  deleting the type.
 - *Refresh does not rotate.* **A successful refresh returns no new refresh token.** Reusable
   refresh tokens match common client libraries; rotation is not implemented.
 - *Domain allowlist demands a verified email.* **New-user registration under an allowlist

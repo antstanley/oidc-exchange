@@ -1,6 +1,6 @@
 # OIDC Exchange Service — Overview
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/*
+**Status:** Implemented · **Date:** 2026-08-21 · **Owner:** Ant Stanley · **Scope:** crates/*
 
 The Rust service at the heart of `oidc-exchange`. It validates ID tokens from third-party
 OIDC providers and exchanges them for self-issued, short-lived access tokens and long-lived
@@ -109,9 +109,11 @@ operator ──Bearer secret──► /internal/* (user CRUD, claims, stats)  �
 
 ### Decisions
 
-- *Two grant inputs.* **`/token` accepts both a provider `code` and a raw `id_token`.** Lets
-  browser SDKs (Google Identity Services) post the credential they already hold without a
-  second server-side code exchange.
+- *Two grant inputs, each explicitly declared.* **`/token` accepts both a provider `code` and
+  a raw `id_token`, and the declared `grant_type` selects which.** Browser SDKs (Google
+  Identity Services) can post the credential they already hold without a second server-side
+  code exchange, while which grant runs stays something the caller declares rather than
+  something inferred from the fields they happened to send.
 - *Opaque, hashed, reusable refresh tokens.* **256-bit random, stored as a SHA-256 hash,
   valid until expiry or revocation.** Revocable and leak-resistant, and reusable refresh
   matches what client libraries expect.
