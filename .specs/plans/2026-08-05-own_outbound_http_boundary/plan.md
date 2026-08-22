@@ -1,6 +1,6 @@
 # Plan: Own the outbound HTTP boundary
 
-**Status:** Backlog · **Layout:** indexed kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/2026-08-05-own_outbound_http_boundary.md`](../../changes/2026-08-05-own_outbound_http_boundary.md)
+**Status:** Done · **Layout:** indexed kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/2026-08-05-own_outbound_http_boundary.md`](../../changes/2026-08-05-own_outbound_http_boundary.md)
 **Review:** spec-reviewer · verdict: changes needed
 **Outbound boundary owner:** @-
 
@@ -10,17 +10,19 @@ This plan makes provider HTTP and provider verification controls owned by shared
 
 | ID | Task | Status | Depends on | External prerequisites |
 |---|---|---|---|---|
-| 01 | [Establish prerequisite contracts and guard lint](backlog/01-prerequisite_contracts_and_guard_lint.md) | Backlog | — | `HttpsUrl`, bounded-read/error-detail helpers from sibling specs; confirm exact API/ownership before dependent work |
-| 02 | [Add bounded provider transport](backlog/02-provider_transport.md) | Backlog | 01 | 01 contracts; source spec requires bounded success reads before transport migration |
-| 03 | [Pin discovery endpoint origins and wire config](backlog/03-endpoint_origin_pinning.md) | Backlog | 01, 02 | `HttpsUrl` contract from 01; warning-mode release boundary explicitly required |
-| 04 | [Build shared verification key set](backlog/04-verification_key_set.md) | Backlog | 01 | cross-provider baseline corpus from 01; answer C12 before replacing both validators |
-| 04a | [Keep provider-specific admitted algorithm policies explicit](backlog/04-verification_key_set.md#scope) | Backlog | 04 | external prerequisite: do not collapse provider policies into one union |
-| 05 | [Redesign JWKS cache single-flight](backlog/05-jwks_cache_single_flight.md) | Backlog | 02, 04 | bounded success reads from 02; keep cache/forced-refresh guards off the network path |
-| 06 | [Bind webhook deliveries and document receivers](backlog/06-webhook_delivery_binding.md) | Backlog | — | —; delivery id and timestamp are minted once outside the retry loop |
-| 07 | [Complete compatibility, docs, and spec integration](backlog/07-compatibility_docs_and_spec_integration.md) | Backlog | 03, 05, 06 | resolved sibling merge/ownership decision; update canonical targets only after behavior stabilizes |
-| 08 | [Run full validation and release-readiness review](backlog/08-full_validation_and_release_readiness.md) | Backlog | 01, 02, 03, 04, 05, 06, 07 | all implementation tasks; final gate, not a certificate |
+| 01 | [Establish prerequisite contracts and guard lint](done/01-prerequisite_contracts_and_guard_lint.md) | Done | — | `HttpsUrl`, bounded-read/error-detail helpers from sibling specs; confirm exact API/ownership before dependent work |
+| 02 | [Add bounded provider transport](done/02-provider_transport.md) | Done | 01 | 01 contracts; source spec requires bounded success reads before transport migration |
+| 03 | [Pin discovery endpoint origins and wire config](done/03-endpoint_origin_pinning.md) | Done | 01, 02 | `HttpsUrl` contract from 01; warning-mode release boundary explicitly required |
+| 04 | [Build shared verification key set](done/04-verification_key_set.md) | Done | 01 | cross-provider baseline corpus from 01; answer C12 before replacing both validators |
+| 04a | [Keep provider-specific admitted algorithm policies explicit](done/04-verification_key_set.md#scope) | Done | 04 | external prerequisite: do not collapse provider policies into one union |
+| 05 | [Redesign JWKS cache single-flight](done/05-jwks_cache_single_flight.md) | Done | 02, 04 | bounded success reads from 02; keep cache/forced-refresh guards off the network path |
+| 06 | [Bind webhook deliveries and document receivers](done/06-webhook_delivery_binding.md) | Done | — | —; delivery id and timestamp are minted once outside the retry loop |
+| 07 | [Complete compatibility, docs, and spec integration](done/07-compatibility_docs_and_spec_integration.md) | Done | 03, 05, 06 | resolved sibling merge/ownership decision; update canonical targets only after behavior stabilizes |
+| 08 | [Run full validation and release-readiness review](done/08-full_validation_and_release_readiness.md) | Done | 01, 02, 03, 04, 05, 06, 07 | all implementation tasks; final gate, not a certificate |
 
-`backlog/` is the only populated kanban column. `in-progress/`, `blocked/`, and `done/` are intentionally absent until status changes. No done certificates are created or planned; their omission is deliberate per the request, and the no-cert rule applies to both the plan and its task files.
+`backlog/` and `in-progress/` are now empty; `done/` holds all eight task files with their
+completion records. No done certificates are created or planned; their omission is deliberate
+per the request, and the no-cert rule applies to both the plan and its task files.
 
 ## Source coverage
 
@@ -79,3 +81,23 @@ Every task inherits [`.specs/development-guidelines.md`](../../development-guide
 - **No done certificates.** The historical plan convention is intentionally not followed. Completion evidence belongs in task updates and review/CI output, not `*-certificate.md` files.
 - **Warning-to-enforcement release boundary.** Origin pinning requires a release decision after warning-mode telemetry; task 03 must not silently collapse the two stages.
 - **Canonical merge is not assumed.** Task 07 updates canonical material only when the change is approved for merge; until then the source change spec remains Proposed.
+
+## Execution deviations (recorded)
+
+1. **Canonical material was updated in this branch while the source change spec stays
+   Proposed** — deviating from the assumption above, per the repository convention of the
+   three prior unstacked PRs (#23/#24/#25), where canonical prose/schema travel with the
+   implementing branch and the change-spec status flip happens at merge time. Page `Date:`
+   fields were therefore not bumped (that stays a merge-time act), and the canonical pages
+   document the as-implemented behavior: origin pinning ships in warning mode with the
+   `Warn` → `Enforce` flip stated everywhere as a separate future release-owner decision,
+   including an implementation-status annotation on the source spec's compatibility claim.
+2. **Sibling prerequisites are vendored, not merged** (`HttpsUrl`,
+   `read_bounded_bytes`/`MAX_UPSTREAM_BODY_BYTES`, `upstream::error_detail`, marked in code
+   under `crates/adapters/src/shared/`). The sibling changes named by the source do not
+   exist in this unstacked checkout; task 01 records the dispositions.
+3. **Merge bookkeeping is deferred, not fabricated.** The siblings are not merged, so per
+   task 07's own gate the source spec keeps `Status: Proposed`; it is not moved to
+   `changes/merged/`, `.specs/README.md`'s pending/merged listings are untouched (the
+   change-spec index is owned by separate in-flight work), and the missing sibling rows the
+   source asks to repair stay unrepaired until that index work lands.

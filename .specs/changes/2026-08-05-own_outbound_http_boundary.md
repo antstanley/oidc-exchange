@@ -545,6 +545,14 @@ endpoints off the issuer's origin — the common case, not the exotic one — mu
 release; the warning names the endpoint and the origin, so the value to add is in the log
 line.
 
+*Implementation status (2026-08-22).* As implemented, undeclared cross-origin endpoints do
+not stop working yet: the service ships in warning mode (`ENDPOINT_ORIGIN_CHECK_MODE = Warn`)
+for one release of structured warnings naming the endpoint, its observed origin, and the
+permitted set, and deployments are served unchanged. Flipping to `Enforce` — the point at
+which they stop working — is deliberately left out of this change: it is a separate future
+release-owner decision taken after one release of warning telemetry, landing as its own
+reviewed commit, never folded silently into another change.
+
 ---
 
 ## Merge plan
