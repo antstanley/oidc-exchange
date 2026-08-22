@@ -1,7 +1,7 @@
 //! Integration coverage for Lambda runtime mode: drives an API Gateway HTTP-API (v2) event
-//! through `lambda_http::request::from_str` and into `bootstrap::build_router`'s output via
-//! `tower::ServiceExt::oneshot` — the same tower `Service` call `lambda_http::run` makes on
-//! every real invocation, minus the runtime-API polling loop itself. See task 03 of
+//! through `lambda_http::request::from_str` and into `bootstrap::build_routers`' single-plane
+//! output via `tower::ServiceExt::oneshot` — the same tower `Service` call `lambda_http::run`
+//! makes on every real invocation, minus the runtime-API polling loop itself. See task 03 of
 //! `.specs/plans/2026-07-02-implement_lambda_runtime/plan.md`.
 
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use oidc_exchange::bootstrap::build_router;
+use oidc_exchange::bootstrap::build_routers;
 use oidc_exchange_core::config::AppConfig;
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
@@ -17,7 +17,8 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
-/// Build the real production router (`bootstrap::build_router`, full middleware stack
+/// Build the real production router a Lambda invocation would serve
+/// (`bootstrap::build_routers` + the single-plane rule, full middleware stack
 /// included) backed by mock adapters — the exact `app` value `main.rs` hands to
 /// `lambda_http::run`.
 fn build_app() -> axum::Router {
@@ -38,7 +39,9 @@ fn build_app() -> axum::Router {
         config.clone(),
     );
 
-    build_router(&config, service)
+    build_routers(&config, service)
+        .single_plane()
+        .expect("the exchange role always yields a servable plane")
 }
 
 /// Build a minimal API Gateway HTTP-API (payload format v2) `GET` event for `path`, in the
@@ -85,7 +88,7 @@ fn apigw_v2_get_event(path: &str) -> String {
 }
 
 /// A `GET /keys` API Gateway v2 event, parsed by `lambda_http` and routed through the same
-/// `build_router` output the hyper path serves, returns 200 with a JWKS body — proving the
+/// single-plane router output the hyper path serves, returns 200 with a JWKS body — proving the
 /// Lambda code path (`lambda_http`'s event-to-`tower::Service` translation) reaches the
 /// identical router as the hyper branch, not a fork.
 #[tokio::test]

@@ -46,6 +46,9 @@ impl AppConfig {
     /// - When the internal API will be served (`server.role` is `admin` or
     ///   `all`, and `internal_api.enabled == true`),
     ///   `internal_api.shared_secret` is present and non-empty.
+    /// - When `server.role` is `all` and the internal API is enabled, the
+    ///   admin listener (`internal_api.host`/`port`) does not collide with the
+    ///   public listener (`server.host`/`port`) — see [`listeners_collide`].
     pub fn validate(&self) -> Result<(), Error> {
         if !ALLOWED_SERVER_ROLES.contains(&self.server.role.as_str()) {
             return Err(Error::ConfigError {
@@ -108,6 +111,31 @@ impl AppConfig {
                         .to_string(),
                 });
             }
+        }
+
+        // Only role = "all" binds both sockets, so only that role can collide.
+        // Under role = "admin" the public socket is never bound (same values
+        // are harmless), and under any other role the admin listener is not
+        // bound at all.
+        let binds_both_listeners = self.server.role == "all" && self.internal_api.enabled;
+        if binds_both_listeners
+            && listeners_collide(
+                &self.server.host,
+                self.server.port,
+                &self.internal_api.host,
+                self.internal_api.port,
+            )
+        {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "internal_api listener {}:{} collides with the public listener {}:{}; \
+                     role = \"all\" binds two distinct sockets and they must not share one",
+                    self.internal_api.host,
+                    self.internal_api.port,
+                    self.server.host,
+                    self.server.port
+                ),
+            });
         }
 
         Ok(())
@@ -412,18 +440,94 @@ impl Default for TelemetryConfig {
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+/// Default for `[internal_api] host` when the key is absent from config: the
+/// admin listener is reachable only from an operator network, so it binds the
+/// loopback interface unless an operator explicitly publishes it. Named rather
+/// than a bare literal so the default, `AppConfig::validate`, and the
+/// deployment docs stay in lockstep.
+/// See `06-configuration.md` → Sections → `[internal_api]` and Defaults summary.
+pub const DEFAULT_INTERNAL_API_HOST: &str = "127.0.0.1";
+
+/// Default for `[internal_api] port` when the key is absent from config: one
+/// above the public listener's 8080, so the two planes never collide by
+/// accident. See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_INTERNAL_API_PORT: u16 = 8081;
+
+/// Host values that bind every interface. When either listener binds one of
+/// these, a same-port admin listener collides with the public listener on at
+/// least one interface, so the pair is rejected rather than discovered as an
+/// `EADDRINUSE` at bind time (or worse, silently shared).
+const WILDCARD_LISTENER_HOSTS: [&str; 3] = ["0.0.0.0", "::", "[::]"];
+
+/// Whether an admin listener at (`admin_host`, `admin_port`) can share the
+/// public listener's socket at (`public_host`, `public_port`).
+///
+/// Two listeners collide when their host/port pairs are identical, or when
+/// their ports are equal and either side binds a wildcard host — a wildcard
+/// listener covers every specific interface, so `0.0.0.0:8081` and
+/// `127.0.0.1:8081` cannot coexist. Different ports never collide.
+pub fn listeners_collide(
+    public_host: &str,
+    public_port: u16,
+    admin_host: &str,
+    admin_port: u16,
+) -> bool {
+    if public_port != admin_port {
+        return false;
+    }
+    let public_wildcard = WILDCARD_LISTENER_HOSTS.contains(&public_host);
+    let admin_wildcard = WILDCARD_LISTENER_HOSTS.contains(&admin_host);
+    public_wildcard || admin_wildcard || public_host == admin_host
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct InternalApiConfig {
     pub enabled: bool,
+    /// Host for the dedicated admin listener. Defaults to
+    /// [`DEFAULT_INTERNAL_API_HOST`] so publishing the admin plane is an
+    /// explicit configuration act.
+    pub host: String,
+    /// Port for the dedicated admin listener. Defaults to
+    /// [`DEFAULT_INTERNAL_API_PORT`]. `AppConfig::validate` rejects a
+    /// role = "all" config whose admin listener collides with the public
+    /// socket.
+    pub port: u16,
     pub auth_method: Option<String>,
     pub shared_secret: Option<String>,
+}
+
+impl Default for InternalApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: DEFAULT_INTERNAL_API_HOST.to_string(),
+            port: DEFAULT_INTERNAL_API_PORT,
+            auth_method: None,
+            shared_secret: None,
+        }
+    }
+}
+
+impl InternalApiConfig {
+    /// The `host:port` string the admin listener binds under the hyper
+    /// runtime, asserted non-empty so a misconfigured host can never produce
+    /// a degenerate bind address.
+    pub fn bind_address(&self) -> String {
+        assert!(
+            !self.host.is_empty(),
+            "internal_api.host must be non-empty before a bind address is composed"
+        );
+        format!("{}:{}", self.host, self.port)
+    }
 }
 
 impl std::fmt::Debug for InternalApiConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InternalApiConfig")
             .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
             .field("auth_method", &self.auth_method)
             .field(
                 "shared_secret",
@@ -1133,5 +1237,142 @@ role = "admin"
 
         assert!(result.is_ok(), "non-empty secret must pass: {result:?}");
         assert!(config.internal_api.enabled);
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin listener separation (task 04): host/port defaults and collision rule
+    // -------------------------------------------------------------------------
+
+    /// The admin listener defaults to loopback on the port above the public
+    /// listener: publishing it must be an explicit configuration act, and the
+    /// default must never collide with `server.host`/`server.port`.
+    #[test]
+    fn internal_api_listener_defaults_to_loopback_adjacent_port() {
+        let config = InternalApiConfig::default();
+
+        assert_eq!(config.host, DEFAULT_INTERNAL_API_HOST);
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, DEFAULT_INTERNAL_API_PORT);
+        assert_eq!(config.port, 8081);
+        assert_eq!(
+            config.bind_address(),
+            format!("{DEFAULT_INTERNAL_API_HOST}:{DEFAULT_INTERNAL_API_PORT}")
+        );
+    }
+
+    /// Table over the collision predicate: identical pairs collide; equal
+    /// ports with any wildcard side collide; different ports never do.
+    #[test]
+    fn listeners_collide_matches_exact_and_wildcard_pairs_only() {
+        let cases = [
+            ("0.0.0.0", 8081_u16, "0.0.0.0", 8081_u16, true),
+            ("127.0.0.1", 8081, "127.0.0.1", 8081, true),
+            ("0.0.0.0", 8080, "127.0.0.1", 8081, false),
+            ("127.0.0.1", 8080, "127.0.0.1", 8081, false),
+            // Equal port, either side wildcard: the wildcard listener covers
+            // every interface including the specific one.
+            ("0.0.0.0", 8081, "127.0.0.1", 8081, true),
+            ("127.0.0.1", 8081, "::", 8081, true),
+            ("[::]", 8081, "[::]", 8081, true),
+            // Equal port, both specific and distinct hosts: separate sockets.
+            ("127.0.0.1", 8081, "10.0.0.5", 8081, false),
+        ];
+        for (public_host, public_port, admin_host, admin_port, expected) in cases {
+            assert_eq!(
+                listeners_collide(public_host, public_port, admin_host, admin_port),
+                expected,
+                "public {public_host}:{public_port} vs admin {admin_host}:{admin_port}"
+            );
+        }
+    }
+
+    /// Negative space: role = "all" with an enabled internal API whose
+    /// listener collides with the public socket must fail startup — two
+    /// listeners are the whole point of the split, and a shared socket would
+    /// silently re-merge the planes.
+    #[test]
+    fn validate_rejects_all_role_with_colliding_admin_listener() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.server.port = 8080;
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some("shhh".to_string());
+        config.internal_api.host = "0.0.0.0".to_string();
+        config.internal_api.port = 8080;
+
+        let err = config
+            .validate()
+            .expect_err("a colliding admin listener must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("internal_api"),
+                    "detail must name the colliding section: {detail}"
+                );
+                assert!(
+                    detail.contains("collides"),
+                    "detail must describe the collision: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Paired positive: the same colliding values under role = "admin" are
+    /// fine, because that role never binds the public socket at all.
+    #[test]
+    fn validate_accepts_admin_role_on_the_public_port() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.server.port = 8080;
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some("shhh".to_string());
+        config.internal_api.host = "0.0.0.0".to_string();
+        config.internal_api.port = 8080;
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "role=admin binds only the admin socket, so no collision exists: {result:?}"
+        );
+    }
+
+    /// And role = "all" with distinct ports (the documented default shape)
+    /// validates: the collision rule fires only on genuine overlap.
+    #[test]
+    fn validate_accepts_all_role_with_distinct_listeners() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some("shhh".to_string());
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "the default loopback:8081 admin listener must not collide: {result:?}"
+        );
+        assert_ne!(config.internal_api.port, config.server.port);
+    }
+
+    /// A disabled internal API removes the admin listener entirely, so its
+    /// host/port can duplicate anything without failing validation.
+    #[test]
+    fn validate_ignores_admin_listener_collision_when_disabled() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = false;
+        config.internal_api.host = "0.0.0.0".to_string();
+        config.internal_api.port = config.server.port;
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "a disabled admin listener cannot collide: {result:?}"
+        );
+        assert!(!config.internal_api.enabled);
     }
 }

@@ -12,17 +12,24 @@ use crate::middleware::internal_auth::internal_auth_layer;
 use crate::state::AppState;
 use oidc_exchange_core::domain::{NewUser, UserPatch};
 
-/// Build the internal API router with shared-secret auth middleware.
+/// Build the internal API surface with relative route paths, behind the
+/// operator-auth layer.
+///
+/// The auth layer is scoped to *this* router only: callers mount it under
+/// `/internal` via [`routes::internal_routes`] (`nest`), so the layer can never
+/// wrap the admin listener's other routes or its fallback — an unmatched path
+/// on the admin plane must render a routing-level 404, not an authentication
+/// rejection, and `/health` must stay reachable without a credential.
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/internal/stats", get(stats))
-        .route("/internal/users", get(list_users).post(create_user))
+        .route("/stats", get(stats))
+        .route("/users", get(list_users).post(create_user))
         .route(
-            "/internal/users/{id}",
+            "/users/{id}",
             get(get_user).patch(update_user).delete(delete_user),
         )
         .route(
-            "/internal/users/{id}/claims",
+            "/users/{id}/claims",
             get(get_claims)
                 .put(set_claims)
                 .patch(merge_claims)

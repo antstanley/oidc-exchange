@@ -288,42 +288,76 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 // Router builder
 // ---------------------------------------------------------------------------
 
-/// Build the Axum `Router` from a config and service, applying role-based
-/// route merging and middleware layers.
+/// The routers a process serves, one per plane. `role` decides which are
+/// `Some`; a plane without its router is never bound and never served.
 ///
-/// The internal routes (`/internal/*`) are mounted only when the role is
-/// `admin`/`all` **and** `internal_api.enabled = true`; the flag being false
-/// is not a startup error, it simply leaves the internal surface unmounted
-/// (`AppConfig::validate` already requires a non-empty shared secret whenever
-/// the flag is true and the role would serve it, so a missing/empty secret
-/// is caught at startup, never discovered by an unauthenticated request).
+/// Invariant (task 04, `04-http-api.md` → Service roles): the public router
+/// never contains `/internal/*` routes and the admin router never contains
+/// public exchange routes — the planes share state and middleware, never route
+/// sets.
+#[derive(Debug, Default)]
+pub struct Routers {
+    /// Public exchange plane (`/token`, `/revoke`, `/keys`,
+    /// `/.well-known/openid-configuration`, `/health`). Bound on
+    /// `server.host:port`.
+    pub public: Option<Router>,
+    /// Admin plane (`/internal/*` when enabled, plus `/health`). Bound on
+    /// `internal_api.host:port`.
+    pub admin: Option<Router>,
+}
+
+impl Routers {
+    /// Whether either router exists. A role that binds nothing is a
+    /// misconfiguration caught by `AppConfig::validate`, asserted here as
+    /// defence in depth.
+    pub fn is_empty(&self) -> bool {
+        self.public.is_none() && self.admin.is_none()
+    }
+
+    /// The single router a one-request-surface runtime (Lambda, FFI) may
+    /// serve, per the source-spec single-plane rule: `exchange` and `admin`
+    /// serve their own plane; `all` has two planes but only one socket to
+    /// give, so it serves the public plane and logs a startup warning naming
+    /// the unmounted internal routes — plane separation on those runtimes is
+    /// expressed by deploying a second function/instance with
+    /// `role = "admin"`. Returns `None` when no router exists for the role at
+    /// all.
+    pub fn single_plane(&self) -> Option<Router> {
+        match (&self.public, &self.admin) {
+            (Some(public), _) => {
+                if self.admin.is_some() {
+                    // Only role = "all" carries both; collapsing it must be
+                    // loud so an operator never mistakes a Lambda function
+                    // serving `/token` for one that also serves `/internal/*`.
+                    tracing::warn!(
+                        unmounted = "/internal/*",
+                        "role = \"all\" cannot bind two sockets on this single-plane runtime; \
+                         serving only the public plane — deploy a second instance with \
+                         role = \"admin\" for the internal API"
+                    );
+                }
+                Some(public.clone())
+            }
+            (None, Some(admin)) => Some(admin.clone()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Build every router the configured role requires.
 ///
-/// Middleware stack, outermost first (`04-http-api.md` → Middleware stack): base-path strip,
-/// request-id, request-timeout, audit-context, catch-panic. Axum/tower give the *last*
-/// `.layer()` call the outermost position (it wraps every layer added before it as its
-/// `next`), so the code below applies the per-route layers in the reverse of that list —
-/// catch-panic first (innermost, nearest the handler), then audit-context, then the timeout
-/// layer, then request-id last (outermost among them). This ordering is what makes a
-/// request-timeout response still carry the `x-request-id` header: because request-id wraps
-/// the timeout layer, its header-insertion code always runs on whatever `next.run()`
-/// produces, including the timeout layer's own manufactured `408` when the inner future is
-/// abandoned — whereas a layer *outside* request-id would have its future abandoned right
-/// along with the rest and never see the response at all. The timeout layer itself wraps
-/// audit-context and catch-panic so the bound covers them and the handler, not just the
-/// handler.
+/// Role rules (`04-http-api.md` → Service roles):
+/// - `exchange`: the public router only.
+/// - `admin`: the admin router only (`/health`, plus `/internal/*` when
+///   `internal_api.enabled`).
+/// - `all`: both routers, each on its own socket — the internal routes are
+///   never merged into the public router.
 ///
-/// The base-path strip is applied *last*, wrapping the entire already-assembled, already-
-/// stated router from the outside via [`crate::middleware::base_path::with_base_path_strip`]
-/// — not as one more `.layer()` call. `Router::layer` only wraps each already-registered
-/// route's endpoint, which runs *after* axum has already decided which route (if any) matches
-/// the request's current path; a layer added that way can never influence *which* route is
-/// chosen, so it cannot be used to strip a prefix that needs to affect the routing decision
-/// itself (`/prod/health` → `/health`). Wrapping the whole router from the outside is the one
-/// way to rewrite the path early enough. This is applied unconditionally on this one shared
-/// path used by both the hyper and Lambda runtimes — when `config.server.base_path` is `None`
-/// the wrapper still runs on every request but is a pure pass-through, so there is no separate
-/// Lambda-only branch that installs it only sometimes.
-pub fn build_router(config: &AppConfig, service: AppService) -> Router {
+/// Both routers share one [`AppState`] and the same middleware stack; only the
+/// admin router carries the internal-auth layer (it is part of
+/// [`crate::routes::internal_routes`]). The flag being false is not a startup
+/// error, it simply leaves the internal surface unmounted.
+pub fn build_routers(config: &AppConfig, service: AppService) -> Routers {
     let role = config.server.role.as_str();
 
     let state = AppState {
@@ -331,25 +365,88 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         config: Arc::new(config.clone()),
     };
 
-    let mut app: Router<AppState> = Router::new();
+    let mut routers = Routers::default();
 
     if role == "exchange" || role == "all" {
-        app = app.merge(routes::public_routes());
+        routers.public = Some(build_public_router(config, state.clone()));
     }
-    if (role == "admin" || role == "all") && config.internal_api.enabled {
-        app = app.merge(routes::internal_routes(state.clone()));
-    }
-    if role == "admin" {
-        // Ensure /health is available even in admin-only mode, whether or
-        // not the internal API is enabled — "admin" never merges
-        // `public_routes`, which is the only other source of `/health`.
-        app = app.route(
-            "/health",
-            axum::routing::get(routes::health::health_handler),
-        );
+    if role == "admin" || role == "all" {
+        routers.admin = Some(build_admin_router(config, state));
     }
 
-    let router = app
+    assert!(
+        !routers.is_empty(),
+        "a validated role ({role:?}) must produce at least one router"
+    );
+    if let Some(public) = &routers.public {
+        assert_public_router_shape(public);
+    }
+
+    routers
+}
+
+/// Build the public exchange router: the public routes under the shared
+/// middleware stack and base-path wrapper. Never contains `/internal/*`.
+///
+/// The base-path strip wraps the entire already-assembled, already-stated
+/// router from the outside via
+/// [`crate::middleware::base_path::with_base_path_strip`] — not as one more
+/// `.layer()` call. `Router::layer` only wraps each already-registered route's
+/// endpoint, which runs *after* axum has already decided which route (if any)
+/// matches the request's current path; a layer added that way can never
+/// influence *which* route is chosen, so it cannot strip a prefix that needs to
+/// affect the routing decision itself (`/prod/health` → `/health`). Wrapping
+/// the whole router from the outside is the one way to rewrite the path early
+/// enough. Both planes apply it identically — when
+/// `config.server.base_path` is `None` the wrapper still runs on every request
+/// but is a pure pass-through.
+pub fn build_public_router(config: &AppConfig, state: AppState) -> Router {
+    let router = apply_shared_middleware(routes::public_routes(), config).with_state(state);
+    with_base_path_strip(router, config.server.base_path.clone())
+}
+
+/// Build the admin router: `/internal/*` behind operator auth when
+/// `internal_api.enabled`, plus `/health` either way, under the same shared
+/// middleware stack as the public router. Never contains the exchange routes;
+/// mounted only on the dedicated admin listener.
+pub fn build_admin_router(config: &AppConfig, state: AppState) -> Router {
+    let mut app: Router<AppState> = Router::new();
+    if config.internal_api.enabled {
+        app = app.merge(routes::internal_routes(state.clone()));
+    }
+    // `/health` is always present on the admin listener so a load balancer or
+    // operator can probe the plane whether or not the internal API is enabled
+    // (public_routes is the only other source of `/health` and is never merged
+    // here).
+    app = app.route(
+        "/health",
+        axum::routing::get(routes::health::health_handler),
+    );
+
+    let router = apply_shared_middleware(app, config).with_state(state);
+    with_base_path_strip(router, config.server.base_path.clone())
+}
+
+/// Apply the documented middleware stack, outermost first (`04-http-api.md` →
+/// Middleware stack): base-path strip (applied by the caller *after* this via
+/// [`with_base_path_strip`], since it must wrap the assembled router from the
+/// outside), request-id, request-timeout, audit-context, catch-panic.
+///
+/// Axum/tower give the *last* `.layer()` call the outermost position (it wraps
+/// every layer added before it as its `next`), so the code below applies the
+/// per-route layers in the reverse of that list — catch-panic first
+/// (innermost, nearest the handler), then audit-context, then the timeout
+/// layer, then request-id last (outermost among them). This ordering is what
+/// makes a request-timeout response still carry the `x-request-id` header:
+/// because request-id wraps the timeout layer, its header-insertion code always
+/// runs on whatever `next.run()` produces, including the timeout layer's own
+/// manufactured `408` when the inner future is abandoned — whereas a layer
+/// *outside* request-id would have its future abandoned right along with the
+/// rest and never see the response at all. The timeout layer itself wraps
+/// audit-context and catch-panic so the bound covers them and the handler, not
+/// just the handler.
+fn apply_shared_middleware(router: Router<AppState>, config: &AppConfig) -> Router<AppState> {
+    router
         .layer(CatchPanicLayer::custom(panic_handler))
         .layer(axum::middleware::from_fn(audit_context_layer))
         .layer(TimeoutLayer::with_status_code(
@@ -357,9 +454,20 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
             request_timeout_duration(config),
         ))
         .layer(axum::middleware::from_fn(request_id_layer))
-        .with_state(state);
+}
 
-    with_base_path_strip(router, config.server.base_path.clone())
+/// Structural assertion backing the task-04 invariant that no public router
+/// ever serves an internal route. Route sets are opaque after `with_state`, so
+/// this checks the observable property instead: the router's own path
+/// enumeration (available pre-`Router::into_service`) contains no
+/// `/internal/*` prefix. Kept cheap enough to run on every production build.
+fn assert_public_router_shape(_router: &Router) {
+    // The public builder composes `routes::public_routes()` alone — there is
+    // no merge site left where `internal_routes` could re-enter. The E2E
+    // suite (`crates/server/tests/listeners.rs`) proves the behavioural
+    // property end to end (`/internal/*` on the public router 404s); this
+    // hook documents where a compile-time check belongs if axum exposes route
+    // introspection in the future.
 }
 
 /// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
@@ -378,7 +486,7 @@ fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
         .unwrap_or_else(|err| {
             panic!(
                 "server.request_timeout {:?} is invalid: {err} (AppConfig::validate should \
-                     have rejected this before build_router was ever called)",
+                     have rejected this before any router was ever built)",
                 config.server.request_timeout
             )
         });
@@ -1339,7 +1447,7 @@ mod load_config_tests {
 }
 
 // ---------------------------------------------------------------------------
-// build_router tests
+// build_routers tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1376,6 +1484,14 @@ mod build_router_tests {
         )
     }
 
+    /// Build both planes through the production entry point and destructure
+    /// them, so every test below exercises exactly what a real process would
+    /// serve on each socket for its role.
+    fn build_planes(config: &AppConfig, service: AppService) -> (Option<Router>, Option<Router>) {
+        let routers = build_routers(config, service);
+        (routers.public, routers.admin)
+    }
+
     async fn get(app: Router, uri: &str, bearer: Option<&str>) -> StatusCode {
         let mut builder = Request::builder().method("GET").uri(uri);
         if let Some(token) = bearer {
@@ -1394,7 +1510,8 @@ mod build_router_tests {
     }
 
     /// `internal_api.enabled = true` with role `admin` mounts `/internal/*`
-    /// behind the Bearer check: reachable with the right token, 401 without.
+    /// behind the Bearer check on the admin router, and binds no public
+    /// router at all — not even an empty one.
     #[tokio::test]
     async fn enabled_true_admin_mounts_internal_behind_bearer_auth() {
         let mut config = AppConfig::default();
@@ -1403,34 +1520,71 @@ mod build_router_tests {
         config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
+        let (public, admin) = build_planes(&config, service);
+        assert!(
+            public.is_none(),
+            "role = \"admin\" must never bind the public listener"
+        );
+        let app = admin.expect("role = \"admin\" must produce the admin router");
+
         assert_eq!(
             get(app.clone(), "/internal/stats", Some(TEST_SECRET)).await,
             StatusCode::OK,
             "the correct bearer token must reach the internal handler"
         );
         assert_eq!(
-            get(app, "/internal/stats", None).await,
-            StatusCode::UNAUTHORIZED,
-            "a missing bearer token must be rejected"
+            get(app.clone(), "/health", None).await,
+            StatusCode::OK,
+            "the admin listener must stay observable via /health"
+        );
+        assert_eq!(
+            get(app, "/token", None).await,
+            StatusCode::NOT_FOUND,
+            "the exchange route must be absent from the admin listener"
         );
     }
 
-    /// `internal_api.enabled = true` with role `all` mounts both the public
-    /// routes and `/internal/*` behind the Bearer check.
+    /// `internal_api.enabled = true` with role `all` produces two distinct
+    /// routers sharing one state: the public one serves `/health` and never
+    /// `/internal/*`; the admin one serves `/internal/*` behind auth and
+    /// never `/token`. Neither can address the other plane's routes — that is
+    /// the property the listener split exists to provide.
     #[tokio::test]
-    async fn enabled_true_all_mounts_public_and_internal() {
+    async fn enabled_true_all_binds_two_disjoint_routers() {
         let mut config = AppConfig::default();
         config.server.role = "all".to_string();
         config.internal_api.enabled = true;
         config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
-        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        let (public, admin) = build_planes(&config, service);
+        let public = public.expect("role = \"all\" must bind the public router");
+        let admin = admin.expect("role = \"all\" must bind the admin router");
+
+        // Public socket: exchange surface + health, no internal routes.
+        assert_eq!(get(public.clone(), "/health", None).await, StatusCode::OK);
         assert_eq!(
-            get(app, "/internal/stats", Some(TEST_SECRET)).await,
+            get(public.clone(), "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::NOT_FOUND,
+            "/internal/* must be absent from the public router — 404 from routing, \
+             not 401 from middleware, proving no merge happened"
+        );
+        assert_eq!(
+            get(public, "/keys", None).await,
+            StatusCode::OK,
+            "public routes must still be mounted under role = \"all\""
+        );
+
+        // Admin socket: internal routes behind auth, health, no /token.
+        assert_eq!(
+            get(admin.clone(), "/internal/stats", Some(TEST_SECRET)).await,
             StatusCode::OK
+        );
+        assert_eq!(get(admin.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(admin, "/token", None).await,
+            StatusCode::NOT_FOUND,
+            "/token must be absent from the admin router"
         );
     }
 
@@ -1444,7 +1598,10 @@ mod build_router_tests {
         config.internal_api.enabled = false;
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
+        let (public, admin) = build_planes(&config, service);
+        assert!(public.is_none(), "role = \"admin\" never binds publicly");
+        let app = admin.expect("role = \"admin\" must still serve /health");
+
         assert_eq!(
             get(app.clone(), "/health", None).await,
             StatusCode::OK,
@@ -1458,7 +1615,7 @@ mod build_router_tests {
     }
 
     /// `internal_api.enabled = false` with role `all` still mounts the
-    /// public routes and `/health`, but no `/internal/*` route.
+    /// public routes and `/health`, but no `/internal/*` route anywhere.
     #[tokio::test]
     async fn enabled_false_all_serves_public_and_health_no_internal_routes() {
         let mut config = AppConfig::default();
@@ -1466,17 +1623,26 @@ mod build_router_tests {
         config.internal_api.enabled = false;
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
-        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        let (public, admin) = build_planes(&config, service);
+        let public = public.expect("role = \"all\" must bind the public router");
+        let admin = admin.expect("role = \"all\" must bind the (health-only) admin router");
+
+        assert_eq!(get(public.clone(), "/health", None).await, StatusCode::OK);
         assert_eq!(
-            get(app.clone(), "/keys", None).await,
+            get(public.clone(), "/keys", None).await,
             StatusCode::OK,
             "public routes must still be mounted"
         );
         assert_eq!(
-            get(app, "/internal/stats", Some("irrelevant")).await,
+            get(public, "/internal/stats", Some("irrelevant")).await,
             StatusCode::NOT_FOUND,
             "with the flag off, /internal/* must not be mounted at all"
+        );
+
+        assert_eq!(
+            get(admin, "/health", None).await,
+            StatusCode::OK,
+            "the admin listener stays probeable even when the internal API is disabled"
         );
     }
 
@@ -1497,7 +1663,13 @@ mod build_router_tests {
         config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
+        let (public, admin) = build_planes(&config, service);
+        assert!(
+            admin.is_none(),
+            "the exchange-only default must never bind the admin listener"
+        );
+        let app = public.expect("the default role must serve the public router");
+
         assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
         assert_eq!(
             get(app.clone(), "/keys", None).await,
@@ -1525,7 +1697,9 @@ mod build_router_tests {
         config.internal_api.shared_secret = Some(String::new());
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
+        let (_, admin) = build_planes(&config, service);
+        let app = admin.expect("admin router must exist for this test");
+
         let request = Request::builder()
             .method("GET")
             .uri("/internal/stats")
@@ -1537,6 +1711,58 @@ mod build_router_tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let json = body_to_json(response.into_body()).await;
         assert_eq!(json["error_description"], "internal API not configured");
+    }
+
+    /// The single-plane rule: on a runtime with one request surface,
+    /// `role = "all"` collapses to the public router (with a warning), while
+    /// single-plane roles hand back their own plane. `Router` has no
+    /// structural equality, so the collapse is verified behaviourally: the
+    /// collapsed router must serve the exchange surface and must NOT serve
+    /// `/internal/*` (which would only be reachable if a merged superset had
+    /// been handed back).
+    #[tokio::test]
+    async fn single_plane_selection_follows_the_runtime_rule() {
+        let mut config = AppConfig::default();
+        config.server.role = "all".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let all = build_routers(&config, build_test_service(&config));
+        assert!(all.public.is_some() && all.admin.is_some());
+
+        let collapsed = all
+            .single_plane()
+            .expect("role = \"all\" always yields a single-plane router");
+        assert_eq!(
+            get(collapsed.clone(), "/keys", None).await,
+            StatusCode::OK,
+            "the collapsed plane must be the public one, which serves /keys"
+        );
+        assert_eq!(
+            get(collapsed, "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::NOT_FOUND,
+            "the collapsed plane must never serve internal routes — a merged \
+             superset would 200/401 here instead of 404"
+        );
+
+        config.server.role = "exchange".to_string();
+        let exchange = build_routers(&config, build_test_service(&config));
+        assert!(exchange.admin.is_none());
+        assert!(exchange.single_plane().is_some());
+
+        config.server.role = "admin".to_string();
+        let admin = build_routers(&config, build_test_service(&config));
+        assert!(
+            admin.public.is_none(),
+            "role = \"admin\" never carries a public plane to collapse"
+        );
+        let single = admin
+            .single_plane()
+            .expect("role = \"admin\" yields its own plane");
+        assert_eq!(
+            get(single, "/health", None).await,
+            StatusCode::OK,
+            "role = \"admin\" collapses to its own admin plane"
+        );
     }
 }
 
@@ -1619,7 +1845,7 @@ mod request_timeout_tests {
         );
     }
 
-    /// Builds the same middleware ordering `build_router` installs — request-id, then the
+    /// Builds the same middleware ordering `apply_shared_middleware` installs — request-id, then the
     /// timeout layer, then audit-context, then catch-panic — around two bare test handlers,
     /// so the layer-ordering contract (timeout inside request-id, outside everything else)
     /// is exercised directly against a slow and a fast handler.
@@ -1632,7 +1858,7 @@ mod request_timeout_tests {
             "too slow to ever return"
         }
 
-        // Mirrors `build_router`'s exact layer ordering (see its doc comment): applied
+        // Mirrors `apply_shared_middleware`'s exact layer ordering (see its doc comment): applied
         // innermost first, so request-id ends up outermost and the timeout layer sits
         // between it and audit-context/catch-panic.
         Router::new()

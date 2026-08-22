@@ -22,6 +22,13 @@ pub fn public_routes() -> Router<AppState> {
         )
 }
 
+/// Mount the internal API under its `/internal` prefix.
+///
+/// `nest` (rather than full-path routes plus a router-wide layer) is what
+/// keeps the operator-auth layer confined to the `/internal` subtree: the
+/// admin listener's `/health` route and its fallback never pass through it,
+/// so unmatched paths on the admin plane 404 at the routing level instead of
+/// surfacing an authentication rejection for routes that do not exist.
 pub fn internal_routes(state: AppState) -> Router<AppState> {
-    internal::router(state)
+    Router::new().nest("/internal", internal::router(state))
 }
