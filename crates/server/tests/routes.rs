@@ -923,3 +923,167 @@ async fn token_valid_refresh_grant_still_succeeds() {
     let json = body_to_json(response.into_body()).await;
     assert!(json.get("access_token").is_some());
 }
+
+// ===========================================================================
+// Credential-route cache control (task 03). Every /token and /revoke
+// response — success and OAuth error alike — carries `Cache-Control: no-store`
+// and `Pragma: no-cache`; /keys, discovery, and /health stay unmarked.
+// ===========================================================================
+
+fn assert_no_store_headers_marked(response: &axum::response::Response) {
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .map(|v| v.to_str().unwrap()),
+        Some("no-store"),
+        "credential response must carry the exact Cache-Control: no-store directive"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("pragma")
+            .map(|v| v.to_str().unwrap()),
+        Some("no-cache"),
+        "credential response must carry the exact Pragma: no-cache directive"
+    );
+}
+
+fn assert_no_cache_headers_absent(response: &axum::response::Response) {
+    // Negative space: the public metadata endpoints keep their own cacheable
+    // policy — a blanket no-store over the whole router would be wrong.
+    assert!(
+        response.headers().get("cache-control").is_none(),
+        "public metadata responses must not be marked no-store"
+    );
+    assert!(
+        response.headers().get("pragma").is_none(),
+        "public metadata responses must not be marked no-cache"
+    );
+}
+
+#[tokio::test]
+async fn token_success_response_carries_no_store_headers() {
+    let (app, _repo) = build_test_app();
+
+    let response = post_form(
+        &app,
+        "/token",
+        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_no_store_headers_marked(&response);
+}
+
+#[tokio::test]
+async fn token_unsupported_grant_error_response_carries_no_store_headers() {
+    let (app, _repo) = build_test_app();
+
+    let response = post_form(&app, "/token", "grant_type=client_credentials").await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_no_store_headers_marked(&response);
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unsupported_grant_type");
+}
+
+/// The `ApiError::Domain` error path (rendered by `into_response` inside the
+/// handler's result) must be covered too — an invalid_request envelope is
+/// credential-adjacent and must not be storable either.
+#[tokio::test]
+async fn token_invalid_request_error_response_carries_no_store_headers() {
+    let (app, _repo) = build_test_app();
+
+    let response = post_form(
+        &app,
+        "/token",
+        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test&id_token=fake.id.token",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_no_store_headers_marked(&response);
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "invalid_request");
+}
+
+#[tokio::test]
+async fn revoke_response_carries_no_store_headers() {
+    let (app, _repo) = build_test_app();
+
+    let response = post_form(
+        &app,
+        "/revoke",
+        "token=some-refresh-token&token_type_hint=refresh_token",
+    )
+    .await;
+
+    // /revoke sits in the shared credential route group by explicit source-
+    // spec decision even though RFC 7009 imposes no cache requirement.
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_no_store_headers_marked(&response);
+
+    // The 503 store-failure path on the same route is marked as well. A real
+    // session must exist first: an unknown token short-circuits to 200
+    // without touching the failing store call (RFC 7009 idempotency).
+    let (app, session_repo) = build_test_app();
+    let exchanged = post_form(
+        &app,
+        "/token",
+        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test",
+    )
+    .await;
+    assert_eq!(exchanged.status(), StatusCode::OK);
+    let json = body_to_json(exchanged.into_body()).await;
+    let refresh_token = json["refresh_token"].as_str().unwrap().to_string();
+
+    session_repo.set_session_fail_mode(true).await;
+    let failing = post_form(
+        &app,
+        "/revoke",
+        &format!("token={refresh_token}&token_type_hint=refresh_token"),
+    )
+    .await;
+    assert_eq!(failing.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_no_store_headers_marked(&failing);
+}
+
+#[tokio::test]
+async fn keys_response_has_no_cache_directives() {
+    let (app, _repo) = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/keys")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_no_cache_headers_absent(&response);
+}
+
+#[tokio::test]
+async fn discovery_response_has_no_cache_directives() {
+    let (app, _repo) = build_test_app();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/.well-known/openid-configuration")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_no_cache_headers_absent(&response);
+}
