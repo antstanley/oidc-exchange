@@ -40,8 +40,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_id_provider ON users(extern
 CREATE TABLE IF NOT EXISTS sessions (
     refresh_token_hash  TEXT PRIMARY KEY,
     user_id             TEXT NOT NULL,
+    family_id           TEXT,
+    generation          INTEGER NOT NULL DEFAULT 0,
     provider            TEXT NOT NULL,
     expires_at          TEXT NOT NULL,
+    rotated_at          TEXT,
     device_id           TEXT,
     user_agent          TEXT,
     ip_address          TEXT,
@@ -88,6 +91,10 @@ pub async fn create_pool(path: &str) -> std::result::Result<SqlitePool, Error> {
     // `CREATE TABLE IF NOT EXISTS` above only covers fresh databases; a `users` table
     // that predates the `version` column needs an explicit, idempotent `ALTER TABLE`.
     ensure_version_column(&pool).await?;
+    // Same for a `sessions` table that predates the session-family columns:
+    // without them the row mapping in this module cannot round-trip a
+    // `Session` (which now carries `family_id`/`generation`/`rotated_at`).
+    ensure_session_family_columns(&pool).await?;
 
     Ok(pool)
 }
@@ -116,6 +123,50 @@ async fn ensure_version_column(pool: &SqlitePool) -> std::result::Result<(), Err
         })?;
     }
 
+    Ok(())
+}
+
+/// The `sessions` columns introduced with refresh-token rotation, as
+/// `(column name, ALTER TABLE statement)` pairs. Applied to a table that
+/// predates rotation; each is a no-op once present (`pragma_table_info`
+/// probe first — SQLite's `ADD COLUMN` has no `IF NOT EXISTS`). Legacy rows
+/// get NULL `family_id`/`rotated_at` and generation 0.
+const SESSION_FAMILY_COLUMNS: [(&str, &str); 3] = [
+    (
+        "family_id",
+        "ALTER TABLE sessions ADD COLUMN family_id TEXT",
+    ),
+    (
+        "generation",
+        "ALTER TABLE sessions ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "rotated_at",
+        "ALTER TABLE sessions ADD COLUMN rotated_at TEXT",
+    ),
+];
+
+/// Idempotently add [`SESSION_FAMILY_COLUMNS`] to a `sessions` table that
+/// predates refresh-token rotation, mirroring [`ensure_version_column`].
+async fn ensure_session_family_columns(pool: &SqlitePool) -> std::result::Result<(), Error> {
+    for (column, ddl) in SESSION_FAMILY_COLUMNS {
+        let has_column = sqlx::query("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1")
+            .bind(column)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?
+            .is_some();
+        if !has_column {
+            sqlx::query(ddl)
+                .execute(pool)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+        }
+    }
     Ok(())
 }
 
@@ -244,11 +295,33 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
                 detail: format!("failed to parse created_at: {e}"),
             })?;
 
+    // A row written before rotation shipped has a NULL family_id (the columns
+    // are added nullable by `ensure_session_family_columns`). The domain type
+    // requires the field, so the sentinel is an *empty string* — deliberately
+    // not a well-formed `fam_` id, so downstream family operations visibly
+    // fail rather than silently matching a family that does not exist. The
+    // rotation flow deletes such legacy rows on first redemption without
+    // writing a retirement record.
+    let family_id: Option<String> = row.get("family_id");
+
+    let rotated_at: Option<DateTime<Utc>> = match row.get::<Option<String>, _>("rotated_at") {
+        Some(s) => Some(
+            s.parse()
+                .map_err(|e: chrono::ParseError| Error::StoreError {
+                    detail: format!("failed to parse rotated_at: {e}"),
+                })?,
+        ),
+        None => None,
+    };
+
     Ok(Session {
         user_id: row.get("user_id"),
         refresh_token_hash: row.get("refresh_token_hash"),
+        family_id: family_id.unwrap_or_default(),
+        generation: row.get::<i64, _>("generation") as u32,
         provider: row.get("provider"),
         expires_at,
+        rotated_at,
         device_id: row.get("device_id"),
         user_agent: row.get("user_agent"),
         ip_address: row.get("ip_address"),
@@ -491,15 +564,19 @@ impl SessionRepository for SqliteRepository {
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
         let expires_at_str = session.expires_at.to_rfc3339();
         let created_at_str = session.created_at.to_rfc3339();
+        let rotated_at_str = session.rotated_at.map(|ts| ts.to_rfc3339());
 
         sqlx::query(
-            "INSERT OR REPLACE INTO sessions (refresh_token_hash, user_id, provider, expires_at, device_id, user_agent, ip_address, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR REPLACE INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .bind(&session.refresh_token_hash)
         .bind(&session.user_id)
+        .bind(&session.family_id)
+        .bind(session.generation as i64)
         .bind(&session.provider)
         .bind(&expires_at_str)
+        .bind(&rotated_at_str)
         .bind(&session.device_id)
         .bind(&session.user_agent)
         .bind(&session.ip_address)

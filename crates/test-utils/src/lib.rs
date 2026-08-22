@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
+use oidc_exchange_core::config::DEFAULT_REFRESH_REUSE_RETENTION;
 use oidc_exchange_core::domain::{
-    AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
-    INITIAL_USER_VERSION,
+    is_valid_family_id, AuditEvent, IdentityClaims, NewUser, ProviderTokens, RefreshResolution,
+    RetiredRefreshToken, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
@@ -20,21 +21,33 @@ use oidc_exchange_core::ports::{
 
 struct MockRepositoryState {
     users: HashMap<String, User>,
+    /// Live session generations, keyed by refresh-token hash. At most one
+    /// generation of a family lives at any instant.
     sessions: HashMap<String, Session>,
+    /// Retired generations retained for reuse detection, keyed by the retired
+    /// hash. Written only by `rotate_refresh_token`'s atomic swap.
+    retired: HashMap<String, RetiredRefreshToken>,
 }
 
 #[derive(Clone)]
 pub struct MockRepository {
     state: Arc<Mutex<MockRepositoryState>>,
-    /// When set, `revoke_session` and `revoke_all_user_sessions` return
-    /// `Err(StoreError)` instead of mutating state — models a session store
-    /// that is unreachable, for exercising the `/revoke` 503 path.
+    /// When set, `revoke_session`, `revoke_family`, and
+    /// `revoke_all_user_sessions` return `Err(StoreError)` instead of mutating
+    /// state — models a session store that is unreachable, for exercising the
+    /// `/revoke` 503 path.
     session_fail_mode: Arc<Mutex<bool>>,
     /// When set, `get_session_by_refresh_token` returns `Err(StoreError)`
     /// instead of a lookup result — models a session store that is
     /// unreachable during the `/revoke` presence-check read, distinct from
     /// `session_fail_mode` which only fires on the mutating revoke calls.
     session_lookup_fail_mode: Arc<Mutex<bool>>,
+    /// How long a retirement record stays readable after its rotation:
+    /// `retired_at + reuse_retention_secs`, capped per record at the family's
+    /// absolute `expires_at`. Mirrors what each persistent adapter computes
+    /// from `[token] refresh_reuse_retention`; configurable so tests can pin
+    /// record expiry deterministically instead of sleeping past the default.
+    reuse_retention_secs: u64,
 }
 
 impl MockRepository {
@@ -43,10 +56,33 @@ impl MockRepository {
             state: Arc::new(Mutex::new(MockRepositoryState {
                 users: HashMap::new(),
                 sessions: HashMap::new(),
+                retired: HashMap::new(),
             })),
             session_fail_mode: Arc::new(Mutex::new(false)),
             session_lookup_fail_mode: Arc::new(Mutex::new(false)),
+            reuse_retention_secs: Self::default_reuse_retention_secs(),
         }
+    }
+
+    /// Build a repository whose retirement records expire exactly
+    /// `reuse_retention_secs` after their rotation (still capped by the
+    /// family's absolute deadline). Must be positive: a zero-width retention
+    /// window would retire and forget a generation in the same instant,
+    /// silently disarming reuse detection.
+    pub fn with_refresh_reuse_retention_secs(reuse_retention_secs: u64) -> Self {
+        assert!(
+            reuse_retention_secs > 0,
+            "reuse retention must be greater than zero"
+        );
+        Self {
+            reuse_retention_secs,
+            ..Self::new()
+        }
+    }
+
+    fn default_reuse_retention_secs() -> u64 {
+        oidc_exchange_core::service::parse_duration_secs(DEFAULT_REFRESH_REUSE_RETENTION)
+            .expect("DEFAULT_REFRESH_REUSE_RETENTION must parse as a duration")
     }
 
     pub async fn get_all_users(&self) -> Vec<User> {
@@ -56,11 +92,26 @@ impl MockRepository {
 
     pub async fn get_all_sessions(&self) -> Vec<Session> {
         let state = self.state.lock().await;
-        state.sessions.values().cloned().collect()
+        let mut sessions: Vec<Session> = state.sessions.values().cloned().collect();
+        // Sort by hash so callers observe a deterministic order from the
+        // hash-map-backed store (assertions on collections must not depend on
+        // HashMap iteration order).
+        sessions.sort_by(|a, b| a.refresh_token_hash.cmp(&b.refresh_token_hash));
+        sessions
     }
 
-    /// Toggle whether `revoke_session` / `revoke_all_user_sessions` fail
-    /// with `Error::StoreError`, simulating an unreachable session store.
+    /// Every retained retirement record, sorted by retired hash for
+    /// deterministic inspection of the reuse-detection state.
+    pub async fn get_all_retired_tokens(&self) -> Vec<RetiredRefreshToken> {
+        let state = self.state.lock().await;
+        let mut retired: Vec<RetiredRefreshToken> = state.retired.values().cloned().collect();
+        retired.sort_by(|a, b| a.refresh_token_hash.cmp(&b.refresh_token_hash));
+        retired
+    }
+
+    /// Toggle whether `revoke_session`, `revoke_family`, and
+    /// `revoke_all_user_sessions` fail with `Error::StoreError`, simulating an
+    /// unreachable session store.
     pub async fn set_session_fail_mode(&self, fail: bool) {
         *self.session_fail_mode.lock().await = fail;
     }
@@ -216,9 +267,37 @@ impl UserRepository for MockRepository {
     }
 }
 
+/// Compute a retirement record's expiry the way every backend must:
+/// `retired_at + reuse_retention`, capped at the family's absolute deadline so
+/// a record never outlives its family.
+fn retirement_expires_at(
+    retired_at: DateTime<Utc>,
+    reuse_retention_secs: u64,
+    family_expires_at: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let retention_deadline = retired_at + chrono::Duration::seconds(reuse_retention_secs as i64);
+    if retention_deadline < family_expires_at {
+        retention_deadline
+    } else {
+        family_expires_at
+    }
+}
+
 #[async_trait]
 impl SessionRepository for MockRepository {
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
+        // Precondition: callers mint well-formed family ids; a malformed one
+        // here is a programmer error, not data to store silently.
+        assert!(
+            is_valid_family_id(&session.family_id),
+            "store_refresh_token: malformed family id {:?}",
+            session.family_id
+        );
+        assert!(
+            !session.refresh_token_hash.is_empty(),
+            "store_refresh_token: refresh_token_hash must not be empty"
+        );
+
         let mut state = self.state.lock().await;
         state
             .sessions
@@ -236,6 +315,110 @@ impl SessionRepository for MockRepository {
         Ok(state.sessions.get(token_hash).cloned())
     }
 
+    /// Classify against live generations first, then retained retirement
+    /// records. A record whose successor is still live reports `Superseded`
+    /// (the grace-eligible shape); anything else it reports `Retired`. All
+    /// under one lock acquisition, so the answer can never straddle a
+    /// concurrent rotation (SR1).
+    async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
+        let state = self.state.lock().await;
+
+        if let Some(live) = state.sessions.get(token_hash) {
+            return Ok(RefreshResolution::Live(live.clone()));
+        }
+
+        let Some(record) = state.retired.get(token_hash) else {
+            return Ok(RefreshResolution::Unknown);
+        };
+
+        match state.sessions.get(&record.successor_hash) {
+            Some(successor_live) => {
+                // Pairing invariant of `rotate_refresh_token`: a successor
+                // pointer always names a generation of the same family.
+                assert_eq!(
+                    successor_live.family_id, record.family_id,
+                    "mock store corruption: successor {} names family {} but lives in {}",
+                    record.successor_hash, record.family_id, successor_live.family_id
+                );
+                Ok(RefreshResolution::Superseded {
+                    live: successor_live.clone(),
+                    retired_at: record.retired_at,
+                })
+            }
+            None => Ok(RefreshResolution::Retired {
+                family_id: record.family_id.clone(),
+                user_id: record.user_id.clone(),
+                retired_at: record.retired_at,
+            }),
+        }
+    }
+
+    /// One mutex-guarded transition performing all three effects — delete the
+    /// live row, write the retirement record, install the replacement — or
+    /// nothing (SR2/SR3/SR4). A failed condition returns before any mutation,
+    /// so the store stays byte-identical across a losing redemption.
+    async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
+        assert!(
+            is_valid_family_id(&replacement.family_id),
+            "rotate_refresh_token: malformed family id {:?}",
+            replacement.family_id
+        );
+        assert_ne!(
+            live_hash, replacement.refresh_token_hash,
+            "rotate_refresh_token: replacement must be a fresh generation"
+        );
+
+        let mut state = self.state.lock().await;
+
+        // CAS condition: the named hash must still be a live generation.
+        let Some(live) = state.sessions.get(live_hash) else {
+            return Ok(false);
+        };
+        // Precondition: a rotation replaces a generation of the same family
+        // for the same user — anything else would strand credentials in a
+        // family their holder no longer controls.
+        assert_eq!(
+            live.family_id, replacement.family_id,
+            "rotate_refresh_token: replacement family {:?} must match live family {:?}",
+            replacement.family_id, live.family_id
+        );
+        assert_eq!(
+            live.user_id, replacement.user_id,
+            "rotate_refresh_token: replacement user {:?} must match live user {:?}",
+            replacement.user_id, live.user_id
+        );
+        assert!(
+            !state.sessions.contains_key(&replacement.refresh_token_hash),
+            "rotate_refresh_token: replacement hash already exists as a live session"
+        );
+        assert!(
+            !state.retired.contains_key(&replacement.refresh_token_hash),
+            "rotate_refresh_token: replacement hash already exists as a retired record"
+        );
+
+        let retired_record = RetiredRefreshToken {
+            refresh_token_hash: live_hash.to_string(),
+            family_id: replacement.family_id.clone(),
+            user_id: replacement.user_id.clone(),
+            successor_hash: replacement.refresh_token_hash.clone(),
+            retired_at: Utc::now(),
+            expires_at: retirement_expires_at(
+                Utc::now(),
+                self.reuse_retention_secs,
+                replacement.expires_at,
+            ),
+        };
+        state
+            .retired
+            .insert(retired_record.refresh_token_hash.clone(), retired_record);
+        state.sessions.remove(live_hash);
+        state
+            .sessions
+            .insert(replacement.refresh_token_hash.clone(), replacement.clone());
+
+        Ok(true)
+    }
+
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
         if *self.session_fail_mode.lock().await {
             return Err(Error::StoreError {
@@ -245,6 +428,36 @@ impl SessionRepository for MockRepository {
         let mut state = self.state.lock().await;
         state.sessions.remove(token_hash);
         Ok(())
+    }
+
+    /// Remove the family's live generation and every retained retirement
+    /// record, returning the combined count (SR5), under one lock acquisition.
+    async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        assert!(
+            is_valid_family_id(family_id),
+            "revoke_family: malformed family id {family_id:?}"
+        );
+        if *self.session_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store failure".into(),
+            });
+        }
+
+        let mut state = self.state.lock().await;
+
+        let live_before = state.sessions.len();
+        state
+            .sessions
+            .retain(|_, session| session.family_id != family_id);
+        let sessions_removed = (live_before - state.sessions.len()) as u64;
+
+        let retired_before = state.retired.len();
+        state
+            .retired
+            .retain(|_, record| record.family_id != family_id);
+        let retired_removed = (retired_before - state.retired.len()) as u64;
+
+        Ok(sessions_removed + retired_removed)
     }
 
     async fn count_active_sessions(&self) -> Result<u64> {
@@ -258,6 +471,9 @@ impl SessionRepository for MockRepository {
         Ok(count as u64)
     }
 
+    /// Remove every live generation and retained retirement record belonging
+    /// to `user_id` — the SR5 removal guarantee applied across the user's
+    /// whole family set.
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
         if *self.session_fail_mode.lock().await {
             return Err(Error::StoreError {
@@ -266,15 +482,25 @@ impl SessionRepository for MockRepository {
         }
         let mut state = self.state.lock().await;
         state.sessions.retain(|_, s| s.user_id != user_id);
+        state.retired.retain(|_, r| r.user_id != user_id);
         Ok(())
     }
 
+    /// Sweep both expired sessions and expired retirement records; the count
+    /// covers both, mirroring the SQL adapters' two-table sweep.
     async fn cleanup_expired_sessions(&self) -> Result<u64> {
         let mut state = self.state.lock().await;
         let now = Utc::now();
-        let before = state.sessions.len();
+
+        let sessions_before = state.sessions.len();
         state.sessions.retain(|_, s| s.expires_at > now);
-        Ok((before - state.sessions.len()) as u64)
+        let sessions_removed = (sessions_before - state.sessions.len()) as u64;
+
+        let retired_before = state.retired.len();
+        state.retired.retain(|_, r| r.expires_at > now);
+        let retired_removed = (retired_before - state.retired.len()) as u64;
+
+        Ok(sessions_removed + retired_removed)
     }
 }
 

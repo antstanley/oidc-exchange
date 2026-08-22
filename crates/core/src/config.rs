@@ -37,6 +37,11 @@ impl AppConfig {
     /// - `server.request_timeout`, `token.access_token_ttl`, and
     ///   `token.refresh_token_ttl` parse via
     ///   [`crate::service::parse_duration_secs`].
+    /// - `token.refresh_rotation_grace`, `token.refresh_reuse_retention`, and
+    ///   `session_repository.cleanup_interval` parse via
+    ///   [`crate::service::parse_duration_secs`] **and** are strictly positive;
+    ///   `refresh_rotation_grace` is additionally capped at
+    ///   [`MAX_REFRESH_ROTATION_GRACE_SECS`].
     /// - Every `registration.domain_allowlist` entry is an exact domain or a
     ///   `*.`-prefixed wildcard.
     /// - When the internal API will be served (`server.role` is `admin` or
@@ -63,6 +68,20 @@ impl AppConfig {
         prefix_config_error(
             crate::service::parse_duration_secs(&self.token.refresh_token_ttl),
             "token.refresh_token_ttl",
+        )?;
+
+        validate_positive_duration_capped_secs(
+            &self.token.refresh_rotation_grace,
+            "token.refresh_rotation_grace",
+            MAX_REFRESH_ROTATION_GRACE_SECS,
+        )?;
+        validate_positive_duration_secs(
+            &self.token.refresh_reuse_retention,
+            "token.refresh_reuse_retention",
+        )?;
+        validate_positive_duration_secs(
+            &self.session_repository.cleanup_interval,
+            "session_repository.cleanup_interval",
         )?;
 
         if let Some(allowlist) = &self.registration.domain_allowlist {
@@ -103,6 +122,47 @@ fn prefix_config_error<T>(result: Result<T, Error>, field: &str) -> Result<T, Er
         },
         other => other,
     })
+}
+
+/// Parse a duration-string config field that must be strictly positive and
+/// return its value in seconds. Zero is rejected because a zero-width window
+/// or interval can never do its job (a zero grace window makes every lost
+/// response a reuse alarm; a zero cleanup interval would spin); negatives
+/// cannot be expressed through the unsigned parser, so only zero needs an
+/// explicit check.
+fn parse_positive_duration_secs(value: &str, field: &str) -> Result<u64, Error> {
+    let secs = prefix_config_error(crate::service::parse_duration_secs(value), field)?;
+    if secs == 0 {
+        return Err(Error::ConfigError {
+            detail: format!("{field}: {value:?} must be greater than zero"),
+        });
+    }
+    Ok(secs)
+}
+
+/// Validate a duration-string config field that must parse as
+/// `<integer><s|m|h|d>` and be strictly positive.
+fn validate_positive_duration_secs(value: &str, field: &str) -> Result<(), Error> {
+    parse_positive_duration_secs(value, field).map(|_| ())
+}
+
+/// [`validate_positive_duration_secs`] plus an inclusive upper bound in
+/// seconds. The grace window is a deliberate weakening of rotation (an
+/// immediately-preceding generation stays redeemable), so an unbounded value
+/// is indistinguishable from no rotation and is rejected at load rather than
+/// trusted.
+fn validate_positive_duration_capped_secs(
+    value: &str,
+    field: &str,
+    max_secs: u64,
+) -> Result<(), Error> {
+    let secs = parse_positive_duration_secs(value, field)?;
+    if secs > max_secs {
+        return Err(Error::ConfigError {
+            detail: format!("{field}: {value:?} exceeds the maximum of {max_secs}s"),
+        });
+    }
+    Ok(())
 }
 
 /// Validate a single `registration.domain_allowlist` entry: only an exact
@@ -185,7 +245,41 @@ pub struct TokenConfig {
     pub refresh_token_ttl: String,
     pub audience: Option<String>,
     pub custom_claims: Option<HashMap<String, String>>,
+    /// Whether each refresh-token redemption mints a replacement and retires
+    /// the presented generation (the default), or restores reusable tokens for
+    /// clients that cannot discard a rotated token. `false` disables both the
+    /// replacement response and rotation itself; retirement records left over
+    /// from a rotation-enabled period are then refused as unknown.
+    pub refresh_rotation: bool,
+    /// Duration string bounding how long the immediately-preceding generation
+    /// stays redeemable after a rotation. Parsed via
+    /// [`crate::service::parse_duration_secs`], validated strictly positive and
+    /// capped at [`MAX_REFRESH_ROTATION_GRACE_SECS`] by [`AppConfig::validate`].
+    pub refresh_rotation_grace: String,
+    /// Duration string bounding how long a retired generation is remembered so
+    /// its re-presentation raises a reuse alarm; per record it is additionally
+    /// capped at the family's own `expires_at`. Validated strictly positive by
+    /// [`AppConfig::validate`].
+    pub refresh_reuse_retention: String,
 }
+
+/// Upper bound, in seconds, on `[token] refresh_rotation_grace`. The grace
+/// window is a deliberate weakening — inside it a superseded generation may
+/// still rotate — so an unbounded window is indistinguishable from no
+/// rotation. See `06-configuration.md` → `[token]`.
+pub const MAX_REFRESH_ROTATION_GRACE_SECS: u64 = 60;
+
+/// Default for `[token] refresh_rotation_grace`: covers a retried HTTP round
+/// trip and little else. Named rather than a bare literal so the value backing
+/// `AppConfig::validate`, `TokenConfig::default`, and the docs stay in
+/// lockstep. See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_REFRESH_ROTATION_GRACE: &str = "10s";
+
+/// Default for `[token] refresh_reuse_retention`: long enough to cover an
+/// attacker racing the legitimate holder for the current credential, short
+/// enough that continuously-refreshing families do not accumulate thousands of
+/// retirement records. See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_REFRESH_REUSE_RETENTION: &str = "24h";
 
 impl Default for TokenConfig {
     fn default() -> Self {
@@ -194,6 +288,9 @@ impl Default for TokenConfig {
             refresh_token_ttl: "30d".to_string(),
             audience: None,
             custom_claims: None,
+            refresh_rotation: true,
+            refresh_rotation_grace: DEFAULT_REFRESH_ROTATION_GRACE.to_string(),
+            refresh_reuse_retention: DEFAULT_REFRESH_REUSE_RETENTION.to_string(),
         }
     }
 }
@@ -259,12 +356,55 @@ pub struct RepositoryConfig {
     pub sqlite: Option<SqliteConfig>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Default for `[session_repository] cleanup_interval`: how often the
+/// long-lived runtimes' session reaper calls `cleanup_expired_sessions` to
+/// sweep expired sessions and retirement records. On the natively-expiring
+/// stores (DynamoDB TTL, Valkey key expiry) the sweep is a cheap backstop. See
+/// `06-configuration.md` → Defaults summary.
+pub const DEFAULT_SESSION_CLEANUP_INTERVAL: &str = "1h";
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SessionRepositoryConfig {
     pub adapter: Option<String>,
     pub valkey: Option<ValkeyConfig>,
     pub lmdb: Option<LmdbConfig>,
+    /// Duration string setting how often the long-lived runtimes' reaper calls
+    /// `cleanup_expired_sessions` to sweep expired sessions and retirement
+    /// records. Parsed via [`crate::service::parse_duration_secs`] and
+    /// validated strictly positive by [`AppConfig::validate`] — an unparseable
+    /// or zero value fails config load rather than silently falling back.
+    pub cleanup_interval: String,
+}
+
+impl Default for SessionRepositoryConfig {
+    fn default() -> Self {
+        Self {
+            adapter: None,
+            valkey: None,
+            lmdb: None,
+            cleanup_interval: DEFAULT_SESSION_CLEANUP_INTERVAL.to_string(),
+        }
+    }
+}
+
+impl SessionRepositoryConfig {
+    /// The cleanup interval in seconds: the configured value when it parses as
+    /// a positive duration, otherwise [`DEFAULT_SESSION_CLEANUP_INTERVAL`].
+    ///
+    /// Startup validation ([`AppConfig::validate`]) already rejects malformed
+    /// and zero values before any server is built; this resolver stays total
+    /// anyway because the reaper must never panic or spin on what it reads
+    /// (tests build configs directly, bypassing validation).
+    pub fn cleanup_interval_secs(&self) -> u64 {
+        crate::service::parse_duration_secs(&self.cleanup_interval)
+            .ok()
+            .filter(|secs| *secs > 0)
+            .unwrap_or_else(|| {
+                crate::service::parse_duration_secs(DEFAULT_SESSION_CLEANUP_INTERVAL)
+                    .expect("DEFAULT_SESSION_CLEANUP_INTERVAL must parse")
+            })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

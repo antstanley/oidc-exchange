@@ -8,6 +8,12 @@ mode = "open"
 [token]
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
+refresh_rotation = true
+refresh_rotation_grace = "10s"
+refresh_reuse_retention = "24h"
+
+[session_repository]
+cleanup_interval = "1h"
 
 [audit]
 adapter = "noop"

@@ -4,7 +4,8 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use crate::domain::{
-    AuditEventType, AuditOutcome, AuditSeverity, NewUser, Session, TokenResponse, UserStatus,
+    is_valid_family_id, new_family_id, AuditEventType, AuditOutcome, AuditSeverity, NewUser,
+    Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::{create_audit_event, parse_duration_secs, AppService};
@@ -299,12 +300,22 @@ impl AppService {
         let refresh_ttl_secs = parse_duration_secs(&self.config.token.refresh_token_ttl)?;
         let expires_at = Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
 
-        // 8. Store session
+        // 8. Store session. Exchange mints the family: one `fam_` id shared by
+        // every generation this sign-in ever rotates through, generation 0,
+        // and no rotation timestamp yet.
+        let family_id = new_family_id();
+        assert!(
+            is_valid_family_id(&family_id),
+            "exchange: minted family id must be well-formed"
+        );
         let session = Session {
             user_id: user.id.clone(),
             refresh_token_hash: token_hash,
+            family_id,
+            generation: 0,
             provider: request.provider.clone(),
             expires_at,
+            rotated_at: None,
             device_id: request.device_id.clone(),
             user_agent: request.user_agent.clone(),
             ip_address: request.ip_address.clone(),

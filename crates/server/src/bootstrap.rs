@@ -1749,8 +1749,11 @@ mod postgres_bootstrap_tests {
         let session = Session {
             user_id: created.id.clone(),
             refresh_token_hash: refresh_token_hash.clone(),
+            family_id: oidc_exchange_core::domain::new_family_id(),
+            generation: 0,
             provider: "bootstrap-test".to_string(),
             expires_at: now + Duration::hours(1),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,

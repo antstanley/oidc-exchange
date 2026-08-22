@@ -7,7 +7,9 @@ use serde_json::Value;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
-    /// Present on code exchange, absent on refresh
+    /// Present on code exchange and on refresh (rotation issues a replacement
+    /// on every redemption). Absent on refresh only when
+    /// `token.refresh_rotation = false`, which restores reusable tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     /// Always "Bearer"

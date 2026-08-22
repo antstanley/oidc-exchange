@@ -50,6 +50,10 @@ pub enum AuditEventType {
     RegistrationDenied,
     ProviderError,
     Unauthorized,
+    /// A retired refresh-token generation was presented outside its grace
+    /// window: the credential chain leaked, its family was revoked. Emitted at
+    /// `AuditSeverity::Warning` so it survives the default emit threshold.
+    RefreshTokenReuse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
