@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-08-15 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
@@ -18,7 +18,39 @@
    - Otherwise require `code` and `redirect_uri` (else `InvalidRequest`),
      `provider.exchange_code` to get `ProviderTokens`, then `validate_id_token` on the
      returned `id_token`.
-3. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
+3. **Bind the assertion** — every accepted ID token, on both grant paths, passes
+   `service::assertion::bind`, which runs in this order and rejects with `InvalidGrant` at
+   the first failure (each rejection audited as `ValidationFailed`/`Warning` with a
+   `detail.check` naming the failed control):
+   - **Lifetime ceiling** — `exp - now` must not exceed `grants.max_assertion_lifetime`, so
+     the single-use marker below always outlives the assertion it guards.
+   - **`azp`** — when `aud` is an array of more than one value, `azp` is required; whenever
+     `azp` is present it must equal `provider.client_id()`. A token minted for a sibling
+     client of the same provider is rejected.
+   - **`at_hash`** — when an access token accompanies the assertion (`provider_access_token`
+     on the direct grant, `ProviderTokens.access_token` on the code path) and the assertion
+     carries `at_hash`, the claim must equal the base64url of the left-most half of the
+     digest of the access token's ASCII octets (OIDC Core §3.1.3.6). The digest follows
+     `IdentityClaims.signing_alg`: SHA-256 for `*256`, SHA-384 for `*384`, SHA-512 for
+     `*512`. An `at_hash` on an `EdDSA`-signed assertion is unverifiable and is rejected.
+     An `at_hash` with no accompanying access token is not verifiable and is skipped.
+   - **Nonce (direct grant only)** — the `nonce` claim must be present, and
+     `take_single_use("nonce:<sha256hex>")` must report it present. That single atomic
+     operation is both the nonce check and the nonce's own one-time-use guarantee: an
+     absent, expired, or already-burned nonce is indistinguishable and all three reject.
+     The code-exchange path requires no nonce — redeeming a single-use code at the
+     provider supplies the binding.
+   - **Single use** — `put_single_use(assertion_key, exp)` must report the key newly
+     inserted; a key already present means the assertion has been spent and is rejected as
+     a replay. `assertion_key` is `assertion:<provider>:<sha256hex(jti)>` when the token
+     carries a `jti`, else `assertion:<provider>:d:<sha256hex(compact_jwt)>`; the `d:`
+     discriminator keeps a literal `jti` from colliding with a digest. The record's
+     `expires_at` is the assertion's own `exp`.
+
+   Store failures during the two atomic operations propagate as typed infrastructure
+   errors (`StoreError` → 5xx), never disguised as client-fault rejections; no rejection
+   audit is emitted for them.
+4. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
    - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
    - **Found, active** → proceed (existing users bypass registration policy).
    - **Not found** → apply policy:
@@ -33,12 +65,21 @@
        `get_user_by_external_id` and continue with the existing user, re-applying the
        suspended-status check. The losing racer emits no `UserCreated` event — the winning
        create already audited it — and the flow otherwise proceeds as for a found user.
-4. **Mint refresh token** — 32 random bytes, base64url-no-pad for the opaque token; SHA-256
+5. **Mint refresh token** — 32 random bytes, base64url-no-pad for the opaque token; SHA-256
    hex of the bytes is the stored hash.
-5. **Store session** — `expires_at = now + refresh_token_ttl`; `store_refresh_token`.
-6. **Sign access token** — `build_access_token(user)` (below).
-7. **Respond** — `TokenResponse { access_token, refresh_token: Some(opaque), token_type:
+6. **Store session** — `expires_at = now + refresh_token_ttl`; `store_refresh_token`.
+7. **Sign access token** — `build_access_token(user)` (below).
+8. **Respond** — `TokenResponse { access_token, refresh_token: Some(opaque), token_type:
    "Bearer", expires_in }`.
+
+## Nonce issuance (`service/assertion.rs::mint_nonce`)
+
+`POST /nonce`, served only when `grants.id_token = true`.
+
+1. 32 random bytes, base64url-no-pad, is the returned nonce; its SHA-256 hex is the key.
+2. `put_single_use("nonce:<hash>", now + grants.nonce_ttl)`. A `false` return is a 256-bit
+   collision and is surfaced as `StoreError` rather than retried.
+3. Respond `{ nonce, expires_in }`.
 
 ## Token refresh (`refresh.rs`)
 
@@ -140,6 +181,21 @@ via `tracing` and never fail the admin call.
 
 ### Decisions
 
+- *Binding lives in the core, not the providers.* **`nonce`, `azp`, `at_hash` and
+  single-use are enforced once in `AppService::exchange`, reading `IdentityClaims.raw_claims`.**
+  The same four controls were omitted twice in two independent validators; a control that
+  every provider must inherit belongs above the provider boundary, not inside it. A Tier 3
+  provider sharing no code with either OIDC validator is covered by construction.
+- *Burn the nonce before claiming the assertion marker.* **The nonce is consumed first; the
+  single-use marker is claimed second.** The reverse order lets an attacker holding a
+  victim's assertion but no valid nonce pin the marker and deny the legitimate client its
+  own first use. In this order a partial failure costs the honest client one `POST /nonce`
+  round trip and never admits a replay.
+- *A lifetime ceiling instead of a capped marker TTL.* **An assertion whose remaining
+  lifetime exceeds `grants.max_assertion_lifetime` (default 1h) is refused.** Capping the
+  marker's TTL instead would leave the assertion replayable after the cap. Real ID tokens
+  live 5–60 minutes, so the ceiling rejects nothing legitimate and bounds the state a
+  single assertion can pin.
 - *Refresh does not rotate.* **A successful refresh returns no new refresh token.** Reusable
   refresh tokens match common client libraries; rotation is not implemented.
 - *Domain allowlist demands a verified email.* **New-user registration under an allowlist

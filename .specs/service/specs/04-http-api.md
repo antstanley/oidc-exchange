@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-08-15 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -16,6 +16,7 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 | POST | `/revoke` | `revoke` | RFC 7009 revocation: 200 for invalid/unknown tokens, 503 on backend failure |
 | GET | `/keys` | `keys` | JWKS: `{"keys":[<jwk>]}` from `KeyManager::public_jwk` |
 | GET | `/.well-known/openid-configuration` | `openid_config` | discovery document |
+| POST | `/nonce` | `nonce` | mint a single-use nonce for the direct ID-token grant; mounted only when `grants.id_token = true` |
 
 ### Internal (mounted for roles `admin` and `all`, behind Bearer auth)
 
@@ -32,6 +33,14 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 | PATCH | `/internal/users/{id}/claims` | merge claims |
 | DELETE | `/internal/users/{id}/claims` | clear claims |
 
+### POST /nonce
+
+Takes no body and returns `{"nonce": "<base64url>", "expires_in": <seconds>}`. The nonce
+is 32 random bytes, base64url-no-pad; only its SHA-256 hex digest is stored. The route is
+unauthenticated by necessity — the caller holds no credential yet — and is not mounted at
+all when the direct grant is disabled, so an operator who leaves the default in place
+gains no new public surface.
+
 ### POST /token request
 
 `application/x-www-form-urlencoded`. `grant_type` selects the flow:
@@ -39,6 +48,7 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 ```
 # code exchange:  grant_type=authorization_code & code=… & redirect_uri=… & provider=google
 # direct token:   grant_type=id_token & id_token=… & provider=google
+#                 [& provider_access_token=…]
 # refresh:        grant_type=refresh_token & refresh_token=…
 ```
 
@@ -46,12 +56,21 @@ The client names the provider (`provider=google`), not a raw issuer URL. Unknown
 `grant_type` → `unsupported_grant_type`. Response body is `TokenResponse`
 ([01-domain-model.md](01-domain-model.md)).
 
+The direct grant requires the ID token to carry a `nonce` claim whose value came from this
+service's `POST /nonce`; the client passes that value into the provider's authentication
+request and does not resend it here — the service reads it from the verified assertion.
+`provider_access_token` is optional and carries the provider access token co-issued with
+the ID token, so the `at_hash` binding can be verified. When `grants.id_token = false` an
+`id_token` field is rejected with `unsupported_grant_type` whatever `grant_type` declares,
+so the switch cannot be evaded by the field-presence branch selection.
+
 ### GET /.well-known/openid-configuration
 
 Reports `issuer`, `jwks_uri` (`/keys`), `token_endpoint`, `revocation_endpoint`, supported
-grant types (`authorization_code`, `refresh_token`), `response_types_supported` (`code`),
-`subject_types_supported` (`public`), and `id_token_signing_alg_values_supported` populated
-from `KeyManager::algorithm()`.
+grant types (`authorization_code`, `refresh_token`, and — only when `grants.id_token =
+true` — `id_token`; the document describes the grants the process actually serves),
+`response_types_supported` (`code`), `subject_types_supported` (`public`), and
+`id_token_signing_alg_values_supported` populated from `KeyManager::algorithm()`.
 
 ## Discovery / state
 
