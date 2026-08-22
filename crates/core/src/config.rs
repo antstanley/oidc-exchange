@@ -801,7 +801,9 @@ max_assertion_lifetime = "30m"
         let mut config = AppConfig::default();
         config.grants.nonce_ttl = "not-a-duration".to_string();
 
-        let err = config.validate().expect_err("bad nonce_ttl must be rejected");
+        let err = config
+            .validate()
+            .expect_err("bad nonce_ttl must be rejected");
 
         match err {
             Error::ConfigError { detail } => {

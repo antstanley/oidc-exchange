@@ -13,6 +13,11 @@ use tracing::instrument;
 /// already-expired Valkey key is ever written).
 const SESSION_TTL_SECONDS_MIN: i64 = 1;
 
+/// The same floor for single-use records: a `put_single_use` whose `expires_at` is not
+/// strictly in the future would need `SET … EX 0` (rejected server-side) or worse, so it
+/// is refused before any key is created rather than writing a born-dead record.
+const SINGLE_USE_TTL_SECONDS_MIN: i64 = 1;
+
 /// The `COUNT` hint, in keys per page, passed to every `SCAN` issued by `cleanup_expired_sessions`.
 /// This only advises the server on page size; it does not bound the total number of keys
 /// visited (the client keeps paging until the cursor returns to 0).
@@ -44,6 +49,10 @@ impl ValkeySessionRepository {
 
     fn active_sessions_key(&self) -> String {
         format!("{}active_sessions", self.key_prefix)
+    }
+
+    fn single_use_key(&self, key: &str) -> String {
+        format!("{}single_use:{}", self.key_prefix, key)
     }
 }
 
@@ -479,6 +488,68 @@ impl SessionRepository for ValkeySessionRepository {
             })?;
 
         Ok(())
+    }
+
+    #[instrument(skip(self, key))]
+    async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        let ttl_seconds = (expires_at - Utc::now()).num_seconds();
+        if ttl_seconds < SINGLE_USE_TTL_SECONDS_MIN {
+            return Err(Error::StoreError {
+                detail: format!(
+                    "refusing to store single-use record with non-future expires_at \
+                     (ttl_seconds={ttl_seconds})"
+                ),
+            });
+        }
+        debug_assert!(ttl_seconds >= SINGLE_USE_TTL_SECONDS_MIN);
+
+        // SET … NX EX is one atomic server-side operation: it writes only when the key
+        // is absent and arms the native TTL in the same breath, so a lost race leaves
+        // no partial state and an unswept record can never outlive its expiry.
+        let value = expires_at.to_rfc3339();
+        let outcome: Option<String> = self
+            .client
+            .set(
+                self.single_use_key(key),
+                value,
+                Some(Expiration::EX(ttl_seconds)),
+                Some(SetOptions::NX),
+                false,
+            )
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        Ok(outcome.is_some())
+    }
+
+    #[instrument(skip(self, key))]
+    async fn take_single_use(&self, key: &str) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        // GETDEL reads-and-removes atomically. The key carries the record's TTL, so any
+        // value GETDEL returns is definitionally live — an expired record has already
+        // been removed by the server, making expired indistinguishable from absent.
+        let removed: Option<String> =
+            self.client
+                .getdel(self.single_use_key(key))
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+
+        debug_assert!(
+            removed
+                .as_deref()
+                .map(|v| DateTime::parse_from_rfc3339(v).is_ok())
+                .unwrap_or(true),
+            "a stored single-use value must be the RFC3339 expiry it was written with"
+        );
+
+        Ok(removed.is_some())
     }
 }
 
@@ -979,5 +1050,65 @@ mod tests {
             counter_after, 1,
             "the counter must equal the live-key count (1) after cleanup with no drift"
         );
+    }
+
+    // -- Single-use conformance (shared suite in test-utils) --------------------
+    // Valkey expires single-use records natively (`SET … EX`), so the cleanup-sweep
+    // scenario does not apply and is deliberately not invoked here.
+
+    use oidc_exchange_test_utils::single_use_conformance as conformance;
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn single_use_first_claim_wins_duplicate_loses() {
+        let repo = create_test_repo().await;
+        conformance::first_claim_wins_duplicate_loses(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn single_use_consume_live_record_exactly_once() {
+        let repo = create_test_repo().await;
+        conformance::consume_live_record_exactly_once(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn single_use_expired_record_is_absent_to_put_and_take() {
+        let repo = create_test_repo().await;
+        conformance::expired_record_is_absent_to_put_and_take(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn single_use_concurrent_put_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_test_repo().await);
+        conformance::concurrent_put_has_exactly_one_winner(repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn single_use_concurrent_take_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_test_repo().await);
+        conformance::concurrent_take_has_exactly_one_winner(repo).await;
+    }
+
+    /// Negative-space specific to the native-TTL store: a put whose expiry is not
+    /// strictly ahead of now must be refused before any key exists, so no born-dead or
+    /// TTL-less record is ever written.
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn single_use_put_rejects_non_future_expiry_without_creating_a_key() {
+        let repo = create_test_repo().await;
+
+        let err = repo
+            .put_single_use("nonce:past", Utc::now() - chrono::Duration::seconds(1))
+            .await
+            .expect_err("a past-expiry put must be refused");
+        assert!(matches!(err, Error::StoreError { .. }));
+
+        let key = repo.single_use_key("nonce:past");
+        let exists: bool = repo.client.exists(&key).await.expect("exists probe");
+        assert!(!exists, "a refused put must not leave any key behind");
     }
 }
