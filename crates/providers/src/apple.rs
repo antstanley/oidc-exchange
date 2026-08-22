@@ -327,29 +327,22 @@ impl IdentityProvider for AppleProvider {
 
         let client_secret = self.generate_client_secret()?;
 
-        let client = oidc_exchange_adapters::shared::http::client();
-        let response = client
-            .post(endpoint)
-            .form(&[
-                ("token", token),
-                ("client_id", &self.client_id),
-                ("client_secret", &client_secret),
-                ("token_type_hint", "access_token"),
-            ])
-            .send()
-            .await
-            .map_err(|e| Error::ProviderError {
-                provider: "apple".into(),
-                detail: format!("Revocation request failed: {e}"),
-            })?;
+        let params = vec![
+            ("token".to_string(), token.to_string()),
+            ("client_id".to_string(), self.client_id.clone()),
+            ("client_secret".to_string(), client_secret),
+            ("token_type_hint".to_string(), "access_token".to_string()),
+        ];
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::ProviderError {
-                provider: "apple".into(),
-                detail: format!("Revocation returned {status}: {body}"),
-            });
+        // The revocation POST goes through the shared transport: status before
+        // body, bounded body, safe error detail — the response body (and with it
+        // any reflection of the posted client secret) is never echoed into the
+        // error.
+        let upstream = oidc_exchange_adapters::shared::transport::ProviderTransport
+            .post_form("apple", endpoint, &params)
+            .await?;
+        if !upstream.is_success() {
+            return Err(upstream.error_into("apple"));
         }
 
         Ok(())

@@ -1,6 +1,8 @@
 use oidc_exchange_core::error::{Error, Result};
 use serde::Deserialize;
 
+use crate::shared::transport::ProviderTransport;
+
 /// Parsed OIDC provider discovery document.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiscoveryDocument {
@@ -15,26 +17,19 @@ pub struct DiscoveryDocument {
 ///
 /// Per RFC 8414 §3.3, the `issuer` field in the returned document must be identical to
 /// the issuer URL used to construct the discovery request URL; a mismatch is rejected.
+///
+/// The fetch goes through [`ProviderTransport`], so the response status is checked
+/// before any body is read and the document body cannot exceed the shared byte
+/// ceiling — an oversized "discovery document" is rejected before it is materialised.
 pub async fn discover(issuer_url: &str) -> Result<DiscoveryDocument> {
     assert!(!issuer_url.is_empty(), "issuer_url must not be empty");
 
     let normalised_issuer = issuer_url.trim_end_matches('/');
     let url = format!("{normalised_issuer}/.well-known/openid-configuration");
-    let response = crate::shared::http::client()
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| Error::ProviderError {
-            provider: issuer_url.to_string(),
-            detail: e.to_string(),
-        })?;
-    let doc = response
-        .json::<DiscoveryDocument>()
-        .await
-        .map_err(|e| Error::ProviderError {
-            provider: issuer_url.to_string(),
-            detail: e.to_string(),
-        })?;
+    let doc: DiscoveryDocument = ProviderTransport
+        .get_json(issuer_url, &url)
+        .await?
+        .parsed(issuer_url)?;
 
     if doc.issuer.trim_end_matches('/') != normalised_issuer {
         return Err(Error::ProviderError {
@@ -185,5 +180,69 @@ mod tests {
             }
             other => panic!("expected ProviderError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_oversized_success_document_before_parsing() {
+        // A discovery document is a few kilobytes; anything at the shared byte
+        // ceiling is a hostile or broken origin, and must be rejected as the
+        // distinctive cap error before JSON materialisation, never parsed.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "x".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize + 1),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = discover(&server.uri())
+            .await
+            .expect_err("an oversized discovery document must not be accepted");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("exceeded the"),
+            "must be the distinctive cap error, got: {message}"
+        );
+        assert!(
+            message.contains(&server.uri()),
+            "the cap error must name the endpoint: {message}"
+        );
+        assert!(
+            !message.contains("invalid JSON"),
+            "the cap error must stay distinct from a parse failure: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_non_success_status_with_safe_detail() {
+        // The transport owns the status check now that it is the sole caller of
+        // the discovery fetch: a 404 must be an error whose detail comes from
+        // the safe path, not a JSON parse error over an HTML body.
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("<html>nope</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = discover(&server.uri())
+            .await
+            .expect_err("a 404 discovery response must be an error");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("404"),
+            "the status must be named in the failure: {message}"
+        );
+        assert!(
+            !message.contains("<html>"),
+            "the error body must never be echoed: {message}"
+        );
     }
 }

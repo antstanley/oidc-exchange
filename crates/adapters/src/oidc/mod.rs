@@ -231,30 +231,20 @@ impl IdentityProvider for OidcProvider {
             None => return Ok(()), // Provider doesn't support revocation
         };
 
-        let client = crate::shared::http::client();
-        let mut params = vec![("token", token)];
-
-        // Include client credentials if available
         let client_id_owned = self.client_id.clone();
-        params.push(("client_id", &client_id_owned));
+        let params = vec![
+            ("token".to_string(), token.to_string()),
+            ("client_id".to_string(), client_id_owned),
+        ];
 
-        let response = client
-            .post(endpoint)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| Error::ProviderError {
-                provider: self.provider_id.clone(),
-                detail: format!("Revocation request failed: {e}"),
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::ProviderError {
-                provider: self.provider_id.clone(),
-                detail: format!("Revocation returned {status}: {body}"),
-            });
+        // The revocation POST goes through the shared transport: status before
+        // body, bounded body, safe error detail — a non-success response's body
+        // is never echoed into the error.
+        let upstream = crate::shared::transport::ProviderTransport
+            .post_form(&self.provider_id, endpoint, &params)
+            .await?;
+        if !upstream.is_success() {
+            return Err(upstream.error_into(&self.provider_id));
         }
 
         Ok(())

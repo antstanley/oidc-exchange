@@ -21,7 +21,12 @@ static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 ///
 /// Built once, lazily, on first use: `connect_timeout` of [`CONNECT_TIMEOUT_SECS`], `timeout`
 /// of [`REQUEST_TIMEOUT_SECS`], and redirects disabled via `redirect::Policy::none()`.
-pub fn client() -> &'static reqwest::Client {
+///
+/// Crate-private on purpose: the transport is the only caller, so the
+/// "no adapter issues a provider request directly" rule is enforced by the
+/// compiler rather than by a repository scan. The webhook adapter builds its
+/// own operator-timeout client and deliberately does not use this one.
+pub(crate) fn client() -> &'static reqwest::Client {
     SHARED_CLIENT.get_or_init(build_client)
 }
 

@@ -167,27 +167,13 @@ impl JwksCache {
     }
 
     async fn fetch_keys(&self) -> Result<serde_json::Value> {
-        let response = crate::shared::http::client()
-            .get(&self.jwks_uri)
-            .send()
-            .await
-            .map_err(|e| Error::ProviderError {
-                provider: self.jwks_uri.clone(),
-                detail: e.to_string(),
-            })?;
+        // The fetch goes through the shared transport: status before body, body
+        // through the shared byte ceiling, non-success detail via the safe path.
+        let keys: serde_json::Value = crate::shared::transport::ProviderTransport
+            .get_json(&self.jwks_uri, &self.jwks_uri)
+            .await?
+            .parsed(&self.jwks_uri)?;
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(Error::ProviderError {
-                provider: self.jwks_uri.clone(),
-                detail: format!("JWKS endpoint returned non-2xx status {status}"),
-            });
-        }
-
-        let keys: serde_json::Value = response.json().await.map_err(|e| Error::ProviderError {
-            provider: self.jwks_uri.clone(),
-            detail: e.to_string(),
-        })?;
         if !keys.is_object() {
             return Err(Error::ProviderError {
                 provider: self.jwks_uri.clone(),
@@ -415,6 +401,136 @@ mod tests {
             .expect("known kid should resolve without a forced refetch");
         assert_eq!(key["kid"], "test-key-1");
         assert_eq!(key["kty"], "RSA");
+    }
+
+    /// Serve one HTTP/1.1 chunked response from a raw TCP listener. wiremock
+    /// cannot force chunked encoding, and chunked is exactly the case where an
+    /// honest `Content-Length` short-circuit does not apply.
+    async fn spawn_chunked_jwks_server(total_bytes: usize, chunk_size: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("ephemeral bind works");
+        let addr = listener.local_addr().expect("local_addr resolves");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("one connection");
+            let mut scratch = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut scratch).await.expect("readable");
+                if read == 0 || scratch[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .expect("head writable");
+            let mut remaining = total_bytes;
+            while remaining > 0 {
+                let n = remaining.min(chunk_size);
+                socket
+                    .write_all(format!("{n:x}\r\n").as_bytes())
+                    .await
+                    .expect("chunk header writable");
+                socket
+                    .write_all(&vec![b'a'; n])
+                    .await
+                    .expect("chunk writable");
+                socket
+                    .write_all(b"\r\n")
+                    .await
+                    .expect("chunk CRLF writable");
+                remaining -= n;
+            }
+            socket
+                .write_all(b"0\r\n\r\n")
+                .await
+                .expect("terminal chunk writable");
+        });
+
+        format!("http://{addr}/jwks")
+    }
+
+    #[tokio::test]
+    async fn oversized_jwks_with_honest_content_length_is_a_cap_error_and_leaves_cache_unpopulated()
+    {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "k".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize + 1),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+
+        let err = cache
+            .get_keys()
+            .await
+            .expect_err("an over-ceiling JWKS body must fail");
+        assert!(
+            format!("{err}").contains("exceeded the"),
+            "must be the distinctive cap error, got: {err}"
+        );
+        // The failed fetch must not populate the cache, exactly as for a non-2xx:
+        // a cap failure leaves no half-fetched state to be served later.
+        assert!(
+            cache.cache.read().await.is_none(),
+            "an over-limit response must never populate the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_chunked_jwks_hits_the_cap_and_never_populates_the_cache() {
+        // No Content-Length at all: only the streaming running-total bound can
+        // catch this, which is why the ceiling must apply mid-stream too.
+        let url = spawn_chunked_jwks_server(
+            crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize * 2,
+            8192,
+        )
+        .await;
+
+        let cache = JwksCache::new(url);
+
+        let err = cache
+            .get_keys()
+            .await
+            .expect_err("a chunked over-ceiling JWKS must fail");
+        assert!(
+            matches!(err, Error::ProviderError { .. }),
+            "the cap failure surfaces as a provider fault, got: {err:?}"
+        );
+        assert!(
+            format!("{err}").contains("exceeded the"),
+            "must name the byte ceiling, got: {err}"
+        );
+        assert!(
+            cache.cache.read().await.is_none(),
+            "no cache entry may exist after a capped fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_within_ceiling_still_fetches_normally() {
+        // Boundary check one below the failure: a normal-sized JWKS keeps working
+        // through the transport after the ceiling exists (negative space for the
+        // two cap tests above).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_jwks()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cache = JwksCache::new(format!("{}/jwks", server.uri()));
+        let keys = cache.get_keys().await.expect("small JWKS must still parse");
+        assert_eq!(keys["keys"][0]["kid"], "test-key-1");
     }
 
     #[tokio::test]

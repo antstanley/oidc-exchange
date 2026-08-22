@@ -1,7 +1,15 @@
 use oidc_exchange_core::domain::ProviderTokens;
 use oidc_exchange_core::error::{Error, Result};
 
+use crate::shared::transport::ProviderTransport;
+
 /// Exchange an authorization code for provider tokens at the given token endpoint.
+///
+/// The exchange goes through [`ProviderTransport`]: the response status is
+/// inspected before any body is read, and the single body read is bounded by the
+/// shared byte ceiling. The same borrowed bytes serve both branches — the OAuth
+/// error detail on non-success and the token parsing on success — so the body is
+/// never read twice.
 pub async fn exchange_code(
     token_endpoint: &str,
     client_id: &str,
@@ -14,54 +22,30 @@ pub async fn exchange_code(
         "token_endpoint must not be empty"
     );
 
-    let client = crate::shared::http::client();
     let mut params = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("code".to_string(), code.to_string()),
+        ("redirect_uri".to_string(), redirect_uri.to_string()),
+        ("client_id".to_string(), client_id.to_string()),
     ];
     if let Some(secret) = client_secret {
-        params.push(("client_secret", secret));
+        params.push(("client_secret".to_string(), secret.to_string()));
     }
 
-    let response = client
-        .post(token_endpoint)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| Error::ProviderError {
-            provider: token_endpoint.to_string(),
-            detail: e.to_string(),
-        })?;
+    let upstream = ProviderTransport
+        .post_form(token_endpoint, token_endpoint, &params)
+        .await?;
 
-    let status = response.status();
-    let raw_body = response.text().await.map_err(|e| Error::ProviderError {
-        provider: token_endpoint.to_string(),
-        detail: e.to_string(),
-    })?;
-
-    if !status.is_success() {
-        let detail = match serde_json::from_str::<serde_json::Value>(&raw_body) {
-            Ok(body) if body.get("error").is_some() => {
-                let error = body["error"].as_str().unwrap_or("unknown_error");
-                match body["error_description"].as_str() {
-                    Some(description) => format!("{error}: {description}"),
-                    None => error.to_string(),
-                }
-            }
-            _ => raw_body,
-        };
-        return Err(Error::ProviderError {
-            provider: token_endpoint.to_string(),
-            detail,
-        });
+    if !upstream.is_success() {
+        return Err(upstream.error_into(token_endpoint));
     }
 
+    // Single bounded read, already performed inside the transport; both the
+    // error branch above and this success branch borrow the same bytes.
     let body: serde_json::Value =
-        serde_json::from_str(&raw_body).map_err(|e| Error::ProviderError {
+        serde_json::from_slice(upstream.bytes()).map_err(|e| Error::ProviderError {
             provider: token_endpoint.to_string(),
-            detail: e.to_string(),
+            detail: format!("invalid JSON in token endpoint response: {e}"),
         })?;
 
     let id_token = body["id_token"]
@@ -247,6 +231,74 @@ mod tests {
         assert!(
             message.contains("the authorization code has expired"),
             "error should include the error_description, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_non_2xx_never_echoes_a_non_protocol_body() {
+        // The old path fell back to embedding the raw response body in the
+        // error detail; through the transport's safe detail path an HTML or
+        // otherwise non-protocol failure body must not reach the error string.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(
+                ResponseTemplate::new(502).set_body_string("<html>bad gateway page</html>"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "code",
+            "https://example.com/cb",
+        )
+        .await
+        .expect_err("a 502 must fail");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("502"),
+            "the status must be named, got: {message}"
+        );
+        assert!(
+            !message.contains("<html>") && !message.contains("bad gateway page"),
+            "the raw failure body must never reach the error surface: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_oversized_success_body() {
+        // Even a "successful" token response is bounded by the shared ceiling:
+        // nothing about a 2xx status makes an unbounded body worth buffering.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "p".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize + 1),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "code",
+            "https://example.com/cb",
+        )
+        .await
+        .expect_err("an over-ceiling token response must fail");
+
+        assert!(
+            format!("{err}").contains("exceeded the"),
+            "must be the distinctive cap error, got: {err}"
         );
     }
 
