@@ -1,6 +1,6 @@
 # Persistence
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
 
 How the domain entities ([01-domain-model.md](01-domain-model.md)) are stored by each
 repository adapter. The adapter-agnostic logical model is `schemas/datamodel.schema.json`; the
@@ -125,9 +125,10 @@ single-host option.
 
 ## Session-only stores
 
-- **LMDB (`adapters/lmdb`)** — embedded `heed` store with two named databases, `sessions`
-  (hash → session) and `user_sessions` (user → set of hashes for revoke-all). Constructed with
-  a path and a max map size in MB.
+- **LMDB (`adapters/lmdb`)** — embedded `heed` store with three named databases, `sessions`
+  (hash → session), `user_sessions` (user → set of hashes for revoke-all), and `single_use`
+  (digest key → RFC 3339 expiry). Constructed with a path and a max map size in MB; the
+  environment is opened with `max_dbs(3)` to cover the third database.
 - **Valkey/Redis (`adapters/valkey`)** — `fred` client; keys `{prefix}session:{hash}`, a
   `{prefix}user_sessions:{user_id}` set, and a `{prefix}active_sessions` counter. A session
   write applies the hash, its TTL, the user-set membership, an `INCR` of the counter, and a
@@ -144,12 +145,31 @@ single-host option.
 
 Both implement `SessionRepository` only and are selected via `[session_repository]`.
 
+## Single-use records
+
+Every store holds the [`SingleUseRecord`](01-domain-model.md) entities behind the
+`SessionRepository` single-use pair, using each adapter's natural atomic primitive, so
+`put_single_use` and `take_single_use` are one round trip everywhere:
+
+| Adapter | Layout | `put_single_use` | `take_single_use` |
+|---|---|---|---|
+| DynamoDB | `pk = SINGLEUSE#<key>`, `sk = SINGLEUSE`, numeric `ttl` | `PutItem` conditioned on `attribute_not_exists(pk) OR expires_at < :now` | `DeleteItem` with `ReturnValues=ALL_OLD`, `expires_at` checked on the returned item |
+| Postgres / SQLite | `single_use(key PRIMARY KEY, expires_at)` | `INSERT … ON CONFLICT (key) DO UPDATE … WHERE single_use.expires_at < now()`, rows affected reports the result | `DELETE … WHERE key = $1 AND expires_at > now() RETURNING 1` |
+| Valkey | `{prefix}single_use:{key}` | `SET … NX EX <ttl>` | `GETDEL` |
+| LMDB | `single_use` named DB | one write txn: read, treat an expired value as absent, write | one write txn: read, delete, report whether the value was live |
+
+DynamoDB and Valkey expire records natively; Postgres, SQLite and LMDB rely on the
+`cleanup_expired_sessions` sweep for space reclamation only — both operations already
+evaluate `expires_at`, so an unswept record is never mistaken for a live one. Storage keeps
+only the namespaced digest key and the expiry: no raw nonce or raw assertion material is
+ever written.
+
 ## Logical schema (`schemas/datamodel.schema.json`)
 
-The adapter-agnostic contract every store satisfies, defining `User`, `Session`, and
-`AuditEvent` with their required fields and the `status` / `severity` / `outcome` enums. It is
-the cross-adapter source of truth; the service's typed entities and
-[canonical-types.schema.json](canonical-types.schema.json) mirror it.
+The adapter-agnostic contract every store satisfies, defining `User`, `Session`,
+`AuditEvent`, and `SingleUseRecord` with their required fields and the `status` /
+`severity` / `outcome` enums. It is the cross-adapter source of truth; the service's typed
+entities and [canonical-types.schema.json](canonical-types.schema.json) mirror it.
 
 ## Assumptions and open questions
 

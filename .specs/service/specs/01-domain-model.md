@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -70,6 +70,19 @@ The raw refresh token exists only in memory during issuance and in the response 
 client. Only the hash is stored. `device_id`, `user_agent`, and `ip_address` are populated
 `None` by the core at issuance today (the audit-context middleware captures them at the HTTP
 edge but they are not threaded into the stored session).
+
+### SingleUseRecord (`domain/single_use.rs`)
+
+```rust
+struct SingleUseRecord {
+    key: String,                  // "nonce:<sha256hex>" | "assertion:<provider>:…"
+    expires_at: DateTime<Utc>,
+}
+```
+
+A presence-only record: the key is all the information there is. Nonce values and
+assertions are stored only as SHA-256 hex digests, as refresh tokens are. Records are
+removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_sessions`.
 
 ### Token types (`domain/token.rs`)
 
@@ -172,6 +185,8 @@ its TTL attribute, other stores via `cleanup_expired_sessions`.
 | Revoke one / all sessions | `SessionRepository::revoke_session` / `revoke_all_user_sessions` |
 | Count active sessions | `SessionRepository::count_active_sessions` |
 | Reap expired sessions | `SessionRepository::cleanup_expired_sessions` |
+| Claim a single-use key | `SessionRepository::put_single_use(key, expires_at)` |
+| Burn a single-use key | `SessionRepository::take_single_use(key)` |
 
 ## Assumptions and open questions
 

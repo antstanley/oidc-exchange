@@ -60,6 +60,18 @@
         "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
       }
     },
+    "SingleUseRecord": {
+      "type": "object",
+      "required": ["key", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+          "description": "Namespaced digest: 'nonce:<sha256hex>' or 'assertion:<provider>:[d:]<sha256hex>'. Never a raw nonce or assertion."
+        },
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
+      }
+    },
     "TokenResponse": {
       "type": "object",
       "required": ["access_token", "token_type", "expires_in"],

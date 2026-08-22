@@ -46,6 +46,18 @@
     "delete_user": {
       "operation": "TransactWriteItems (Put + Delete)",
       "description": "A patch that transitions status to Deleted writes the versioned User item (Put, conditioned on version) and removes the UserUniquenessGuard item (Delete, pk EXT#<provider>#<external_id> / sk UNIQUE) in the same transaction — both succeed or neither does. Removing the guard frees (provider, external_id) for re-registration: get_user_by_external_id returns None for the identity, and a later create_user for the same pair writes a fresh guard instead of losing to attribute_not_exists(pk). Any other update_user patch (no status change, or a change to Active/Suspended) stays a plain versioned PutItem and never touches the guard."
+    },
+    "put_single_use": {
+      "operation": "PutItem (conditioned)",
+      "description": "One conditional PutItem is the whole claim: it succeeds only when attribute_not_exists(pk) OR expires_at < :now, so exactly one of N racing claims wins and an expired record's key is reusable without any sweep having run. A ConditionalCheckFailedException maps to Ok(false), not an error.",
+      "pk": "SINGLEUSE#<namespaced digest>",
+      "sk": "SINGLEUSE"
+    },
+    "take_single_use": {
+      "operation": "DeleteItem (ReturnValues=ALL_OLD)",
+      "description": "One DeleteItem burns the key and returns the removed item; liveness is decided from the returned item's expires_at (re-validated on read), so absent, already-burned, and expired keys all report not-found.",
+      "pk": "SINGLEUSE#<namespaced digest>",
+      "sk": "SINGLEUSE"
     }
   },
   "item_schemas": {
@@ -88,6 +100,15 @@
       "description": "Written in the same TransactWriteItems call as the User item, both conditioned on attribute_not_exists(pk), so a duplicate (provider, external_id) cancels the transaction with a Conflict instead of racing past an existing user. Removed in the same TransactWriteItems call as the versioned status write when a delete_user patch transitions the user to Deleted (see the delete_user access pattern), which is what frees (provider, external_id) for re-registration.",
       "attributes": {
         "user_id": "S"
+      }
+    },
+    "SingleUseRecord": {
+      "pk": "SINGLEUSE#<namespaced digest>",
+      "sk": "SINGLEUSE",
+      "description": "Presence-only record backing nonces and assertion-replay markers; the namespaced digest key is all the state there is — storage never holds raw nonce or raw assertion material. The numeric ttl lets DynamoDB reap the item natively after expiry.",
+      "attributes": {
+        "expires_at": "N (epoch seconds; evaluated by both claim operations)",
+        "ttl": "N (epoch seconds, DynamoDB TTL)"
       }
     }
   }
