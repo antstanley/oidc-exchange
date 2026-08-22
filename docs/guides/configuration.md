@@ -146,6 +146,9 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Extra origins Google's discovery document may name beyond accounts.google.com:
+# token/revocation endpoints on oauth2.googleapis.com, JWKS on www.googleapis.com.
+# Each entry is a bare https origin; defaults to empty (issuer's origin only).
 endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 
 [providers.apple]
@@ -202,5 +205,6 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 | `telemetry.sample_rate` | `1.0` |
 | `audit.adapter` | `noop` |
 | `audit.blocking_threshold` | `warning` |
+| `providers.<name>.endpoint_origins` | none — the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
 | `internal_api` | disabled |
