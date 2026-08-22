@@ -281,6 +281,28 @@ pub const DEFAULT_REFRESH_ROTATION_GRACE: &str = "10s";
 /// retirement records. See `06-configuration.md` → Defaults summary.
 pub const DEFAULT_REFRESH_REUSE_RETENTION: &str = "24h";
 
+impl TokenConfig {
+    /// The reuse-retention window in seconds: the configured value when it
+    /// parses as a positive duration, otherwise
+    /// [`DEFAULT_REFRESH_REUSE_RETENTION`].
+    ///
+    /// Startup validation ([`AppConfig::validate`]) already rejects malformed
+    /// and zero values before any store is built; this resolver stays total
+    /// anyway because the session adapters compute every retirement record's
+    /// deadline from it and must never panic on what they read (tests build
+    /// configs directly, bypassing validation). Mirrors
+    /// [`SessionRepositoryConfig::cleanup_interval_secs`].
+    pub fn refresh_reuse_retention_secs(&self) -> u64 {
+        crate::service::parse_duration_secs(&self.refresh_reuse_retention)
+            .ok()
+            .filter(|secs| *secs > 0)
+            .unwrap_or_else(|| {
+                crate::service::parse_duration_secs(DEFAULT_REFRESH_REUSE_RETENTION)
+                    .expect("DEFAULT_REFRESH_REUSE_RETENTION must parse")
+            })
+    }
+}
+
 impl Default for TokenConfig {
     fn default() -> Self {
         Self {
@@ -1319,5 +1341,31 @@ cleanup_interval = "15m"
         // An explicitly valid value resolves to itself.
         config.cleanup_interval = "90s".to_string();
         assert_eq!(config.cleanup_interval_secs(), 90);
+    }
+
+    /// The reuse-retention resolver mirrors `cleanup_interval_secs`: the
+    /// documented default when malformed or zero (tests bypass startup
+    /// validation), and the configured value when valid.
+    #[test]
+    fn refresh_reuse_retention_secs_resolves_documented_default_for_bad_input() {
+        let mut token = TokenConfig::default();
+        assert_eq!(
+            token.refresh_reuse_retention_secs(),
+            crate::service::parse_duration_secs(DEFAULT_REFRESH_REUSE_RETENTION)
+                .expect("documented default parses")
+        );
+        assert_eq!(token.refresh_reuse_retention_secs(), 24 * 60 * 60);
+
+        for malformed in ["not-a-duration", "24hours", "0s"] {
+            token.refresh_reuse_retention = malformed.to_string();
+            assert_eq!(
+                token.refresh_reuse_retention_secs(),
+                24 * 60 * 60,
+                "malformed/zero retention {malformed:?} must fall back to the documented default"
+            );
+        }
+
+        token.refresh_reuse_retention = "12h".to_string();
+        assert_eq!(token.refresh_reuse_retention_secs(), 12 * 60 * 60);
     }
 }

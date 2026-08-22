@@ -3,14 +3,15 @@ use std::future::Future;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use oidc_exchange_core::domain::{
+    is_valid_family_id, NewUser, RefreshResolution, RetiredRefreshToken, Session, User, UserPatch,
+    UserStatus, INITIAL_USER_VERSION,
+};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use tracing::instrument;
 
-use oidc_exchange_core::domain::{
-    NewUser, RefreshResolution, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
-};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
@@ -52,15 +53,40 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS retired_refresh_tokens (
+    refresh_token_hash  TEXT PRIMARY KEY,
+    family_id           TEXT NOT NULL,
+    user_id             TEXT NOT NULL,
+    successor_hash      TEXT NOT NULL,
+    retired_at          TEXT NOT NULL,
+    expires_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_retired_family ON retired_refresh_tokens (family_id);
+CREATE INDEX IF NOT EXISTS idx_retired_expires_at ON retired_refresh_tokens (expires_at);
 "#;
 
 pub struct SqliteRepository {
     pool: SqlitePool,
+    /// How long a retirement record stays readable after its rotation:
+    /// `retired_at + reuse_retention_secs`, capped per record at the family's
+    /// absolute `expires_at` by [`RetiredRefreshToken::retention_deadline`].
+    /// Resolved from `[token] refresh_reuse_retention` at bootstrap; injected
+    /// here because the store, not the caller, stamps every record's deadline.
+    reuse_retention_secs: u64,
 }
 
 impl SqliteRepository {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, reuse_retention_secs: u64) -> Self {
+        assert!(
+            reuse_retention_secs > 0,
+            "reuse retention must be greater than zero"
+        );
+        Self {
+            pool,
+            reuse_retention_secs,
+        }
     }
 }
 
@@ -329,6 +355,111 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
     })
 }
 
+fn parse_rfc3339(value: &str, field: &str) -> Result<DateTime<Utc>> {
+    value
+        .parse()
+        .map_err(|e: chrono::ParseError| Error::StoreError {
+            detail: format!("failed to parse {field}: {e}"),
+        })
+}
+
+fn row_to_retired(row: &sqlx::sqlite::SqliteRow) -> Result<RetiredRefreshToken> {
+    let retired_at_str: String = row.get("retired_at");
+    let expires_at_str: String = row.get("expires_at");
+
+    // Round-trip revalidation (store-read boundary): every column of a
+    // retirement record is NOT NULL in the DDL, so an unparseable timestamp is
+    // corruption, not absence, and must surface as a store error.
+    Ok(RetiredRefreshToken {
+        refresh_token_hash: row.get("refresh_token_hash"),
+        family_id: row.get("family_id"),
+        user_id: row.get("user_id"),
+        successor_hash: row.get("successor_hash"),
+        retired_at: parse_rfc3339(&retired_at_str, "retired_at")?,
+        expires_at: parse_rfc3339(&expires_at_str, "expires_at")?,
+    })
+}
+
+/// Build the retirement record a winning rotation writes for `live`. The
+/// successor inherits the family identity; the deadline is
+/// `min(now + reuse_retention, family expires_at)` so no record outlives its
+/// family. Legacy rows must never reach this helper — there is no prior
+/// generation for them to be detected against.
+fn retirement_record(
+    live_hash: &str,
+    live: &Session,
+    replacement: &Session,
+    reuse_retention_secs: u64,
+    now: DateTime<Utc>,
+) -> RetiredRefreshToken {
+    assert_eq!(
+        live.refresh_token_hash, live_hash,
+        "retirement record must name the presented hash"
+    );
+    assert!(
+        is_valid_family_id(&live.family_id),
+        "a legacy row must not produce a retirement record: {:?}",
+        live.family_id
+    );
+    RetiredRefreshToken {
+        refresh_token_hash: live_hash.to_string(),
+        family_id: live.family_id.clone(),
+        user_id: live.user_id.clone(),
+        successor_hash: replacement.refresh_token_hash.clone(),
+        retired_at: now,
+        expires_at: RetiredRefreshToken::retention_deadline(
+            now,
+            reuse_retention_secs,
+            replacement.expires_at,
+        ),
+    }
+}
+
+/// Insert one session row on an existing transaction or the pool. Shared by
+/// `store_refresh_token` and the winning arm of `rotate_refresh_token` so
+/// both write paths bind identical columns.
+///
+/// `replace` selects the conflict behaviour: the store path is idempotent
+/// (`INSERT OR REPLACE`, preserving its existing semantics), while rotation
+/// inserts plainly so a replacement hash colliding with any existing live row
+/// fails the transaction loudly instead of clobbering it. Both fragments come
+/// only from this module's own call sites, never from input.
+async fn insert_session_tx<'e, E>(executor: E, session: &Session, replace: bool) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let expires_at_str = session.expires_at.to_rfc3339();
+    let created_at_str = session.created_at.to_rfc3339();
+    let rotated_at_str = session.rotated_at.map(|ts| ts.to_rfc3339());
+
+    let conflict_clause = if replace { "OR REPLACE" } else { "" };
+    sqlx::query(
+        &format!(
+            "INSERT {conflict_clause} INTO sessions \
+             (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+        ),
+    )
+    .bind(&session.refresh_token_hash)
+    .bind(&session.user_id)
+    .bind(&session.family_id)
+    .bind(session.generation as i64)
+    .bind(&session.provider)
+    .bind(&expires_at_str)
+    .bind(&rotated_at_str)
+    .bind(&session.device_id)
+    .bind(&session.user_agent)
+    .bind(&session.ip_address)
+    .bind(&created_at_str)
+    .execute(executor)
+    .await
+    .map_err(|e| Error::StoreError {
+        detail: e.to_string(),
+    })?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl UserRepository for SqliteRepository {
     #[instrument(skip(self), fields(user_id))]
@@ -562,32 +693,7 @@ impl UserRepository for SqliteRepository {
 impl SessionRepository for SqliteRepository {
     #[instrument(skip(self, session), fields(user_id = %session.user_id))]
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
-        let expires_at_str = session.expires_at.to_rfc3339();
-        let created_at_str = session.created_at.to_rfc3339();
-        let rotated_at_str = session.rotated_at.map(|ts| ts.to_rfc3339());
-
-        sqlx::query(
-            "INSERT OR REPLACE INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        )
-        .bind(&session.refresh_token_hash)
-        .bind(&session.user_id)
-        .bind(&session.family_id)
-        .bind(session.generation as i64)
-        .bind(&session.provider)
-        .bind(&expires_at_str)
-        .bind(&rotated_at_str)
-        .bind(&session.device_id)
-        .bind(&session.user_agent)
-        .bind(&session.ip_address)
-        .bind(&created_at_str)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| Error::StoreError {
-            detail: e.to_string(),
-        })?;
-
-        Ok(())
+        insert_session_tx(&self.pool, session, true).await
     }
 
     #[instrument(skip(self), fields(token_hash))]
@@ -606,30 +712,57 @@ impl SessionRepository for SqliteRepository {
         }
     }
 
-    /// Interim classification for task 01: these stores hold live generations
-    /// only — the `retired_refresh_tokens` table and the full
-    /// `Superseded`/`Retired`/`Unknown` classification arrive with task 03
-    /// (sql_session_adapters). Live-or-unknown is therefore the complete,
-    /// truthful answer today, and it is strongly consistent: the read sees
-    /// every committed write.
+    /// Classify `token_hash` against live generations first, then retained
+    /// retirement records (SR1). Each read is its own committed query on this
+    /// pool, and SQLite serializes writers, so the answer reflects the most
+    /// recent write. A record past its retention deadline answers `Unknown`
+    /// until the sweep physically deletes it — reuse detection must not fire
+    /// on a window that has closed.
     #[instrument(skip(self), fields(token_hash))]
     async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
         assert!(
             !token_hash.is_empty(),
             "resolve_refresh_token: token_hash must not be empty"
         );
-        match self.get_session_by_refresh_token(token_hash).await? {
-            Some(session) => Ok(RefreshResolution::Live(session)),
-            None => Ok(RefreshResolution::Unknown),
+        if let Some(session) = self.get_session_by_refresh_token(token_hash).await? {
+            return Ok(RefreshResolution::Live(session));
+        }
+
+        let Some(record) = self.get_retired_record(token_hash).await? else {
+            return Ok(RefreshResolution::Unknown);
+        };
+        if record.expires_at <= Utc::now() {
+            return Ok(RefreshResolution::Unknown);
+        }
+
+        match self
+            .get_session_by_refresh_token(&record.successor_hash)
+            .await?
+        {
+            Some(successor_live) => Ok(RefreshResolution::Superseded {
+                live: successor_live,
+                retired_at: record.retired_at,
+            }),
+            None => Ok(RefreshResolution::Retired {
+                family_id: record.family_id,
+                user_id: record.user_id,
+                retired_at: record.retired_at,
+            }),
         }
     }
 
-    /// Interim rotation for task 01: one transaction whose compare-and-swap
-    /// condition is the delete's affected-row count — zero rows means the live
-    /// generation moved, so the transaction rolls back and this returns
-    /// `false`, giving exactly-one-winner (SR3) and an all-or-nothing swap of
-    /// the two session rows (SR2). Task 03 extends this same transaction with
-    /// the retirement-record insert that SR4/SR5 need.
+    /// One `BEGIN … COMMIT` performing all rotation effects — delete the live
+    /// row, write the retirement record, install the replacement — conditioned
+    /// on the live row still existing (SR2/SR3/SR4). The condition is the
+    /// delete's affected-row count: zero rows means a concurrent redemption
+    /// moved the live generation first, so the transaction rolls back having
+    /// written nothing and this returns `false`.
+    ///
+    /// A live row carrying the empty-family sentinel is a pre-rotation legacy
+    /// row: its first redemption deletes it and installs the replacement
+    /// *without* a retirement record — there is no prior generation to detect
+    /// reuse against — and the replacement carries whatever family the caller
+    /// minted. The store never invents one.
     #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
     async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
         assert_ne!(
@@ -637,13 +770,47 @@ impl SessionRepository for SqliteRepository {
             "rotate_refresh_token: replacement must be a fresh generation"
         );
         assert!(
-            !replacement.refresh_token_hash.is_empty(),
-            "rotate_refresh_token: replacement hash must not be empty"
+            is_valid_family_id(&replacement.family_id),
+            "rotate_refresh_token: malformed replacement family id {:?}",
+            replacement.family_id
         );
 
         let mut tx = self.pool.begin().await.map_err(|e| Error::StoreError {
             detail: e.to_string(),
         })?;
+
+        // Read the live row inside the transaction: its existence is the CAS
+        // condition and its family/user identity decides between the normal
+        // three-effect rotation and the legacy first-redemption swap.
+        let live_row = sqlx::query("SELECT * FROM sessions WHERE refresh_token_hash = ?1")
+            .bind(live_hash)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        let Some(live_row) = live_row else {
+            // The condition failed: a concurrent redemption moved the live
+            // generation first. Roll back and write nothing.
+            tx.rollback().await.map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+            return Ok(false);
+        };
+        let live = row_to_session(&live_row)?;
+        let legacy_row = live.family_id.is_empty();
+        if !legacy_row {
+            // A rotation replaces a generation of the same family — anything
+            // else would strand credentials outside their holder's control.
+            assert_eq!(
+                live.family_id, replacement.family_id,
+                "rotate_refresh_token: family mismatch between live and replacement"
+            );
+        }
+        assert_eq!(
+            live.user_id, replacement.user_id,
+            "rotate_refresh_token: user mismatch between live and replacement"
+        );
 
         let deleted = sqlx::query("DELETE FROM sessions WHERE refresh_token_hash = ?1")
             .bind(live_hash)
@@ -653,37 +820,41 @@ impl SessionRepository for SqliteRepository {
                 detail: e.to_string(),
             })?;
         if deleted.rows_affected() == 0 {
-            // The condition failed: a concurrent redemption moved the live
-            // generation first. Roll back and write nothing.
+            // The row the SELECT observed was concurrently removed and the
+            // delete lost the race; the transaction must still roll back.
             tx.rollback().await.map_err(|e| Error::StoreError {
                 detail: e.to_string(),
             })?;
             return Ok(false);
         }
 
-        let expires_at_str = replacement.expires_at.to_rfc3339();
-        let created_at_str = replacement.created_at.to_rfc3339();
-        let rotated_at_str = replacement.rotated_at.map(|ts| ts.to_rfc3339());
-        sqlx::query(
-            "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        )
-        .bind(&replacement.refresh_token_hash)
-        .bind(&replacement.user_id)
-        .bind(&replacement.family_id)
-        .bind(replacement.generation as i64)
-        .bind(&replacement.provider)
-        .bind(&expires_at_str)
-        .bind(&rotated_at_str)
-        .bind(&replacement.device_id)
-        .bind(&replacement.user_agent)
-        .bind(&replacement.ip_address)
-        .bind(&created_at_str)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::StoreError {
-            detail: e.to_string(),
-        })?;
+        if !legacy_row {
+            let now = Utc::now();
+            let record = retirement_record(
+                live_hash,
+                &live,
+                replacement,
+                self.reuse_retention_secs,
+                now,
+            );
+            sqlx::query(
+                "INSERT INTO retired_refresh_tokens (refresh_token_hash, family_id, user_id, successor_hash, retired_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .bind(&record.refresh_token_hash)
+            .bind(&record.family_id)
+            .bind(&record.user_id)
+            .bind(&record.successor_hash)
+            .bind(record.retired_at.to_rfc3339())
+            .bind(record.expires_at.to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        }
+
+        insert_session_tx(&mut *tx, replacement, false).await?;
 
         tx.commit().await.map_err(|e| Error::StoreError {
             detail: e.to_string(),
@@ -704,27 +875,39 @@ impl SessionRepository for SqliteRepository {
         Ok(())
     }
 
-    /// Interim family revocation for task 01: removes the family's live
-    /// generations and returns how many. The retirement records `revoke_family`
-    /// must also sweep do not exist in this store until task 03 adds them, so
-    /// the count covers live rows only — exactly the removal work this store
-    /// currently holds.
+    /// Remove the family's live generation and every retained retirement
+    /// record, returning the combined count (SR5), inside one transaction so
+    /// the two sweeps cannot be observed half-applied. Idempotent: an unknown
+    /// (but well-formed) family id removes nothing and returns `Ok(0)`.
     #[instrument(skip(self), fields(family_id))]
     async fn revoke_family(&self, family_id: &str) -> Result<u64> {
         assert!(
-            !family_id.is_empty(),
-            "revoke_family: family_id must not be empty"
+            is_valid_family_id(family_id),
+            "revoke_family: malformed family id {family_id:?}"
         );
 
-        let result = sqlx::query("DELETE FROM sessions WHERE family_id = ?1")
+        let mut tx = self.pool.begin().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+        let live = sqlx::query("DELETE FROM sessions WHERE family_id = ?1")
             .bind(family_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| Error::StoreError {
                 detail: e.to_string(),
             })?;
+        let retired = sqlx::query("DELETE FROM retired_refresh_tokens WHERE family_id = ?1")
+            .bind(family_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        tx.commit().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
 
-        Ok(result.rows_affected())
+        Ok(live.rows_affected() + retired.rows_affected())
     }
 
     #[instrument(skip(self))]
@@ -744,13 +927,33 @@ impl SessionRepository for SqliteRepository {
 
     #[instrument(skip(self), fields(user_id))]
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+        assert!(
+            !user_id.is_empty(),
+            "revoke_all_user_sessions: user_id must not be empty"
+        );
+
+        // The SR5 removal guarantee applied across all of the user's families:
+        // live rows and retained retirement records leave in one transaction.
+        let mut tx = self.pool.begin().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
         sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
             .bind(user_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| Error::StoreError {
                 detail: e.to_string(),
             })?;
+        sqlx::query("DELETE FROM retired_refresh_tokens WHERE user_id = ?1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        tx.commit().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -758,21 +961,63 @@ impl SessionRepository for SqliteRepository {
     #[instrument(skip(self))]
     async fn cleanup_expired_sessions(&self) -> Result<u64> {
         let now_str = Utc::now().to_rfc3339();
-        let result = sqlx::query("DELETE FROM sessions WHERE expires_at < ?1")
+
+        // The sweep covers sessions and retirement records alike, and its
+        // count is the combined number deleted (the port contract).
+        let mut tx = self.pool.begin().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+        let sessions = sqlx::query("DELETE FROM sessions WHERE expires_at < ?1")
             .bind(&now_str)
-            .execute(&self.pool)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        let retired = sqlx::query("DELETE FROM retired_refresh_tokens WHERE expires_at < ?1")
+            .bind(&now_str)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+        tx.commit().await.map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+
+        Ok(sessions.rows_affected() + retired.rows_affected())
+    }
+}
+
+impl SqliteRepository {
+    /// Fetch one retirement record by hash, if it is still retained. Inherent
+    /// helper (not a port method): `resolve_refresh_token` needs the raw
+    /// record to evaluate the successor pointer, while `/revoke`'s liveness
+    /// lookup deliberately does not see retirement records as sessions.
+    async fn get_retired_record(&self, token_hash: &str) -> Result<Option<RetiredRefreshToken>> {
+        let row = sqlx::query("SELECT * FROM retired_refresh_tokens WHERE refresh_token_hash = ?1")
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
             .await
             .map_err(|e| Error::StoreError {
                 detail: e.to_string(),
             })?;
 
-        Ok(result.rows_affected())
+        match row {
+            Some(ref r) => Ok(Some(row_to_retired(r)?)),
+            None => Ok(None),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reuse-retention window used by every test repository: one hour — short
+    /// enough that deadline arithmetic stays inside a test's lifetime, and
+    /// positive per the constructor's precondition.
+    const TEST_REUSE_RETENTION_SECS: u64 = 3600;
 
     async fn create_test_repo() -> SqliteRepository {
         let options = SqliteConnectOptions::new()
@@ -799,7 +1044,7 @@ mod tests {
             }
         }
 
-        SqliteRepository::new(pool)
+        SqliteRepository::new(pool, TEST_REUSE_RETENTION_SECS)
     }
 
     #[tokio::test]
@@ -982,7 +1227,7 @@ mod tests {
         let path_str = path.to_str().expect("utf8 path").to_string();
 
         let pool = create_pool(&path_str).await.expect("create_pool");
-        let repo = SqliteRepository::new(pool);
+        let repo = SqliteRepository::new(pool, TEST_REUSE_RETENTION_SECS);
 
         let created = repo
             .create_user(&NewUser {
@@ -1054,7 +1299,7 @@ mod tests {
             .await
             .expect("migration should add the version column");
 
-        let repo = SqliteRepository::new(pool);
+        let repo = SqliteRepository::new(pool, TEST_REUSE_RETENTION_SECS);
         let user = repo
             .get_user_by_id("usr_legacy")
             .await
@@ -1359,7 +1604,7 @@ mod tests {
             }
         }
 
-        (SqliteRepository::new(pool), dir)
+        (SqliteRepository::new(pool, TEST_REUSE_RETENTION_SECS), dir)
     }
 
     #[tokio::test]
@@ -1498,5 +1743,493 @@ mod tests {
             winning_attempt,
             "should stop retrying as soon as an attempt succeeds, not keep spinning"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Refresh-token rotation and reuse detection (task 03)
+    // -----------------------------------------------------------------------
+
+    /// Insert a pre-rotation (legacy) session row exactly the way the
+    /// pre-migration schema would have written it: NULL `family_id`,
+    /// generation 0, NULL `rotated_at`.
+    async fn seed_legacy_session(repo: &SqliteRepository, token_hash: &str, user_id: &str) {
+        let now_str = Utc::now().to_rfc3339();
+        let expires_str = (Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
+             VALUES (?1, ?2, NULL, 0, 'google', ?3, NULL, NULL, NULL, NULL, ?4)",
+        )
+        .bind(token_hash)
+        .bind(user_id)
+        .bind(expires_str)
+        .bind(now_str)
+        .execute(&repo.pool)
+        .await
+        .expect("seed legacy session row");
+    }
+
+    async fn retired_count(repo: &SqliteRepository) -> i64 {
+        let row = sqlx::query("SELECT COUNT(*) AS count FROM retired_refresh_tokens")
+            .fetch_one(&repo.pool)
+            .await
+            .expect("count retirement records");
+        row.get::<i64, _>("count")
+    }
+
+    /// The full SR1–SR5 shared suite against the SQLite store. One tag
+    /// namespaces every fixture the suite creates.
+    #[tokio::test]
+    async fn sqlite_session_store_meets_sr1_through_sr5() {
+        let repo = create_test_repo().await;
+        oidc_exchange_test_utils::session_contract::assert_full_conformance(
+            &repo,
+            "sqlite-session-conformance",
+        )
+        .await;
+    }
+
+    /// A legacy row's first redemption swaps atomically but writes no
+    /// retirement record — there is no prior generation to detect reuse
+    /// against — and the presented hash reads Unknown afterwards. The
+    /// replacement carries the caller's newly-minted family; nothing here
+    /// synthesizes one.
+    #[tokio::test]
+    async fn legacy_row_first_redemption_swaps_without_retirement_record() {
+        let repo = create_test_repo().await;
+        let legacy_hash = oidc_exchange_test_utils::session_contract::fixture_hash(
+            "sqlite-legacy:first-redemption",
+        );
+        seed_legacy_session(&repo, &legacy_hash, "usr_legacy").await;
+
+        // Classification is storage-factual: the sentinel-carrying row is Live.
+        let legacy = repo
+            .get_session_by_refresh_token(&legacy_hash)
+            .await
+            .expect("read legacy row")
+            .expect("legacy row must exist");
+        assert_eq!(legacy.family_id, "", "sentinel family on read");
+        assert_eq!(legacy.generation, 0);
+        assert_eq!(legacy.rotated_at, None);
+
+        let base = Utc::now();
+        let new_family =
+            oidc_exchange_test_utils::session_contract::fixture_family_id("sqlite-legacy:new-fam");
+        assert!(is_valid_family_id(&new_family));
+        let replacement = Session {
+            refresh_token_hash: format!("{legacy_hash}-next"),
+            family_id: new_family.clone(),
+            generation: 0,
+            rotated_at: None,
+            expires_at: base + chrono::Duration::hours(24),
+            created_at: base,
+            ..legacy.clone()
+        };
+
+        let won = repo
+            .rotate_refresh_token(&legacy_hash, &replacement)
+            .await
+            .expect("legacy first-redemption swap");
+        assert!(won, "an uncontended legacy redemption must win its CAS");
+
+        use oidc_exchange_core::domain::RefreshResolution::*;
+        assert_eq!(
+            repo.resolve_refresh_token(&legacy_hash)
+                .await
+                .expect("resolve"),
+            Unknown,
+            "a consumed legacy row has no retained record and must read Unknown"
+        );
+        match repo
+            .resolve_refresh_token(&replacement.refresh_token_hash)
+            .await
+            .expect("resolve replacement")
+        {
+            Live(session) => {
+                assert_eq!(session.family_id, new_family);
+                assert_eq!(session.user_id, "usr_legacy");
+            }
+            other => panic!("replacement must be Live, got {other:?}"),
+        }
+        assert_eq!(
+            retired_count(&repo).await,
+            0,
+            "a legacy first redemption must not leave a retirement record"
+        );
+        assert_eq!(
+            repo.count_active_sessions().await.expect("active count"),
+            1,
+            "exactly the replacement is active after the swap"
+        );
+    }
+
+    /// Negative space: a losing CAS against a legacy row writes nothing at all.
+    #[tokio::test]
+    async fn legacy_row_failed_cas_leaves_store_untouched() {
+        let repo = create_test_repo().await;
+        let legacy_hash =
+            oidc_exchange_test_utils::session_contract::fixture_hash("sqlite-legacy:cas-failure");
+        seed_legacy_session(&repo, &legacy_hash, "usr_legacy").await;
+
+        let base = Utc::now();
+        let replacement = Session {
+            refresh_token_hash: format!("{legacy_hash}-next"),
+            family_id: oidc_exchange_test_utils::session_contract::fixture_family_id(
+                "sqlite-legacy:cas-fam",
+            ),
+            user_id: "usr_legacy".to_string(),
+            provider: "google".to_string(),
+            expires_at: base + chrono::Duration::hours(24),
+            rotated_at: None,
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: base,
+            generation: 0,
+        };
+
+        let won = repo
+            .rotate_refresh_token("no-such-live-hash", &replacement)
+            .await
+            .expect("rotation against an unknown live hash");
+        assert!(!won, "a missing live generation must lose the CAS");
+        assert_eq!(
+            repo.get_session_by_refresh_token(&legacy_hash)
+                .await
+                .expect("read legacy row")
+                .expect("legacy row must survive the lost race")
+                .refresh_token_hash,
+            legacy_hash,
+        );
+        assert_eq!(
+            retired_count(&repo).await,
+            0,
+            "no retirement record may appear when the CAS fails"
+        );
+        assert!(
+            repo.get_session_by_refresh_token(&replacement.refresh_token_hash)
+                .await
+                .expect("read replacement")
+                .is_none(),
+            "the loser's replacement must never be installed"
+        );
+    }
+
+    /// Transaction rollback: when the replacement insert fails mid-transaction
+    /// (its hash colliding with an existing live row), the whole unit rolls
+    /// back — the live generation the delete removed comes back, and no
+    /// orphaned retirement record is left behind (SR2's all-or-nothing rule
+    /// under a real failure, not just a lost CAS).
+    #[tokio::test]
+    async fn failed_replacement_insert_rolls_back_delete_and_retirement() {
+        let repo = create_test_repo().await;
+        use oidc_exchange_test_utils::session_contract::{family_chain, fixture_family_id};
+
+        let chain = family_chain("sqlite:rollback", 0, "usr_rollback");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
+
+        // An unrelated live row already occupying the replacement's hash: the
+        // mid-transaction collision that forces the rollback.
+        let blocker = Session {
+            refresh_token_hash: chain.gen1.refresh_token_hash.clone(),
+            family_id: fixture_family_id("sqlite:rollback:blocker-fam"),
+            user_id: "usr_blocker".to_string(),
+            ..chain.gen1.clone()
+        };
+        repo.store_refresh_token(&blocker)
+            .await
+            .expect("store blocker");
+
+        let result = repo
+            .rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            .await;
+        assert!(
+            result.is_err(),
+            "the colliding insert must fail the transaction"
+        );
+
+        // Rollback completeness, checked three ways: the deleted live
+        // generation is present again, no retirement record for it exists,
+        // and the blocking row is untouched.
+        assert_eq!(
+            repo.get_session_by_refresh_token(&chain.gen0.refresh_token_hash)
+                .await
+                .expect("read gen0 after rollback"),
+            Some(chain.gen0),
+            "the delete must have been rolled back with the rest of the transaction"
+        );
+        assert_eq!(
+            retired_count(&repo).await,
+            0,
+            "no orphaned retirement record may survive the rollback"
+        );
+        assert!(
+            repo.get_session_by_refresh_token(&blocker.refresh_token_hash)
+                .await
+                .expect("read blocker after rollback")
+                .is_some(),
+            "the blocking row must be untouched"
+        );
+    }
+
+    /// The migration upgrades a `sessions` table that predates the family
+    /// columns without touching its rows, is safe to re-run, and legacy rows
+    /// read back through the domain type with the sentinel values.
+    #[tokio::test]
+    async fn session_family_column_migration_upgrades_legacy_table_and_is_idempotent() {
+        let options = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("in-memory pool");
+
+        // Simulate the pre-rotation schema: a sessions table with no family
+        // columns, holding one row.
+        sqlx::query(
+            "CREATE TABLE sessions (
+                refresh_token_hash  TEXT PRIMARY KEY,
+                user_id             TEXT NOT NULL,
+                provider            TEXT NOT NULL,
+                expires_at          TEXT NOT NULL,
+                device_id           TEXT,
+                user_agent          TEXT,
+                ip_address          TEXT,
+                created_at          TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy sessions table");
+        let now_str = Utc::now().to_rfc3339();
+        let expires_str = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO sessions (refresh_token_hash, user_id, provider, expires_at, created_at) \
+             VALUES ('legacy-hash', 'usr_legacy', 'google', ?1, ?2)",
+        )
+        .bind(expires_str)
+        .bind(now_str)
+        .execute(&pool)
+        .await
+        .expect("insert legacy row");
+
+        // Run the upgrade path twice: every statement must stay idempotent.
+        for _ in 0..2 {
+            for statement in MIGRATIONS.split(';') {
+                let trimmed = statement.trim();
+                if !trimmed.is_empty() {
+                    sqlx::query(trimmed)
+                        .execute(&pool)
+                        .await
+                        .expect("re-running a migration statement should not error");
+                }
+            }
+            ensure_session_family_columns(&pool)
+                .await
+                .expect("ensure_session_family_columns");
+        }
+
+        let repo = SqliteRepository::new(pool, TEST_REUSE_RETENTION_SECS);
+        let legacy = repo
+            .get_session_by_refresh_token("legacy-hash")
+            .await
+            .expect("read migrated legacy row")
+            .expect("migrated row must survive");
+        assert_eq!(
+            legacy.family_id, "",
+            "NULL column lands on the empty sentinel"
+        );
+        assert!(!is_valid_family_id(&legacy.family_id));
+        assert_eq!(legacy.generation, 0);
+        assert_eq!(legacy.rotated_at, None);
+
+        // And the upgraded table accepts canonical rows.
+        let canonical = oidc_exchange_test_utils::session_contract::generation_session(
+            "usr_new",
+            &oidc_exchange_test_utils::session_contract::fixture_family_id(
+                "sqlite-migration:new-row",
+            ),
+            0,
+            "canonical-hash".to_string(),
+            Utc::now() + chrono::Duration::hours(1),
+            Utc::now(),
+            None,
+        );
+        repo.store_refresh_token(&canonical)
+            .await
+            .expect("store canonical row post-migration");
+        assert_eq!(
+            repo.resolve_refresh_token(&canonical.refresh_token_hash)
+                .await
+                .expect("resolve canonical row"),
+            oidc_exchange_core::domain::RefreshResolution::Live(canonical),
+            "the upgraded table must accept and classify canonical rows"
+        );
+    }
+
+    /// Cleanup sweeps expired sessions and expired retirement records alike,
+    /// its count covering both tables, and leaves live state alone.
+    #[tokio::test]
+    async fn cleanup_counts_expired_sessions_and_retired_records_together() {
+        let repo = create_test_repo().await;
+        use oidc_exchange_test_utils::session_contract::family_chain;
+
+        let chain = family_chain("sqlite:cleanup", 0, "usr_cleanup");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
+        assert!(
+            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+                .await
+                .expect("rotate"),
+            "rotation must win"
+        );
+
+        // Force-expire everything by rewriting the timestamps in place: the
+        // live generation, and the retention deadline of the retirement record.
+        let past = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        sqlx::query("UPDATE sessions SET expires_at = ?1 WHERE refresh_token_hash = ?2")
+            .bind(past.clone())
+            .bind(chain.gen1.refresh_token_hash.clone())
+            .execute(&repo.pool)
+            .await
+            .expect("expire live generation");
+        sqlx::query(
+            "UPDATE retired_refresh_tokens SET expires_at = ?1 WHERE refresh_token_hash = ?2",
+        )
+        .bind(past)
+        .bind(chain.gen0.refresh_token_hash.clone())
+        .execute(&repo.pool)
+        .await
+        .expect("expire retirement record");
+
+        let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
+        assert_eq!(
+            removed, 2,
+            "cleanup must count one expired session plus one expired retirement record"
+        );
+        assert_eq!(retired_count(&repo).await, 0);
+        assert_eq!(
+            repo.count_active_sessions().await.expect("active count"),
+            0,
+            "nothing live remains after the sweep"
+        );
+        assert_eq!(
+            repo.cleanup_expired_sessions()
+                .await
+                .expect("second cleanup"),
+            0,
+            "a second sweep over a clean store reports zero"
+        );
+    }
+
+    /// `revoke_all_user_sessions` removes the user's live generations *and*
+    /// their retained retirement records, leaving other users untouched.
+    #[tokio::test]
+    async fn revoke_all_user_sessions_sweeps_retired_records_of_that_user_only() {
+        let repo = create_test_repo().await;
+        use oidc_exchange_test_utils::session_contract::family_chain;
+
+        let mine = family_chain("sqlite:revoke-all", 0, "usr_mine");
+        let theirs = family_chain("sqlite:revoke-all", 1, "usr_theirs");
+        repo.store_refresh_token(&mine.gen0)
+            .await
+            .expect("store mine");
+        repo.store_refresh_token(&theirs.gen0)
+            .await
+            .expect("store theirs");
+        assert!(
+            repo.rotate_refresh_token(&mine.gen0.refresh_token_hash, &mine.gen1)
+                .await
+                .expect("rotate mine"),
+            "my rotation must win"
+        );
+        assert!(
+            repo.rotate_refresh_token(&theirs.gen0.refresh_token_hash, &theirs.gen1)
+                .await
+                .expect("rotate theirs"),
+            "their rotation must win"
+        );
+        assert_eq!(retired_count(&repo).await, 2, "one record per rotation");
+
+        repo.revoke_all_user_sessions("usr_mine")
+            .await
+            .expect("revoke all mine");
+
+        use oidc_exchange_core::domain::RefreshResolution::*;
+        assert_eq!(
+            repo.resolve_refresh_token(&mine.gen1.refresh_token_hash)
+                .await
+                .expect("resolve my live"),
+            Unknown,
+            "my live generation must be gone"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(&mine.gen0.refresh_token_hash)
+                .await
+                .expect("resolve my retired"),
+            Unknown,
+            "my retirement record must be gone"
+        );
+        match repo
+            .resolve_refresh_token(&theirs.gen1.refresh_token_hash)
+            .await
+            .expect("resolve their live")
+        {
+            Live(session) => assert_eq!(session.user_id, "usr_theirs"),
+            other => panic!("another user's family must survive my revocation, got {other:?}"),
+        }
+        assert_eq!(
+            retired_count(&repo).await,
+            1,
+            "only the other user's retirement record remains"
+        );
+    }
+
+    /// A retirement record past its retention deadline classifies as Unknown
+    /// even before cleanup physically deletes it — the reuse window has
+    /// closed, so re-presentation is refused silently rather than alarmed on.
+    #[tokio::test]
+    async fn expired_retirement_record_resolves_unknown_before_cleanup() {
+        let repo = create_test_repo().await;
+        use oidc_exchange_test_utils::session_contract::family_chain;
+
+        let chain = family_chain("sqlite:expired-record", 0, "usr_expired_record");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
+        assert!(
+            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+                .await
+                .expect("rotate"),
+            "rotation must win"
+        );
+
+        // Expire only the retirement record; the successor stays live.
+        let past = (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        sqlx::query(
+            "UPDATE retired_refresh_tokens SET expires_at = ?1 WHERE refresh_token_hash = ?2",
+        )
+        .bind(past)
+        .bind(chain.gen0.refresh_token_hash.clone())
+        .execute(&repo.pool)
+        .await
+        .expect("expire retirement record");
+
+        use oidc_exchange_core::domain::RefreshResolution::*;
+        assert_eq!(
+            repo.resolve_refresh_token(&chain.gen0.refresh_token_hash)
+                .await
+                .expect("resolve"),
+            Unknown,
+            "an expired record must classify Unknown, not Superseded"
+        );
+        // Cleanup removes it and reports it.
+        let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
+        assert_eq!(removed, 1, "the sweep must remove exactly the dead record");
     }
 }

@@ -462,7 +462,10 @@ async fn build_user_repository(
                 })?;
             let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
+                oidc_exchange_adapters::sqlite::SqliteRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "" => Err(Box::new(Error::ConfigError {
@@ -520,7 +523,10 @@ async fn build_session_repository(
             })?;
             let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
+                oidc_exchange_adapters::sqlite::SqliteRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "valkey" => {

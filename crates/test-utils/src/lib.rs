@@ -273,9 +273,12 @@ impl UserRepository for MockRepository {
 impl SessionRepository for MockRepository {
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
         // Precondition: callers mint well-formed family ids; a malformed one
-        // here is a programmer error, not data to store silently.
+        // here is a programmer error, not data to store silently. The
+        // empty-string sentinel is the one non-well-formed value accepted: it
+        // is how every backend represents a pre-rotation (legacy) row, and the
+        // persistent adapters must be able to hold one just like this store.
         assert!(
-            is_valid_family_id(&session.family_id),
+            session.family_id.is_empty() || is_valid_family_id(&session.family_id),
             "store_refresh_token: malformed family id {:?}",
             session.family_id
         );
@@ -360,14 +363,22 @@ impl SessionRepository for MockRepository {
         let Some(live) = state.sessions.get(live_hash) else {
             return Ok(false);
         };
-        // Precondition: a rotation replaces a generation of the same family
-        // for the same user — anything else would strand credentials in a
-        // family their holder no longer controls.
-        assert_eq!(
-            live.family_id, replacement.family_id,
-            "rotate_refresh_token: replacement family {:?} must match live family {:?}",
-            replacement.family_id, live.family_id
-        );
+        // Precondition on well-formed rows: a rotation replaces a generation
+        // of the same family for the same user — anything else would strand
+        // credentials in a family their holder no longer controls. A legacy
+        // row (empty-family sentinel, written before rotation shipped) is the
+        // one exception: it belongs to no family, so its first redemption
+        // swaps to the caller's newly-minted family without a retirement
+        // record (there is no prior generation to detect reuse against) and
+        // only user identity is asserted.
+        let legacy_row = live.family_id.is_empty();
+        if !legacy_row {
+            assert_eq!(
+                live.family_id, replacement.family_id,
+                "rotate_refresh_token: replacement family {:?} must match live family {:?}",
+                replacement.family_id, live.family_id
+            );
+        }
         assert_eq!(
             live.user_id, replacement.user_id,
             "rotate_refresh_token: replacement user {:?} must match live user {:?}",
@@ -383,21 +394,27 @@ impl SessionRepository for MockRepository {
         );
 
         let now = Utc::now();
-        let retired_record = RetiredRefreshToken {
-            refresh_token_hash: live_hash.to_string(),
-            family_id: replacement.family_id.clone(),
-            user_id: replacement.user_id.clone(),
-            successor_hash: replacement.refresh_token_hash.clone(),
-            retired_at: now,
-            expires_at: RetiredRefreshToken::retention_deadline(
-                now,
-                self.reuse_retention_secs,
-                replacement.expires_at,
-            ),
-        };
-        state
-            .retired
-            .insert(retired_record.refresh_token_hash.clone(), retired_record);
+        if !legacy_row {
+            // A legacy row produces no retirement record: there is no prior
+            // generation to detect reuse against (the source spec's SQL
+            // first-redemption rule, mirrored here so wave-C flow tests
+            // behave identically on the mock and the persistent stores).
+            let retired_record = RetiredRefreshToken {
+                refresh_token_hash: live_hash.to_string(),
+                family_id: replacement.family_id.clone(),
+                user_id: replacement.user_id.clone(),
+                successor_hash: replacement.refresh_token_hash.clone(),
+                retired_at: now,
+                expires_at: RetiredRefreshToken::retention_deadline(
+                    now,
+                    self.reuse_retention_secs,
+                    replacement.expires_at,
+                ),
+            };
+            state
+                .retired
+                .insert(retired_record.refresh_token_hash.clone(), retired_record);
+        }
         state.sessions.remove(live_hash);
         state
             .sessions
