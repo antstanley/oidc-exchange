@@ -308,6 +308,33 @@ the receiver deploy together with this upgrade. `user_sync.enabled` defaults to
 `false` and no shipped example enables it; see the worked example above for the
 reference verification flow.
 
+#### Release note (embedding surface, `crates/adapters`)
+
+For embedders linking `crates/adapters` directly (the `IdentityProvider` trait
+signature itself is unchanged):
+
+- **`JwksCache::new`/`with_ttl` gained a required admitted-algorithms parameter**
+  (e.g. pass the same constant your validator advertises). Constructing without
+  it no longer compiles.
+- **`JwksCache::get_keys` returns `Arc<VerificationKeySet>`**, not
+  `serde_json::Value`. Use `get_key(kid)` for the resolve → one rate-limited
+  forced refetch → re-resolve → fail-closed path both built-in providers use.
+- **Key-selection behavior changed** to one shared constructor
+  (`VerificationKeySet::from_jwks`): keys declaring an unknown algorithm (e.g.
+  `RSA-OAEP`) are rejected instead of being inferred from their key type;
+  alg-less RSA / EC P-256 / OKP Ed25519 signing keys are now accepted on Apple's
+  path too; and a duplicate-`kid` JWKS whose eligible entry appears second now
+  validates (two *eligible* entries under one `kid` remain an error).
+- **Discovery endpoint origins**: each provider's discovery document may name
+  only origins pinned at config load (`endpoint_origins`, plus the issuer's own).
+  The check currently ships in warning mode — undeclared origins log a warning
+  and are served — and rejecting them (`Warn` → `Enforce`) is a separate future
+  release-owner decision after one release of that telemetry, not part of this
+  version.
+- Every outbound provider request goes through `ProviderTransport` (status read
+  before body; bodies bounded at the shared 64 KiB ceiling); webhook delivery
+  keeps its own operator-timeout client by design.
+
 ### Noop
 
 Disables user sync. This is the default when `user_sync.enabled` is `false` or the section is omitted.
