@@ -486,6 +486,66 @@ async fn lifetime_ceiling_rejects_long_remaining_lifetime() {
     assert_eq!(response.token_type, "Bearer");
 }
 
+/// An assertion whose `exp` has already passed is refused by the lifetime
+/// control itself — including thirty seconds past `exp`, well inside the
+/// default 60-second validation leeway real providers apply, which is exactly
+/// how such tokens reach binding. Zero remaining life refuses too. Each
+/// refusal audits once with `detail.check` = `lifetime_ceiling` and answers
+/// `invalid_grant`, writes no born-dead replay marker, and leaves the
+/// presented nonce unburned (lifetime runs before nonce consumption).
+#[tokio::test]
+async fn lifetime_control_refuses_assertions_whose_exp_has_passed() {
+    for offset in [-30i64, 0] {
+        let jti = unique_jti();
+        let repo = MockRepository::new();
+        let nonce = mint_nonce_over(&repo).await;
+
+        let mut raw = HashMap::new();
+        raw.insert("exp".to_string(), json!(Utc::now().timestamp() + offset));
+        raw.insert("jti".to_string(), json!(jti.clone()));
+        raw.insert("sub".to_string(), json!("binding-subject"));
+        raw.insert("nonce".to_string(), json!(nonce.clone()));
+
+        let provider = MockIdentityProvider::new(PROVIDER_ID);
+        provider.set_claims(claims_for("RS256", raw)).await;
+        let (svc, audit, repo) = make_auditing_service(repo, provider, make_config());
+
+        let err = svc
+            .exchange(direct_request())
+            .await
+            .expect_err("an assertion with no remaining life refuses");
+        expect_invalid_grant(err, "already expired");
+
+        // Audited exactly once, as a lifetime-control rejection.
+        let events = audit.events().await;
+        assert_eq!(events.len(), 1, "one ValidationFailed per refusal");
+        assert_eq!(events[0].event_type, AuditEventType::ValidationFailed);
+        assert_eq!(events[0].severity, AuditSeverity::Warning);
+        assert!(matches!(&events[0].outcome, AuditOutcome::Failure { .. }));
+        assert_eq!(
+            events[0].detail.get("check"),
+            Some(&json!(assertion::CHECK_LIFETIME_CEILING)),
+            "the born-dead assertion fails at the lifetime control"
+        );
+
+        // Negative space: no born-dead marker exists for this jti…
+        let jti_digest = hex::encode(Sha256::digest(jti.as_bytes()));
+        assert!(
+            repo.get_single_use_record(&format!("assertion:{PROVIDER_ID}:{jti_digest}"))
+                .await
+                .is_none(),
+            "an expired assertion must not pin a replay marker"
+        );
+        // …and the nonce survives the pre-nonce lifetime rejection.
+        assert!(
+            repo.get_single_use_record(&nonce_key(&nonce))
+                .await
+                .is_some(),
+            "the nonce must survive a lifetime rejection"
+        );
+    }
+}
+
 /// Multi-audience rules: `azp` required when `aud` is multi-valued, present
 /// `azp` must name this client, and a correct token passes.
 #[tokio::test]

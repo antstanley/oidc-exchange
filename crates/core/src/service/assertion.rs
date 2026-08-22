@@ -185,9 +185,9 @@ fn str_claim<'a>(claims: &'a IdentityClaims, name: &str) -> Option<&'a str> {
 }
 
 /// Parse the assertion's `exp` claim and enforce the remaining-lifetime
-/// ceiling. Returns the expiry instant, which doubles as the replay marker's
-/// `expires_at` — the marker must always outlive the assertion it guards,
-/// which the ceiling guarantees by construction.
+/// controls. Returns the expiry instant, which doubles as the replay marker's
+/// `expires_at`: assertions whose `exp` has passed are refused even though
+/// validator leeway may still admit them, so the marker never starts dead.
 ///
 /// A missing or unparseable `exp` fails this control: real validators require
 /// the claim (jsonwebtoken pins `exp` as required), and the marker could not
@@ -218,6 +218,17 @@ fn check_lifetime(
     assert!(now.timestamp() > 0, "clock must be past the epoch");
 
     let remaining = exp_secs - now.timestamp();
+    // Strictly positive: validators admit tokens whose `exp` passed within
+    // their leeway (jsonwebtoken defaults to 60s), but a marker written with
+    // `expires_at <= now` is born dead — every store treats it as absent, so
+    // replay protection would silently vanish.
+    if remaining <= 0 {
+        return Err(AssertionRejection {
+            check: CHECK_LIFETIME_CEILING,
+            reason: "assertion is already expired".to_string(),
+        }
+        .into());
+    }
     if remaining > max_assertion_secs as i64 {
         return Err(AssertionRejection {
             check: CHECK_LIFETIME_CEILING,
