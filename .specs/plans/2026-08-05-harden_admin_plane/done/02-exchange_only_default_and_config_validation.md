@@ -1,6 +1,6 @@
 # 02 · Exchange-only default and config validation
 
-**Status:** Backlog  
+**Status:** Done  
 **Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 3; [04-http-api](../../../service/specs/04-http-api.md) Service roles target; [06-configuration](../../../service/specs/06-configuration.md) target  
 **Depends on:** —  
 **Produces:** An omitted `server.role` defaults to `exchange`, with migration documentation and tests that make implicit-admin exposure impossible.
@@ -15,8 +15,8 @@
 
 ## Definition of done
 
-- [ ] Deserializing/defaulting configuration without `server.role` yields `exchange`; explicit `all` and `admin` preserve their configured values.
-- [ ] Tests establish that the default cannot serve internal routes once task 04’s router split is present, without asserting an implementation not yet built here.
-- [ ] The migration impact is documented with rationale: admin exposure must be a deliberate deployment decision.
-- [ ] `cargo fmt --check --all`, `cargo clippy --workspace -- -D warnings`, and affected Rust tests pass; unrelated failures are recorded but not fixed.
-- [ ] Reviewable: the default is one named configuration value with explicit-deployment migration guidance.
+- [x] Deserializing/defaulting configuration without `server.role` yields `exchange`; explicit `all` and `admin` preserve their configured values.
+- [x] Tests establish that the default cannot serve internal routes once task 04’s router split is present, without asserting an implementation not yet built here.
+- [x] The migration impact is documented with rationale: admin exposure must be a deliberate deployment decision.
+- [x] `cargo fmt --check --all`, `cargo clippy --workspace -- -D warnings`, and affected Rust tests pass; unrelated failures are recorded but not fixed.
+- [x] Reviewable: the default is one named configuration value with explicit-deployment migration guidance.

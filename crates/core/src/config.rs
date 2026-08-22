@@ -129,6 +129,14 @@ fn validate_allowlist_entry(entry: &str) -> Result<(), Error> {
 /// See `06-configuration.md` → Sections → `[server]` and Defaults summary.
 pub const DEFAULT_REQUEST_TIMEOUT: &str = "30s";
 
+/// Default for `[server] role` when the key is absent from config: serve only
+/// the public exchange plane. Named rather than a bare literal so the value
+/// backing `ServerConfig::default`, `AppConfig::validate`, and the deployment
+/// docs stay in lockstep — admin reachability must be a deliberate
+/// configuration act, never a consequence of an omitted key.
+/// See `06-configuration.md` → Sections → `[server]` and Defaults summary.
+pub const DEFAULT_SERVER_ROLE: &str = "exchange";
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -155,7 +163,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             issuer: String::new(),
-            role: "all".to_string(),
+            role: DEFAULT_SERVER_ROLE.to_string(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT.to_string(),
             base_path: None,
         }
@@ -744,7 +752,79 @@ host = "0.0.0.0"
             result.is_ok(),
             "well-formed config must validate: {result:?}"
         );
-        assert_eq!(config.server.role, "all");
+        assert_eq!(config.server.role, DEFAULT_SERVER_ROLE);
+    }
+
+    /// An omitted `[server].role` must land on the exchange-only default, so a
+    /// stock process never serves the internal admin API by accident.
+    #[test]
+    fn server_role_absent_deserializes_to_exchange_default() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[server]
+host = "0.0.0.0"
+"#,
+        )
+        .expect("config without server.role must deserialize");
+
+        assert_eq!(
+            config.server.role, DEFAULT_SERVER_ROLE,
+            "an omitted server.role must default to {DEFAULT_SERVER_ROLE}, never to a \
+             role that serves the admin plane"
+        );
+    }
+
+    /// Explicit roles are compatibility surfaces: an installation that sets
+    /// `all` or `admin` deliberately must keep exactly what it configured.
+    #[test]
+    fn explicit_all_and_admin_roles_are_preserved() {
+        let all: AppConfig = toml::from_str(
+            r#"
+[server]
+role = "all"
+"#,
+        )
+        .expect("explicit role = \"all\" must deserialize");
+        let admin: AppConfig = toml::from_str(
+            r#"
+[server]
+role = "admin"
+"#,
+        )
+        .expect("explicit role = \"admin\" must deserialize");
+
+        assert_eq!(
+            all.server.role, "all",
+            "an explicit \"all\" must be preserved verbatim"
+        );
+        assert_eq!(
+            admin.server.role, "admin",
+            "an explicit \"admin\" must be preserved verbatim"
+        );
+    }
+
+    /// Even with `internal_api.enabled = true`, an omitted role must fail no
+    /// validation and yet never count as "serving" the internal API: enabling
+    /// the flag alone cannot turn the default process into an admin plane
+    /// (task 04's listener split builds on this same gate).
+    #[test]
+    fn default_role_with_enabled_internal_api_is_not_served() {
+        let mut config = AppConfig::default();
+        config.internal_api.enabled = true;
+        // No shared secret on purpose: under the default role the internal API
+        // is not served, so the served-secret requirement must not fire.
+        config.internal_api.shared_secret = None;
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "the exchange-only default must not require internal-API credentials: {result:?}"
+        );
+        assert_eq!(
+            config.server.role, DEFAULT_SERVER_ROLE,
+            "the test is only meaningful for the absent-role default"
+        );
     }
 
     #[test]

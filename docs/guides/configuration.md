@@ -26,6 +26,7 @@ The following shows every configuration section with all available options. In p
 host = "0.0.0.0"                       # bind address
 port = 8080                            # listen port
 issuer = "https://auth.example.com"    # issuer URL for JWTs (iss claim)
+role = "exchange"                      # "exchange" (default), "admin", or "all" — see Upgrading below
 
 # ─── Registration policy ──────────────────────────────────────────
 [registration]
@@ -192,6 +193,7 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 |---|---|
 | `server.host` | `0.0.0.0` |
 | `server.port` | `8080` |
+| `server.role` | `exchange` |
 | `registration.mode` | `open` |
 | `registration.domain_allowlist` | none (all domains allowed) |
 | `token.access_token_ttl` | `15m` |
@@ -203,3 +205,28 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 | `audit.blocking_threshold` | `warning` |
 | `user_sync.enabled` | `false` |
 | `internal_api` | disabled |
+
+## Upgrading: `server.role` now defaults to `exchange`
+
+Earlier releases defaulted `server.role` to `all`: a deployment that only set
+`internal_api.enabled = true` got the internal admin API served on the same
+process as the public `/token` endpoint without ever naming that decision. The
+default is now `exchange`, which serves only the public exchange plane —
+admin reachability must be a deliberate deployment decision, visible in
+configuration.
+
+If an installation relied on the implicit `all`, set the role explicitly when
+upgrading:
+
+```toml
+[server]
+role = "all"     # public exchange plane + internal admin API on this process
+```
+
+Prefer splitting the planes when you do: keep `role = "exchange"` (or omit the
+key) on internet-facing processes, and run a separate process with
+`role = "admin"` and `internal_api.enabled = true` for the admin API, reachable
+only from your operator network. An `exchange`-role process never mounts
+`/internal/*`, so a forgotten `internal_api.enabled = true` there fails closed
+instead of publishing the privilege-assignment primitive.
+

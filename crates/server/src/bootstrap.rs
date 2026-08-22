@@ -1480,6 +1480,38 @@ mod build_router_tests {
         );
     }
 
+    /// The exchange-only default: with `server.role` omitted — the stock
+    /// deployment shape — no `/internal/*` route may be mounted even when
+    /// `internal_api.enabled = true`, so implicit admin exposure is
+    /// impossible. Enabling the flag and setting a role that binds the admin
+    /// plane are both explicit, deliberate acts.
+    #[tokio::test]
+    async fn default_role_serves_exchange_routes_only_despite_enabled_internal_api() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            config.server.role,
+            oidc_exchange_core::config::DEFAULT_SERVER_ROLE,
+            "the test is only meaningful for the absent-role default"
+        );
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let service = build_test_service(&config);
+
+        let app = build_router(&config, service);
+        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(app.clone(), "/keys", None).await,
+            StatusCode::OK,
+            "public routes must still be mounted under the default role"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::NOT_FOUND,
+            "even with the internal API enabled, the default role must not mount \
+             /internal/* at all — not merely reject the credential"
+        );
+    }
+
     /// An empty configured `shared_secret` must never be treated as
     /// "configured" by the auth middleware, even when the request supplies
     /// an equally empty bearer token — defence in depth alongside
