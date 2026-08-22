@@ -3,6 +3,21 @@ import { env } from "$env/dynamic/private";
 const INTERNAL_API_URL = env.INTERNAL_API_URL || "http://localhost:8081";
 const INTERNAL_API_SECRET = env.INTERNAL_API_SECRET || "";
 
+/**
+ * Encode a user id as exactly one path segment.
+ *
+ * Why: the id arrives from the browser's URL (`params.id`), which an attacker
+ * controls. Interpolating it raw lets a `%2f` (or a literal `/`) introduce
+ * extra path segments, so a credentialed request meant for
+ * `/internal/users/<id>` is re-addressed to `/internal/stats` or another
+ * route. Encoding here — inside the client, not at the call sites — means
+ * every caller gets the same guarantee by construction. Query parameters are
+ * composed separately and keep their own encoding.
+ */
+function encodedUserId(id: string): string {
+  return encodeURIComponent(id);
+}
+
 async function api(path: string, options: RequestInit = {}): Promise<Response> {
   const url = `${INTERNAL_API_URL}${path}`;
   const headers = new Headers(options.headers);
@@ -27,7 +42,7 @@ export async function listUsers(offset = 0, limit = 50) {
 }
 
 export async function getUser(id: string) {
-  const res = await api(`/internal/users/${id}`);
+  const res = await api(`/internal/users/${encodedUserId(id)}`);
   if (!res.ok) {
     if (res.status === 404) return null;
     throw new Error(`Get user failed: ${res.status}`);
@@ -36,7 +51,7 @@ export async function getUser(id: string) {
 }
 
 export async function updateUser(id: string, patch: Record<string, unknown>) {
-  const res = await api(`/internal/users/${id}`, {
+  const res = await api(`/internal/users/${encodedUserId(id)}`, {
     method: "PATCH",
     body: JSON.stringify(patch),
   });
@@ -45,18 +60,18 @@ export async function updateUser(id: string, patch: Record<string, unknown>) {
 }
 
 export async function deleteUser(id: string) {
-  const res = await api(`/internal/users/${id}`, { method: "DELETE" });
+  const res = await api(`/internal/users/${encodedUserId(id)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Delete user failed: ${res.status}`);
 }
 
 export async function getUserClaims(id: string) {
-  const res = await api(`/internal/users/${id}/claims`);
+  const res = await api(`/internal/users/${encodedUserId(id)}/claims`);
   if (!res.ok) throw new Error(`Get claims failed: ${res.status}`);
   return res.json();
 }
 
 export async function setClaims(id: string, claims: Record<string, unknown>) {
-  const res = await api(`/internal/users/${id}/claims`, {
+  const res = await api(`/internal/users/${encodedUserId(id)}/claims`, {
     method: "PUT",
     body: JSON.stringify(claims),
   });
@@ -64,7 +79,7 @@ export async function setClaims(id: string, claims: Record<string, unknown>) {
 }
 
 export async function mergeClaims(id: string, claims: Record<string, unknown>) {
-  const res = await api(`/internal/users/${id}/claims`, {
+  const res = await api(`/internal/users/${encodedUserId(id)}/claims`, {
     method: "PATCH",
     body: JSON.stringify(claims),
   });
@@ -72,6 +87,6 @@ export async function mergeClaims(id: string, claims: Record<string, unknown>) {
 }
 
 export async function clearClaims(id: string) {
-  const res = await api(`/internal/users/${id}/claims`, { method: "DELETE" });
+  const res = await api(`/internal/users/${encodedUserId(id)}/claims`, { method: "DELETE" });
   if (!res.ok) throw new Error(`Clear claims failed: ${res.status}`);
 }

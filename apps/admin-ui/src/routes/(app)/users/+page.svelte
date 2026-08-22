@@ -27,9 +27,9 @@
 						</td>
 						<td class="px-5 py-3 text-sm text-gray-400">{user.provider}</td>
 						<td class="px-5 py-3">
-							{#if user.status === 'Active'}
+							{#if user.status === 'active'}
 								<span class="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-green-500/10 text-green-400">Active</span>
-							{:else if user.status === 'Suspended'}
+							{:else if user.status === 'suspended'}
 								<span class="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-yellow-500/10 text-yellow-400">Suspended</span>
 							{:else}
 								<span class="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400">Deleted</span>

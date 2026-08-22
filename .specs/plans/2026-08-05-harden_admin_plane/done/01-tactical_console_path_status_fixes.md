@@ -1,6 +1,6 @@
 # 01 · Tactical console path/status fixes
 
-**Status:** Backlog  
+**Status:** Done  
 **Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 1; [admin-ui overview](../../../admin-ui/specs/00-overview.md) target  
 **Depends on:** — (external integration gate: `2026-08-05-verify_admin_ui_session_jwt` owns session/login changes)  
 **Produces:** The existing server-only admin client encodes every user-id path segment; UI types and status controls use `active | suspended | deleted`.
@@ -16,8 +16,8 @@
 
 ## Definition of done
 
-- [ ] Every user-id helper encodes exactly one path segment before composing its request path; query parameters remain separately encoded.
-- [ ] Status badges and edit submission use only `active`, `suspended`, and `deleted`; TypeScript catches any title-cased value.
-- [ ] Positive and negative tests prove both hostile payloads cannot redirect credentialed traffic, while a normal id still reaches its intended endpoint.
-- [ ] `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, and relevant `pnpm test` pass; unrelated failures are recorded but not repaired.
-- [ ] Reviewable: one client boundary owns path encoding and the UI’s status spelling matches `UserStatus` serialization.
+- [x] Every user-id helper encodes exactly one path segment before composing its request path; query parameters remain separately encoded.
+- [x] Status badges and edit submission use only `active`, `suspended`, and `deleted`; TypeScript catches any title-cased value.
+- [x] Positive and negative tests prove both hostile payloads cannot redirect credentialed traffic, while a normal id still reaches its intended endpoint.
+- [x] `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, and relevant `pnpm test` pass; unrelated failures are recorded but not repaired.
+- [x] Reviewable: one client boundary owns path encoding and the UI’s status spelling matches `UserStatus` serialization.
