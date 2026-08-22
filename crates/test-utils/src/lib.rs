@@ -14,6 +14,8 @@ use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
 };
 
+pub mod corpus;
+
 // ---------------------------------------------------------------------------
 // MockRepository
 // ---------------------------------------------------------------------------

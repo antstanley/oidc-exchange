@@ -1,0 +1,18 @@
+# Clippy configuration for one lint only, per
+# .specs/changes/2026-08-05-own_outbound_http_boundary.md (Decisions:
+# "`clippy.toml` for one lint, not a ruleset").
+#
+# await-holding-invalid-types makes clippy::await_holding_invalid_type fire at
+# the binding site when one of these async-aware lock guards is alive across an
+# .await. The better-known clippy::await_holding_lock covers only std::sync and
+# parking_lot guards and does not catch tokio's, which is why the type list is
+# configured deliberately.
+#
+# The rule behind the lint: no lock guard may be alive across an .await that
+# performs I/O; single-flight is expressed with its own primitive rather than
+# obtained as a side effect of a data lock.
+await-holding-invalid-types = [
+    "tokio::sync::RwLockWriteGuard",
+    "tokio::sync::RwLockReadGuard",
+    "tokio::sync::MutexGuard",
+]

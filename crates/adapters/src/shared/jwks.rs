@@ -51,6 +51,13 @@ impl JwksCache {
     }
 
     /// Return the cached JWKS if still fresh, otherwise fetch from the remote URL.
+    ///
+    /// No lock that protects the cached value is held across the fetch: the
+    /// slow path checks freshness under the write guard, releases it, fetches
+    /// outside any lock, and re-acquires only to store. The interim cost of
+    /// that ordering is a possible thundering herd of refetches (bounded per
+    /// fetch by the shared byte ceiling), which the single-flight redesign
+    /// replaces with an elected fetcher.
     pub async fn get_keys(&self) -> Result<serde_json::Value> {
         // Fast path: read lock to check if cache is valid.
         {
@@ -62,17 +69,23 @@ impl JwksCache {
             }
         }
 
-        // Slow path: acquire write lock and fetch.
-        let mut guard = self.cache.write().await;
-
-        // Double-check: another task may have refreshed while we waited for the write lock.
-        if let Some(ref cached) = *guard {
-            if cached.fetched_at.elapsed() < self.ttl {
-                return Ok(cached.keys.clone());
+        // Slow path: confirm staleness under the write lock, then release it
+        // before any network I/O — the guard must never span the fetch.
+        {
+            let guard = self.cache.write().await;
+            if let Some(ref cached) = *guard {
+                if cached.fetched_at.elapsed() < self.ttl {
+                    // Another task refreshed while we waited for the lock.
+                    return Ok(cached.keys.clone());
+                }
             }
+            // Deliberately drop `guard` here: fetching under it is the
+            // lock-across-network defect this ordering removes.
         }
 
         let keys = self.fetch_keys().await?;
+
+        let mut guard = self.cache.write().await;
         *guard = Some(CachedJwks {
             keys: keys.clone(),
             fetched_at: Instant::now(),
@@ -120,6 +133,12 @@ impl JwksCache {
     /// network fetch per [`MIN_REFRESH_INTERVAL`]. If a forced refetch happened more recently
     /// than the interval allows, this returns `Ok(())` without issuing a request, leaving the
     /// existing cache entry in place.
+    ///
+    /// The rate-limit timestamp is written and the guard released *before* the network
+    /// call: at most one fetch per interval even when the upstream is unhealthy, and no
+    /// lock guard spans the fetch. Callers that arrive while a permitted refetch is in
+    /// flight are told "rate-limited" rather than queued behind it; the single-flight
+    /// redesign elects one fetcher for that window instead.
     pub async fn refresh(&self) -> Result<()> {
         assert!(
             MIN_REFRESH_INTERVAL > Duration::ZERO,
@@ -135,20 +154,26 @@ impl JwksCache {
             }
         }
 
-        let mut last_guard = self.last_forced_refetch.write().await;
+        {
+            let mut last_guard = self.last_forced_refetch.write().await;
 
-        // Double-check under the write lock: another task may have refreshed while we waited.
-        if let Some(last) = *last_guard {
-            if last.elapsed() < MIN_REFRESH_INTERVAL {
-                return Ok(());
+            // Double-check under the write lock: another task may have refreshed while we
+            // waited.
+            if let Some(last) = *last_guard {
+                if last.elapsed() < MIN_REFRESH_INTERVAL {
+                    return Ok(());
+                }
             }
-        }
 
-        // Record the attempt *before* the network call, not after a successful one: this
-        // ensures at most one network fetch per `MIN_REFRESH_INTERVAL` even when the upstream
-        // is unhealthy and `fetch_keys` returns an error, so a failing (or attacker-targeted)
-        // JWKS endpoint cannot be hammered by repeated forced refetches within the interval.
-        *last_guard = Some(Instant::now());
+            // Record the attempt *before* the network call, not after a successful one: this
+            // ensures at most one network fetch per `MIN_REFRESH_INTERVAL` even when the
+            // upstream is unhealthy and `fetch_keys` returns an error, so a failing (or
+            // attacker-targeted) JWKS endpoint cannot be hammered by repeated forced
+            // refetches within the interval.
+            *last_guard = Some(Instant::now());
+            // Deliberately drop `last_guard`: the timestamp is already recorded, so the
+            // guard's job is done and it must not span the fetch below.
+        }
 
         let keys = self.fetch_keys().await?;
         if keys.get("keys").is_none() {
