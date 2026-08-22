@@ -549,6 +549,7 @@ async fn build_session_repository(
                     .key_prefix
                     .clone()
                     .unwrap_or_else(|| "oidc:".to_string()),
+                config.token.refresh_reuse_retention_secs(),
             )
             .await?;
             Ok(Box::new(client))
