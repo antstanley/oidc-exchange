@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -69,14 +69,19 @@ struct Session {
 The raw refresh token exists only in memory during issuance and in the response to the
 client. Only the hash is stored. `device_id`, `user_agent`, and `ip_address` are populated
 `None` by the core at issuance today (the audit-context middleware captures them at the HTTP
-edge but they are not threaded into the stored session).
+edge but they are not threaded into the stored session). `refresh_token_hash` is also the
+session's identifier: it is the key every `SessionRepository` lookup and revocation takes,
+and it is the value minted access tokens carry as their `sid` claim so a presented access
+token names the session it belongs to.
 
 ### Token types (`domain/token.rs`)
 
 - **`TokenResponse`** — the `/token` body: `access_token`, optional `refresh_token` (present
   on exchange, absent on refresh), `token_type` (always `"Bearer"`), `expires_in` seconds.
 - **`AccessTokenClaims`** — JWT payload: `sub` (internal user id), `iss`, `aud`, `iat`,
-  `exp`, plus a flattened `custom: HashMap<String, Value>` of resolved claims.
+  `exp`, `sid` (the `refresh_token_hash` of the session the token was minted for), plus a
+  flattened `custom: HashMap<String, Value>` of resolved claims. All six registered fields
+  are required on both serialization and deserialization.
 - **`ProviderTokens`** — what a provider returns from code exchange: `id_token`, optional
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
