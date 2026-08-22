@@ -104,6 +104,7 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
 
 SQLite runs with WAL journal mode and foreign keys enabled automatically. The database file and tables are created on first startup.

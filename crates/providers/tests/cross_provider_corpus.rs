@@ -197,6 +197,7 @@ fn oidc_config(server_uri: &str) -> OidcProviderConfig {
         jwks_uri: Some(format!("{server_uri}/jwks.json")),
         token_endpoint: Some(format!("{server_uri}/token")),
         revocation_endpoint: None,
+        endpoint_origins: Vec::new(),
         scopes: vec!["openid".into()],
         additional_params: HashMap::new(),
     }

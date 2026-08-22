@@ -5,6 +5,10 @@ use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, encode, Algorithm, EncodingKey, Header, Validation};
 use oidc_exchange_adapters::shared::claims::coerce_bool;
 use oidc_exchange_adapters::shared::jwks::JwksCache;
+use oidc_exchange_adapters::shared::origins::{
+    origin_of, parse_https_origin, EndpointOrigins, MAX_ENDPOINT_ORIGINS,
+    MAX_ENDPOINT_ORIGIN_LEN_BYTES,
+};
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
@@ -62,6 +66,54 @@ struct ClientSecretClaims {
     aud: String,
     iat: u64,
     exp: u64,
+}
+
+/// Extract and validate the optional `endpoint_origins` array from Apple's raw
+/// TOML config map.
+///
+/// Every entry must be a bare `https` origin — the same strict rule the config
+/// layer applies to Tier 1 providers — because these entries declare what a
+/// discovery document (or a future Apple endpoint relocation) may name.
+fn parse_declared_endpoint_origins(config: &HashMap<String, toml::Value>) -> Result<Vec<String>> {
+    let Some(raw) = config.get("endpoint_origins") else {
+        return Ok(Vec::new());
+    };
+
+    let Some(entries) = raw.as_array() else {
+        return Err(Error::ConfigError {
+            detail: "apple: 'endpoint_origins' must be an array of https origins".into(),
+        });
+    };
+
+    assert!(
+        entries.len() <= MAX_ENDPOINT_ORIGINS,
+        "endpoint_origins exceeds MAX_ENDPOINT_ORIGINS"
+    );
+
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let Some(entry) = value.as_str() else {
+                return Err(Error::ConfigError {
+                    detail: format!("apple: endpoint_origins[{index}] must be a string"),
+                });
+            };
+            if entry.len() > MAX_ENDPOINT_ORIGIN_LEN_BYTES {
+                // Rejected before any parse so an oversized entry can never
+                // become log or error text; the message names only the index.
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "apple: endpoint_origins[{index}] exceeds \
+                         {MAX_ENDPOINT_ORIGIN_LEN_BYTES} bytes"
+                    ),
+                });
+            }
+            parse_https_origin(entry).map_err(|e| Error::ConfigError {
+                detail: format!("apple: invalid endpoint_origins[{index}]: {e}"),
+            })
+        })
+        .collect()
 }
 
 impl AppleProvider {
@@ -136,6 +188,42 @@ impl AppleProvider {
                 .unwrap_or(APPLE_REVOCATION_ENDPOINT)
                 .to_string(),
         );
+
+        // Endpoint-origin pinning, same shape as a Tier 1 provider: the pinned
+        // set is the issuer's own origin (the `appleid.apple.com` constant),
+        // the origins of any explicitly configured overrides, and every
+        // declared `endpoint_origins` entry. The overrides are operator input
+        // here, so each one must at minimum parse as an absolute URL — an
+        // override that pins no origin would otherwise silently escape the
+        // set. Apple performs no runtime discovery, so the set is a
+        // construction-time invariant rather than a per-fetch check; it is
+        // asserted below instead of being skipped.
+        let declared_extras = parse_declared_endpoint_origins(config)?;
+
+        let overrides: Vec<&str> = [
+            Some(token_endpoint.as_str()),
+            Some(jwks_uri.as_str()),
+            revocation_endpoint.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for endpoint in &overrides {
+            if origin_of(endpoint).is_none() {
+                return Err(Error::ConfigError {
+                    detail: "apple: endpoint override is not an absolute URL".into(),
+                });
+            }
+        }
+
+        let pinned_origins =
+            EndpointOrigins::from_parts(APPLE_ISSUER, &overrides, &declared_extras);
+        for endpoint in &overrides {
+            debug_assert!(
+                pinned_origins.admits(endpoint),
+                "an explicitly configured endpoint's own origin is always admitted"
+            );
+        }
 
         Ok(Self {
             client_id,

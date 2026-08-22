@@ -1,6 +1,7 @@
 use oidc_exchange_core::error::{Error, Result};
 use serde::Deserialize;
 
+use crate::shared::origins::{check_pinned_origin, EndpointOrigins, ENDPOINT_ORIGIN_CHECK_MODE};
 use crate::shared::transport::ProviderTransport;
 
 /// Parsed OIDC provider discovery document.
@@ -18,11 +19,25 @@ pub struct DiscoveryDocument {
 /// Per RFC 8414 §3.3, the `issuer` field in the returned document must be identical to
 /// the issuer URL used to construct the discovery request URL; a mismatch is rejected.
 ///
+/// Each endpoint the document supplies (`token_endpoint`, `jwks_uri`, and
+/// `revocation_endpoint` when present) is checked against the provider's pinned
+/// endpoint-origin set. The check runs in the shipped [`ENDPOINT_ORIGIN_CHECK_MODE`]:
+/// warning first for one release, then a separately reviewed enforcement flip — a
+/// discovery document may confirm which origins this service talks to but can never
+/// widen them.
+///
 /// The fetch goes through [`ProviderTransport`], so the response status is checked
 /// before any body is read and the document body cannot exceed the shared byte
 /// ceiling — an oversized "discovery document" is rejected before it is materialised.
-pub async fn discover(issuer_url: &str) -> Result<DiscoveryDocument> {
+pub async fn discover(
+    issuer_url: &str,
+    permitted_origins: &EndpointOrigins,
+) -> Result<DiscoveryDocument> {
     assert!(!issuer_url.is_empty(), "issuer_url must not be empty");
+    assert!(
+        !permitted_origins.as_list().is_empty(),
+        "the issuer's own origin always pins at least one permitted origin"
+    );
 
     let normalised_issuer = issuer_url.trim_end_matches('/');
     let url = format!("{normalised_issuer}/.well-known/openid-configuration");
@@ -47,14 +62,49 @@ pub async fn discover(issuer_url: &str) -> Result<DiscoveryDocument> {
         "discovery document issuer must match the configured issuer after normalisation"
     );
 
+    // Origin pinning runs after the issuer self-consistency check so a hostile
+    // document is already bound to one issuer before its endpoints are judged.
+    // Every supplied endpoint passes through the same mode decision — there is
+    // no per-endpoint escape hatch that could let enforcement erode quietly.
+    check_pinned_origin(
+        issuer_url,
+        "token_endpoint",
+        &doc.token_endpoint,
+        permitted_origins,
+        ENDPOINT_ORIGIN_CHECK_MODE,
+    )?;
+    check_pinned_origin(
+        issuer_url,
+        "jwks_uri",
+        &doc.jwks_uri,
+        permitted_origins,
+        ENDPOINT_ORIGIN_CHECK_MODE,
+    )?;
+    if let Some(revocation) = &doc.revocation_endpoint {
+        check_pinned_origin(
+            issuer_url,
+            "revocation_endpoint",
+            revocation,
+            permitted_origins,
+            ENDPOINT_ORIGIN_CHECK_MODE,
+        )?;
+    }
+
     Ok(doc)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::origins::OriginCheckMode;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Issuer-only permitted set: every endpoint these fixtures serve sits on
+    /// the mock server's loopback origin, which is the issuer's origin.
+    fn issuer_only_origins(issuer: &str) -> EndpointOrigins {
+        EndpointOrigins::from_parts(issuer, &[], &[])
+    }
 
     #[tokio::test]
     async fn discover_parses_openid_configuration() {
@@ -74,7 +124,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let doc = discover(&server.uri())
+        let doc = discover(&server.uri(), &issuer_only_origins(&server.uri()))
             .await
             .expect("discovery should succeed");
 
@@ -106,7 +156,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let doc = discover(&server.uri())
+        let doc = discover(&server.uri(), &issuer_only_origins(&server.uri()))
             .await
             .expect("discovery should succeed");
 
@@ -124,7 +174,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = discover(&server.uri()).await;
+        let result = discover(&server.uri(), &issuer_only_origins(&server.uri())).await;
         assert!(result.is_err());
     }
 
@@ -146,7 +196,7 @@ mod tests {
 
         // Pass URL with trailing slash
         let url_with_slash = format!("{}/", server.uri());
-        let doc = discover(&url_with_slash)
+        let doc = discover(&url_with_slash, &issuer_only_origins(&server.uri()))
             .await
             .expect("discovery should succeed with trailing slash");
 
@@ -169,7 +219,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = discover(&server.uri()).await;
+        let result = discover(&server.uri(), &issuer_only_origins(&server.uri())).await;
 
         let err = result.expect_err("mismatched issuer should be rejected");
         match err {
@@ -198,7 +248,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = discover(&server.uri())
+        let err = discover(&server.uri(), &issuer_only_origins(&server.uri()))
             .await
             .expect_err("an oversized discovery document must not be accepted");
 
@@ -231,7 +281,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = discover(&server.uri())
+        let err = discover(&server.uri(), &issuer_only_origins(&server.uri()))
             .await
             .expect_err("a 404 discovery response must be an error");
 
@@ -243,6 +293,74 @@ mod tests {
         assert!(
             !message.contains("<html>"),
             "the error body must never be echoed: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_serves_warning_mode_for_an_undeclared_cross_origin_endpoint() {
+        // The shipped release mode is Warn: a document naming an endpoint on an
+        // origin outside the pinned set must still be served (the deployment
+        // learns from the structured warning, not an outage) until the
+        // separately reviewed enforcement flip lands.
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "issuer": server.uri(),
+            "token_endpoint": format!("{}/token", server.uri()),
+            "jwks_uri": "https://undeclared.example/jwks.json",
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            ENDPOINT_ORIGIN_CHECK_MODE,
+            OriginCheckMode::Warn,
+            "the shipped mode is the warning stage; flipping it is a release decision"
+        );
+
+        let doc = discover(&server.uri(), &issuer_only_origins(&server.uri()))
+            .await
+            .expect("warning mode must not reject the same deployment it warns about");
+        assert_eq!(doc.jwks_uri, "https://undeclared.example/jwks.json");
+    }
+
+    #[tokio::test]
+    async fn discover_accepts_a_declared_cross_origin_endpoint() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "issuer": server.uri(),
+            "token_endpoint": format!("{}/token", server.uri()),
+            "jwks_uri": "https://www.googleapis.com/jwks.json",
+            "revocation_endpoint": "https://oauth2.googleapis.com/revoke",
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let permitted = EndpointOrigins::from_parts(
+            &server.uri(),
+            &[],
+            &[
+                "https://oauth2.googleapis.com".to_string(),
+                "https://www.googleapis.com".to_string(),
+            ],
+        );
+
+        let doc = discover(&server.uri(), &permitted)
+            .await
+            .expect("declared cross-origin endpoints must be accepted");
+        assert_eq!(doc.jwks_uri, "https://www.googleapis.com/jwks.json");
+        assert_eq!(
+            doc.revocation_endpoint.as_deref(),
+            Some("https://oauth2.googleapis.com/revoke")
         );
     }
 }

@@ -7,6 +7,7 @@ use oidc_exchange_core::ports::IdentityProvider;
 
 use crate::shared::claims::coerce_bool;
 use crate::shared::jwks::JwksCache;
+use crate::shared::origins::{parse_https_origin, EndpointOrigins, MAX_ENDPOINT_ORIGINS};
 
 /// The algorithms the generic (Tier 1) provider admits for ID-token signatures:
 /// the nine JWS signature algorithms this adapter has always accepted. Deliberately
@@ -43,12 +44,48 @@ impl OidcProvider {
     /// Build an `OidcProvider` from an `OidcProviderConfig`.
     ///
     /// If `token_endpoint` or `jwks_uri` are absent from the config they are
-    /// resolved via OIDC discovery on the configured `issuer`.
+    /// resolved via OIDC discovery on the configured `issuer`. Discovery runs
+    /// against the provider's pinned endpoint-origin set — the issuer's own
+    /// origin, the origins of explicitly configured endpoints, and every
+    /// declared `endpoint_origins` entry — so a discovery document can never
+    /// introduce an origin at runtime. The set is fixed here, at construction;
+    /// nothing that happens later in the provider's life widens it.
     pub async fn from_config(provider_id: &str, config: &OidcProviderConfig) -> Result<Self> {
+        // The adapter re-validates what the config layer validated: paired
+        // checks at both ends of the boundary, because a future caller could
+        // construct this config without passing through TOML loading.
+        assert!(
+            config.endpoint_origins.len() <= MAX_ENDPOINT_ORIGINS,
+            "endpoint_origins exceeds MAX_ENDPOINT_ORIGINS"
+        );
+        for entry in &config.endpoint_origins {
+            parse_https_origin(entry).map_err(|e| Error::ConfigError {
+                detail: format!("provider '{provider_id}': invalid endpoint_origins entry: {e}"),
+            })?;
+        }
+
+        let configured_endpoints: Vec<&str> = [
+            config.token_endpoint.as_deref(),
+            config.jwks_uri.as_deref(),
+            config.revocation_endpoint.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let permitted_origins = EndpointOrigins::from_parts(
+            &config.issuer,
+            &configured_endpoints,
+            &config.endpoint_origins,
+        );
+        debug_assert!(
+            permitted_origins.admits(&config.issuer),
+            "the issuer's own origin is always a member of its pinned set"
+        );
+
         let discovery = if config.token_endpoint.is_some() && config.jwks_uri.is_some() {
             None
         } else {
-            Some(crate::shared::discovery::discover(&config.issuer).await?)
+            Some(crate::shared::discovery::discover(&config.issuer, &permitted_origins).await?)
         };
 
         let token_endpoint = config
@@ -295,6 +332,7 @@ mod tests {
             jwks_uri,
             token_endpoint,
             revocation_endpoint,
+            endpoint_origins: Vec::new(),
             scopes: vec!["openid".into()],
             additional_params: HashMap::new(),
         }
@@ -651,6 +689,188 @@ mod tests {
             provider.revocation_endpoint.as_deref(),
             Some(format!("{uri}/oauth/revoke").as_str())
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Origin pinning: discovery may confirm origins, never widen them.
+    // The shipped mode is Warn (see origins::ENDPOINT_ORIGIN_CHECK_MODE);
+    // these tests pin the shipped behaviour and the enforcement shape is
+    // covered exhaustively by the mode-parameterised unit tests in
+    // shared::origins.
+    // ---------------------------------------------------------------
+
+    /// Mount a discovery document on `server` whose endpoints live on a second,
+    /// genuinely distinct loopback origin (a second mock server's port).
+    async fn mount_cross_origin_discovery(server: &MockServer, cross_origin_base: &str) {
+        let body = json!({
+            "issuer": server.uri(),
+            "token_endpoint": format!("{cross_origin_base}/oauth/token"),
+            "jwks_uri": format!("{cross_origin_base}/.well-known/jwks.json"),
+            "revocation_endpoint": format!("{cross_origin_base}/oauth/revoke"),
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn undeclared_cross_origin_discovery_is_served_in_warning_mode() {
+        // Two servers give two genuinely different loopback origins (distinct ports).
+        let issuer_server = MockServer::start().await;
+        let cross_origin_server = MockServer::start().await;
+
+        mount_cross_origin_discovery(&issuer_server, &cross_origin_server.uri()).await;
+
+        // No endpoint_origins declared: the cross-origin document violates the
+        // pinned set, but warning mode must not reject the deployment — it is
+        // the one-release window operators use to learn what to declare.
+        let mut config = make_config(&issuer_server.uri(), None, None, None);
+        config.endpoint_origins.clear();
+
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("warning mode must accept an undeclared cross-origin document");
+
+        assert_eq!(
+            provider.token_endpoint,
+            format!("{}/oauth/token", cross_origin_server.uri()),
+            "the discovered endpoint is adopted unchanged under warning mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_cross_origin_jwks_admits_discovered_endpoints_on_that_origin() {
+        // An explicitly configured endpoint's own origin joins the pinned set,
+        // so a discovery document naming further endpoints on that origin is
+        // admitted. The JWKS itself stays on the configured (loopback) URL;
+        // declaring *new* origins is covered by the strict-parse unit tests in
+        // shared::origins and Google's shape below, because declared entries
+        // must be bare https origins and loopback test origins are plain http.
+        let issuer_server = MockServer::start().await;
+        let key_server = MockServer::start().await;
+
+        mount_cross_origin_discovery(&issuer_server, &key_server.uri()).await;
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .expect(1) // The token's kid resolves in this set; no further fetch.
+            .mount(&key_server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &issuer_server.uri(),
+            "aud": "test-client-id",
+            "sub": "user-cross-origin",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        // jwks_uri configured explicitly (its origin therefore joins the pinned
+        // set), token_endpoint left absent so discovery still runs.
+        let config = make_config(
+            &issuer_server.uri(),
+            None,
+            Some(format!("{}/.well-known/jwks.json", key_server.uri())),
+            None,
+        );
+
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("cross-origin discovery over a configured endpoint's origin must be accepted");
+
+        assert_eq!(
+            provider.token_endpoint,
+            format!("{}/oauth/token", key_server.uri()),
+            "the discovered token endpoint on the admitted origin is adopted"
+        );
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("the jwks on the admitted origin must actually serve keys");
+
+        assert_eq!(identity.subject, "user-cross-origin");
+    }
+
+    #[tokio::test]
+    async fn google_multi_origin_discovery_shape_passes_when_all_origins_are_declared() {
+        // Google publishes its token/revocation endpoints on oauth2.googleapis.com
+        // and its JWKS on www.googleapis.com — two origins, neither of them the
+        // issuer's. The fixture names those real-world origins in the document
+        // while serving it from loopback; only the parsed strings are checked.
+        let issuer_server = MockServer::start().await;
+        let body = json!({
+            "issuer": issuer_server.uri(),
+            "token_endpoint": "https://oauth2.googleapis.com/token",
+            "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+            "revocation_endpoint": "https://oauth2.googleapis.com/revoke",
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(1)
+            .mount(&issuer_server)
+            .await;
+
+        let mut config = make_config(&issuer_server.uri(), None, None, None);
+        config.endpoint_origins = vec![
+            "https://oauth2.googleapis.com".to_string(),
+            "https://www.googleapis.com".to_string(),
+        ];
+
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("Google's documented multi-origin shape must parse when declared");
+
+        assert_eq!(
+            provider.token_endpoint,
+            "https://oauth2.googleapis.com/token"
+        );
+        assert_eq!(
+            provider.revocation_endpoint.as_deref(),
+            Some("https://oauth2.googleapis.com/revoke"),
+            "the discovered revocation endpoint is adopted from the declared document"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_endpoint_origins_entries_are_rejected_at_the_adapter_boundary() {
+        let issuer_server = MockServer::start().await;
+
+        for bad in [
+            "http://not-https.example",       // wrong scheme
+            "https://path.example/with/path", // carries a path
+            "https://q.example/?query=1",     // carries a query
+            "garbage",                        // not a URL at all
+        ] {
+            let mut config = make_config(
+                &issuer_server.uri(),
+                Some(format!("{}/oauth/token", issuer_server.uri())),
+                Some(format!("{}/.well-known/jwks.json", issuer_server.uri())),
+                None,
+            );
+            config.endpoint_origins = vec![bad.to_string()];
+
+            let err = OidcProvider::from_config("google", &config)
+                .await
+                .err()
+                .expect("invalid declared entries must fail construction");
+
+            assert!(
+                matches!(err, Error::ConfigError { .. }),
+                "entry {bad:?} must be a config error, got: {err:?}"
+            );
+        }
     }
 
     // ---------------------------------------------------------------

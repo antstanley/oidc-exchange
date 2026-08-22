@@ -36,6 +36,7 @@ adapter = "oidc"
 issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
 
 See the [full configuration guide](https://github.com/antstanley/oidc-exchange#configuration) and the [deployment guides](https://github.com/antstanley/oidc-exchange/tree/main/docs/integration) (ECS Fargate, generic container / Kubernetes, …).

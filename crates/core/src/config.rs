@@ -539,6 +539,7 @@ issuer = "https://accounts.google.com"
 client_id = "google-client-id"
 client_secret = "google-client-secret"
 scopes = ["openid", "email", "profile"]
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 "#;
 
         let config: AppConfig =
@@ -600,6 +601,18 @@ scopes = ["openid", "email", "profile"]
             google.extra.get("issuer").unwrap().as_str().unwrap(),
             "https://accounts.google.com"
         );
+
+        // The declared endpoint origins survive parsing as a string array in
+        // `extra` (the typed lift and strict per-entry validation happen in the
+        // server's `provider_config_to_oidc`).
+        let origins = google
+            .extra
+            .get("endpoint_origins")
+            .and_then(|v| v.as_array())
+            .expect("endpoint_origins must parse as an array");
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0].as_str(), Some("https://oauth2.googleapis.com"));
+        assert_eq!(origins[1].as_str(), Some("https://www.googleapis.com"));
     }
 
     /// `[repository.postgres] run_migrations` deserializes to `Some(true|false)`
