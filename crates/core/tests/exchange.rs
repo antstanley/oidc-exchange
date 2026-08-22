@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::{
-    AccessTokenClaims, AuditEventType, AuditOutcome, IdentityClaims, NewUser, User, UserPatch,
-    UserStatus,
+    is_valid_family_id, AccessTokenClaims, AuditEventType, AuditOutcome, IdentityClaims, NewUser,
+    User, UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -315,6 +315,16 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     assert_eq!(sessions[0].refresh_token_hash, expected_hash);
     assert_eq!(sessions[0].user_id, users[0].id);
     assert_eq!(sessions[0].provider, "mock");
+
+    // Exchange issues the family: generation 0, no rotation yet, and the
+    // access token's `sid` names exactly that family.
+    assert!(is_valid_family_id(&sessions[0].family_id));
+    assert_eq!(sessions[0].generation, 0);
+    assert_eq!(sessions[0].rotated_at, None);
+    assert_eq!(
+        claims.sid, sessions[0].family_id,
+        "the sid claim must carry the session's stable family identifier"
+    );
 }
 
 #[tokio::test]

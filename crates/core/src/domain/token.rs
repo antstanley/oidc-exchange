@@ -40,6 +40,21 @@ pub struct AccessTokenClaims {
     /// This service's issuer URL
     pub iss: String,
     pub aud: String,
+    /// Stable session identity: the `family_id` (`fam_` + lowercase ULID) of
+    /// the session this token was minted for. Rotation never moves it, so the
+    /// `sid` names exactly one revocable token family for the token's whole
+    /// validity however often the refresh token rotates beneath it.
+    ///
+    /// VENDORED SEAM (task 08): this field is the minimal in-branch slice of
+    /// the sibling `2026-08-05-validate_revoke_token_claims` contract (PR
+    /// #19), which is not merged on this branch; that PR's full validator —
+    /// required-field semantics beyond `sid`, `at+jwt` typ-header pinning,
+    /// registered-claim validation order — is deliberately NOT vendored here.
+    /// Reconcile this field and its consumers against PR #19 at merge time.
+    ///
+    /// A plain `String` field is required on deserialization: a payload
+    /// without a `sid` fails closed rather than minting an un-revocable token.
+    pub sid: String,
     pub iat: u64,
     pub exp: u64,
     /// Merged: config template claims + user.claims

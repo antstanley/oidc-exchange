@@ -323,8 +323,11 @@ impl AppService {
         };
         self.session_repo.store_refresh_token(&session).await?;
 
-        // 9. Build access token JWT (shared logic)
-        let (access_token, access_ttl_secs) = self.build_access_token(&user).await?;
+        // 9. Build access token JWT (shared logic). The token's `sid` names
+        // the family just minted, so it stays revocation-stable for the
+        // token's whole validity however often the refresh token rotates.
+        let (access_token, access_ttl_secs) =
+            self.build_access_token(&user, &session.family_id).await?;
 
         let response = TokenResponse {
             access_token,

@@ -372,7 +372,11 @@ impl AppService {
                 .await;
         }
 
-        let (access_token, expires_in) = self.build_access_token(&user).await?;
+        // The sid names the family this rotation just served — the mint
+        // postcondition guarantees it is well-formed here.
+        let family_id_for_sid = &replacement.family_id;
+        debug_assert!(is_valid_family_id(family_id_for_sid));
+        let (access_token, expires_in) = self.build_access_token(&user, family_id_for_sid).await?;
         self.audit_successful_refresh(
             &user.id,
             &replacement.family_id,
@@ -454,7 +458,14 @@ impl AppService {
             return Err(Error::UserSuspended { user_id: user.id });
         }
 
-        let (access_token, expires_in) = self.build_access_token(&user).await?;
+        // The sid names the family the session already belongs to. A
+        // pre-rotation legacy row carries the empty-string sentinel here:
+        // minting a family would be rotation work, which this switch is off,
+        // so the token is issued with an unusable sid and fails closed at
+        // consumption time — the same posture as any hash-form sid.
+        let family_id_for_sid = &session.family_id;
+        debug_assert!(family_id_for_sid.is_empty() || is_valid_family_id(family_id_for_sid));
+        let (access_token, expires_in) = self.build_access_token(&user, family_id_for_sid).await?;
         self.audit_successful_refresh(
             &user.id,
             &session.family_id,

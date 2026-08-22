@@ -538,6 +538,27 @@ impl MockKeyManager {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
         Self { signing_key }
     }
+
+    /// Test infrastructure: sign an arbitrary JSON payload into a compact
+    /// three-part JWS with the same header shape and encoding
+    /// (`{"alg":"EdDSA","typ":"JWT"}`, base64url-no-pad) the service mints,
+    /// so tests can present validly-signed tokens carrying claim values the
+    /// service itself would never issue (e.g. hash-form `sid`s from before a
+    /// rotation-capable build) without reconstructing signing keys.
+    pub fn sign_payload_jws(&self, payload: &serde_json::Value) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signature = self.signing_key.sign(signing_input.as_bytes());
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        )
+    }
 }
 
 impl Default for MockKeyManager {
