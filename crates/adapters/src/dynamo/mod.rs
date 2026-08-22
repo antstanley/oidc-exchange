@@ -690,6 +690,7 @@ impl UserRepository for DynamoRepository {
             .table_name(&self.table_name)
             .key("pk", AttributeValue::S(format!("USER#{user_id}")))
             .key("sk", AttributeValue::S("PROFILE".to_string()))
+            .consistent_read(true)
             .send()
             .await
             .map_err(Self::store_err)?;
