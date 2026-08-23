@@ -75,8 +75,18 @@ impl OidcExchange {
                 message: e.to_string(),
             })?;
         if let Some(base_path) = base_path {
+            if base_path.is_empty()
+                || base_path == "/"
+                || !base_path.starts_with('/')
+                || base_path.ends_with('/')
+            {
+                return Err(FfiError {
+                    code: "CONFIG_ERROR".to_string(),
+                    message: "basePath must be an absolute, non-root path without a trailing slash"
+                        .to_string(),
+                });
+            }
             config.server.base_path = Some(base_path.to_string());
-            config.normalise();
             config.validate().map_err(|e| FfiError {
                 code: "CONFIG_ERROR".to_string(),
                 message: e.to_string(),

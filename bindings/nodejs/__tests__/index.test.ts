@@ -96,6 +96,29 @@ describe("OidcExchange", () => {
     expect(response.status).toBe(200);
   });
 
+  it("applies basePath before routing and respects segment boundaries", async () => {
+    const oidc = new OidcExchange({ configString: TEST_CONFIG, basePath: "/auth" });
+    expect((await oidc.handleRequest(request("/auth/health"))).status).toBe(200);
+    expect((await oidc.handleRequest(request("/authorize/health"))).status).toBe(404);
+  });
+
+  it.each(["", "/", "auth", "/auth/"])("rejects invalid basePath %j", (basePath) => {
+    expect(() => new OidcExchange({ configString: TEST_CONFIG, basePath })).toThrow(
+      /basePath must be an absolute, non-root path without a trailing slash/,
+    );
+  });
+
+  it("preserves configured defaults and isolates handler overrides", async () => {
+    const configured = TEST_CONFIG.replace("[server]", '[server]\nbase_path = "/configured"');
+    const defaultInstance = new OidcExchange({ configString: configured });
+    const overridden = new OidcExchange({ configString: configured, basePath: "/override" });
+    const freshDefault = new OidcExchange({ configString: configured });
+    expect((await defaultInstance.handleRequest(request("/configured/health"))).status).toBe(200);
+    expect((await overridden.handleRequest(request("/override/health"))).status).toBe(200);
+    expect((await freshDefault.handleRequest(request("/configured/health"))).status).toBe(200);
+    expect((await overridden.handleRequest(request("/configured/health"))).status).toBe(404);
+  });
+
   it("retains deprecated synchronous compatibility", () => {
     const oidc = new OidcExchange({ configString: TEST_CONFIG });
     expect(oidc.handleRequestSync(request("/health")).status).toBe(200);
