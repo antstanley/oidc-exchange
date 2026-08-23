@@ -135,8 +135,40 @@ protocol = "grpc"                      # "grpc" or "http"
 
 # ─── Internal admin API ───────────────────────────────────────────
 [internal_api]
-auth_method = "shared_secret"
+enabled = true                         # serves /internal/* on the dedicated admin listener
+host = "127.0.0.1"                     # admin listener bind address (loopback by default)
+port = 8081
+# Authentication mechanisms, tried in the order given.
+# Values: "operator_token", "mtls", "shared_secret". The legacy singular
+# `auth_method` key is still accepted and read as a one-element list.
+auth_methods = ["operator_token"]
+# Shared secret for the "shared_secret" compatibility mechanism. While that
+# mechanism is enabled it must be at least 32 bytes — non-empty is not enough.
 shared_secret = "${INTERNAL_API_SECRET}"
+
+# "operator_token" mechanism: operator JWTs are verified against THIS
+# service's own key manager ([key_manager]) and require a real (non-noop)
+# adapter plus a non-empty [server].issuer.
+token_audience = "internal"            # aud an operator token must carry; must differ from [token].audience
+required_claim = "role"                # claim name a verified operator token must carry
+required_value = "${OPERATOR_ROLE_VALUE}"  # value required_claim must carry
+
+# Failed-authentication throttle, keyed by peer address on the admin listener:
+max_auth_failures = 5                  # failed attempts one peer may spend...
+auth_failure_window = "1m"             # ...per this window before lockout
+auth_lockout = "5m"                    # how long a locked-out peer stays denied
+
+# How long cached dashboard counts (active sessions) may be served before a
+# re-scan; consumed by the DynamoDB adapter only. Valid range: 1s–3600s.
+stats_cache_ttl = "60s"
+
+# "mtls" mechanism: the client-certificate subject is asserted by the
+# TLS-terminating proxy via this header. Trustworthy only while the admin
+# listener is unreachable except through that proxy (which must also strip
+# client-supplied copies of the header); a startup warning fires when this
+# mechanism is enabled on a non-loopback listener.
+[internal_api.mtls]
+subject_header = "x-client-cert-subject"
 
 # ─── Identity providers ───────────────────────────────────────────
 # Each [providers.<name>] block registers a provider. The name is used
@@ -205,7 +237,16 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 | `audit.adapter` | `noop` |
 | `audit.blocking_threshold` | `warning` |
 | `user_sync.enabled` | `false` |
-| `internal_api` | disabled |
+| `internal_api.enabled` | `false` |
+| `internal_api.host` / `.port` | `127.0.0.1:8081` |
+| `internal_api.auth_methods` | `["shared_secret"]` |
+| `internal_api.token_audience` | `"internal"` |
+| `internal_api.required_claim` / `.required_value` | `"role"` / `"admin"` |
+| `internal_api.mtls.subject_header` | `"x-client-cert-subject"` |
+| `internal_api.max_auth_failures` | `5` |
+| `internal_api.auth_failure_window` | `"1m"` |
+| `internal_api.auth_lockout` | `"5m"` |
+| `internal_api.stats_cache_ttl` | `"60s"` |
 
 ## Upgrading: `server.role` now defaults to `exchange`
 
