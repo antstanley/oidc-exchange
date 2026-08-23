@@ -289,16 +289,28 @@ async fn postgres_session_spans_never_render_sentinels() {
     let repo = oidc_exchange_adapters::postgres::PostgresRepository::new(pool);
 
     // `sessions.user_id` carries a foreign key to `users`, so the lifecycle must run
-    // against a real user row — the same JIT-provisioning order production uses.
-    let created = repo
-        .create_user(&NewUser {
-            external_id: "corpus-postgres-sub".to_string(),
-            provider: "corpus-postgres".to_string(),
-            email: Some("corpus-postgres@example.com".to_string()),
-            display_name: None,
-        })
+    // against a real user row — the same JIT-provisioning order production uses:
+    // look up by `(external_id, provider)` first, create only when absent. The seed
+    // key is fixed, so blind creation here would panic with a duplicate-key conflict
+    // on any second run against the same persistent database.
+    const SEED_EXTERNAL_ID: &str = "corpus-postgres-sub";
+    const SEED_PROVIDER: &str = "corpus-postgres";
+    let created = match repo
+        .get_user_by_external_id(SEED_EXTERNAL_ID, SEED_PROVIDER)
         .await
-        .expect("seed user row for the sessions foreign key");
+        .expect("look up seed user by (external_id, provider)")
+    {
+        Some(existing) => existing,
+        None => repo
+            .create_user(&NewUser {
+                external_id: SEED_EXTERNAL_ID.to_string(),
+                provider: SEED_PROVIDER.to_string(),
+                email: Some("corpus-postgres@example.com".to_string()),
+                display_name: None,
+            })
+            .await
+            .expect("seed user row for the sessions foreign key"),
+    };
 
     let capture = install_span_capture(SharedBuffer::default());
     drive_lifecycle(&repo, &POSTGRES, &created.id).await;
