@@ -40,6 +40,7 @@ pub struct Limits {
 pub struct OidcExchangeOptions {
     pub config_string: Option<String>,
     pub config: Option<String>,
+    pub base_path: Option<String>,
 }
 
 #[napi]
@@ -76,9 +77,17 @@ impl OidcExchange {
     #[napi(constructor)]
     pub fn new(options: OidcExchangeOptions) -> napi::Result<Self> {
         let inner = if let Some(ref config_string) = options.config_string {
-            oidc_exchange_ffi::OidcExchange::new(config_string)
+            oidc_exchange_ffi::OidcExchange::new_with_base_path(
+                config_string,
+                options.base_path.as_deref(),
+            )
         } else if let Some(ref config_path) = options.config {
-            oidc_exchange_ffi::OidcExchange::from_file(config_path)
+            let config_string = std::fs::read_to_string(config_path)
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            oidc_exchange_ffi::OidcExchange::new_with_base_path(
+                &config_string,
+                options.base_path.as_deref(),
+            )
         } else {
             return Err(napi::Error::from_reason(
                 "Either `config` (file path) or `config_string` (inline TOML) must be provided",

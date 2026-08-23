@@ -143,19 +143,6 @@ importers:
       vitest:
         specifier: ^4.1.9
         version: 4.1.9(@types/node@26.0.1)(vite@8.1.1(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(yaml@2.9.0))
-    optionalDependencies:
-      '@oidc-exchange/darwin-arm64':
-        specifier: 0.2.0
-        version: 0.2.0
-      '@oidc-exchange/linux-arm64-gnu':
-        specifier: 0.2.0
-        version: 0.2.0
-      '@oidc-exchange/linux-x64-gnu':
-        specifier: 0.2.0
-        version: 0.2.0
-      '@oidc-exchange/win32-x64-msvc':
-        specifier: 0.2.0
-        version: 0.2.0
 
 packages:
 
@@ -1336,26 +1323,6 @@ packages:
 
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
-
-  '@oidc-exchange/darwin-arm64@0.2.0':
-    resolution: {integrity: sha512-ncaCIdFnrNOxpkpwT7lhmY++hELeF0Z2synmp2o/XAYp/LPIcy7hGO6QtaV6RQ8gTCUlssw49z+GM0n7uUntPQ==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@oidc-exchange/linux-arm64-gnu@0.2.0':
-    resolution: {integrity: sha512-KYI5QDbdezziZ9q32PpeIWRqKuQ2r66kxWPL0lEaw5efm5BBgX7aXPg7Kinw1gfT3Csd7Z5IQSbbAobeL+I0fQ==}
-    cpu: [arm64]
-    os: [linux]
-
-  '@oidc-exchange/linux-x64-gnu@0.2.0':
-    resolution: {integrity: sha512-RXSOB4gkmJwjug3Z3EHPeDoKHSitPkttpy2YfXdPWAkF9GbUQEf/bSaXg/rrdkz1HNlls6wXJC+on3OXeQW7cQ==}
-    cpu: [x64]
-    os: [linux]
-
-  '@oidc-exchange/win32-x64-msvc@0.2.0':
-    resolution: {integrity: sha512-08Ai7qiWBuz3W4Vm1aqZ5kOO+soTzjoHEJGwCPngMK1yKZCxLZaox4TkLNKgApO1x1jVxVqxjOlioVBGwlOMrg==}
-    cpu: [x64]
-    os: [win32]
 
   '@oslojs/encoding@1.1.0':
     resolution: {integrity: sha512-70wQhgYmndg4GCPxPPxPGevRKqTIJ2Nh4OkiMWmDAVYsTQ+Ta7Sq+rPevXyXGdzr30/qZBnyOalCszoMxlyldQ==}
@@ -5686,18 +5653,6 @@ snapshots:
   '@octokit/types@16.0.0':
     dependencies:
       '@octokit/openapi-types': 27.0.0
-
-  '@oidc-exchange/darwin-arm64@0.2.0':
-    optional: true
-
-  '@oidc-exchange/linux-arm64-gnu@0.2.0':
-    optional: true
-
-  '@oidc-exchange/linux-x64-gnu@0.2.0':
-    optional: true
-
-  '@oidc-exchange/win32-x64-msvc@0.2.0':
-    optional: true
 
   '@oslojs/encoding@1.1.0': {}
 

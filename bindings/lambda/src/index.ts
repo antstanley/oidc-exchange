@@ -56,8 +56,7 @@ type LambdaResult = APIGatewayProxyResult | APIGatewayProxyResultV2 | ALBResult;
 export function createHandler(
   options: LambdaHandlerOptions,
 ): (event: LambdaEvent, context: Context) => Promise<LambdaResult> {
-  const { basePath: _basePath = "", ...oidcOptions } = options;
-  const oidc = new OidcExchange(oidcOptions);
+  const oidc = new OidcExchange(options);
   const maxBodyBytes = oidc.limits().maxBodyBytes;
 
   return async (event: LambdaEvent, _context: Context): Promise<LambdaResult> => {
@@ -73,28 +72,31 @@ export function createHandler(
 
     const response = await oidc.handleRequest(request);
 
-    // Build response headers as a plain object
-    const responseHeaders: Record<string, string> = {};
-    for (const { name, value } of response.headers) {
-      responseHeaders[name] = value;
-    }
-
     const bodyBase64 = Buffer.from(response.body).toString("base64");
 
-    // Return the right shape for the event source
     if (isApiGatewayV2(event)) {
+      const headers: Record<string, string> = {};
+      const cookies: string[] = [];
+      for (const { name, value } of response.headers) {
+        if (name.toLowerCase() === "set-cookie") cookies.push(value);
+        else if (!(name in headers)) headers[name] = value;
+      }
       return {
         statusCode: response.status,
-        headers: responseHeaders,
+        headers,
+        ...(cookies.length ? { cookies } : {}),
         body: bodyBase64,
         isBase64Encoded: true,
       } satisfies APIGatewayProxyResultV2;
     }
 
-    // v1 and ALB use the same response shape
+    const multiValueHeaders: Record<string, string[]> = {};
+    for (const { name, value } of response.headers) {
+      (multiValueHeaders[name] ??= []).push(value);
+    }
     return {
       statusCode: response.status,
-      headers: responseHeaders,
+      multiValueHeaders,
       body: bodyBase64,
       isBase64Encoded: true,
     } satisfies APIGatewayProxyResult;

@@ -36,10 +36,10 @@
     "vitest": "^4.1.9"
   },
   "optionalDependencies": {
-    "@oidc-exchange/darwin-arm64": "0.2.0",
-    "@oidc-exchange/linux-arm64-gnu": "0.2.0",
-    "@oidc-exchange/linux-x64-gnu": "0.2.0",
-    "@oidc-exchange/win32-x64-msvc": "0.2.0"
+    "@oidc-exchange/darwin-arm64": "0.3.0",
+    "@oidc-exchange/linux-arm64-gnu": "0.3.0",
+    "@oidc-exchange/linux-x64-gnu": "0.3.0",
+    "@oidc-exchange/win32-x64-msvc": "0.3.0"
   },
   "napi": {
     "binaryName": "oidc-exchange",
@@ -53,5 +53,5 @@
   "engines": {
     "node": ">= 22"
   },
-  "packageManager": "pnpm@10.11.0"
+  "packageManager": "pnpm@11.9.0"
 }

@@ -28,6 +28,8 @@ export interface Limits {
 export interface OidcExchangeOptions {
   config?: string;
   configString?: string;
+  /** Validated override for server.base_path, applied before router construction. */
+  basePath?: string;
 }
 
 export class OidcExchange {

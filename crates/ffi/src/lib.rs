@@ -56,10 +56,26 @@ pub struct OidcExchange {
 
 impl OidcExchange {
     pub fn new(config_toml: &str) -> Result<Self, FfiError> {
-        let config = oidc_exchange::bootstrap::parse_config(config_toml).map_err(|e| FfiError {
-            code: "CONFIG_ERROR".to_string(),
-            message: e.to_string(),
-        })?;
+        Self::new_with_base_path(config_toml, None)
+    }
+
+    pub fn new_with_base_path(
+        config_toml: &str,
+        base_path: Option<&str>,
+    ) -> Result<Self, FfiError> {
+        let mut config =
+            oidc_exchange::bootstrap::parse_config(config_toml).map_err(|e| FfiError {
+                code: "CONFIG_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+        if let Some(base_path) = base_path {
+            config.server.base_path = Some(base_path.to_string());
+            config.normalise();
+            config.validate().map_err(|e| FfiError {
+                code: "CONFIG_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+        }
         let limits = NormalisationLimits {
             max_body_bytes: config.server.max_request_body_bytes as u64,
         };
