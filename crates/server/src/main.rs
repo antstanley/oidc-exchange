@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Build service and the per-plane routers the role requires.
     let service = bootstrap::build_service(&config).await?;
-    let routers = bootstrap::build_routers(&config, service);
+    let routers = bootstrap::build_routers(&config, service)?;
 
     if config.server.role == "all" {
         // Native runtime: both planes bind, each on its own socket. The
@@ -107,15 +107,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // One signal anchors every listener's drain and the deadline watchdog:
         // each server gets its own clone so all of them observe the same
         // SIGTERM/ctrl-c instant (see the `shutdown` module docs).
+        //
+        // Both planes serve through the connect-info make-service so the
+        // client-address middleware — and the admin plane's operator-auth
+        // throttle key — keep a real socket peer on every request.
         let signal = ShutdownSignal::spawn();
         let serve_future = {
             let mut handles = Vec::with_capacity(bound.len());
             for (listener, router) in bound {
                 let graceful = signal.clone();
                 handles.push(tokio::spawn(async move {
-                    axum::serve(listener, router)
-                        .with_graceful_shutdown(graceful.wait())
-                        .await
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(graceful.wait())
+                    .await
                 }));
             }
             async move {

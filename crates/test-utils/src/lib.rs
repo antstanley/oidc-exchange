@@ -356,13 +356,20 @@ impl KeyManager for MockKeyManager {
 // MockRateLimiter
 // ---------------------------------------------------------------------------
 
-/// A scriptable rate limiter for tests: by default it allows everything (the
-/// common case), and `deny_mode` switches it to deny every consumption with a
-/// fixed Retry-After, so throttle-path tests can force the lockout branch
-/// deterministically instead of simulating clock elision.
+/// Fixed Retry-After (seconds) the mock reports while in deny mode.
+pub const MOCK_RETRY_AFTER_SECS: u64 = 60;
+
+/// A scriptable rate limiter for tests: by default it allows everything and
+/// consumes nothing observable, and `deny_mode` makes every consultation
+/// return `Deny` — so lockout-path tests can force that branch
+/// deterministically instead of simulating clock elision. Check/consume call
+/// counters are exposed so auth-layer tests can assert exactly *when* the
+/// budget is consulted and drawn down.
 #[derive(Clone, Default)]
 pub struct MockRateLimiter {
     deny_mode: Arc<Mutex<bool>>,
+    check_calls: Arc<Mutex<u64>>,
+    consume_calls: Arc<Mutex<u64>>,
 }
 
 impl MockRateLimiter {
@@ -370,18 +377,39 @@ impl MockRateLimiter {
         Self::default()
     }
 
-    /// Force every subsequent `check_and_consume` to return `Deny`.
+    /// Force every subsequent `check` to return `Deny`.
     pub async fn set_deny_mode(&self, deny: bool) {
         *self.deny_mode.lock().await = deny;
+    }
+
+    /// How many times [`RateLimiter::check`] has been invoked.
+    pub async fn check_calls(&self) -> u64 {
+        *self.check_calls.lock().await
+    }
+
+    /// How many times [`RateLimiter::consume`] has been invoked.
+    pub async fn consume_calls(&self) -> u64 {
+        *self.consume_calls.lock().await
     }
 }
 
 #[async_trait]
 impl RateLimiter for MockRateLimiter {
-    async fn check_and_consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+    async fn check(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        *self.check_calls.lock().await += 1;
         if *self.deny_mode.lock().await {
             return Ok(RateLimitDecision::Deny {
-                retry_after_secs: 60,
+                retry_after_secs: MOCK_RETRY_AFTER_SECS,
+            });
+        }
+        Ok(RateLimitDecision::Allow)
+    }
+
+    async fn consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        *self.consume_calls.lock().await += 1;
+        if *self.deny_mode.lock().await {
+            return Ok(RateLimitDecision::Deny {
+                retry_after_secs: MOCK_RETRY_AFTER_SECS,
             });
         }
         Ok(RateLimitDecision::Allow)

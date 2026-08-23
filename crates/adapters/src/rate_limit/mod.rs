@@ -31,9 +31,10 @@ pub const MAX_TRACKED_PEERS: usize = 4096;
 ///
 /// Phase one (counting): each *failed* authentication consumes one unit of the
 /// per-peer budget inside the current failure window; successes consume
-/// nothing. Phase two (lockout): once the budget is exhausted the peer is
-/// denied outright for the remainder of `auth_failure_window + auth_lockout`,
-/// with `retry_after_secs` reporting the remaining denial time.
+/// nothing — they never reach [`RateLimiter::consume`]. Phase two (lockout):
+/// once the budget is exhausted the peer is denied outright for the remainder
+/// of `auth_failure_window + auth_lockout`, with `retry_after_secs` reporting
+/// the remaining denial time.
 pub struct AdminAuthRateLimiter {
     failure_window: Duration,
     lockout: Duration,
@@ -96,87 +97,153 @@ impl AdminAuthRateLimiter {
         self.failure_window + self.lockout
     }
 
-    /// The decision for `peer` at instant `now`, consuming one unit only when
-    /// the decision is a fresh Allow that draws the budget down.
-    fn check_at(&self, peer: &IpAddr, now: Instant) -> RateLimitDecision {
+    /// Run `f` against the lock-protected state. A poisoned lock means a prior
+    /// update panicked mid-mutation; failing closed here would lock out every
+    /// operator permanently, while failing open leaves throttling degraded but
+    /// audited — so every operation degrades to "unthrottled" and says so.
+    fn with_state<T>(&self, f: impl FnOnce(&mut HashMap<IpAddr, Bucket>) -> T) -> Option<T> {
         let mut state = match self.state.lock() {
             Ok(state) => state,
-            // A poisoned lock means a prior update panicked mid-mutation;
-            // failing closed here would lock out every operator permanently,
-            // while failing open leaves throttling degraded but audited.
             Err(_) => {
-                tracing::error!(
-                    "admin auth rate-limiter lock poisoned; allowing request unthrottled"
-                );
-                return RateLimitDecision::Allow;
+                tracing::error!("admin auth rate-limiter lock poisoned; allowing request unthrottled");
+                return None;
             }
         };
+        Some(f(&mut state))
+    }
 
+    /// Expire finished buckets so stale peers cannot crowd the bound, then get
+    /// (creating if needed) the bucket for `peer` at instant `now`.
+    fn live_bucket<'a>(
+        &self,
+        state: &'a mut HashMap<IpAddr, Bucket>,
+        peer: &IpAddr,
+        now: Instant,
+    ) -> &'a mut Bucket {
         let lifetime = self.bucket_lifetime();
-        // Expire finished buckets first so stale peers cannot crowd the bound.
         state.retain(|_, bucket| now.duration_since(bucket.started_at) < lifetime);
 
-        let budget = self.max_auth_failures;
-        let bucket = match state.get_mut(peer) {
-            Some(bucket) => *bucket,
-            None => {
-                let fresh = Bucket {
-                    started_at: now,
-                    consumed: 0,
-                };
-                state.insert(*peer, fresh);
-                // Bound enforcement: after expiry-retention above, inserting
-                // one more entry can exceed the cap by at most one; evict the
-                // oldest live bucket to make room.
-                if state.len() > MAX_TRACKED_PEERS {
-                    let oldest = state
-                        .iter()
-                        .min_by_key(|(_, bucket)| bucket.started_at)
-                        .map(|(addr, _)| *addr)
-                        .expect("a non-empty map always has an oldest entry");
-                    assert_ne!(
-                        &oldest, peer,
-                        "the freshly inserted bucket must never be its own eviction victim"
-                    );
-                    state.remove(&oldest);
-                }
-                debug_assert!(
-                    state.len() <= MAX_TRACKED_PEERS,
-                    "peer tracking must stay bounded by MAX_TRACKED_PEERS"
-                );
-                fresh
-            }
-        };
-
-        let elapsed = now.duration_since(bucket.started_at);
-        if elapsed >= lifetime {
-            // Fully elapsed since construction: start a new counting phase.
+        if !state.contains_key(peer) {
             let fresh = Bucket {
                 started_at: now,
                 consumed: 0,
             };
             state.insert(*peer, fresh);
-            return RateLimitDecision::Allow;
+            // Bound enforcement: after expiry-retention above, inserting one
+            // more entry can exceed the cap by at most one; evict the oldest
+            // live bucket to make room.
+            if state.len() > MAX_TRACKED_PEERS {
+                let oldest = state
+                    .iter()
+                    .min_by_key(|(_, bucket)| bucket.started_at)
+                    .map(|(addr, _)| *addr)
+                    .expect("a non-empty map always has an oldest entry");
+                assert_ne!(
+                    oldest, *peer,
+                    "the freshly inserted bucket must never be its own eviction victim"
+                );
+                state.remove(&oldest);
+            }
         }
 
-        if elapsed < self.failure_window && bucket.consumed < budget {
-            state.get_mut(peer).expect("bucket just verified").consumed += 1;
-            return RateLimitDecision::Allow;
-        }
+        let bucket = state.get_mut(peer).expect("bucket was just inserted");
+        debug_assert!(
+            state.len() <= MAX_TRACKED_PEERS,
+            "peer tracking must stay bounded by MAX_TRACKED_PEERS"
+        );
+        bucket
+    }
 
-        // Either the budget is spent or the lockout is running: deny with the
-        // remaining seconds of the denial window (at least one, so a boundary
-        // hit never advertises an immediate retry).
-        let remaining = lifetime.saturating_sub(elapsed).as_secs().max(1);
-        RateLimitDecision::Deny {
-            retry_after_secs: remaining,
+    /// The consultation half of the contract: locked out or not, consuming
+    /// nothing either way.
+    fn check_at(&self, peer: &IpAddr, now: Instant) -> RateLimitDecision {
+        self.with_state(|state| {
+            let bucket = self.live_bucket(state, peer, now);
+            Self::decision_at(
+                bucket,
+                now,
+                self.failure_window,
+                self.bucket_lifetime(),
+                self.max_auth_failures,
+            )
+        })
+        .unwrap_or(RateLimitDecision::Allow)
+    }
+
+    /// The consumption half: record one failed attempt, tripping lockout when
+    /// the last free unit goes.
+    fn consume_at(&self, peer: &IpAddr, now: Instant) -> RateLimitDecision {
+        self.with_state(|state| {
+            let lifetime = self.bucket_lifetime();
+            let bucket = self.live_bucket(state, peer, now);
+            let elapsed = now.duration_since(bucket.started_at);
+
+            // A fully elapsed phase — or one whose counting window closed
+            // without ever exhausting the budget — rolls over here: the aged
+            // failures stop counting, and this attempt is the new phase's
+            // first unit.
+            if elapsed >= lifetime
+                || (elapsed >= self.failure_window
+                    && bucket.consumed < self.max_auth_failures)
+            {
+                *bucket = Bucket {
+                    started_at: now,
+                    consumed: 1,
+                };
+                return RateLimitDecision::Allow;
+            }
+
+            if elapsed < self.failure_window && bucket.consumed < self.max_auth_failures {
+                bucket.consumed += 1;
+                if bucket.consumed >= self.max_auth_failures {
+                    // The last free unit just went: lockout runs from the
+                    // phase start until window + lockout have fully elapsed.
+                    return RateLimitDecision::Deny {
+                        retry_after_secs: remaining_secs(lifetime, elapsed),
+                    };
+                }
+                return RateLimitDecision::Allow;
+            }
+
+            // Already locked out.
+            RateLimitDecision::Deny {
+                retry_after_secs: remaining_secs(lifetime, elapsed),
+            }
+        })
+        .unwrap_or(RateLimitDecision::Allow)
+    }
+
+    /// Locked out or not, for a bucket observed at `now` (no mutation).
+    ///
+    /// Allowed while the counting phase is live with units left; denied once
+    /// the budget is spent, until the phase's full lifetime (window +
+    /// lockout) has run. A phase whose window closed without exhaustion is
+    /// stale-but-harmless: it still answers Allow, and the next consumption
+    /// rolls it.
+    fn decision_at(
+        bucket: &Bucket,
+        now: Instant,
+        failure_window: Duration,
+        lifetime: Duration,
+        max_auth_failures: u64,
+    ) -> RateLimitDecision {
+        let elapsed = now.duration_since(bucket.started_at);
+        let in_window = elapsed < failure_window;
+        let budget_left = bucket.consumed < max_auth_failures;
+
+        if elapsed >= lifetime || in_window || budget_left {
+            RateLimitDecision::Allow
+        } else {
+            RateLimitDecision::Deny {
+                retry_after_secs: remaining_secs(lifetime, elapsed),
+            }
         }
     }
 }
 
 #[async_trait]
 impl RateLimiter for AdminAuthRateLimiter {
-    async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
+    async fn check(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
         match key {
             // This adapter implements exactly the admin plane's budget; other
             // key scopes are #24's concern and are rejected loudly rather than
@@ -184,6 +251,18 @@ impl RateLimiter for AdminAuthRateLimiter {
             RateLimitKey::OperatorAuth(peer) => Ok(self.check_at(peer, Instant::now())),
         }
     }
+
+    async fn consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
+        match key {
+            RateLimitKey::OperatorAuth(peer) => Ok(self.consume_at(peer, Instant::now())),
+        }
+    }
+}
+
+/// Seconds of `lifetime` still ahead at `elapsed`, floored at one so a
+/// boundary hit never advertises an immediate retry.
+fn remaining_secs(lifetime: Duration, elapsed: Duration) -> u64 {
+    lifetime.saturating_sub(elapsed).as_secs().max(1)
 }
 
 #[cfg(test)]
@@ -192,8 +271,12 @@ mod tests {
     use std::time::Duration;
 
     fn limiter(budget: u64) -> AdminAuthRateLimiter {
-        AdminAuthRateLimiter::new(budget, Duration::from_secs(60), Duration::from_secs(300))
-            .expect("valid throttle bounds")
+        AdminAuthRateLimiter::new(
+            budget,
+            Duration::from_secs(60),
+            Duration::from_secs(300),
+        )
+        .expect("valid throttle bounds")
     }
 
     fn peer(last_octet: u8) -> IpAddr {
@@ -205,25 +288,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn denies_only_after_the_budget_is_spent() {
+    async fn denies_only_after_the_budget_is_spent_by_failures() {
         let limiter = limiter(2);
         let addr = peer(1);
+        let k = key(addr);
 
-        assert_eq!(
-            limiter.check_and_consume(&key(addr)).await.unwrap(),
-            RateLimitDecision::Allow
-        );
-        assert_eq!(
-            limiter.check_and_consume(&key(addr)).await.unwrap(),
-            RateLimitDecision::Allow
-        );
-        assert!(
-            matches!(
-                limiter.check_and_consume(&key(addr)).await.unwrap(),
-                RateLimitDecision::Deny { retry_after_secs } if retry_after_secs >= 1
-            ),
-            "the third failure must be denied with a positive Retry-After"
-        );
+        // Consultations alone never draw the budget down — only consume does.
+        for _ in 0..5 {
+            assert_eq!(limiter.check(&k).await.unwrap(), RateLimitDecision::Allow);
+        }
+
+        assert_eq!(limiter.consume(&k).await.unwrap(), RateLimitDecision::Allow);
+        assert_eq!(limiter.consume(&k).await.unwrap(), RateLimitDecision::Allow);
+        // Third failure trips the lockout...
+        assert!(matches!(
+            limiter.consume(&k).await.unwrap(),
+            RateLimitDecision::Deny { retry_after_secs } if retry_after_secs >= 1
+        ));
+        // ...and from then on even consultations are denied.
+        assert!(matches!(
+            limiter.check(&k).await.unwrap(),
+            RateLimitDecision::Deny { .. }
+        ));
     }
 
     #[tokio::test]
@@ -231,32 +317,30 @@ mod tests {
         let limiter = limiter(1);
         let a = peer(2);
         let b = peer(3);
-        let now = Instant::now();
 
-        assert_eq!(limiter.check_at(&a, now), RateLimitDecision::Allow);
+        assert_eq!(limiter.check(&key(a)).await.unwrap(), RateLimitDecision::Allow);
         // Peer b has its own bucket: no cross-peer draw-down.
-        assert_eq!(limiter.check_at(&b, now), RateLimitDecision::Allow);
-        // Peer a is now locked out for the full remaining lifetime (window +
-        // lockout), not just the remainder of the counting window.
-        let denied = limiter.check_at(&a, now + Duration::from_secs(30));
-        assert!(
-            matches!(denied, RateLimitDecision::Deny { .. }),
-            "still inside window + lockout: peer a stays denied"
-        );
-        // After the full lifetime expires the peer gets a fresh budget.
-        let later = now + Duration::from_secs(360 + 1);
-        assert_eq!(
-            limiter.check_at(&a, later),
-            RateLimitDecision::Allow,
-            "after failure window + lockout the peer starts a fresh counting phase"
-        );
+        assert_eq!(limiter.check(&key(b)).await.unwrap(), RateLimitDecision::Allow);
+        // Peer a fails once and is immediately locked out (budget 1).
+        assert!(matches!(
+            limiter.consume(&key(a)).await.unwrap(),
+            RateLimitDecision::Deny { .. }
+        ));
+        // The lockout is flat: consultations stay denied for the remainder of
+        // window + lockout, not merely the counting window.
+        assert!(matches!(
+            limiter.consume(&key(b)).await.unwrap(),
+            RateLimitDecision::Allow
+        ));
+        assert!(matches!(
+            limiter.check(&key(a)).await.unwrap(),
+            RateLimitDecision::Deny { .. }
+        ));
     }
 
     #[tokio::test]
     async fn constructor_rejects_zero_bounds() {
-        assert!(
-            AdminAuthRateLimiter::new(0, Duration::from_secs(1), Duration::from_secs(1)).is_err()
-        );
+        assert!(AdminAuthRateLimiter::new(0, Duration::from_secs(1), Duration::from_secs(1)).is_err());
         assert!(AdminAuthRateLimiter::new(1, Duration::ZERO, Duration::from_secs(1)).is_err());
         assert!(AdminAuthRateLimiter::new(1, Duration::from_secs(1), Duration::ZERO).is_err());
         assert!(

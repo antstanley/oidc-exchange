@@ -251,12 +251,17 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
     let user_repo = build_user_repository(config).await?;
     let session_repo = build_session_repository(config).await?;
 
-    // Key manager and providers only needed for exchange role
-    let keys: Box<dyn KeyManager> = if role == "admin" {
-        Box::new(oidc_exchange_adapters::noop::NoopKeyManager)
-    } else {
-        build_key_manager(config)?
-    };
+    // Key manager and providers only needed for exchange role — except that
+    // the operator_token mechanism verifies tokens against a real key manager
+    // even under role = "admin", where signing is otherwise unused (the
+    // configuration validation refuses the noop manager in exactly that
+    // combination, so this branch cannot be reached with adapter = "noop").
+    let keys: Box<dyn KeyManager> =
+        if role == "admin" && !config.internal_api.uses_operator_token() {
+            Box::new(oidc_exchange_adapters::noop::NoopKeyManager)
+        } else {
+            build_key_manager(config)?
+        };
 
     let audit = build_audit_log(config).await?;
 
@@ -394,12 +399,27 @@ impl Routers {
 /// admin router carries the internal-auth layer (it is part of
 /// [`crate::routes::internal_routes`]). The flag being false is not a startup
 /// error, it simply leaves the internal surface unmounted.
-pub fn build_routers(config: &AppConfig, service: AppService) -> Routers {
+pub fn build_routers(
+    config: &AppConfig,
+    service: AppService,
+) -> Result<Routers, Box<dyn std::error::Error>> {
     let role = config.server.role.as_str();
+
+    // The operator-auth gate exists exactly where the internal-auth layer
+    // will mount: an enabled internal API on a role that binds the admin
+    // listener. Anywhere else there is nothing to authenticate. Building can
+    // fail (e.g. loading the verification key material for operator tokens),
+    // and a misconfigured admin plane must fail startup rather than serve.
+    let operator_auth = if internal_api_served(config) {
+        Some(Arc::new(build_operator_auth_gate(config)?))
+    } else {
+        None
+    };
 
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config.clone()),
+        operator_auth,
     };
 
     let mut routers = Routers::default();
@@ -419,7 +439,73 @@ pub fn build_routers(config: &AppConfig, service: AppService) -> Routers {
         assert_public_router_shape(public);
     }
 
-    routers
+    Ok(routers)
+}
+
+/// Build the operator-authentication gate from `[internal_api]`
+/// configuration: one authenticator per configured mechanism, in configured
+/// order. Configuration has already been validated by `AppConfig::validate`;
+/// the assertions here are defence in depth against wiring drift.
+fn build_operator_auth_gate(
+    config: &AppConfig,
+) -> Result<crate::middleware::operator_auth::OperatorAuthGate, Box<dyn std::error::Error>> {
+    use crate::middleware::operator_auth::{
+        MtlsSubjectAuthenticator, OperatorAuthGate, OperatorTokenAuthenticator,
+        SharedSecretAuthenticator,
+    };
+
+    let internal = &config.internal_api;
+    assert!(
+        internal.enabled,
+        "the gate is only built when the internal API is served"
+    );
+
+    let mut authenticators: Vec<Box<dyn crate::middleware::operator_auth::OperatorAuthenticator>> =
+        Vec::with_capacity(internal.auth_methods.len());
+    for method in &internal.auth_methods {
+        match method.as_str() {
+            "shared_secret" => {
+                let secret = internal.shared_secret.clone().filter(|s| !s.is_empty())
+                    .ok_or_else(|| Error::ConfigError {
+                        detail: "shared_secret mechanism enabled but no secret is configured"
+                            .to_string(),
+                    })?;
+                authenticators.push(Box::new(SharedSecretAuthenticator::new(secret)));
+            }
+            "operator_token" => {
+                // Validation guarantees a non-noop key-manager adapter while
+                // this mechanism is enabled; build a dedicated verification
+                // instance so token checking never contends with signing.
+                if config.key_manager.adapter == "noop" {
+                    return Err(Error::ConfigError {
+                        detail: "operator_token cannot run on the noop key manager".to_string()
+                            .into(),
+                    });
+                }
+                let keys = build_key_manager(config)?;
+                authenticators.push(Box::new(OperatorTokenAuthenticator::new(
+                    keys,
+                    config.server.issuer.clone(),
+                    internal.token_audience.clone(),
+                    internal.required_claim.clone(),
+                    internal.required_value.clone(),
+                )));
+            }
+            "mtls" => {
+                authenticators.push(Box::new(MtlsSubjectAuthenticator::new(
+                    internal.mtls_subject_header().to_string(),
+                )));
+            }
+            other => {
+                return Err(Error::ConfigError {
+                    detail: format!("unknown internal auth mechanism: {other:?}"),
+                }
+                .into())
+            }
+        }
+    }
+
+    Ok(OperatorAuthGate::new(authenticators))
 }
 
 /// Build the public exchange router: the public routes under the shared
