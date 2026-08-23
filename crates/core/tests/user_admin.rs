@@ -1359,3 +1359,242 @@ fn exchange_plane_events_retain_null_operator_attribution() {
     );
     assert_eq!(event.actor.as_deref(), Some("usr_subject"));
 }
+
+// ─── Bounded cursor pagination (task 08): core clamp + traversal ───────────
+
+use oidc_exchange_core::domain::{UserPage, DEFAULT_ADMIN_PAGE_SIZE, MAX_ADMIN_PAGE_SIZE};
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::Arc;
+
+/// A `UserRepository` decorator that records the `limit` and `cursor` the
+/// service actually handed to the port, so tests can prove the clamp happens
+/// in the core — before any adapter is reached — rather than in an HTTP
+/// handler that a non-HTTP caller could bypass.
+#[derive(Clone)]
+struct RecordingLimitRepository {
+    inner: MockRepository,
+    last_limit: Arc<AtomicU32>,
+    call_count: Arc<AtomicU32>,
+}
+
+impl RecordingLimitRepository {
+    fn new(inner: MockRepository) -> Self {
+        Self {
+            inner,
+            last_limit: Arc::new(AtomicU32::new(0)),
+            call_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    fn last_limit(&self) -> u32 {
+        self.last_limit.load(AtomicOrdering::SeqCst)
+    }
+
+    fn calls(&self) -> u32 {
+        self.call_count.load(AtomicOrdering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl UserRepository for RecordingLimitRepository {
+    async fn get_user_by_id(
+        &self,
+        user_id: &str,
+    ) -> oidc_exchange_core::error::Result<Option<oidc_exchange_core::domain::User>> {
+        self.inner.get_user_by_id(user_id).await
+    }
+
+    async fn get_user_by_external_id(
+        &self,
+        external_id: &str,
+        provider: &str,
+    ) -> oidc_exchange_core::error::Result<Option<oidc_exchange_core::domain::User>> {
+        self.inner
+            .get_user_by_external_id(external_id, provider)
+            .await
+    }
+
+    async fn create_user(
+        &self,
+        user: &NewUser,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::User> {
+        self.inner.create_user(user).await
+    }
+
+    async fn update_user(
+        &self,
+        user_id: &str,
+        patch: &UserPatch,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::User> {
+        self.inner.update_user(user_id, patch).await
+    }
+
+    async fn delete_user(&self, user_id: &str) -> oidc_exchange_core::error::Result<()> {
+        self.inner.delete_user(user_id).await
+    }
+
+    async fn count_by_status(&self) -> oidc_exchange_core::error::Result<HashMap<String, u64>> {
+        self.inner.count_by_status().await
+    }
+
+    async fn list_users(
+        &self,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> oidc_exchange_core::error::Result<UserPage> {
+        self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+        self.last_limit.store(limit, AtomicOrdering::SeqCst);
+        assert!(
+            cursor.is_none(),
+            "this recording mock only asserts limit clamping; cursor is None in these tests"
+        );
+        self.inner.list_users(cursor, limit).await
+    }
+}
+
+fn make_service_with_repo(repo: MockRepository) -> AppService {
+    make_service_with_mocks(repo, MockUserSync::new()).0
+}
+
+fn make_service_recording(repo: RecordingLimitRepository) -> AppService {
+    let provider = MockIdentityProvider::new("mock");
+    let provider_id = provider.provider_id().to_string();
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(provider_id, Box::new(provider));
+
+    AppService::new(
+        Box::new(repo),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
+        providers,
+        make_config(),
+    )
+}
+
+/// An above-bound `limit` is clamped to `MAX_ADMIN_PAGE_SIZE` in the core,
+/// before the port is reached: the adapter observes exactly 200, never the
+/// caller's 500.
+#[tokio::test]
+async fn admin_list_users_clamps_above_bound_limit_before_the_adapter() {
+    let recording = RecordingLimitRepository::new(MockRepository::new());
+    let svc = make_service_recording(recording.clone());
+
+    let page = svc
+        .admin_list_users(None, Some(MAX_ADMIN_PAGE_SIZE + 300))
+        .await
+        .expect("an above-bound limit clamps rather than errors");
+
+    assert!(page.next_cursor.is_none(), "an empty store is exhausted");
+    assert_eq!(recording.calls(), 1, "exactly one adapter call");
+    assert_eq!(
+        recording.last_limit(),
+        MAX_ADMIN_PAGE_SIZE,
+        "the adapter must observe the clamped limit, not the caller's"
+    );
+}
+
+/// An absent `limit` resolves to the documented default (50) inside the core.
+#[tokio::test]
+async fn admin_list_users_resolves_the_default_limit_in_the_core() {
+    let recording = RecordingLimitRepository::new(MockRepository::new());
+    let svc = make_service_recording(recording.clone());
+
+    svc.admin_list_users(None, None)
+        .await
+        .expect("a default listing succeeds");
+
+    assert_eq!(
+        recording.last_limit(),
+        DEFAULT_ADMIN_PAGE_SIZE,
+        "None must resolve to DEFAULT_ADMIN_PAGE_SIZE before the adapter"
+    );
+}
+
+/// `limit = 0` violates the published schema's `minimum: 1` and is rejected
+/// with `InvalidRequest` *without* reaching the adapter at all.
+#[tokio::test]
+async fn admin_list_users_rejects_zero_limit_without_touching_the_adapter() {
+    let recording = RecordingLimitRepository::new(MockRepository::new());
+    let svc = make_service_recording(recording.clone());
+
+    let err = svc
+        .admin_list_users(None, Some(0))
+        .await
+        .expect_err("limit 0 is below the documented minimum");
+
+    match err {
+        Error::InvalidRequest { reason } => {
+            assert!(
+                reason.contains("at least 1"),
+                "the rejection must name the minimum, got: {reason}"
+            );
+        }
+        other => panic!("expected Error::InvalidRequest, got {other:?}"),
+    }
+    assert_eq!(
+        recording.calls(),
+        0,
+        "a rejected limit must never reach the adapter"
+    );
+}
+
+/// A full traversal over the mock's keyset ordering: pages of 2 over 7 users
+/// cover every row exactly once and terminate only at a null cursor.
+#[tokio::test]
+async fn admin_list_users_traverses_every_user_exactly_once_until_null_cursor() {
+    let repo = MockRepository::new();
+    let svc = make_service_with_repo(repo);
+
+    let total = 7;
+    for i in 0..total {
+        svc.admin_create_user(&operator(), &new_user(&format!("page-{i}"), "google"))
+            .await
+            .expect("seed user");
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let page = svc
+            .admin_list_users(cursor.as_deref(), Some(2))
+            .await
+            .expect("each page succeeds");
+        pages += 1;
+        seen.extend(page.users.iter().map(|u| u.id.clone()));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+        assert!(pages < 100, "traversal must terminate");
+    }
+
+    assert_eq!(seen.len(), total, "every user is returned exactly once");
+    assert_eq!(
+        seen.iter().collect::<std::collections::HashSet<_>>().len(),
+        total,
+        "no duplicates across adjacent pages"
+    );
+    assert_eq!(pages, 4, "7 users at limit 2 = pages of 2+2+2+1");
+}
+
+/// A tampered cursor is a caller fault: `InvalidRequest`, deterministically.
+#[tokio::test]
+async fn admin_list_users_rejects_a_tampered_cursor_as_invalid_request() {
+    let repo = MockRepository::new();
+    let svc = make_service_with_repo(repo);
+
+    for bad_cursor in ["garbage", "aGVsbG8=", ""] {
+        let err = svc
+            .admin_list_users(Some(bad_cursor), Some(10))
+            .await
+            .expect_err("a tampered cursor must be rejected");
+        match err {
+            Error::InvalidRequest { .. } => {}
+            other => panic!("expected InvalidRequest for {bad_cursor:?}, got {other:?}"),
+        }
+    }
+}
