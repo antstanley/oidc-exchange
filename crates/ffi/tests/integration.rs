@@ -2,8 +2,11 @@
 
 use std::process::Command;
 
-use oidc_exchange_ffi::{OidcExchange, TransportHints, WireRequest};
+use oidc_exchange_ffi::OidcExchange;
+#[cfg(feature = "conformance")]
+use oidc_exchange_ffi::{TransportHints, WireRequest};
 
+#[cfg(feature = "conformance")]
 fn wire(method: &str, raw_path: &[u8]) -> WireRequest {
     WireRequest {
         method: method.to_string(),
@@ -203,28 +206,31 @@ fn test_invalid_method() {
 }
 
 #[test]
+#[cfg(feature = "conformance")]
 fn async_wire_normalises_empty_path_and_separate_query() {
     let (exchange, _tmp) = setup();
     let mut request = wire("GET", b"");
     request.query = Some(b"check=1".to_vec());
     let response = exchange
-        .runtime_handle_for_test(request)
+        .runtime_handle_for_conformance(request)
         .expect("wire request must produce a response");
     assert_eq!(response.status, 404);
 }
 
 #[test]
+#[cfg(feature = "conformance")]
 fn async_wire_preserves_encoded_delimiters_as_path_data() {
     let (exchange, _tmp) = setup();
     for path in [b"/a%2Fb".as_slice(), b"/a%3Fb", b"/a%23b", b"/a/%2E%2E/b"] {
         let response = exchange
-            .runtime_handle_for_test(wire("GET", path))
+            .runtime_handle_for_conformance(wire("GET", path))
             .expect("encoded path must produce a response");
         assert_eq!(response.status, 404, "path={path:?}");
     }
 }
 
 #[test]
+#[cfg(feature = "conformance")]
 fn async_wire_rejects_non_origin_form_and_invalid_method_as_400() {
     let (exchange, _tmp) = setup();
     for mut request in [
@@ -233,7 +239,7 @@ fn async_wire_rejects_non_origin_form_and_invalid_method_as_400() {
         wire("NOT A METHOD", b"/health"),
     ] {
         let response = exchange
-            .runtime_handle_for_test(request.clone())
+            .runtime_handle_for_conformance(request.clone())
             .expect("shaping failure must be an HTTP response");
         assert_eq!(response.status, 400);
         request.raw_path = b"/health".to_vec();
@@ -241,6 +247,7 @@ fn async_wire_rejects_non_origin_form_and_invalid_method_as_400() {
 }
 
 #[test]
+#[cfg(feature = "conformance")]
 fn async_wire_drops_invalid_headers_and_keeps_valid_duplicates() {
     let (exchange, _tmp) = setup();
     let mut request = wire("GET", b"/health");
@@ -250,12 +257,13 @@ fn async_wire_drops_invalid_headers_and_keeps_valid_duplicates() {
         ("x-forwarded-for".into(), "198.51.100.2".into()),
     ];
     let response = exchange
-        .runtime_handle_for_test(request)
+        .runtime_handle_for_conformance(request)
         .expect("invalid header must be dropped, not fatal");
     assert_eq!(response.status, 200);
 }
 
 #[test]
+#[cfg(feature = "conformance")]
 fn async_wire_enforces_published_body_limit_at_boundary() {
     let (exchange, _tmp) = setup();
     let limit = exchange.limits().max_body_bytes;
@@ -265,7 +273,7 @@ fn async_wire_enforces_published_body_limit_at_boundary() {
     at_limit.body = vec![b'x'; limit as usize];
     assert_ne!(
         exchange
-            .runtime_handle_for_test(at_limit)
+            .runtime_handle_for_conformance(at_limit)
             .expect("at-limit body reaches router")
             .status,
         413
@@ -275,7 +283,7 @@ fn async_wire_enforces_published_body_limit_at_boundary() {
     over_limit.body = vec![b'x'; limit as usize + 1];
     assert_eq!(
         exchange
-            .runtime_handle_for_test(over_limit)
+            .runtime_handle_for_conformance(over_limit)
             .expect("over-limit body yields response")
             .status,
         413

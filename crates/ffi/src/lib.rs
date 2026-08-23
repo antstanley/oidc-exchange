@@ -239,17 +239,24 @@ impl OidcExchange {
 
     #[cfg(feature = "conformance")]
     #[doc(hidden)]
-    pub fn runtime_handle_for_test(&self, request: WireRequest) -> Result<FfiResponse, FfiError> {
-        self.runtime.block_on(self.handle(request))
-    }
-
-    #[cfg(feature = "conformance")]
-    #[doc(hidden)]
     pub fn runtime_handle_for_conformance(
         &self,
         request: WireRequest,
     ) -> Result<FfiResponse, FfiError> {
-        self.runtime_handle_for_test(request)
+        self.runtime.block_on(self.handle(request))
+    }
+
+    #[cfg(test)]
+    fn with_router_for_test(router: Router, max_body_bytes: u64) -> Result<Self, FfiError> {
+        let runtime = tokio::runtime::Runtime::new().map_err(|e| FfiError {
+            code: "RUNTIME_ERROR".to_string(),
+            message: e.to_string(),
+        })?;
+        Ok(Self {
+            runtime,
+            router,
+            limits: NormalisationLimits { max_body_bytes },
+        })
     }
 
     /// Deprecated compatibility route. New bindings should pass a `WireRequest` to `handle`.
@@ -331,4 +338,194 @@ async fn response_to_ffi(response: axum::response::Response) -> Result<FfiRespon
         headers,
         body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::future::{ready, Ready};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    use axum::body::{Body, Bytes};
+    use futures_util::FutureExt;
+    use http::{Request, Response};
+    use http_body::{Body as HttpBody, Frame};
+    use tracing_subscriber::layer::{Context as LayerContext, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
+
+    use super::*;
+
+    const PANIC_DETAIL: &str = "router panic raw-subject-fixture secret-token-fixture";
+    const SECRET: &str = "secret-token-fixture";
+    const SUBJECT: &str = "raw-subject-fixture";
+
+    #[derive(Clone, Copy)]
+    enum PanicPoint {
+        ServiceFuture,
+        ResponseBody,
+    }
+
+    #[derive(Clone, Copy)]
+    struct InjectedService {
+        panic_point: PanicPoint,
+    }
+
+    impl tower::Service<Request<Body>> for InjectedService {
+        type Response = Response<Body>;
+        type Error = Infallible;
+        type Future = Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: Request<Body>) -> Self::Future {
+            match self.panic_point {
+                PanicPoint::ServiceFuture => panic!("{PANIC_DETAIL}"),
+                PanicPoint::ResponseBody => ready(Ok(Response::new(Body::new(PanickingBody)))),
+            }
+        }
+    }
+
+    struct PanickingBody;
+
+    impl HttpBody for PanickingBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            panic!("{PANIC_DETAIL}")
+        }
+    }
+
+    #[derive(Default)]
+    struct EventVisitor(String);
+
+    impl tracing::field::Visit for EventVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            use std::fmt::Write;
+            let _ = write!(self.0, "{}={value:?};", field.name());
+        }
+    }
+
+    #[derive(Clone)]
+    struct EventCapture(Arc<Mutex<String>>);
+
+    impl<S> Layer<S> for EventCapture
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+            let mut visitor = EventVisitor::default();
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .push_str(&visitor.0);
+        }
+    }
+
+    fn runtime(panic_point: PanicPoint) -> OidcExchange {
+        OidcExchange::with_router_for_test(
+            Router::new().fallback_service(InjectedService { panic_point }),
+            1024,
+        )
+        .expect("test runtime must construct")
+    }
+
+    fn request(request_id: &str) -> WireRequest {
+        WireRequest {
+            method: "POST".into(),
+            raw_path: b"/injected".to_vec(),
+            query: None,
+            headers: vec![
+                ("x-request-id".into(), request_id.into()),
+                ("authorization".into(), format!("Bearer {SECRET}")),
+                ("x-subject".into(), SUBJECT.into()),
+            ],
+            body: SUBJECT.as_bytes().to_vec(),
+            hints: TransportHints { path_is_raw: true },
+        }
+    }
+
+    fn assert_safe_500(response: &FfiResponse, expected_request_id: Option<&str>, logs: &str) {
+        assert_eq!(response.status, 500);
+        assert_eq!(response.body, Vec::<u8>::new());
+        let expected_headers = expected_request_id.map_or_else(Vec::new, |request_id| {
+            vec![("x-request-id".to_string(), request_id.to_string())]
+        });
+        assert_eq!(response.headers, expected_headers);
+        let response_debug = format!("{:?}{:?}", response.headers, response.body);
+        for sensitive in [PANIC_DETAIL, SECRET, SUBJECT] {
+            assert!(!response_debug.contains(sensitive));
+            assert!(!logs.contains(sensitive));
+        }
+        assert!(logs.contains("panic contained at FFI request boundary"));
+    }
+
+    fn exercise_async(panic_point: PanicPoint, request_id: &str) {
+        let runtime = runtime(panic_point);
+        let captured = Arc::new(Mutex::new(String::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(captured.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let outcome = runtime
+            .runtime
+            .block_on(AssertUnwindSafe(runtime.handle(request(request_id))).catch_unwind());
+        let response = outcome
+            .expect("handle future must not unwind")
+            .expect("panic has HTTP semantics");
+        let expected_id = HeaderValue::from_str(request_id).ok().map(|_| request_id);
+        let logs = captured.lock().expect("capture mutex must not be poisoned");
+        assert_safe_500(&response, expected_id, &logs);
+    }
+
+    #[test]
+    fn service_future_poll_panic_is_contained_and_runtime_is_reusable() {
+        exercise_async(PanicPoint::ServiceFuture, "req-safe-123");
+        let runtime = runtime(PanicPoint::ServiceFuture);
+        for _ in 0..2 {
+            let outcome = runtime
+                .runtime
+                .block_on(AssertUnwindSafe(runtime.handle(request("req-reuse"))).catch_unwind());
+            assert_eq!(
+                outcome.expect("runtime must remain usable").unwrap().status,
+                500
+            );
+        }
+    }
+
+    #[test]
+    fn response_body_poll_panic_is_contained_and_invalid_request_id_is_not_reflected() {
+        exercise_async(PanicPoint::ResponseBody, "invalid\nrequest-id");
+    }
+
+    #[test]
+    fn deprecated_sync_compatibility_path_does_not_unwind() {
+        let runtime = runtime(PanicPoint::ResponseBody);
+        #[allow(deprecated)]
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            runtime.handle_request(
+                "POST",
+                "/injected",
+                vec![("x-request-id".into(), "sync-safe-123".into())],
+                Vec::new(),
+            )
+        }));
+        let response = outcome
+            .expect("block_on compatibility trampoline must not unwind")
+            .expect("panic has HTTP semantics");
+        assert_safe_500(
+            &response,
+            Some("sync-safe-123"),
+            "panic contained at FFI request boundary",
+        );
+    }
 }

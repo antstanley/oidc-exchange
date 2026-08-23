@@ -33,3 +33,4 @@
 - Migration: `RELEASE_NOTES.md` records Node Promise/wire-shape migration, Python ordered-header/raw-path migration, Lambda base-path behaviour, and intentionally deferred removal after the following major cycle.
 - Source lifecycle: `.specs/changes/2026-08-05-runtime_parity_across_interfaces.md` remains Proposed and unmoved; `.specs/README.md` therefore remains correctly indexed as proposed.
 - Zero done certificates: no certificate was introduced; task 10 itself is the reviewable completion record.
+- F3 review evidence confirms the documented three-level panic stack at its shared FFI boundary: injected router-future and response-body polling panics cannot unwind through async `handle` or the deprecated synchronous trampoline, and map to the generic safe 500 without panic, token, subject, or invalid request-ID reflection.

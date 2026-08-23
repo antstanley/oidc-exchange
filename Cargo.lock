@@ -2844,6 +2844,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "futures-util",
  "http 1.4.2",
+ "http-body 1.0.1",
  "http-body-util",
  "oidc-exchange",
  "oidc-exchange-core",
@@ -2855,6 +2856,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
