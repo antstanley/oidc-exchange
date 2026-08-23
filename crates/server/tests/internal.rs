@@ -711,10 +711,28 @@ async fn list_users_without_limit_serves_the_documented_default_page_size() {
     assert_eq!(status, StatusCode::OK);
     let rows = body["users"].as_array().unwrap();
     assert_eq!(rows.len(), 50, "the default page size is 50");
+    let cursor = body["next_cursor"]
+        .as_str()
+        .expect("a full default page must carry a non-null next_cursor");
+
+    // The cursor is a real continuation token, not just non-null: following
+    // it serves exactly the one row that remained after the default page,
+    // and the listing terminates there.
+    let (status, tail) = get_users_page(&app, &format!("cursor={}", urlencode(cursor))).await;
+    assert_eq!(status, StatusCode::OK, "the issued cursor must resolve");
+    let tail_rows = tail["users"].as_array().unwrap();
     assert_eq!(
-        body["next_cursor"].as_str(),
-        Some("x").map(|_| body["next_cursor"].as_str().unwrap()),
-        "a full default page must carry a non-null next_cursor"
+        tail_rows.len(),
+        1,
+        "exactly one row remains beyond the 50-row default page"
+    );
+    assert!(
+        !rows.iter().any(|u| u["id"] == tail_rows[0]["id"]),
+        "the tail page continues strictly after the first page"
+    );
+    assert!(
+        tail["next_cursor"].is_null(),
+        "51 users exhaust the listing on the tail page"
     );
 }
 
