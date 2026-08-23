@@ -144,9 +144,7 @@ impl AppConfig {
 /// invents path structure the operator did not write; [`AppConfig::validate`]
 /// rejects it instead, naming the field.
 fn normalise_base_path(base_path: Option<String>) -> Option<String> {
-    let Some(base_path) = base_path else {
-        return None;
-    };
+    let base_path = base_path?;
     // Trim exactly one trailing slash, then fold any resulting root/empty
     // form back to unset (`"/"` → `None`, `"//"` → `None`) so the canonical
     // set is closed under the operation.
