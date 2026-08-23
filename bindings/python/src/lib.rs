@@ -3,8 +3,31 @@
 // known interaction between PyO3 proc macros and clippy.
 #![allow(clippy::useless_conversion)]
 
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict};
+
+fn required_string(request: &Bound<'_, PyDict>, field: &'static str) -> PyResult<String> {
+    let value = request
+        .get_item(field)?
+        .ok_or_else(|| PyKeyError::new_err(field))?;
+    value
+        .extract::<String>()
+        .map_err(|_| PyValueError::new_err(format!("request field '{field}' must be a string")))
+}
+
+fn optional_body(value: Option<Bound<'_, PyAny>>) -> PyResult<Vec<u8>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if let Ok(bytes) = value.extract::<Vec<u8>>() {
+        return Ok(bytes);
+    }
+    value
+        .extract::<String>()
+        .map(String::into_bytes)
+        .map_err(|_| PyValueError::new_err("request field 'body' must be bytes or a string"))
+}
 
 /// Python wrapper around the FFI OidcExchange instance.
 #[pyclass]
@@ -48,45 +71,30 @@ impl OidcExchange {
         py: Python<'py>,
         request: &Bound<'py, PyDict>,
     ) -> PyResult<Py<PyDict>> {
-        let method: String = request
-            .get_item("method")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("method"))?
-            .extract()?;
-
-        let path: String = request
-            .get_item("path")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("path"))?
-            .extract()?;
+        let method = required_string(request, "method")?;
+        let path = required_string(request, "path")?;
 
         let headers: Vec<(String, String)> = if let Some(h) = request.get_item("headers")? {
-            let hdict: &Bound<'py, PyDict> = h.downcast()?;
-            let mut vec = Vec::new();
-            for (k, v) in hdict.iter() {
-                vec.push((k.extract::<String>()?, v.extract::<String>()?));
-            }
-            vec
+            let hdict = h.downcast::<PyDict>().map_err(|_| {
+                PyValueError::new_err("request field 'headers' must be a dictionary")
+            })?;
+            hdict
+                .iter()
+                .map(|(key, value)| {
+                    let key = key.extract::<String>().map_err(|_| {
+                        PyValueError::new_err("request header names must be strings")
+                    })?;
+                    let value = value.extract::<String>().map_err(|_| {
+                        PyValueError::new_err("request header values must be strings")
+                    })?;
+                    Ok((key, value))
+                })
+                .collect::<PyResult<_>>()?
         } else {
             Vec::new()
         };
 
-        let body: Vec<u8> = if let Some(b) = request.get_item("body")? {
-            // Try bytes first, then string, default empty
-            if let Ok(bytes) = b.extract::<Vec<u8>>() {
-                bytes
-            } else if let Ok(s) = b.extract::<String>() {
-                s.into_bytes()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Precondition on the extracted inputs: `method` and `path` must have been
-        // populated from the request dict before we release the GIL and hand them
-        // (by reference) to the blocking FFI call below.
-        assert!(!method.is_empty(), "method must be a non-empty string");
-        assert!(!path.is_empty(), "path must be a non-empty string");
+        let body = optional_body(request.get_item("body")?)?;
 
         // Release the GIL for the blocking FFI call so other Python threads —
         // including an asyncio event loop driving this call via an executor —

@@ -195,6 +195,41 @@ async def test_async_health(test_config):
     assert response["status"] == 200
 
 
+def test_handle_request_sync_accepts_empty_path_without_assertion(test_config):
+    """An empty path reaches the legacy FFI boundary and returns its typed error."""
+    instance = OidcExchange(config_string=test_config)
+    with pytest.raises(RuntimeError, match="REQUEST_BUILD_ERROR"):
+        instance.handle_request_sync({"method": "GET", "path": ""})
+
+
+@pytest.mark.parametrize("missing_field", ["method", "path"])
+def test_handle_request_sync_missing_required_field_raises_key_error(test_config, missing_field):
+    """Missing required fields retain the documented KeyError contract."""
+    instance = OidcExchange(config_string=test_config)
+    request = {"method": "GET", "path": "/health"}
+    del request[missing_field]
+    with pytest.raises(KeyError, match=missing_field):
+        instance.handle_request_sync(request)
+
+
+@pytest.mark.parametrize(
+    ("request_data", "message"),
+    [
+        ({"method": 1, "path": "/health"}, "method.*string"),
+        ({"method": "GET", "path": 1}, "path.*string"),
+        ({"method": "GET", "path": "/health", "body": object()}, "body.*bytes or a string"),
+        ({"method": "GET", "path": "/health", "headers": []}, "headers.*dictionary"),
+    ],
+)
+def test_handle_request_sync_invalid_field_type_raises_value_error(
+    test_config, request_data, message
+):
+    """Ill-typed direct inputs fail as ValueError rather than panicking or defaulting."""
+    instance = OidcExchange(config_string=test_config)
+    with pytest.raises(ValueError, match=message):
+        instance.handle_request_sync(request_data)
+
+
 def test_handle_request_sync_invalid_method_raises_runtime_error(test_config):
     """An errored FFI request (invalid HTTP method) still raises PyRuntimeError."""
     instance = OidcExchange(config_string=test_config)
