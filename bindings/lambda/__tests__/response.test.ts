@@ -13,7 +13,7 @@ const response = {
   ],
   body: Buffer.from("ok"),
 };
-const v2 = { version: "2.0" } as APIGatewayProxyEventV2;
+const v2 = { version: "2.0", requestContext: { http: {} } } as unknown as APIGatewayProxyEventV2;
 const v1 = { httpMethod: "GET", requestContext: {} } as unknown as APIGatewayProxyEvent;
 const alb = { httpMethod: "GET", requestContext: { elb: {} } } as unknown as ALBEvent;
 
