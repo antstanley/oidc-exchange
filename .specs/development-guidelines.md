@@ -1,6 +1,6 @@
 # Development Guidelines
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** Repo-wide
+**Status:** Implemented · **Date:** 2026-08-24 · **Owner:** Ant Stanley · **Scope:** Repo-wide
 
 The rules of the road for everyone — humans and agents — writing code in `oidc-exchange`.
 This page is canonical: a guideline here is a rule the repo adopts. It covers the toolchain,
@@ -18,7 +18,7 @@ in the global spec layer.
 | clippy | latest | `cargo clippy --workspace -- -D warnings` (zero warnings) |
 | cargo-nextest | latest | `cargo nextest run --workspace`; config in `.config/nextest.toml` |
 | TypeScript | strict mode, `.ts` only | every package is ESM (`"type": "module"`) |
-| pnpm | 10.x | `pnpm install`; `pnpm-lock.yaml` is the lockfile of record |
+| pnpm | 11.9.0 | exact Corepack version; frozen committed lockfiles are records of resolved inputs |
 | oxfmt | latest | `pnpm format` / `pnpm format:check` |
 | oxlint | latest | `pnpm lint` |
 | tsc / astro check / svelte-check | latest | `pnpm typecheck` per TS workspace (`tsc --noEmit` for the bindings; `astro check` / `svelte-check` for the apps) |
@@ -31,7 +31,7 @@ in the global spec layer.
 | pyright | latest, strict | `uv run pyright` over `bindings/python`; runs in CI |
 | jujutsu (jj) | latest | sole VCS front end over a Git backend |
 | lefthook | latest | pre-push gate (`lefthook.yml`); `pnpm install` installs it, `lefthook run pre-push` runs it by hand |
-| CI | GitHub Actions | `.github/workflows/ci.yml`: lint, test, nodejs-test, python-test, web-apps |
+| CI | GitHub Actions | per-job permissions; lint, test, Node, Python, web-app, advisory, and signing-path gates |
 
 ## Tiger Style — the pervasive style
 
@@ -297,7 +297,18 @@ The repo is jj-managed (`.jj/` over a Git backend).
   `bindings/python/pyproject.toml` is enforced by the release pipeline's `validate` job
   ([bindings/specs/05-distribution](bindings/specs/05-distribution.md)).
 - **CI is the enforcement gate** (`.github/workflows/ci.yml`): format-check, clippy, nextest,
-  the napi build + vitest, and the maturin build + pytest run on every push and PR.
+  the napi build + vitest, the maturin build + pytest/Ruff/Pyright, web-app hygiene, the frozen
+  Cargo/pnpm/Python advisory wrapper, and the source-derived signing-path policy run on every push
+  and PR. See [distribution supply-chain gates](bindings/specs/05-distribution.md#supply-chain-gates).
+- **Generated key material and local state are never committed.** `.gitignore` uses patterns
+  `*.pem`, `*.p8`, `*.key`, `keys/`, `data/`, `lmdb/`, `*.db`, `*.sqlite`, and `*.sqlite3`, because
+  documented setup flows write relative to their caller's directory. This is especially important
+  under jj: the default `snapshot.auto-track = "all()"` records unignored new files on the next
+  snapshot without a deliberate add step.
+- **Dependency advisories are triaged, not carried silently.** Each committed graph is scanned.
+  A carried finding requires the exact policy schema, reachability rationale, owner, review date,
+  and expiry; unknown or expired findings and tool/DB/registry failures fail closed. Cargo
+  unmaintained/yanked reports warn rather than masquerading as clean.
 - **The pre-push hook** (managed by [lefthook](https://lefthook.dev) via `lefthook.yml`) runs format-check, lint, typecheck, and the fast test tier for every language the change touches; CI re-runs the same plus the slow/integration tier. A failing hook blocks the push; do not bypass it. `pnpm install` installs it (the root `prepare` script runs `lefthook install`); run it by hand any time with `lefthook run pre-push` (see [CONTRIBUTING.md](../CONTRIBUTING.md)). Note that `jj git push` does not run git hooks, so CI remains the backstop.
 - **The 70-lines-per-function and two-assertions-per-function limits stay review gates, not hard lints.** A clippy `too_many_lines` lint at threshold 70 was evaluated and declined: existing functions exceed it (up to 134 lines across core, adapters, and the server crate), so enabling it under `-D warnings` would break the build without a sanctioned refactor. Assertion density is not lintable off the shelf. Both stay reviewer-enforced.
 - **Generated native artifacts are not committed** — they are built per platform in CI.

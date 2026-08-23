@@ -11,20 +11,37 @@ description: Build and run oidc-exchange in 5 minutes.
 
 Choose one of the following methods:
 
-### Option 1: Install script (recommended)
+### Option 1: Verified install script (recommended)
+
+For an authenticated binary install, install the [GitHub CLI](https://cli.github.com/) first. The installer requires the downloaded binary to have GitHub build provenance from repository `antstanley/oidc-exchange` and signer workflow `antstanley/oidc-exchange/.github/workflows/release.yml`:
 
 ```bash
+command -v gh
 curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
 ```
 
-The installer verifies the downloaded binary's checksum and, when the GitHub CLI (`gh`) is available, requires GitHub build provenance from `antstanley/oidc-exchange` and `.github/workflows/release.yml`. Without `gh`, it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
-
-
-### Option 2: Docker
+To verify a manually downloaded binary, run:
 
 ```bash
+gh attestation verify ./oidc-exchange-linux-x64 \
+  --repo antstanley/oidc-exchange \
+  --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
+```
+
+Without `gh`, the installer loudly falls back to checksum-only corruption detection; that does not authenticate the release.
+
+### Option 2: Verified GHCR container
+
+The GHCR multi-arch tag has build provenance for its immutable final manifest digest (in addition to each platform digest). Verify the final GHCR manifest before running it:
+
+```bash
+gh attestation verify oci://ghcr.io/antstanley/oidc-exchange:latest \
+  --repo antstanley/oidc-exchange \
+  --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
 docker pull ghcr.io/antstanley/oidc-exchange:latest
 ```
+
+This is GitHub build provenance, not a registry signature. The release is also copied to Docker Hub, but the workflow does not attach or promise a Docker Hub-verifiable attestation; use GHCR for this verification path.
 
 ### Option 3: npm
 

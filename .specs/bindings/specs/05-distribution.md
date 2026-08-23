@@ -1,98 +1,119 @@
 # Distribution
 
-**Status:** Implemented · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Scope:** install.sh, Dockerfile, .github/workflows
+**Status:** Implemented · **Date:** 2026-08-24 · **Owner:** Ant Stanley · **Scope:** install.sh, Dockerfile, .github/workflows
 
-How every artifact is built and shipped: the binary install script, the Docker image, the
-language packages, and the tag-triggered release pipeline.
+How every artifact is built, authenticated, and shipped.
 
 ## Artifacts
 
-| Artifact | Target | Channel |
-|---|---|---|
-| Binary `oidc-exchange` | linux x64/arm64, windows x64, macOS arm64 | GitHub Releases (+ checksums) |
-| Docker image | `linux/amd64`, `linux/arm64` | ghcr.io and Docker Hub |
-| `@oidc-exchange/node` + 4 platform packages (`@oidc-exchange/{linux-x64-gnu,linux-arm64-gnu,win32-x64-msvc,darwin-arm64}`) | 4 napi targets | npm (OIDC trusted publishing, provenance) |
-| `oidc-exchange` wheels | 4 abi3 platforms | PyPI |
-| `@oidc-exchange/lambda` | TypeScript | npm |
+| Artifact | Target | Channel | Provenance |
+|---|---|---|---|
+| Binary `oidc-exchange` | linux x64/arm64, windows x64, macOS arm64 | GitHub Releases (+ checksums) | GitHub/Sigstore build attestation |
+| Docker image | `linux/amd64`, `linux/arm64` | ghcr.io and Docker Hub | GHCR build attestations for each platform digest and the final manifest digest |
+| `@oidc-exchange/node` + 4 platform packages (`@oidc-exchange/{linux-x64-gnu,linux-arm64-gnu,win32-x64-msvc,darwin-arm64}`) | 4 napi targets | npm (OIDC trusted publishing) | npm `--provenance` |
+| `oidc-exchange` wheels | 4 abi3 platforms | PyPI (OIDC trusted publishing) | PyPI attestations |
+| `@oidc-exchange/lambda` | TypeScript | npm (OIDC trusted publishing) | npm `--provenance` |
+
+Every channel carries a claim binding an artifact digest to this repository, workflow, and tagged
+revision. Binary checksums are corruption checks, not authenticity claims. Container build
+provenance is attached in GHCR: each native build attests its immutable platform digest, the
+manifest job composes exactly those digests, resolves the immutable multi-arch digest, and attests
+that final digest. The workflow also copies the manifest to Docker Hub, but does not sign it there;
+consumer-side `gh attestation verify oci://...` is therefore documented only for GHCR. Registry
+signing and build provenance are distinct controls; this pipeline implements the latter.
 
 ## Install script (`install.sh`)
 
-A bash installer for `antstanley/oidc-exchange`. It detects OS (`uname -s`) and arch
-(`uname -m`), maps to a release asset name, downloads the binary and its SHA-256 checksum from
-GitHub Releases, verifies the checksum, and installs to `/usr/local/bin` (root) or
-`~/.local/bin` (non-root). It accepts a `--version`/positional pin and defaults to the latest
-release; it requires `curl`/`wget` and `sha256sum`/`shasum`.
+The Bash installer is fixed to repository `antstanley/oidc-exchange` and signer workflow
+`antstanley/oidc-exchange/.github/workflows/release.yml`. It maps the detected OS and architecture
+to a release asset. `--version` accepts only
+`^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$`; malformed or missing
+operands fail before a request or URL construction. After downloading the binary and SHA-256
+sidecar from GitHub Releases, it verifies the checksum. If `gh` is present, installation also
+requires:
+
+```bash
+gh attestation verify <downloaded-binary> \
+  --repo antstanley/oidc-exchange \
+  --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
+```
+
+A failed or timed-out provenance check stops installation. Without `gh`, the installer loudly says
+that checksum verification detects corruption only and does not authenticate the artifact. It
+installs to `/usr/local/bin` for root or `~/.local/bin` otherwise. The separate sibling change owns
+the existing behavior when neither checksum utility is present; this specification does not claim
+that branch fails closed.
 
 ## Docker (`Dockerfile`)
 
-Multi-stage: `rust:1.85-slim` builder (`cargo build --release --bin oidc-exchange`, with
-`pkg-config`/`libssl-dev`) → `debian:bookworm-slim` runtime with `ca-certificates`/`curl`,
-exposing 8080 and running the binary. Example Dockerfiles layer config onto the published
-image.
+A multi-stage Rust build produces the runtime binary in a minimal Debian image. Release builds run
+natively for `linux/amd64` and `linux/arm64`, push each GHCR image by digest, and compose the final
+manifest from those immutable subjects.
 
 ## Release pipeline (`.github/workflows`)
 
-**CI (`ci.yml`)** runs on push/PR: `lint` (`cargo fmt --check`, `cargo clippy -- -D
-warnings`), `test` (`cargo nextest run --workspace`), `nodejs-test` (build the napi module,
-vitest, lint/fmt), `python-test` (maturin build, pytest via uv).
+**CI (`ci.yml`)** runs format, clippy, nextest, Node native build/tests/lint/format/typecheck,
+Python maturin/pytest/Ruff/Pyright, web-app checks, the three-graph advisory wrapper, and the
+resolved signing-path policy. Every job has job-level permissions and no CI job has write scope.
 
-**Release (`release.yml`)** triggers on a `v*.*.*` tag and runs: `validate` (extract version
-from the tag), `build-binaries` (matrix per target, checksums), `build-docker` (buildx
-multi-arch, push to both registries with `latest`/`vX.Y.Z`/`vX.Y`/`vX` tags), and
-`create-release` (GitHub Release with binaries and a generated changelog).
+**Release (`release.yml`)** starts with the same blocking dependency and signing-path policy.
+There is no workflow-level permission grant. Every job declares only what it needs: checkout/build
+jobs use `contents: read` with `persist-credentials: false`; image jobs add `packages: write`;
+binary, per-platform image, and final-manifest attestation producers alone add `id-token: write`
+and `attestations: write`; `create-release` alone has `contents: write`; npm/PyPI publishers alone
+have `id-token: write` for trusted publishing. The binary attestation consumes the exact generated
+`.sha256` subject checksum. Platform image attestations consume the build step digest. The manifest
+attestation consumes the digest resolved after composing the two platform subjects.
 
-`build-nodejs` (matrix per napi target) builds the native module with `napi build --release
---target <triple>` and uploads the resulting `oidc-exchange.<triple>.node` as an artifact.
-`publish-npm` then runs as a separate job — it needs `build-nodejs`, declares `permissions: {
-id-token: write, contents: read }`, and runs in the `publish` GitHub Environment so publish
-credentials are never exposed to build or runtime code. It downloads the `.node` artifacts, runs
-`napi artifacts` to place each binary into its `npm/<triple>` package, validates the root package
-with `publint` and `@arethetypeswrong/cli`, and publishes the four platform packages and the root
-`@oidc-exchange/node` with `npm publish --provenance --access public`. Authentication is GitHub
-OIDC trusted publishing — no `NPM_TOKEN`. Installs use `--ignore-scripts` and every action is
-pinned to a full-length commit SHA. The publish step runs on Node.js >= 24.8.0. The same job also
-builds and publishes `@oidc-exchange/lambda` on the same OIDC trusted-publishing path.
+`build-nodejs` installs with exact pnpm 11.9.0 and a frozen lockfile, then executes the locked napi
+CLI offline. A separate read-only `validate-npm-package` job runs locked `publint` and
+`@arethetypeswrong/cli`, distributes artifacts, and proves all four platform binaries exist before
+uploading a validated package tree. Only then does `publish-npm` receive OIDC identity and stage
+platform, root Node, and Lambda packages with provenance and ignored lifecycle scripts. Lambda uses
+its own committed lockfile and a frozen, `--ignore-scripts` install. No publishing job resolves
+`@latest`, runs `npx --yes`, or bypasses a lockfile.
 
-`build-python` (matrix per platform) builds an `abi3` wheel with maturin in a `manylinux_2_28`
-container (`PyO3/maturin-action`, `manylinux: 2_28` for the Linux targets), and one job also
-builds the sdist (`maturin sdist`); all wheels and the sdist upload as artifacts. Because the
-extension is built against the Python 3.10 stable ABI, one wheel per platform covers 3.10–3.13.
-`publish-pypi` then runs as a separate job — it needs `build-python`, declares `permissions: {
-id-token: write }`, runs in the `pypi` GitHub Environment, downloads every wheel and the sdist,
-and uploads them with `pypa/gh-action-pypi-publish`. Authentication is PyPI Trusted Publishing —
-no `PYPI_TOKEN`. Every action is pinned to a full-length commit SHA.
+Python builds four `cp310-abi3` wheels plus an sdist with the SHA-pinned maturin action and publishes
+through PyPI Trusted Publishing. The binding uses `pyo3 0.29.2` with `extension-module` and
+`abi3-py310`; the obsolete pyo3 advisory exceptions have been removed.
+
+## Supply-chain gates
+
+- **Pinning and lockfiles.** Every action is a full commit SHA. Executed tools are locked or exact:
+  pnpm 11.9.0, cargo-deny 0.19.0, and pip-audit 2.9.0. CI/release installs are frozen; publish-path
+  installs use `--ignore-scripts`. `minimumReleaseAge` is explicit in `pnpm-workspace.yaml`.
+- **Least privilege.** Permissions are per job. Checkout jobs explicitly retain only
+  `contents: read`, disable persisted credentials when they do not push, and cannot inherit an
+  omitted workflow-level write scope.
+- **Three dependency graphs.** `scripts/run-advisory-scans.mjs` scans committed `Cargo.lock`, all
+  owned pnpm lockfiles recursively, and the frozen production export of
+  `bindings/python/uv.lock`. Unknown and expired high-severity findings fail; exact unexpired
+  exceptions pass only when ecosystem, advisory, package, version/range, rationale, owner, expiry,
+  and review date match. Cargo unmaintained and yanked findings warn. Scanner, database, registry,
+  malformed-output, version, and frozen-export failures exit separately as tool failure rather
+  than being reported as clean. `config/advisory-policy.json` is the exception inventory.
+- **Signing paths.** `config/signing-path-policy.json` derives roots from the adapters source and
+  evaluates locked Cargo metadata in `workspace-all-targets` and `linux-release-target` modes.
+  Pre-release protected packages fail unless the exact mode/package/version/path exception is
+  present, owned, reasoned, and unexpired. Fourteen inventory entries (seven per mode; twelve currently exercised findings because the resolved RSA prerelease edge is dev-only and excluded) expire
+  2026-09-15; drift in a path, version, feature graph, or protected package fails closed.
 
 ## Version parity
 
-One version string must match across `Cargo.toml` `workspace.package.version`,
-`bindings/nodejs/package.json`, and `bindings/python/pyproject.toml`. The `validate` job checks
-this before building. Bumps are manual: edit the three files, commit, tag, push. npm and PyPI
-use the bare `X.Y.Z`; GitHub and Docker use the `v`-prefixed tag.
+One version must match across the workspace Cargo manifest, Node package, and Python project. The
+tag-triggered `validate` job checks parity before builds.
 
-## Assumptions and open questions
+## Assumptions and decisions
 
-### Assumptions
-
-- ghcr.io and Docker Hub credentials are configured as repository secrets for the publish
-  jobs.
-- The git tag is the single source of truth for a release's version.
-
-### Decisions
-
-- *Tag-triggered unified release.* **A `v*.*.*` tag drives binaries, Docker, npm, and PyPI in
-  one pipeline.** Atomic, consistent versioning across every artifact from one monorepo.
-- *Checksum-verified install.* **`install.sh` verifies SHA-256 before installing.** Detects
-  tampering or truncated downloads.
-- *npm trusted publishing.* **`@oidc-exchange/node` and its platform packages publish via GitHub
-  OIDC, not a stored `NPM_TOKEN`.** Short-lived per-run credentials and npm provenance remove a
-  long-lived secret and attest the build to the source commit. The package is configured as a
-  trusted publisher for `antstanley/oidc-exchange` / `release.yml` on npmjs.
-- *PyPI trusted publishing.* **`oidc-exchange` wheels publish via GitHub OIDC, not a stored
-  `PYPI_TOKEN`.** `pypa/gh-action-pypi-publish` exchanges the workflow's OIDC token for a
-  short-lived upload credential; the project is registered as a trusted publisher for
-  `antstanley/oidc-exchange` / `release.yml` on PyPI.
+- GitHub-hosted release runners can mint OIDC identities and reach Sigstore and registries.
+- Binary and image authenticity uses GitHub build provenance; checksums remain corruption fallback.
+- npm and PyPI use trusted publishing, not stored publication tokens.
+- The Docker Hub copy is not claimed to carry the GHCR attestation or a registry signature.
+- Advisory exceptions are exact, dated policy records rather than blanket scanner ignores.
+- Signing-path detection landed without an unrelated cryptographic dependency upgrade; the exact
+  temporary RC exceptions must be removed, replaced, or deliberately reviewed by 2026-09-15.
 
 ### Open questions
 
-- Version bumps are manual across three manifests; a single-command bump (or a release-please
-  style automation) is not yet in place.
+- Version bumps remain manually coordinated across manifests.
+- Whether Docker Hub should gain an independent registry-signing mechanism is future work.

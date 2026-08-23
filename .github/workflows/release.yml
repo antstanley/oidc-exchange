@@ -556,13 +556,18 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
             ```
 
-            The installer requires GitHub build provenance when `gh` is available; otherwise it warns that checksum verification detects corruption but does not authenticate the release.
+            Install `gh` first for authenticated installation. The installer fixes the repository to `antstanley/oidc-exchange` and signer to `antstanley/oidc-exchange/.github/workflows/release.yml`. Without `gh`, it loudly performs checksum-only corruption detection, not authentication.
 
-            ### Docker
+            ### Docker (GHCR build provenance)
 
             ```bash
+            gh attestation verify oci://ghcr.io/${{ github.repository }}:${{ needs.validate.outputs.version }} \
+              --repo antstanley/oidc-exchange \
+              --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
             docker pull ghcr.io/${{ github.repository }}:${{ needs.validate.outputs.version }}
             ```
+
+            This verifies the immutable final multi-arch GHCR manifest's build provenance, not a registry signature. The Docker Hub copy is not claimed to carry a Docker Hub-verifiable attestation.
 
             ### npm
 

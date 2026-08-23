@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [source spec](../../../changes/2026-08-05-harden_release_supply_chain.md) §Proposed changes → Release pipeline and Node.js paragraph; §Supply-chain gates → Pinning/Least privilege; §Implementation notes A.2–A.3; [distribution canonical page](../../../bindings/specs/05-distribution.md) §Release pipeline
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_release_supply_chain.md) §Proposed changes → Release pipeline and Node.js paragraph; §Supply-chain gates → Pinning/Least privilege; §Implementation notes A.2–A.3; [distribution canonical page](../../../bindings/specs/05-distribution.md) §Release pipeline
 **Depends on:** 01
 **Produces:** per-job permissions and locked/exact tooling prevent jobs with publishing authority from executing dynamically resolved packages.
 **Pointers:** `.github/workflows/release.yml:8-10,16-618`; `.github/workflows/ci.yml:12-148`; `.github/workflows/nodejs-addon-glibc.yml:21-79`; `bindings/nodejs/package.json:22-36`

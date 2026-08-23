@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [source spec](../../../changes/2026-08-05-harden_release_supply_chain.md) §Proposed changes → Release pipeline, Node.js paragraph and Supply-chain gates → Pinning/Lockfiles; §Implementation notes A.3–A.5; §Regression tests; [distribution canonical page](../../../bindings/specs/05-distribution.md) §Release pipeline
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_release_supply_chain.md) §Proposed changes → Release pipeline, Node.js paragraph and Supply-chain gates → Pinning/Lockfiles; §Implementation notes A.3–A.5; §Regression tests; [distribution canonical page](../../../bindings/specs/05-distribution.md) §Release pipeline
 **Depends on:** —
 **Produces:** committed Node and Lambda lockfiles support frozen install commands in CI and tagged builds.
 **Pointers:** `bindings/nodejs/package.json:30-36`; `bindings/nodejs/pnpm-lock.yaml`; `bindings/lambda/package.json:26-35`; `pnpm-workspace.yaml:1-42`; `.github/workflows/release.yml:299-325,438-454`; `.github/workflows/ci.yml:47-84`; `.github/workflows/nodejs-addon-glibc.yml:47-55`

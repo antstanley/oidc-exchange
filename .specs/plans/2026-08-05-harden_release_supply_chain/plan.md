@@ -1,6 +1,6 @@
 # Plan: Harden release supply chain
 
-**Status:** Review · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [changes/2026-08-05-harden_release_supply_chain.md](../../changes/2026-08-05-harden_release_supply_chain.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [changes/merged/2026-08-05-harden_release_supply_chain.md](../../changes/merged/2026-08-05-harden_release_supply_chain.md)
 
 Harden the tagged release and dependency supply chain through reviewable slices: first make the Node/Lambda dependency graph reproducible, then remove publishing authority from dynamic tool resolution and over-broad workflow credentials, add provenance with a verifying installer, and introduce advisory and signing-path policy gates. The dependency-policy slices are isolated from the release-pipeline slices so this unstacked PR does not absorb the sibling fail-closed installer change or unrelated release-candidate remediation.
 
@@ -10,7 +10,7 @@ Harden the tagged release and dependency supply chain through reviewable slices:
 
 ## Source and definition-of-done baseline
 
-- **Spec.** [changes/2026-08-05-harden_release_supply_chain.md](../../changes/2026-08-05-harden_release_supply_chain.md), covering its proposed distribution and repository-hygiene deltas, implementation packages A–D, and regression tests. No type/schema change is in scope.
+- **Spec.** [changes/merged/2026-08-05-harden_release_supply_chain.md](../../changes/merged/2026-08-05-harden_release_supply_chain.md), covering its proposed distribution and repository-hygiene deltas, implementation packages A–D, and regression tests. No type/schema change is in scope.
 - **Canonical targets.** [bindings/specs/05-distribution.md](../../bindings/specs/05-distribution.md) §§Artifacts, Install script, Release pipeline, and the new Supply-chain gates section; [development-guidelines.md](../../development-guidelines.md) §Repository hygiene.
 - **Already built.** All `uses:` references in the reviewed workflows are full commit SHAs; npm and PyPI already use OIDC trusted publishing; release builds and checksums, Node platform artifacts, and the existing CI jobs are present. The code read found the remaining workflow-level permissions, dynamic Node tooling, non-frozen installs, missing Lambda lockfile, absent advisory config, and installer URL interpolation. Existing release-candidate crypto crates and `pyo3` remain preconditions for the policy/triage tasks, not silently fixed by this PR.
 - **Definition of done.** Every task inherits [development-guidelines.md](../../development-guidelines.md) §Definition of done and §Limits and bounds: focused positive and negative tests, named constants for new bounds, meaningful assertions where functions are touched, and clean format/lint/test gates for every touched language. Workflow and shell changes must additionally use hermetic/static tests that prove their security invariants without publishing.

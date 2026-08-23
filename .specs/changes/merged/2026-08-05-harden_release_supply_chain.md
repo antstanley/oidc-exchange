@@ -1,6 +1,6 @@
 # Change: Harden the release and dependency supply chain
 
-**Status:** Proposed · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Target:** .github/workflows, install.sh, Cargo.lock, bindings/* (distribution)
+**Status:** Merged · **Date:** 2026-08-05 · **Merged:** 2026-08-24 · **Owner:** Ant Stanley · **Target:** .github/workflows, install.sh, Cargo.lock, bindings/* (distribution)
 
 Close the supply-chain gaps around the tag-triggered release: pin every dependency resolved
 inside a job that holds publishing rights, scope `GITHUB_TOKEN` per job instead of once at
@@ -482,3 +482,14 @@ holds when a future job is granted `id-token: write`.
   determines both how urgent work package D is and how its policy check must be written.
 - Does `apps/admin-ui` ever become a published artifact? It is absent from `release.yml`
   today. If it becomes one, it needs to be in scope for attestation from the start.
+
+---
+
+## Shipped reconciliation (2026-08-24)
+
+The canonical pages supersede provisional inventories in this proposal. In particular, pyo3 is
+0.29.2 and its two obsolete advisory exceptions are removed; the exact active advisory exception
+inventory is 7 Cargo, 11 pnpm, and 0 Python; the resolved signing-path policy evaluates two actual
+metadata modes with seven inventory entries per mode (six currently exercised; RSA is dev-only) through 2026-09-15; and the final
+GHCR multi-arch manifest digest is attested in addition to each native platform digest. Docker Hub
+is a copied distribution target but is not claimed to carry GHCR build provenance or registry signing.

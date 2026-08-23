@@ -80,7 +80,7 @@ function pythonFindings() {
   requireVersion("pip-audit", ["--version"], PIP_AUDIT_VERSION);
   const result = run("uv", ["export", "--frozen", "--no-dev", "--no-emit-project", "--format", "requirements-txt", "--output-file", resolve(OUTPUT, "python-requirements.txt")], resolve(ROOT, "bindings/python"));
   if (result.error || result.status !== 0) throw new Error("uv frozen export failed");
-  const audit = run("pip-audit", ["--requirement", resolve(OUTPUT, "python-requirements.txt"), "--format", "json", "--progress-spinner", "off"]);
+  const audit = run("pip-audit", ["--requirement", resolve(OUTPUT, "python-requirements.txt"), "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"]);
   if (audit.error || ![0, 1].includes(audit.status)) throw new Error("pip-audit tool or vulnerability DB failure");
   let report;
   try { report = JSON.parse(audit.stdout); } catch { throw new Error("pip-audit emitted malformed JSON"); }

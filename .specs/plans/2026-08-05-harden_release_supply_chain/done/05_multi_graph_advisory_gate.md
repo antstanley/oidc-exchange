@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [source spec](../../../changes/2026-08-05-harden_release_supply_chain.md) §Proposed changes → Supply-chain gates → Advisories/All three dependency graphs; §Implementation notes C.9–C.11; [development guidelines](../../../development-guidelines.md) §Repository hygiene
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_release_supply_chain.md) §Proposed changes → Supply-chain gates → Advisories/All three dependency graphs; §Implementation notes C.9–C.11; [development guidelines](../../../development-guidelines.md) §Repository hygiene
 **Depends on:** 01
 **Produces:** CI and release pre-publish gates evaluate Cargo, pnpm, and Python dependency findings against recorded, dated policy rather than leaving advisories silent.
 **Pointers:** `deny.toml` (new); `.github/workflows/ci.yml:12-148`; `.github/workflows/release.yml:16-618`; `Cargo.lock`; `bindings/python/Cargo.toml:12`; `bindings/python/pyproject.toml`; `bindings/lambda/pnpm-lock.yaml`
@@ -22,7 +22,7 @@
 - [x] `pyo3` no longer remains on the specified vulnerable line, and the supported abi3/maturin build is proven after the update.
 - [x] Positive and negative audit-policy tests demonstrate the stated pass, warn, and fail outcomes without requiring live publication.
 - [x] Meets the repo definition of done (tests, lint/format, named-constant limits — see plan.md baseline).
-- [x] Reviewable: a reviewer can inspect the dated policy and run fixtures that show unrecorded findings fail while recorded bounded findings follow the documented outcome.
+- [x] Reviewable: 18 active exceptions remain (7 Cargo and 11 pnpm; 0 Python); a reviewer can inspect the dated policy and run fixtures that show unrecorded findings fail while recorded bounded findings follow the documented outcome.
 
 ## Sibling boundaries
 

@@ -2,10 +2,10 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [source spec](../../../changes/2026-08-05-harden_release_supply_chain.md) §Implementation notes D.12; §Proposed changes → Assumptions / Decisions → Open questions; [distribution canonical page](../../../bindings/specs/05-distribution.md) §Supply-chain gates
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_release_supply_chain.md) §Implementation notes D.12; §Proposed changes → Assumptions / Decisions → Open questions; [distribution canonical page](../../../bindings/specs/05-distribution.md) §Supply-chain gates
 **Depends on:** 05
 **Produces:** a resolved-graph policy check prevents signing and verification paths from silently selecting pre-release cryptographic dependencies.
-**Pointers:** `Cargo.lock`; `crates/adapters/Cargo.toml:14-22,40`; `crates/adapters/src/local_keys/mod.rs:1-105`; `crates/adapters/src/kms/mod.rs:1-379,637-900`; `crates/adapters/src/oidc/mod.rs:268-333`
+**Pointers:** `Cargo.lock`; `config/signing-path-policy.json` (2 modes, 14 exact path exceptions); `crates/adapters/Cargo.toml:14-22,40`; `crates/adapters/src/local_keys/mod.rs:1-105`; `crates/adapters/src/kms/mod.rs:1-379,637-900`; `crates/adapters/src/oidc/mod.rs:268-333`
 
 ## Steps
 
