@@ -1,6 +1,7 @@
 # 07 · Closed reserved-claim enforcement
 
-**Status:** Blocked — external merge-order gate  
+**Status:** Done on branch; external merge-order gate noted  
+**Gate note:** implemented here ahead of sibling `2026-08-05-validate_revoke_token_claims` (commit `ovztwrxo`), which must still merge first — or its `sid`/`nbf` reservations be folded without overwrite — when this branch's spec changes are applied to the canonical prose. Every DoD item below is implemented and verified on this branch; only that merge-order step sits outside it.  
 **Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 7; [01-domain-model](../../../service/specs/01-domain-model.md) User target; [03-service-flows](../../../service/specs/03-service-flows.md) Custom claims target  
 **Depends on:** — (external gate: `2026-08-05-validate_revoke_token_claims` must merge first, or its `sid` and `nbf` additions must be folded without overwrite)  
 **Produces:** The closed 24-name protocol set is rejected before persistence, configuration acceptance, template resolution, and token flattening.
