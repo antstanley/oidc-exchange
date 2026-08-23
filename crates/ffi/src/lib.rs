@@ -232,13 +232,22 @@ impl OidcExchange {
         Ok(built)
     }
 
+    #[cfg(any(test, feature = "conformance"))]
+    #[doc(hidden)]
+    pub fn runtime_handle_for_test(
+        &self,
+        request: WireRequest,
+    ) -> Result<FfiResponse, FfiError> {
+        self.runtime.block_on(self.handle(request))
+    }
+
     #[cfg(feature = "conformance")]
     #[doc(hidden)]
     pub fn runtime_handle_for_conformance(
         &self,
         request: WireRequest,
     ) -> Result<FfiResponse, FfiError> {
-        self.runtime.block_on(self.handle(request))
+        self.runtime_handle_for_test(request)
     }
 
     /// Deprecated compatibility route. New bindings should pass a `WireRequest` to `handle`.

@@ -15,6 +15,7 @@ use oidc_exchange_core::ports::{
 use oidc_exchange_core::service::AppService;
 
 use crate::middleware::audit_context::audit_context_layer;
+#[cfg(any(not(feature = "conformance"), test))]
 use crate::middleware::base_path::with_base_path_strip;
 #[cfg(feature = "conformance")]
 use crate::middleware::base_path::with_base_path_strip_and_observe;
@@ -382,8 +383,9 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         config.server.max_request_body_bytes,
     );
     #[cfg(not(feature = "conformance"))]
-    let router = with_base_path_strip(router, config.server.base_path.clone());
+    return wrap_with_base_path_under_outer_guard(router, config.server.base_path.clone());
 
+    #[cfg(feature = "conformance")]
     wrap_under_outer_guard(router)
 }
 
@@ -423,6 +425,7 @@ where
 /// outside the base-path rewrite, not merely around each already-matched endpoint. Shared
 /// with the panic-containment tests for the same drift-proofing reason as
 /// [`apply_route_layers`].
+#[cfg(any(not(feature = "conformance"), test))]
 fn wrap_with_base_path_under_outer_guard(router: Router, base_path: Option<String>) -> Router {
     wrap_under_outer_guard(with_base_path_strip(router, base_path))
 }
