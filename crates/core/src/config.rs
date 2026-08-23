@@ -119,6 +119,28 @@ impl AppConfig {
             );
         }
 
+        // The mtls mechanism trusts a header asserted by whatever terminates
+        // TLS in front of the admin listener. On the default loopback bind
+        // that trust is anchored by reachability; published on a routable
+        // interface it becomes a silent identity-spoofing surface unless the
+        // trusted proxy both sets and strips the header. Warn so the
+        // deployment cannot enable the pairing unknowingly.
+        if internal_api_served
+            && self.internal_api.uses_mtls()
+            && !admin_listener_is_loopback(&self.internal_api.host)
+        {
+            tracing::warn!(
+                host = %self.internal_api.host,
+                port = self.internal_api.port,
+                subject_header = %self.internal_api.mtls_subject_header(),
+                "the mtls mechanism trusts the client-certificate subject header on an \
+                 admin listener bound beyond loopback; any host that can reach this \
+                 listener and set the header authenticates as anyone - ensure your \
+                 TLS-terminating proxy overwrites the header on every request and the \
+                 listener is otherwise unreachable"
+            );
+        }
+
         // Only role = "all" binds both sockets, so only that role can collide.
         // Under role = "admin" the public socket is never bound (same values
         // are harmless), and under any other role the admin listener is not
@@ -684,6 +706,19 @@ pub fn listeners_collide(
     let public_wildcard = WILDCARD_LISTENER_HOSTS.contains(&public_host);
     let admin_wildcard = WILDCARD_LISTENER_HOSTS.contains(&admin_host);
     public_wildcard || admin_wildcard || public_host == admin_host
+}
+
+/// Whether an admin listener bound to `host` is loopback-only — the anchor the
+/// proxy-asserted `mtls` mechanism's trust rests on. An IP host is loopback
+/// exactly when its address is; the bare name `localhost` is accepted as the
+/// spelling of the same guarantee. Anything else (a routable IP, a wildcard
+/// bind, or a hostname) publishes the listener beyond the machine, so
+/// header-asserted identities can come from anywhere that reaches it.
+fn admin_listener_is_loopback(host: &str) -> bool {
+    if let Ok(address) = host.trim().parse::<std::net::IpAddr>() {
+        return address.is_loopback();
+    }
+    host.trim().eq_ignore_ascii_case("localhost")
 }
 
 /// Minimum accepted length, in bytes, of `internal_api.shared_secret` while
@@ -2095,6 +2130,48 @@ role = "admin"
                 assert!(detail.contains("subject_header"), "got: {detail}");
             }
             other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Publishing the mtls mechanism on a non-loopback admin listener is a
+    /// warning, not a refusal — the pairing is legitimate behind a trusted,
+    /// header-sanitising proxy — but it must never happen silently. The
+    /// loopback predicate itself is tabled over the shapes an operator can
+    /// actually write.
+    #[test]
+    fn validate_still_boots_with_mtls_on_a_non_loopback_admin_listener() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.auth_methods = vec!["mtls".to_string()];
+        config.internal_api.shared_secret = None;
+        // Non-loopback bind (the wildcard default public shape).
+        config.internal_api.host = "0.0.0.0".to_string();
+
+        config
+            .validate()
+            .expect("the warning path is advisory; the config remains servable");
+    }
+
+    #[test]
+    fn admin_listener_loopback_predicate_covers_the_writable_shapes() {
+        let cases = [
+            ("127.0.0.1", true),
+            ("::1", true),
+            ("localhost", true),
+            ("LocalHost", true),   // hostnames compare case-insensitively
+            (" 127.0.0.1 ", true), // surrounding whitespace is not an interface
+            ("0.0.0.0", false),
+            ("192.168.1.10", false),
+            ("admin.internal.svc", false),
+            ("", false),
+        ];
+        for (host, expected) in cases {
+            assert_eq!(
+                super::admin_listener_is_loopback(host),
+                expected,
+                "host {host:?} loopback classification"
+            );
         }
     }
 
