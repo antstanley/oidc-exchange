@@ -28,3 +28,7 @@ sha2.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+# Task 07 structural proof: UI compile-fail cases asserting that `Secret<T>` refuses
+# every formatting and tracing capture path; expected rustc diagnostics are committed
+# as `.stderr` fixtures beside each case (re-bless with TRYBUILD=overwrite).
+trybuild = "1"
