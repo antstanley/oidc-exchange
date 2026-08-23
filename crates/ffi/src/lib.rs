@@ -232,7 +232,7 @@ impl OidcExchange {
         Ok(built)
     }
 
-    #[cfg(any(test, feature = "conformance"))]
+    #[cfg(feature = "conformance")]
     #[doc(hidden)]
     pub fn runtime_handle_for_test(
         &self,
