@@ -9,7 +9,7 @@ const oidc = new OidcExchange({
   config: resolve(__dirname, "..", "config.toml"),
 });
 
-const app = Fastify();
+const app = Fastify({ bodyLimit: oidc.limits().maxBodyBytes });
 
 app.addContentTypeParser("*", { parseAs: "buffer" }, (_req, body, done) => {
   done(null, body);

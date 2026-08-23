@@ -13,9 +13,20 @@ const app = express();
 
 app.all("/auth/*", (req, res) => {
   const chunks: Buffer[] = [];
-  req.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const limit = oidc.limits().maxBodyBytes;
+  let received = 0;
+  req.on("data", (chunk: Buffer) => {
+    received += chunk.length;
+    if (received > limit) {
+      req.destroy();
+      if (!res.headersSent) res.status(413).end();
+      return;
+    }
+    chunks.push(chunk);
+  });
   req.on("end", async () => {
-    const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+    if (received > limit) return;
+    const body = chunks.length > 0 ? Buffer.concat(chunks, received) : undefined;
     const headers = [];
     const raw = req.rawHeaders;
     for (let i = 0; i < raw.length; i += 2) {

@@ -7,6 +7,26 @@ const oidc = new OidcExchange({
   config: path.resolve(__dirname, '..', 'config.toml'),
 })
 
+async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<Buffer> {
+  const reader = stream.getReader()
+  const chunks: Buffer[] = []
+  let length = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) return Buffer.concat(chunks, length)
+      length += value.byteLength
+      if (length > limit) {
+        await reader.cancel('request body exceeds configured limit')
+        throw new Response(null, { status: 413 })
+      }
+      chunks.push(Buffer.from(value))
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 const app = new Hono()
 
 app.all('/auth/*', async (c) => {
@@ -23,7 +43,7 @@ app.all('/auth/*', async (c) => {
     headers.push({ name, value })
   })
 
-  const body = req.body ? Buffer.from(await req.arrayBuffer()) : undefined
+  const body = req.body ? await readBounded(req.body, oidc.limits().maxBodyBytes) : undefined
 
   const response = await oidc.handleRequest({
     method: req.method,
