@@ -13,6 +13,7 @@ import {
   fromAlbEvent,
   fromApiGatewayV1,
   fromApiGatewayV2,
+  BodyTooLargeError,
   isAlbEvent,
   isApiGatewayV1,
   isApiGatewayV2,
@@ -55,18 +56,22 @@ type LambdaResult = APIGatewayProxyResult | APIGatewayProxyResultV2 | ALBResult;
 export function createHandler(
   options: LambdaHandlerOptions,
 ): (event: LambdaEvent, context: Context) => Promise<LambdaResult> {
-  const { basePath = "", ...oidcOptions } = options;
+  const { basePath: _basePath = "", ...oidcOptions } = options;
   const oidc = new OidcExchange(oidcOptions);
+  const maxBodyBytes = oidc.limits().maxBodyBytes;
 
   return async (event: LambdaEvent, _context: Context): Promise<LambdaResult> => {
-    const request = normalise(event, basePath);
+    let request;
+    try {
+      request = normalise(event, maxBodyBytes);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        return { statusCode: 413, body: "", isBase64Encoded: false };
+      }
+      throw error;
+    }
 
-    const response = oidc.handleRequest({
-      method: request.method,
-      path: request.path,
-      headers: request.headers,
-      body: request.body,
-    });
+    const response = await oidc.handleRequest(request);
 
     // Build response headers as a plain object
     const responseHeaders: Record<string, string> = {};
@@ -96,11 +101,9 @@ export function createHandler(
   };
 }
 
-function normalise(event: LambdaEvent, basePath: string) {
-  if (isApiGatewayV2(event)) return fromApiGatewayV2(event, basePath);
-  if (isAlbEvent(event)) return fromAlbEvent(event, basePath);
-  if (isApiGatewayV1(event)) return fromApiGatewayV1(event, basePath);
-
-  // Fallback — treat as v1-like
-  return fromApiGatewayV1(event as APIGatewayProxyEvent, basePath);
+function normalise(event: LambdaEvent, maxBodyBytes: number) {
+  if (isApiGatewayV2(event)) return fromApiGatewayV2(event, maxBodyBytes);
+  if (isAlbEvent(event)) return fromAlbEvent(event, maxBodyBytes);
+  if (isApiGatewayV1(event)) return fromApiGatewayV1(event, maxBodyBytes);
+  return fromApiGatewayV1(event as APIGatewayProxyEvent, maxBodyBytes);
 }

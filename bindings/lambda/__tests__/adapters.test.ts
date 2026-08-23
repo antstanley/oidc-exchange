@@ -81,9 +81,9 @@ describe("fromApiGatewayV1", () => {
       isBase64Encoded: false,
     } as unknown as APIGatewayProxyEvent;
 
-    const req = fromApiGatewayV1(event, "/auth");
+    const req = fromApiGatewayV1(event);
     expect(req.method).toBe("POST");
-    expect(req.path).toBe("/token");
+    expect(Buffer.from(req.rawPath).toString()).toBe("/auth/token");
     expect(req.headers).toContainEqual({
       name: "content-type",
       value: "application/x-www-form-urlencoded",
@@ -102,8 +102,8 @@ describe("fromApiGatewayV1", () => {
       isBase64Encoded: false,
     } as unknown as APIGatewayProxyEvent;
 
-    const req = fromApiGatewayV1(event, "");
-    expect(req.path).toBe("/health");
+    const req = fromApiGatewayV1(event);
+    expect(Buffer.from(req.rawPath).toString()).toBe("/health");
   });
 
   it("includes query string parameters", () => {
@@ -117,8 +117,9 @@ describe("fromApiGatewayV1", () => {
       isBase64Encoded: false,
     } as unknown as APIGatewayProxyEvent;
 
-    const req = fromApiGatewayV1(event, "");
-    expect(req.path).toBe("/health?debug=true");
+    const req = fromApiGatewayV1(event);
+    expect(Buffer.from(req.rawPath).toString()).toBe("/health")
+    expect(Buffer.from(req.query!).toString()).toBe("debug=true");
   });
 
   it("decodes base64 body", () => {
@@ -133,7 +134,7 @@ describe("fromApiGatewayV1", () => {
       isBase64Encoded: true,
     } as unknown as APIGatewayProxyEvent;
 
-    const req = fromApiGatewayV1(event, "");
+    const req = fromApiGatewayV1(event);
     expect(req.body?.toString("utf-8")).toBe(bodyText);
   });
 
@@ -150,7 +151,7 @@ describe("fromApiGatewayV1", () => {
       isBase64Encoded: false,
     } as unknown as APIGatewayProxyEvent;
 
-    const req = fromApiGatewayV1(event, "");
+    const req = fromApiGatewayV1(event);
     const acceptHeaders = req.headers.filter((h) => h.name === "accept");
     expect(acceptHeaders).toHaveLength(2);
   });
@@ -174,9 +175,10 @@ describe("fromApiGatewayV2", () => {
       isBase64Encoded: false,
     } as unknown as APIGatewayProxyEventV2;
 
-    const req = fromApiGatewayV2(event, "/auth");
+    const req = fromApiGatewayV2(event);
     expect(req.method).toBe("GET");
-    expect(req.path).toBe("/keys?format=jwks");
+    expect(Buffer.from(req.rawPath).toString()).toBe("/auth/keys")
+    expect(Buffer.from(req.query!).toString()).toBe("format=jwks");
   });
 
   it("handles Function URL events (same as v2)", () => {
@@ -192,9 +194,9 @@ describe("fromApiGatewayV2", () => {
       isBase64Encoded: false,
     } as unknown as APIGatewayProxyEventV2;
 
-    const req = fromApiGatewayV2(event, "");
+    const req = fromApiGatewayV2(event);
     expect(req.method).toBe("POST");
-    expect(req.path).toBe("/token");
+    expect(Buffer.from(req.rawPath).toString()).toBe("/token");
     expect(req.body?.toString("utf-8")).toBe("grant_type=authorization_code");
   });
 });
@@ -216,8 +218,8 @@ describe("fromAlbEvent", () => {
       isBase64Encoded: false,
     } as unknown as ALBEvent;
 
-    const req = fromAlbEvent(event, "/auth");
+    const req = fromAlbEvent(event);
     expect(req.method).toBe("GET");
-    expect(req.path).toBe("/.well-known/openid-configuration");
+    expect(Buffer.from(req.rawPath).toString()).toBe("/auth/.well-known/openid-configuration");
   });
 });
