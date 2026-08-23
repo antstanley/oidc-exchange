@@ -119,6 +119,31 @@ async fn exchange_role_binds_public_only() {
     );
 }
 
+/// The final role × flag combination (completing the 2×3 matrix): a
+/// disabled internal API under the exchange role changes nothing — no admin
+/// router exists and the public surface is intact.
+#[tokio::test]
+async fn exchange_role_disabled_binds_the_same_public_only_plane() {
+    let routers = build_planes("exchange", false);
+
+    let public = routers.public.expect("exchange binds the public plane");
+    assert!(
+        routers.admin.is_none(),
+        "role = \"exchange\" never binds an admin router, flag on or off"
+    );
+
+    let (status, _) = get(&public, "/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = get(&public, "/keys", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = get(&public, "/internal/stats", Some(TEST_SECRET)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "the internal surface stays absent with the flag off"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2. role = "admin", enabled: admin plane only, no exchange routes.
 // ---------------------------------------------------------------------------
