@@ -5,12 +5,14 @@ import { OidcExchange } from "@oidc-exchange/node";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const oidc = new OidcExchange({
-  config: resolve(__dirname, "..", "config.toml"),
-});
+const oidc = new OidcExchange(process.env.OIDC_EXCHANGE_CONFIG_STRING
+  ? { configString: process.env.OIDC_EXCHANGE_CONFIG_STRING }
+  : { config: resolve(__dirname, "..", "config.toml") });
 
-const app = Fastify({ bodyLimit: oidc.limits().maxBodyBytes });
+export const maxBodyBytes = oidc.limits().maxBodyBytes;
+export const app = Fastify({ bodyLimit: maxBodyBytes });
 
+app.removeAllContentTypeParsers();
 app.addContentTypeParser("*", { parseAs: "buffer" }, (_req, body, done) => {
   done(null, body);
 });
@@ -53,12 +55,13 @@ app.all("/auth/*", async (request, reply) => {
   reply.status(response.status).send(response.body);
 });
 
-const port = Number(process.env.PORT) || 8080;
-
-app.listen({ host: "0.0.0.0", port }, (err) => {
-  if (err) {
-    console.error(err);
-    process.exit(1);
-  }
-  console.log(`OIDC-Exchange (Fastify) listening on http://localhost:${port}`);
-});
+if (process.env.NODE_ENV !== "test") {
+  const port = Number(process.env.PORT) || 8080;
+  app.listen({ host: "0.0.0.0", port }, (err) => {
+    if (err) {
+      console.error(err);
+      process.exit(1);
+    }
+    console.log(`OIDC-Exchange (Fastify) listening on http://localhost:${port}`);
+  });
+}

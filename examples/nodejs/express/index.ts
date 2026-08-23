@@ -1,32 +1,19 @@
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { collectBoundedExpressBody } from "./body-limit.js";
 import { OidcExchange } from "@oidc-exchange/node";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const oidc = new OidcExchange({
-  config: resolve(__dirname, "..", "config.toml"),
-});
+const oidc = new OidcExchange(process.env.OIDC_EXCHANGE_CONFIG_STRING
+  ? { configString: process.env.OIDC_EXCHANGE_CONFIG_STRING }
+  : { config: resolve(__dirname, "..", "config.toml") });
 
 const app = express();
 
 app.all("/auth/*", (req, res) => {
-  const chunks: Buffer[] = [];
-  const limit = oidc.limits().maxBodyBytes;
-  let received = 0;
-  req.on("data", (chunk: Buffer) => {
-    received += chunk.length;
-    if (received > limit) {
-      req.destroy();
-      if (!res.headersSent) res.status(413).end();
-      return;
-    }
-    chunks.push(chunk);
-  });
-  req.on("end", async () => {
-    if (received > limit) return;
-    const body = chunks.length > 0 ? Buffer.concat(chunks, received) : undefined;
+  collectBoundedExpressBody(req, res, oidc.limits().maxBodyBytes, async (body) => {
     const headers = [];
     const raw = req.rawHeaders;
     for (let i = 0; i < raw.length; i += 2) {
@@ -50,7 +37,9 @@ app.all("/auth/*", (req, res) => {
   });
 });
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => {
-  console.log(`OIDC-Exchange (Express) listening on http://localhost:${port}`);
-});
+if (process.env.NODE_ENV !== "test") {
+  const port = process.env.PORT || 8080;
+  app.listen(port, () => {
+    console.log(`OIDC-Exchange (Express) listening on http://localhost:${port}`);
+  });
+}

@@ -1,31 +1,15 @@
-import path from 'path'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { OidcExchange } from '@oidc-exchange/node'
+import { BodyTooLargeError, payloadTooLargeResponse, readBoundedRequestBody } from '../body-limit.js'
 
-const oidc = new OidcExchange({
-  config: path.resolve(__dirname, '..', 'config.toml'),
-})
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<Buffer> {
-  const reader = stream.getReader()
-  const chunks: Buffer[] = []
-  let length = 0
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) return Buffer.concat(chunks, length)
-      length += value.byteLength
-      if (length > limit) {
-        await reader.cancel('request body exceeds configured limit')
-        throw new Response(null, { status: 413 })
-      }
-      chunks.push(Buffer.from(value))
-    }
-  } finally {
-    reader.releaseLock()
-  }
-}
+const oidc = new OidcExchange(process.env.OIDC_EXCHANGE_CONFIG_STRING
+  ? { configString: process.env.OIDC_EXCHANGE_CONFIG_STRING }
+  : { config: path.resolve(__dirname, '..', 'config.toml') })
 
 const app = new Hono()
 
@@ -43,7 +27,13 @@ app.all('/auth/*', async (c) => {
     headers.push({ name, value })
   })
 
-  const body = req.body ? await readBounded(req.body, oidc.limits().maxBodyBytes) : undefined
+  let body: Buffer | undefined
+  try {
+    body = await readBoundedRequestBody(req, oidc.limits().maxBodyBytes)
+  } catch (error) {
+    if (error instanceof BodyTooLargeError) return payloadTooLargeResponse()
+    throw error
+  }
 
   const response = await oidc.handleRequest({
     method: req.method,
@@ -59,14 +49,15 @@ app.all('/auth/*', async (c) => {
     responseHeaders.append(name, value)
   }
 
-  return new Response(response.body, {
+  return new Response(new Uint8Array(response.body), {
     status: response.status,
     headers: responseHeaders,
   })
 })
 
-const port = Number(process.env.PORT) || 8080
-
-serve({ fetch: app.fetch, port }, () => {
-  console.log(`OIDC-Exchange (Hono) listening on http://localhost:${port}`)
-})
+if (process.env.NODE_ENV !== 'test') {
+  const port = Number(process.env.PORT) || 8080
+  serve({ fetch: app.fetch, port }, () => {
+    console.log(`OIDC-Exchange (Hono) listening on http://localhost:${port}`)
+  })
+}

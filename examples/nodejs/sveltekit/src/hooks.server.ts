@@ -1,30 +1,11 @@
 import path from 'path'
 import type { Handle } from '@sveltejs/kit'
 import { OidcExchange } from '@oidc-exchange/node'
+import { BodyTooLargeError, payloadTooLargeResponse, readBoundedRequestBody } from './body-limit'
 
-const oidc = new OidcExchange({
-  config: path.resolve(process.cwd(), '..', 'config.toml'),
-})
-
-async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<Buffer> {
-  const reader = stream.getReader()
-  const chunks: Buffer[] = []
-  let length = 0
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) return Buffer.concat(chunks, length)
-      length += value.byteLength
-      if (length > limit) {
-        await reader.cancel('request body exceeds configured limit')
-        throw new Response(null, { status: 413 })
-      }
-      chunks.push(Buffer.from(value))
-    }
-  } finally {
-    reader.releaseLock()
-  }
-}
+const oidc = new OidcExchange(process.env.OIDC_EXCHANGE_CONFIG_STRING
+  ? { configString: process.env.OIDC_EXCHANGE_CONFIG_STRING }
+  : { config: path.resolve(process.cwd(), '..', 'config.toml') })
 
 export const handle: Handle = async ({ event, resolve }) => {
   if (!event.url.pathname.startsWith('/auth/')) {
@@ -43,9 +24,13 @@ export const handle: Handle = async ({ event, resolve }) => {
     headers.push({ name, value })
   })
 
-  const body = request.body
-    ? await readBounded(request.body, oidc.limits().maxBodyBytes)
-    : undefined
+  let body: Buffer | undefined
+  try {
+    body = await readBoundedRequestBody(request, oidc.limits().maxBodyBytes)
+  } catch (error) {
+    if (error instanceof BodyTooLargeError) return payloadTooLargeResponse()
+    throw error
+  }
 
   const response = await oidc.handleRequest({
     method: request.method,
@@ -61,7 +46,7 @@ export const handle: Handle = async ({ event, resolve }) => {
     responseHeaders.append(name, value)
   }
 
-  return new Response(response.body, {
+  return new Response(new Uint8Array(response.body), {
     status: response.status,
     headers: responseHeaders,
   })
