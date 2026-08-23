@@ -161,7 +161,13 @@ impl AppConfig {
     /// - when `operator_token` is among them: a non-empty `server.issuer`
     ///   (tokens are verified against it) and a non-noop `key_manager`
     ///   adapter (verification needs real keys; under `role = "admin"` the
-    ///   bootstrap otherwise builds a noop manager).
+    ///   bootstrap otherwise builds a noop manager); a non-empty
+    ///   `token_audience`; a non-empty `required_claim` *and*
+    ///   `required_value` (an empty required value would accept tokens whose
+    ///   claim equals the empty string — no credential gate at all); and a
+    ///   `token_audience` distinct from `[token].audience`, which is the one
+    ///   structural replay defense separating user access tokens from
+    ///   operator credentials minted by the same key manager.
     /// - parseable `auth_failure_window` and `auth_lockout`, and a non-zero
     ///   `max_auth_failures`.
     /// - parseable `stats_cache_ttl` within
@@ -249,6 +255,33 @@ impl AppConfig {
                              operator_token mechanism is enabled"
                         .to_string(),
                 });
+            }
+            if self.internal_api.required_value.trim().is_empty() {
+                // An empty (or blank) required value would gate nothing: any
+                // token whose claim equals the empty string — i.e. no real
+                // credential property at all — would authenticate.
+                return Err(Error::ConfigError {
+                    detail: "internal_api.required_value must be non-empty while the \
+                             operator_token mechanism is enabled"
+                        .to_string(),
+                });
+            }
+            if let Some(public_audience) = &self.token.audience {
+                if public_audience == &self.internal_api.token_audience {
+                    // The internal audience is the one structural replay
+                    // defense between user access tokens and operator
+                    // credentials, which share this service's issuer and key
+                    // manager. Defaults differ, so equality can only arise
+                    // through deliberate misconfiguration — refuse it at load.
+                    return Err(Error::ConfigError {
+                        detail: format!(
+                            "internal_api.token_audience ({public_audience:?}) must differ from \
+                             token.audience: a shared audience lets any user access token minted \
+                             by this service's key manager be replayed as an operator \
+                             credential"
+                        ),
+                    });
+                }
             }
         }
 
@@ -1863,6 +1896,111 @@ role = "admin"
         assert!(
             result.is_ok(),
             "a real key manager with an issuer satisfies operator_token: {result:?}"
+        );
+    }
+
+    /// An empty `required_claim` was already refused; its value needs the same
+    /// gate. A blank `required_value` would accept any token whose claim
+    /// equals the empty string — a credential check that checks nothing.
+    #[test]
+    fn validate_rejects_blank_required_value_when_operator_token_enabled() {
+        let base = || {
+            let mut config = AppConfig::default();
+            config.server.role = "admin".to_string();
+            config.server.issuer = "https://auth.example.com".to_string();
+            config.internal_api.enabled = true;
+            config.key_manager.adapter = "local".to_string();
+            config.key_manager.local = Some(crate::config::LocalKeyConfig {
+                private_key_path: "/tmp/operator-signing-key.pem".to_string(),
+                algorithm: "EdDSA".to_string(),
+                kid: "operator-test-key".to_string(),
+            });
+            config.internal_api.auth_methods = vec!["operator_token".to_string()];
+            config.internal_api.shared_secret = None;
+            config
+        };
+
+        for blank in ["", "   "] {
+            let mut config = base();
+            config.internal_api.required_value = blank.to_string();
+            let err = config
+                .validate()
+                .expect_err("a blank required_value must be rejected");
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains("required_value"),
+                        "detail must name the offending field: {detail}"
+                    );
+                }
+                other => panic!("expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    /// The internal audience is the one replay defense between user access
+    /// tokens and operator credentials (same issuer, same key manager), so an
+    /// `[internal_api].token_audience` equal to `[token].audience` fails
+    /// startup; distinct values — including the default pair — boot.
+    #[test]
+    fn validate_rejects_an_operator_token_audience_shared_with_user_tokens() {
+        let mut shared = AppConfig::default();
+        shared.server.role = "admin".to_string();
+        shared.server.issuer = "https://auth.example.com".to_string();
+        shared.internal_api.enabled = true;
+        shared.key_manager.adapter = "local".to_string();
+        shared.key_manager.local = Some(crate::config::LocalKeyConfig {
+            private_key_path: "/tmp/operator-signing-key.pem".to_string(),
+            algorithm: "EdDSA".to_string(),
+            kid: "operator-test-key".to_string(),
+        });
+        shared.internal_api.auth_methods = vec!["operator_token".to_string()];
+        shared.internal_api.shared_secret = None;
+        shared.token.audience = Some(shared.internal_api.token_audience.clone());
+
+        let err = shared
+            .validate()
+            .expect_err("a shared audience defeats the replay defense");
+        match &err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("token_audience") && detail.contains("differ"),
+                    "the rejection must name both audiences' rule: {detail}"
+                );
+                // The message explains why, but never echoes credential material.
+                assert!(
+                    detail.contains("replayed"),
+                    "the rejection must state the replay risk: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+
+        // Distinct audiences — here the default internal audience against an
+        // explicit public one — validate.
+        let mut distinct = shared;
+        distinct.token.audience = Some("https://api.example.com".to_string());
+        assert!(
+            distinct.validate().is_ok(),
+            "distinct audiences keep the replay defense intact"
+        );
+    }
+
+    /// The shared-audience rule scopes to deployments that verify operator
+    /// tokens at all: without `operator_token` among the mechanisms no
+    /// operator credential exists to replay, so the equality is merely odd,
+    /// not dangerous.
+    #[test]
+    fn audience_equality_is_only_refused_while_operator_token_is_enabled() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
+        config.token.audience = Some(config.internal_api.token_audience.clone());
+
+        assert!(
+            config.validate().is_ok(),
+            "without operator_token there is no operator credential to replay"
         );
     }
 
