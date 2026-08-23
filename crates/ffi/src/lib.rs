@@ -247,12 +247,8 @@ impl OidcExchange {
         Ok(built)
     }
 
-    #[cfg(feature = "conformance")]
     #[doc(hidden)]
-    pub fn runtime_handle_for_conformance(
-        &self,
-        request: WireRequest,
-    ) -> Result<FfiResponse, FfiError> {
+    pub fn handle_blocking(&self, request: WireRequest) -> Result<FfiResponse, FfiError> {
         self.runtime.block_on(self.handle(request))
     }
 

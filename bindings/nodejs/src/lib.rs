@@ -63,7 +63,7 @@ impl Task for HandleRequestTask {
             .take()
             .ok_or_else(|| napi::Error::from_reason("request task was already consumed"))?;
         self.inner
-            .runtime_handle_for_conformance(request)
+            .handle_blocking(request)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
@@ -115,7 +115,7 @@ impl OidcExchange {
             );
         }
         self.inner
-            .runtime_handle_for_conformance(request_to_wire(request))
+            .handle_blocking(request_to_wire(request))
             .map(response_to_node)
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
