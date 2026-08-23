@@ -46,6 +46,8 @@ fn build_app(base_path: Option<&str>) -> Router {
     let state = AppState {
         service: std::sync::Arc::new(service),
         config: std::sync::Arc::new(config.clone()),
+        // The base-path suite exercises the public plane only.
+        operator_auth: None,
     };
 
     build_public_router(&config, state)

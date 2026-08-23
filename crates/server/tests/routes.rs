@@ -48,6 +48,8 @@ fn build_test_app() -> (Router, MockRepository) {
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        // Public-plane suite only; no internal routes are mounted here.
+        operator_auth: None,
     };
 
     let app = public_routes()

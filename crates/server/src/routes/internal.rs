@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -20,6 +20,14 @@ use oidc_exchange_core::domain::{NewUser, OperatorPrincipal, UserPatch};
 /// wrap the admin listener's other routes or its fallback — an unmatched path
 /// on the admin plane must render a routing-level 404, not an authentication
 /// rejection, and `/health` must stay reachable without a credential.
+///
+/// The layer inserts the authenticated [`OperatorPrincipal`] as a request
+/// extension; every mutating handler below takes it as an `Extension`
+/// extractor and threads it into its service call, so attribution always
+/// records *the principal that was actually authenticated* — never a value the
+/// handler chose for itself. A request reaching these handlers without the
+/// extension is a wiring bug; extraction fails with 500 rather than mutating
+/// data unattributed.
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/stats", get(stats))
@@ -73,13 +81,9 @@ pub async fn list_users(
 
 pub async fn create_user(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Json(new_user): Json<NewUser>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Interim attribution: until the operator-auth layer inserts real
-    // principals as request extensions, every authenticated caller acted
-    // through the shared secret, whose principal is explicitly
-    // unattributed.
-    let operator = OperatorPrincipal::unattributed();
     let user = state
         .service
         .admin_create_user(&operator, &new_user)
@@ -107,10 +111,10 @@ pub async fn get_user(
 
 pub async fn update_user(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
     Json(patch): Json<UserPatch>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let operator = OperatorPrincipal::unattributed();
     let user = state
         .service
         .admin_update_user(&operator, &id, &patch)
@@ -120,9 +124,9 @@ pub async fn update_user(
 
 pub async fn delete_user(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let operator = OperatorPrincipal::unattributed();
     state.service.admin_delete_user(&operator, &id).await?;
     Ok(StatusCode::OK)
 }
@@ -141,10 +145,10 @@ pub async fn get_claims(
 
 pub async fn set_claims(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
     Json(claims): Json<HashMap<String, Value>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let operator = OperatorPrincipal::unattributed();
     state
         .service
         .admin_set_claims(&operator, &id, claims)
@@ -154,10 +158,10 @@ pub async fn set_claims(
 
 pub async fn merge_claims(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
     Json(claims): Json<HashMap<String, Value>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let operator = OperatorPrincipal::unattributed();
     state
         .service
         .admin_merge_claims(&operator, &id, claims)
@@ -167,9 +171,9 @@ pub async fn merge_claims(
 
 pub async fn clear_claims(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let operator = OperatorPrincipal::unattributed();
     state.service.admin_clear_claims(&operator, &id).await?;
     Ok(StatusCode::OK)
 }

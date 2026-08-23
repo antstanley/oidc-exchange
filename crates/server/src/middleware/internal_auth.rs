@@ -31,7 +31,7 @@ use serde_json::json;
 use crate::middleware::operator_auth::{auth_event_detail, AuthInput};
 use crate::state::AppState;
 use oidc_exchange_core::domain::{
-    ClientAddr, OperatorAuthFailureReason, OperatorPrincipal, RateLimitKey, SecurityEvent,
+    ClientAddr, OperatorAuthFailureReason, RateLimitKey, SecurityEvent,
 };
 
 /// Response header carrying the remaining lockout seconds on a 429.
@@ -175,7 +175,9 @@ async fn emit_security_event_or_log(
             event,
             oidc_exchange_core::domain::AuditOutcome::Failure {
                 reason: match event {
-                    SecurityEvent::OperatorAuthenticationFailed { reason } => reason.as_str().to_string(),
+                    SecurityEvent::OperatorAuthenticationFailed { reason } => {
+                        reason.as_str().to_string()
+                    }
                     SecurityEvent::ThrottleExceeded => {
                         oidc_exchange_core::domain::security_failure_reasons::THROTTLE_EXCEEDED
                             .to_string()
@@ -199,9 +201,7 @@ fn unauthorized_response(reason: OperatorAuthFailureReason) -> Response {
     let description = match reason {
         OperatorAuthFailureReason::MissingCredential => "authentication required",
         OperatorAuthFailureReason::InvalidCredential => "invalid credential",
-        OperatorAuthFailureReason::NotConfigured => {
-            "internal API authentication is not configured"
-        }
+        OperatorAuthFailureReason::NotConfigured => "internal API authentication is not configured",
     };
     (
         StatusCode::UNAUTHORIZED,

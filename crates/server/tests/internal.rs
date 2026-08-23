@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -8,27 +7,20 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
-use oidc_exchange::routes::{internal_routes, public_routes};
-use oidc_exchange::state::AppState;
+use oidc_exchange::bootstrap::build_routers;
 use oidc_exchange_core::config::AppConfig;
-use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
-    MockUserSync,
+    MockAuditLog, MockKeyManager, MockRateLimiter, MockRepository, MockUserSync,
 };
 
 const TEST_SECRET: &str = "test-internal-secret-1234";
 
-fn build_test_app() -> Router {
-    let provider = MockIdentityProvider::new("test");
-    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
-    providers.insert("test".to_string(), Box::new(provider));
-
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+/// The production admin plane (`bootstrap::build_routers`, role = "admin",
+/// full middleware stack including operator auth) over mock adapters —
+/// exactly what a role = "admin" process serves on its listener.
+fn build_admin_plane() -> Router {
+    let config = test_config();
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -37,18 +29,27 @@ fn build_test_app() -> Router {
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
         Box::new(MockRateLimiter::new()),
-        providers,
+        HashMap::new(),
         config.clone(),
     );
 
-    let state = AppState {
-        service: Arc::new(service),
-        config: Arc::new(config),
-    };
+    let routers = build_routers(&config, service).expect("the admin test config builds routers");
+    assert!(
+        routers.public.is_none(),
+        "role = \"admin\" must not produce a public router"
+    );
+    routers
+        .admin
+        .expect("role = \"admin\" produces the admin router")
+}
 
-    public_routes()
-        .merge(internal_routes(state.clone()))
-        .with_state(state)
+fn test_config() -> AppConfig {
+    let mut config = AppConfig::default();
+    config.server.issuer = "https://auth.example.com".to_string();
+    config.server.role = "admin".to_string();
+    config.internal_api.enabled = true;
+    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    config
 }
 
 async fn body_to_json(body: Body) -> serde_json::Value {
@@ -62,7 +63,7 @@ async fn body_to_json(body: Body) -> serde_json::Value {
 
 #[tokio::test]
 async fn internal_auth_rejects_missing_auth() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -90,7 +91,7 @@ async fn internal_auth_rejects_missing_auth() {
 
 #[tokio::test]
 async fn internal_auth_rejects_wrong_secret() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -119,7 +120,7 @@ async fn internal_auth_rejects_wrong_secret() {
 
 #[tokio::test]
 async fn internal_auth_passes_with_correct_secret() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -142,22 +143,16 @@ async fn internal_auth_passes_with_correct_secret() {
 }
 
 // ---------------------------------------------------------------------------
-// 3b. Internal auth rejection: empty configured secret is never "configured",
-// even against an empty Bearer token (defence in depth — `AppConfig::validate`
-// already refuses to start a role that serves the internal API with an empty
-// `shared_secret`, so this only guards a config built by hand, e.g. in tests
-// or an embedder).
+// 3b. An empty configured secret must never produce a servable admin plane:
+// the auth gate refuses to build with a blank shared secret, so
+// `build_routers` fails closed at startup. (`AppConfig::validate` rejects the
+// same config at load; this guards the router layer for a hand-built config,
+// e.g. from an embedder.)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_token() {
-    let provider = MockIdentityProvider::new("test");
-    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
-    providers.insert("test".to_string(), Box::new(provider));
-
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
+async fn empty_configured_secret_fails_router_build() {
+    let mut config = test_config();
     config.internal_api.shared_secret = Some(String::new());
 
     let service = AppService::new(
@@ -167,38 +162,17 @@ async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_to
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
         Box::new(MockRateLimiter::new()),
-        providers,
+        HashMap::new(),
         config.clone(),
     );
 
-    let state = AppState {
-        service: Arc::new(service),
-        config: Arc::new(config),
-    };
+    let outcome = build_routers(&config, service);
 
-    let app = public_routes()
-        .merge(internal_routes(state.clone()))
-        .with_state(state);
-
-    // An empty `Bearer ` token must not be accepted just because the
-    // configured secret is also empty.
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/internal/stats")
-                .header("authorization", "Bearer ")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-    let json = body_to_json(response.into_body()).await;
-    assert_eq!(json["error"], "unauthorized");
-    assert_eq!(json["error_description"], "internal API not configured");
+    let err = outcome.expect_err("an empty shared secret must fail router construction");
+    assert!(
+        err.to_string().contains("no secret is configured"),
+        "the failure must name the missing credential, got: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +181,7 @@ async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_to
 
 #[tokio::test]
 async fn create_user_returns_201() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -247,7 +221,7 @@ async fn create_user_returns_201() {
 
 #[tokio::test]
 async fn get_user_returns_200() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     // First create a user
     let create_resp = app
@@ -302,7 +276,7 @@ async fn get_user_returns_200() {
 
 #[tokio::test]
 async fn claims_merge_works() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     // Create user
     let create_resp = app
@@ -388,7 +362,7 @@ async fn claims_merge_works() {
 
 #[tokio::test]
 async fn delete_user_returns_200() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     // Create user first
     let create_resp = app
@@ -440,7 +414,7 @@ const UNKNOWN_USER_ID: &str = "usr_does_not_exist";
 
 #[tokio::test]
 async fn update_user_unknown_id_returns_404_not_found() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -464,7 +438,7 @@ async fn update_user_unknown_id_returns_404_not_found() {
 
 #[tokio::test]
 async fn delete_user_unknown_id_returns_404_not_found() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -487,7 +461,7 @@ async fn delete_user_unknown_id_returns_404_not_found() {
 
 #[tokio::test]
 async fn get_claims_unknown_id_returns_404_not_found() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -510,7 +484,7 @@ async fn get_claims_unknown_id_returns_404_not_found() {
 
 #[tokio::test]
 async fn set_claims_unknown_id_returns_404_not_found() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -534,7 +508,7 @@ async fn set_claims_unknown_id_returns_404_not_found() {
 
 #[tokio::test]
 async fn merge_claims_unknown_id_returns_404_not_found() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(
@@ -558,7 +532,7 @@ async fn merge_claims_unknown_id_returns_404_not_found() {
 
 #[tokio::test]
 async fn clear_claims_unknown_id_returns_404_not_found() {
-    let app = build_test_app();
+    let app = build_admin_plane();
 
     let response = app
         .oneshot(

@@ -49,7 +49,8 @@ fn build_planes(role: &str, internal_enabled: bool) -> Routers {
         config.clone(),
     );
 
-    let routers = build_routers(&config, service);
+    let routers = build_routers(&config, service)
+        .expect("the listener-matrix test configs always build routers");
     assert!(
         !routers.is_empty(),
         "a validated role ({role}) must produce at least one router"

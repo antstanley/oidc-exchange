@@ -42,6 +42,7 @@ fn build_app() -> axum::Router {
     );
 
     build_routers(&config, service)
+        .expect("the exchange-only test config always builds routers")
         .single_plane()
         .expect("the exchange role always yields a servable plane")
 }

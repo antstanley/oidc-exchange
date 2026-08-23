@@ -256,12 +256,12 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
     // even under role = "admin", where signing is otherwise unused (the
     // configuration validation refuses the noop manager in exactly that
     // combination, so this branch cannot be reached with adapter = "noop").
-    let keys: Box<dyn KeyManager> =
-        if role == "admin" && !config.internal_api.uses_operator_token() {
-            Box::new(oidc_exchange_adapters::noop::NoopKeyManager)
-        } else {
-            build_key_manager(config)?
-        };
+    let keys: Box<dyn KeyManager> = if role == "admin" && !config.internal_api.uses_operator_token()
+    {
+        Box::new(oidc_exchange_adapters::noop::NoopKeyManager)
+    } else {
+        build_key_manager(config)?
+    };
 
     let audit = build_audit_log(config).await?;
 
@@ -465,7 +465,10 @@ fn build_operator_auth_gate(
     for method in &internal.auth_methods {
         match method.as_str() {
             "shared_secret" => {
-                let secret = internal.shared_secret.clone().filter(|s| !s.is_empty())
+                let secret = internal
+                    .shared_secret
+                    .clone()
+                    .filter(|s| !s.is_empty())
                     .ok_or_else(|| Error::ConfigError {
                         detail: "shared_secret mechanism enabled but no secret is configured"
                             .to_string(),
@@ -478,9 +481,9 @@ fn build_operator_auth_gate(
                 // instance so token checking never contends with signing.
                 if config.key_manager.adapter == "noop" {
                     return Err(Error::ConfigError {
-                        detail: "operator_token cannot run on the noop key manager".to_string()
-                            .into(),
-                    });
+                        detail: "operator_token cannot run on the noop key manager".to_string(),
+                    }
+                    .into());
                 }
                 let keys = build_key_manager(config)?;
                 authenticators.push(Box::new(OperatorTokenAuthenticator::new(
@@ -1581,7 +1584,6 @@ mod build_router_tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt;
     use std::collections::HashMap;
     use tower::ServiceExt;
 
@@ -1616,7 +1618,7 @@ mod build_router_tests {
     /// them, so every test below exercises exactly what a real process would
     /// serve on each socket for its role.
     fn build_planes(config: &AppConfig, service: AppService) -> (Option<Router>, Option<Router>) {
-        let routers = build_routers(config, service);
+        let routers = build_routers(config, service).expect("test configs always build routers");
         (routers.public, routers.admin)
     }
 
@@ -1630,11 +1632,6 @@ mod build_router_tests {
             .await
             .unwrap();
         response.status()
-    }
-
-    async fn body_to_json(body: Body) -> serde_json::Value {
-        let bytes = body.collect().await.unwrap().to_bytes();
-        serde_json::from_slice(&bytes).unwrap()
     }
 
     /// `internal_api.enabled = true` with role `admin` mounts `/internal/*`
@@ -1812,33 +1809,26 @@ mod build_router_tests {
         );
     }
 
-    /// An empty configured `shared_secret` must never be treated as
-    /// "configured" by the auth middleware, even when the request supplies
-    /// an equally empty bearer token — defence in depth alongside
-    /// `AppConfig::validate`, which already refuses to start a role that
-    /// serves the internal API with an empty secret.
+    /// An empty configured `shared_secret` must never reach the wire as a
+    /// working (or half-working) mechanism: the auth gate refuses to build
+    /// with a blank secret, so `build_routers` fails and the process never
+    /// serves the admin plane at all — defence in depth alongside
+    /// `AppConfig::validate`, which rejects the same config at load.
     #[tokio::test]
-    async fn empty_shared_secret_is_never_accepted_as_configured() {
+    async fn empty_shared_secret_fails_router_build() {
         let mut config = AppConfig::default();
         config.server.role = "admin".to_string();
         config.internal_api.enabled = true;
         config.internal_api.shared_secret = Some(String::new());
         let service = build_test_service(&config);
 
-        let (_, admin) = build_planes(&config, service);
-        let app = admin.expect("admin router must exist for this test");
+        let outcome = build_routers(&config, service);
 
-        let request = Request::builder()
-            .method("GET")
-            .uri("/internal/stats")
-            .header("authorization", "Bearer ")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let json = body_to_json(response.into_body()).await;
-        assert_eq!(json["error_description"], "internal API not configured");
+        let err = outcome.expect_err("an empty shared secret must fail router construction");
+        assert!(
+            err.to_string().contains("no secret is configured"),
+            "the failure must name the missing credential, got: {err}"
+        );
     }
 
     /// The single-plane rule: on a runtime with one request surface,
@@ -1854,7 +1844,8 @@ mod build_router_tests {
         config.server.role = "all".to_string();
         config.internal_api.enabled = true;
         config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
-        let all = build_routers(&config, build_test_service(&config));
+        let all = build_routers(&config, build_test_service(&config))
+            .expect("test configs always build routers");
         assert!(all.public.is_some() && all.admin.is_some());
 
         let collapsed = all
@@ -1873,12 +1864,14 @@ mod build_router_tests {
         );
 
         config.server.role = "exchange".to_string();
-        let exchange = build_routers(&config, build_test_service(&config));
+        let exchange = build_routers(&config, build_test_service(&config))
+            .expect("test configs always build routers");
         assert!(exchange.admin.is_none());
         assert!(exchange.single_plane().is_some());
 
         config.server.role = "admin".to_string();
-        let admin = build_routers(&config, build_test_service(&config));
+        let admin = build_routers(&config, build_test_service(&config))
+            .expect("test configs always build routers");
         assert!(
             admin.public.is_none(),
             "role = \"admin\" never carries a public plane to collapse"
