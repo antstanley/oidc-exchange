@@ -30,6 +30,8 @@ jobs:
           corepack pnpm@11.9.0 --version
       - name: Evaluate frozen Cargo, pnpm, and Python graphs
         run: node scripts/run-advisory-scans.mjs
+      - name: Enforce signing and verification paths
+        run: node scripts/run-signing-path-policy.mjs
     permissions:
       contents: read
   lint:

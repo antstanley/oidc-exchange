@@ -8,7 +8,7 @@
     "format": "pnpm -r format",
     "format:check": "pnpm -r --no-bail format:check",
     "typecheck": "pnpm -r --no-bail typecheck",
-    "test:supply-chain": "node --test scripts/__tests__/advisory-policy.test.mjs scripts/__tests__/supply-chain.test.mjs scripts/__tests__/workflow-policy.test.mjs"
+    "test:supply-chain": "node --test scripts/__tests__/advisory-policy.test.mjs scripts/__tests__/signing-path-policy.test.mjs scripts/__tests__/supply-chain.test.mjs scripts/__tests__/workflow-policy.test.mjs"
   },
   "devDependencies": {
     "lefthook": "2.1.9",
