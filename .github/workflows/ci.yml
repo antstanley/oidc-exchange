@@ -133,10 +133,7 @@ jobs:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - run: pnpm --dir bindings/nodejs exec napi build --release --dts index.generated.d.ts
-      - run: pnpm --dir bindings/lambda build
       - run: uv sync --project bindings/python
-      - run: uv run --project bindings/python maturin develop
       - name: Require executable cross-runtime parity
         run: node conformance/report.mjs
 

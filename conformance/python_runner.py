@@ -1,115 +1,60 @@
-from __future__ import annotations
-
 import asyncio
+import importlib.util
 import io
 import json
+import os
 import sys
-from collections.abc import Callable
 from typing import Any
 
+shape, config, artifact, variant = sys.argv[1:]
+if not os.path.isfile(artifact) or __import__("time").time() - os.path.getmtime(artifact) > 900:
+    raise RuntimeError(f"fresh PyO3 artifact missing or stale: {artifact}")
+spec = importlib.util.spec_from_file_location("oidc_exchange._oidc_exchange", artifact)
+if spec is None or spec.loader is None: raise RuntimeError("cannot load PyO3 artifact")
+module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+sys.modules["oidc_exchange._oidc_exchange"] = module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bindings", "python", "python"))
 from oidc_exchange import OidcExchange
 from oidc_exchange._asgi import make_asgi_app
 from oidc_exchange._wsgi import make_wsgi_app
 
-
-def body(fixture: dict[str, Any]) -> bytes:
-    return b"x" * fixture["bodyLength"]
-
-
-def result(
-    fixture: dict[str, Any], status: int, *, path: str, headers: list[dict[str, str]]
-) -> dict[str, Any]:
-    return {
-        "id": fixture["id"],
-        "method": fixture["method"],
-        "decodedPath": path,
-        "query": fixture.get("query"),
-        "orderedHeaders": headers,
-        "status": status,
-        "executed": True,
-    }
-
-
-async def run_asgi(app: Callable[..., Any], fixture: dict[str, Any]) -> int:
-    messages = [{"type": "http.request", "body": body(fixture), "more_body": False}]
-    sent: list[dict[str, Any]] = []
-
-    async def receive() -> dict[str, Any]:
-        return messages.pop(0)
-
-    async def send(message: dict[str, Any]) -> None:
-        sent.append(message)
-
-    scope: dict[str, Any] = {
-        "type": "http",
-        "method": fixture["method"],
-        "path": decode_path(fixture["rawPath"]),
-        "query_string": (fixture.get("query") or "").encode("latin-1"),
-        "headers": [
-            (h["name"].encode("latin-1"), h["value"].encode("latin-1")) for h in fixture["headers"]
-        ],
-    }
-    if fixture["pathIsRaw"]:
-        scope["raw_path"] = fixture["rawPath"].encode("latin-1")
-    await app(scope, receive, send)
-    return int(sent[0]["status"])
-
-
-def run_wsgi(app: Callable[..., Any], fixture: dict[str, Any]) -> int:
-    captured = ""
-
-    def start_response(status: str, _headers: list[tuple[str, str]]) -> None:
-        nonlocal captured
-        captured = status
-
-    environ: dict[str, Any] = {
-        "REQUEST_METHOD": fixture["method"],
-        "PATH_INFO": decode_path(fixture["rawPath"]),
-        "QUERY_STRING": fixture.get("query", ""),
-        "wsgi.input": io.BytesIO(body(fixture)),
-        "CONTENT_LENGTH": content_length(fixture),
-    }
-    if fixture["pathIsRaw"]:
-        environ["RAW_URI"] = fixture["rawPath"] + (
-            ("?" + fixture["query"]) if fixture.get("query") else ""
-        )
-    if fixture.get("orderedHeadersAvailable", True):
-        environ["oidc_exchange.headers"] = [(h["name"], h["value"]) for h in fixture["headers"]]
-    list(app(environ, start_response))
-    return int(captured.split()[0])
-
-
-def content_length(fixture: dict[str, Any]) -> str:
-    for header in fixture["headers"]:
-        if header["name"].lower() == "content-length":
-            return header["value"]
-    return str(fixture["bodyLength"])
-
-
-def decode_path(value: str) -> str:
+def body(f: dict[str, Any]) -> bytes: return b"x" * f["bodyLength"]
+def decoded(value: str) -> str:
     from urllib.parse import unquote
-
     return unquote(value or "/")
+def parsed(fid: str, status: int, data: bytes) -> dict[str, Any]:
+    if data:
+        try: return {"id": fid, **json.loads(data), "executed": True}
+        except json.JSONDecodeError: pass
+    return {"id": fid, "status": status, "executed": True}
 
+async def asgi(app: Any, f: dict[str, Any]) -> dict[str, Any]:
+    messages=[{"type":"http.request","body":body(f),"more_body":False}]; sent=[]
+    async def receive(): return messages.pop(0)
+    async def send(message): sent.append(message)
+    scope={"type":"http","method":f["method"],"path":decoded(f["rawPath"]),"query_string":(f.get("query") or "").encode("latin-1"),"headers":[(h["name"].encode("latin-1"),h["value"].encode("latin-1")) for h in f["headers"]]}
+    if variant=="faithful": scope["raw_path"]=f["rawPath"].encode("latin-1")
+    await app(scope,receive,send)
+    status=next(m["status"] for m in sent if m["type"]=="http.response.start")
+    data=b"".join(m.get("body",b"") for m in sent if m["type"]=="http.response.body")
+    return parsed(f["id"],status,data)
 
-async def main() -> None:
-    shape, config = sys.argv[1:]
-    oidc = OidcExchange(config=config)
-    app = make_asgi_app(oidc) if shape == "asgi" else make_wsgi_app(oidc)
+def wsgi(app: Any, f: dict[str, Any]) -> dict[str, Any]:
+    captured={}
+    def start_response(status,headers): captured.update(status=int(status.split()[0]),headers=headers)
+    content=next((h["value"] for h in f["headers"] if h["name"].lower()=="content-length"),str(f["bodyLength"]))
+    environ={"REQUEST_METHOD":f["method"],"PATH_INFO":decoded(f["rawPath"]),"QUERY_STRING":f.get("query") or "","wsgi.input":io.BytesIO(body(f)),"CONTENT_LENGTH":content}
+    if variant=="faithful":
+        environ["RAW_URI"]=f["rawPath"]+(("?"+f["query"]) if f.get("query") else "")
+        environ["oidc_exchange.headers"]=[(h["name"],h["value"]) for h in f["headers"]]
+    else:
+        for h in f["headers"]:
+            if h["name"].lower() not in ("content-length","content-type"): environ["HTTP_"+h["name"].upper().replace("-","_")]=h["value"]
+    data=b"".join(app(environ,start_response))
+    return parsed(f["id"],captured["status"],data)
+
+async def main():
+    oidc=OidcExchange(config=config); app=make_asgi_app(oidc) if shape=="asgi" else make_wsgi_app(oidc)
     for line in sys.stdin:
-        fixture = json.loads(line)
-        status = await run_asgi(app, fixture) if shape == "asgi" else run_wsgi(app, fixture)
-        path = decode_path(fixture["rawPath"] or "/")
-        if path == "/auth":
-            path = "/"
-        elif path.startswith("/auth/"):
-            path = path[5:]
-        headers = (
-            fixture["headers"]
-            if shape == "asgi" or fixture.get("orderedHeadersAvailable", True)
-            else []
-        )
-        print(json.dumps(result(fixture, status, path=path, headers=headers)), flush=True)
-
-
+        f=json.loads(line); out=await asgi(app,f) if shape=="asgi" else wsgi(app,f); print(json.dumps(out),flush=True)
 asyncio.run(main())

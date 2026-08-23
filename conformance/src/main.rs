@@ -5,15 +5,13 @@ use oidc_exchange_ffi::{OidcExchange, TransportHints, WireRequest};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const OBSERVE: &str = "/auth/__oidc_exchange_conformance__/observe";
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Input {
     id: String,
     method: String,
     #[serde(rename = "rawPath")]
-    _raw_path: String,
+    raw_path: String,
     query: Option<String>,
     headers: Vec<Header>,
     body_length: usize,
@@ -45,7 +43,7 @@ fn run_ffi(exchange: &OidcExchange, input: Input) -> Value {
     let response = exchange
         .runtime_handle_for_conformance(WireRequest {
             method: input.method,
-            raw_path: OBSERVE.as_bytes().to_vec(),
+            raw_path: input.raw_path.as_bytes().to_vec(),
             query: input.query.map(String::into_bytes),
             headers: tagged_headers(input.headers),
             body: vec![b'x'; input.body_length],
@@ -73,7 +71,11 @@ fn run_native(config: &str, input: Input) -> Value {
         let mut request = format!(
             "{} {}{} HTTP/1.1\r\nHost: localhost\r\n",
             input.method,
-            OBSERVE,
+            if input.raw_path.is_empty() {
+                "/"
+            } else {
+                &input.raw_path
+            },
             input
                 .query
                 .as_ref()

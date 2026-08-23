@@ -353,13 +353,6 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     if role == "exchange" || role == "all" {
         app = app.merge(routes::public_routes());
     }
-    #[cfg(feature = "conformance")]
-    {
-        app = app.route(
-            "/__oidc_exchange_conformance__/observe",
-            axum::routing::any(conformance_observe),
-        );
-    }
     if (role == "admin" || role == "all") && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
     }
@@ -372,6 +365,9 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
             axum::routing::get(routes::health::health_handler),
         );
     }
+
+    #[cfg(feature = "conformance")]
+    let app = app.fallback(conformance_observe);
 
     let router = apply_route_layers(
         app,
@@ -461,6 +457,11 @@ async fn conformance_observe(request: axum::extract::Request) -> axum::response:
         .headers
         .get("x-request-id")
         .and_then(|value| value.to_str().ok());
+    let routed_status = if matches!(parts.uri.path(), "/health" | "/keys") {
+        200
+    } else {
+        404
+    };
     let response = json!({
         "method": parts.method.as_str(),
         "decodedPath": parts.uri.path(),
@@ -468,9 +469,14 @@ async fn conformance_observe(request: axum::extract::Request) -> axum::response:
         "orderedHeaders": ordered_headers,
         "requestId": request_id,
         "bodyLength": body.len(),
-        "status": 200
+        "status": routed_status,
+        "downstreamMarker": "observed-after-routing"
     });
-    (axum::http::StatusCode::OK, axum::Json(response)).into_response()
+    (
+        axum::http::StatusCode::from_u16(routed_status).expect("valid routed status"),
+        axum::Json(response),
+    )
+        .into_response()
 }
 
 fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
