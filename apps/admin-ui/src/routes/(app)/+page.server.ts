@@ -1,8 +1,14 @@
-import { getStats, listUsers } from "$lib/api";
+import { getStats, listUsersPage } from "$lib/api";
 import type { PageServerLoad } from "./$types";
 
-export const load: PageServerLoad = async () => {
-  const [stats, recentUsers] = await Promise.all([getStats(), listUsers(0, 10)]);
+/** How many recently-created users the dashboard preview shows. */
+const RECENT_USERS_SHOWN = 10;
 
-  return { stats, recentUsers };
+export const load: PageServerLoad = async () => {
+  const [stats, recentPage] = await Promise.all([
+    getStats(),
+    listUsersPage({ limit: RECENT_USERS_SHOWN }),
+  ]);
+
+  return { stats, recentUsers: recentPage.users };
 };

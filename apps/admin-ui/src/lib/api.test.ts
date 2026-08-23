@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   clearClaims,
@@ -9,6 +9,15 @@ import {
   setClaims,
   updateUser,
 } from "./api";
+import { env } from "../../tests/env-stub";
+
+/**
+ * The generated client fails closed when no operator credential is
+ * configured, so these tests pin the last-preference shared secret to keep
+ * every request on the plain-fetch path. No assertion reads the value; the
+ * credential-selection matrix itself lives in credentials.test.ts.
+ */
+const TEST_SHARED_SECRET = "vitest-only-shared-secret";
 
 /**
  * The exact hostile payloads from correction #41: each carries an encoded
@@ -88,8 +97,13 @@ const USER_HELPERS = [
   },
 ] as const;
 
+beforeEach(() => {
+  env.INTERNAL_API_SECRET = TEST_SHARED_SECRET;
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  delete env.INTERNAL_API_SECRET;
 });
 
 describe("user-id path encoding", () => {
