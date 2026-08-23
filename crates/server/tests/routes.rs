@@ -145,7 +145,17 @@ async fn token_missing_code_returns_400() {
 
     let json = body_to_json(response.into_body()).await;
     assert_eq!(json["error"], "invalid_request");
-    assert!(json["error_description"].as_str().unwrap().contains("code"));
+    // The body carries the fixed generic description — never the internal reason that
+    // names which parameter was missing (that would let an unauthenticated caller probe
+    // the validation pipeline one step at a time).
+    assert_eq!(
+        json["error_description"],
+        "the request is missing a required parameter or is otherwise malformed"
+    );
+    assert!(
+        !json["error_description"].as_str().unwrap().contains("code"),
+        "the description must not name the missing parameter"
+    );
 }
 
 // ---------------------------------------------------------------------------
