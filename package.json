@@ -1,7 +1,6 @@
 {
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "prepare": "lefthook install",
     "bump-version": "node scripts/bump-version.js",
@@ -9,10 +8,11 @@
     "format": "pnpm -r format",
     "format:check": "pnpm -r --no-bail format:check",
     "typecheck": "pnpm -r --no-bail typecheck",
-    "test:supply-chain": "node --test scripts/__tests__/supply-chain.test.mjs"
+    "test:supply-chain": "node --test scripts/__tests__/supply-chain.test.mjs scripts/__tests__/workflow-policy.test.mjs"
   },
   "devDependencies": {
     "lefthook": "2.1.9",
     "yaml": "2.9.0"
-  }
+  },
+  "packageManager": "pnpm@11.9.0"
 }

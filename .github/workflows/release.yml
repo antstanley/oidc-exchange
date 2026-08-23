@@ -1,17 +1,10 @@
 name: Release
-
 on:
   push:
     tags:
-      - "v*.*.*"
-
-permissions:
-  contents: write
-  packages: write
-
+      - v*.*.*
 env:
   CARGO_TERM_COLOR: always
-
 jobs:
   validate:
     name: Validate Version
@@ -22,7 +15,9 @@ jobs:
       pypi_published: ${{ steps.preflight.outputs.pypi_published }}
       docker_published: ${{ steps.preflight.outputs.docker_published }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
       - name: Extract and validate version
         id: extract
         env:
@@ -50,11 +45,8 @@ jobs:
           fi
 
           echo "All versions match: $VERSION"
-
       - name: Preflight — which registries already have this version
         id: preflight
-        # A version already live in a registry skips its build + publish jobs, so
-        # a re-run only builds/publishes the channels that are still missing.
         env:
           VERSION: ${{ steps.extract.outputs.version }}
           GH_REPO: ${{ github.repository }}
@@ -73,7 +65,8 @@ jobs:
             echo "docker_published=$docker"
           } >> "$GITHUB_OUTPUT"
           echo "Already published -> npm=$npm pypi=$pypi docker=$docker (matching build+publish jobs will be skipped)"
-
+    permissions:
+      contents: read
   build-binaries:
     name: Build Binary (${{ matrix.target }})
     needs: validate
@@ -98,16 +91,16 @@ jobs:
             artifact: oidc-exchange-darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --locked
-
       - name: Build release binary
         shell: bash
         run: |
@@ -116,7 +109,6 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }} --bin oidc-exchange
           fi
-
       - name: Rename and checksum
         shell: bash
         run: |
@@ -127,7 +119,6 @@ jobs:
             cp oidc-exchange "${{ matrix.artifact }}"
           fi
           sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
-
       - name: Smoke test
         if: "!matrix.use_cross"
         shell: bash
@@ -137,23 +128,20 @@ jobs:
           else
             ./target/${{ matrix.target }}/release/oidc-exchange --version
           fi
-
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: binary-${{ matrix.target }}
           path: |
             target/${{ matrix.target }}/release/${{ matrix.artifact }}
             target/${{ matrix.target }}/release/${{ matrix.artifact }}.sha256
-
+    permissions:
+      contents: read
   build-docker:
     name: Build Docker (${{ matrix.platform }})
     needs: validate
     if: ${{ needs.validate.outputs.docker_published != 'true' }}
     runs-on: ${{ matrix.runner }}
-    # Build each arch on its NATIVE runner (no QEMU) and push by digest; the
-    # docker-manifest job then assembles the multi-arch manifest. Compiling Rust
-    # under arm64 emulation took ~2h; native arm64 is minutes.
     strategy:
       fail-fast: false
       matrix:
@@ -163,63 +151,67 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
       - name: Prepare platform pair
         env:
           PLATFORM: ${{ matrix.platform }}
         run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
       - name: Docker metadata (labels)
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
         with:
           images: ghcr.io/${{ github.repository }}
       - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
         with:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Push by digest to ghcr only; docker-manifest fans out to Docker Hub.
-          outputs: 'type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true'
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
       - name: Export digest
         run: |
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
-
+    permissions:
+      contents: read
+      packages: write
   docker-manifest:
     name: Merge Docker manifest
     needs: build-docker
     runs-on: ubuntu-latest
-    # DOCKERHUB_USERNAME / DOCKERHUB_TOKEN live in the 'docker' Environment.
     environment: docker
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
         with:
           images: |
             ghcr.io/${{ github.repository }}
@@ -230,21 +222,18 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest
       - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Login to Docker Hub
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Create and push multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
-        # Assemble the manifest list from the per-arch digests (read from ghcr) and
-        # push it to every tag across both registries; imagetools copies the arch
-        # images to Docker Hub as needed.
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
@@ -252,42 +241,29 @@ jobs:
       - name: Inspect
         run: docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
       - name: Sync Docker Hub description
-        # Docker Hub doesn't read a repo README, so push README.docker.md to the
-        # repo overview. Cosmetic — never fail the release on it. (ghcr shows the
-        # repo README automatically via the image's org.opencontainers.image.source label.)
         continue-on-error: true
-        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: antstanley80/oidc-exchange
           readme-filepath: ./README.docker.md
-          short-description: "Validate provider ID tokens and issue your own access/refresh JWTs"
-
+          short-description: Validate provider ID tokens and issue your own access/refresh JWTs
+    permissions:
+      contents: read
+      packages: write
   build-nodejs:
     name: Build Node.js (${{ matrix.target }})
     needs: validate
     if: ${{ needs.validate.outputs.npm_published != 'true' }}
     strategy:
-      # One leg failing must not cancel the others (each produces a platform
-      # binary the publish job needs).
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            # Build the linux-gnu addons with `cross`, whose build image links
-            # against an old glibc floor (~2.17), so the published binary loads on
-            # AWS Lambda's AL2023 runtime (glibc 2.34) and other glibc>=2.17 hosts
-            # (managed zip runtime and container-image alike). Building natively on
-            # ubuntu-latest (glibc 2.39) linked GLIBC_2.39, which failed to load on
-            # Lambda (issue #11). `cross` — unlike napi's own cross-toolchain, which
-            # cannot compile this crate's aws-lc-sys dependency — is the same tool
-            # the server binary's aarch64 build uses and is proven on this crypto stack.
             use_cross: true
           - target: aarch64-unknown-linux-gnu
-            # Cross-compiled from the x64 host via `cross` against the same old glibc
-            # floor, so this leg no longer needs a native arm64 runner.
             os: ubuntu-latest
             use_cross: true
           - target: x86_64-pc-windows-msvc
@@ -296,119 +272,61 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 24.18.0
       - name: Activate pnpm 11.9.0
         run: corepack pnpm@11.9.0 --version
       - name: Install cross
-        # The linux-gnu legs build through `cross` (Docker-based, old-glibc image).
         if: matrix.use_cross
         run: cargo install cross --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
-        # The reviewed lock resolves self-published optional platform packages,
-        # so release builds must not rewrite dependency selection.
         run: corepack pnpm@11.9.0 install --frozen-lockfile
       - name: Build
         working-directory: bindings/nodejs
-        # --platform: emit oidc-exchange.<triple>.node so each artifact is uniquely
-        # named and `napi artifacts` can distribute it into its npm/<triple> package.
-        # --use-cross (linux-gnu legs) builds via `cross` in an old-glibc image so the
-        # addon loads on AL2023/Lambda; other targets build with plain cargo.
         run: corepack pnpm@11.9.0 exec --offline napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: nodejs-${{ matrix.target }}
           path: bindings/nodejs/*.node
-
+    permissions:
+      contents: read
   publish-npm:
     name: Publish to npm
-    needs: build-nodejs
-    # Only this job is granted OIDC token-minting rights, so publish
-    # credentials are never exposed to build or runtime code.
+    needs:
+      - build-nodejs
+      - validate-npm-package
     permissions:
-      id-token: write
       contents: read
+      id-token: write
     environment: publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - &a1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          node-version: "24.18.0"
+          persist-credentials: false
+      - &a2
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.18.0
           registry-url: https://registry.npmjs.org
-      - name: Upgrade npm for the `npm stage` command
-        # Node 24.8.0's bundled npm has OIDC trusted publishing but predates
-        # `npm stage` (staged publishing); install a newer npm.
-        run: npm install -g npm@latest
-      - name: Activate pnpm 11.9.0
-        run: corepack pnpm@11.9.0 --version
-      - name: Install napi CLI
-        run: pnpm add -g @napi-rs/cli
-
-      - name: Sync platform package versions to the release version
-        working-directory: bindings/nodejs
-        # Stamp the root package.json version into every npm/<triple>/package.json
-        # and the root optionalDependencies, so a version bump never leaves a
-        # platform package (or the optionalDependencies pin) at a stale version
-        # and re-publishing an already-published version cannot happen.
-        run: napi version
-
-      - name: Download Node.js artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download validated npm package tree
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: nodejs-*
-          path: bindings/nodejs/artifacts
-          merge-multiple: true
-
-      - name: Distribute binaries into platform packages
-        working-directory: bindings/nodejs
-        run: napi artifacts
-
-      - name: Verify every platform binary is present
-        working-directory: bindings/nodejs
-        run: |
-          set -euo pipefail
-          missing=0
-          for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
-            node_file="npm/${pkg}/oidc-exchange.${pkg}.node"
-            if [ -f "${node_file}" ]; then
-              echo "ok: ${node_file}"
-            else
-              echo "::error::missing native binary: ${node_file}"
-              missing=1
-            fi
-          done
-          if [ "${missing}" -ne 0 ]; then
-            echo "::error::one or more platform packages are missing their .node binary; aborting publish"
-            exit 1
-          fi
-
-      - name: Validate package metadata (publint)
-        working-directory: bindings/nodejs
-        run: npx --yes publint
-
-      - name: Validate type definitions (arethetypeswrong)
-        working-directory: bindings/nodejs
-        # --profile esm-only: the package is ESM-only (node22+); CJS consumers are
-        # unsupported, so the CjsResolvesToEsm resolution is not a failure here.
-        run: npx --yes @arethetypeswrong/cli --pack --profile esm-only
-
-      # Publishes are STAGED (npm stage publish), not direct: CI uploads to npm's
-      # staging area and the release is approved out-of-band (npm stage approve or
-      # the npmjs staged-packages UI) before it goes live. This lets the trusted
-      # publisher be restricted to stage-publish only.
+          name: validated-npm-packages
+          path: bindings/nodejs
       - name: Stage platform packages
         working-directory: bindings/nodejs
-        # Auth is GitHub OIDC trusted publishing (id-token: write + registry-url);
-        # no token. --provenance attests the build to the source commit.
         run: |
           set -euo pipefail
           for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
@@ -423,7 +341,6 @@ jobs:
               npm stage publish --provenance --access public --ignore-scripts "./npm/${pkg}"
             fi
           done
-
       - name: Stage @oidc-exchange/node
         working-directory: bindings/nodejs
         run: |
@@ -434,12 +351,8 @@ jobs:
           else
             npm stage publish --provenance --access public --ignore-scripts
           fi
-
       - name: Build and stage @oidc-exchange/lambda
         working-directory: bindings/lambda
-        # pnpm has no stage command, and lambda has a workspace:^ dep npm can't
-        # rewrite, so pnpm pack (which rewrites it to a real version) then stage
-        # the tarball. Auth is OIDC trusted publishing (no token).
         run: |
           set -euo pipefail
           ver=$(node -p "require('./package.json').version")
@@ -452,12 +365,8 @@ jobs:
             npm stage publish --provenance --access public --ignore-scripts \
               "${RUNNER_TEMP}/oidc-exchange-lambda-${ver}.tgz"
           fi
-
       - name: List pending staged packages (approve these to go live)
-        # Staged packages are not live until approved (npm stage approve <id> or
-        # the npmjs staged-packages UI). This surfaces what this run staged.
         run: npm stage list || true
-
   build-python:
     name: Build Python (${{ matrix.target || matrix.command }})
     needs: validate
@@ -466,18 +375,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux: manylinux_2_28 abi3 wheels built inside the maturin Docker image.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             command: build
             args: --release --out dist
-            manylinux: "2_28"
+            manylinux: 2_28
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             command: build
             args: --release --out dist
-            manylinux: "2_28"
-          # macOS / Windows: native abi3 wheels (manylinux does not apply).
+            manylinux: 2_28
           - target: aarch64-apple-darwin
             os: macos-latest
             command: build
@@ -486,15 +393,16 @@ jobs:
             os: windows-latest
             command: build
             args: --release --out dist
-          # Source distribution (built once, target/manylinux irrelevant).
           - os: ubuntu-latest
             command: sdist
             args: --out dist
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
       - name: Build with maturin
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
         with:
           command: ${{ matrix.command }}
           args: ${{ matrix.args }}
@@ -502,40 +410,34 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           working-directory: bindings/python
         env:
-          # Pin the macOS wheel platform tag to macosx_11_0_arm64 (the platform the
-          # spec claims); inert on the Linux and Windows matrix legs.
           MACOSX_DEPLOYMENT_TARGET: "11.0"
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: wheels-${{ matrix.target || matrix.command }}
           path: bindings/python/dist/*
-
+    permissions:
+      contents: read
   publish-pypi:
     name: Publish to PyPI
-    needs: [build-python]
-    # Only this job is granted OIDC token-minting rights, so publish
-    # credentials are never exposed to build or runtime code.
+    needs:
+      - build-python
     permissions:
       id-token: write
     environment: pypi
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
       - name: Publish to PyPI
-        # No password/token: authentication is PyPI Trusted Publishing via OIDC.
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
         with:
           packages-dir: dist/
-          # Idempotent re-runs: skip files already uploaded for this version
-          # (e.g. re-running a release whose npm half failed) instead of erroring.
           skip-existing: true
-
   create-release:
     name: Create GitHub Release
     needs:
@@ -544,22 +446,19 @@ jobs:
       - docker-manifest
       - publish-npm
       - publish-pypi
-    # Run unless something FAILED — publish jobs are 'skipped' (not failed) when
-    # their version already exists in the registry (see validate preflight).
     if: ${{ !cancelled() && needs.build-binaries.result == 'success' && needs.docker-manifest.result != 'failure' && needs.publish-npm.result != 'failure' && needs.publish-pypi.result != 'failure' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
+          persist-credentials: false
           fetch-depth: 0
-
       - name: Download binary artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: binary-*
           path: release-artifacts
           merge-multiple: true
-
       - name: Generate changelog
         id: changelog
         run: |
@@ -574,9 +473,8 @@ jobs:
             echo "$CHANGELOG"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b
         with:
           tag_name: v${{ needs.validate.outputs.version }}
           name: v${{ needs.validate.outputs.version }}
@@ -616,3 +514,61 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+  validate-npm-package:
+    name: Validate npm packages
+    needs: build-nodejs
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - *a1
+      - *a2
+      - name: Activate pnpm 11.9.0
+        run: corepack pnpm@11.9.0 --version
+      - name: Install locked package tooling
+        working-directory: bindings/nodejs
+        run: corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
+      - name: Sync platform package versions to the release version
+        working-directory: bindings/nodejs
+        run: corepack pnpm@11.9.0 exec --offline napi version
+      - name: Download Node.js artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: nodejs-*
+          path: bindings/nodejs/artifacts
+          merge-multiple: true
+      - name: Distribute binaries into platform packages
+        working-directory: bindings/nodejs
+        run: corepack pnpm@11.9.0 exec --offline napi artifacts
+      - name: Verify every platform binary is present
+        working-directory: bindings/nodejs
+        run: |
+          set -euo pipefail
+          missing=0
+          for pkg in darwin-arm64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+            node_file="npm/${pkg}/oidc-exchange.${pkg}.node"
+            if [ -f "${node_file}" ]; then
+              echo "ok: ${node_file}"
+            else
+              echo "::error::missing native binary: ${node_file}"
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::one or more platform packages are missing their .node binary; aborting publish"
+            exit 1
+          fi
+      - name: Validate package metadata (publint)
+        working-directory: bindings/nodejs
+        run: corepack pnpm@11.9.0 exec --offline publint
+      - name: Validate type definitions (arethetypeswrong)
+        working-directory: bindings/nodejs
+        run: corepack pnpm@11.9.0 exec --offline attw --pack --profile esm-only
+      - name: Upload validated npm package tree
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: validated-npm-packages
+          path: bindings/nodejs
+          include-hidden-files: false

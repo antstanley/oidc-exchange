@@ -91,7 +91,7 @@ test("owned workflow installs use the exact frozen package manager", () => {
       }
     }
   }
-  assert.equal(installCount, 6);
+  assert.equal(installCount, 7);
 });
 
 test("isolated Node and Lambda frozen installs accept reviewed graphs", () => {
