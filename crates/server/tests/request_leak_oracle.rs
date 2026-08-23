@@ -1,9 +1,10 @@
 //! End-to-end HTTP leak-oracle suite (plan task 07): the public error-oracle checks
-//! consolidated onto a real axum router carrying the production middleware stack.
-//! (The request-ID boundary and silent-rejection assertions live in
-//! `http_leak_regression.rs`; this file's oracle tests assert the request-id side of
-//! the same control — a client-chosen id is echoed even on failures, and the operator
-//! diagnostic for that failure fires under the span carrying it.)
+//! consolidated onto a real axum router carrying the production middleware stack,
+//! together with the request-ID boundary cases consolidated from the middleware unit
+//! tests (which run against that middleware alone) onto the full token path. A
+//! client-chosen id is echoed even on failures, over-long or hostile ids are silently
+//! replaced at every scale up to 64 KiB, and the operator diagnostic for a failure
+//! fires under the span carrying the id the client actually saw echoed.
 //!
 //! Everything here drives `POST /token` through the same layers bootstrap installs —
 //! request-id outermost, audit-context inside it — under a capturing subscriber that
@@ -34,7 +35,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use oidc_exchange::middleware::audit_context::audit_context_layer;
-use oidc_exchange::middleware::request_id::request_id_layer;
+use oidc_exchange::middleware::request_id::{request_id_layer, MAX_REQUEST_ID_LEN};
 use oidc_exchange::routes::public_routes;
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::AppConfig;
@@ -462,6 +463,108 @@ async fn validation_failure_classes_are_indistinguishable_over_http() {
         bodies.windows(2).all(|w| w[0] == w[1]),
         "signature/expiry/audience failures must be indistinguishable, got {bodies:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Request-ID boundaries consolidated onto the full token path
+// ---------------------------------------------------------------------------
+
+/// The echoed `x-request-id` of a response, as visible ASCII.
+async fn echoed_request_id(response: Response) -> String {
+    response
+        .headers()
+        .get("x-request-id")
+        .expect("response must carry x-request-id")
+        .to_str()
+        .expect("echoed id must be visible ASCII")
+        .to_string()
+}
+
+/// The middleware unit tests prove the length/charset boundaries against
+/// `request_id_layer` alone; this test consolidates them onto the production stack —
+/// `public_routes` with request-id outermost and audit-context inside — so a boundary
+/// regression cannot hide behind a thinner router. At the limit the client-chosen id
+/// is reused end to end; one byte over, or hostile at 64 KiB, it is silently replaced
+/// by a generated UUIDv4: never echoed back and never rendered into telemetry.
+#[tokio::test]
+async fn request_id_boundaries_hold_over_the_production_token_stack() {
+    const TOKEN_FORM: &str = "grant_type=authorization_code&code=c\
+                             &redirect_uri=https://client.example.com/callback&provider=failing";
+
+    let app = build_app(HashMap::new());
+    let capture = install_capture();
+
+    // Positive at-limit case: exactly MAX_REQUEST_ID_LEN legal bytes is still the
+    // client's id, echoed byte for byte.
+    let at_limit = "k".repeat(MAX_REQUEST_ID_LEN);
+    let response = post_form(
+        app.clone(),
+        "/token",
+        TOKEN_FORM.to_string(),
+        Some(&at_limit),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "an unknown provider maps to a 400 regardless of the correlation id"
+    );
+    assert_eq!(
+        echoed_request_id(response).await,
+        at_limit,
+        "an id of exactly MAX_REQUEST_ID_LEN bytes must be reused"
+    );
+
+    // Negative space above the limit: one byte more is discarded wholesale in favor of
+    // a generated UUIDv4 — not truncated to the acceptable prefix of the same value.
+    let over_limit = "k".repeat(MAX_REQUEST_ID_LEN + 1);
+    let response = post_form(
+        app.clone(),
+        "/token",
+        TOKEN_FORM.to_string(),
+        Some(&over_limit),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let replaced = echoed_request_id(response).await;
+    assert_ne!(replaced, over_limit, "an over-long id must be discarded");
+    assert_ne!(
+        replaced,
+        &over_limit[..MAX_REQUEST_ID_LEN],
+        "the rejected value must not survive even truncated"
+    );
+    assert!(
+        uuid::Uuid::parse_str(&replaced).is_ok(),
+        "the replacement must be a generated UUIDv4, got {replaced:?}"
+    );
+
+    // Hostile scale: a 64 KiB header gets the identical silent treatment.
+    const HOSTILE_LEN: usize = 65_536;
+    let hostile = "k".repeat(HOSTILE_LEN);
+    let response = post_form(
+        app.clone(),
+        "/token",
+        TOKEN_FORM.to_string(),
+        Some(&hostile),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let replaced = echoed_request_id(response).await;
+    assert_ne!(replaced, hostile, "a 64 KiB id must be discarded");
+    assert!(uuid::Uuid::parse_str(&replaced).is_ok());
+
+    // Silence: neither oversized value appears anywhere in the rendered telemetry —
+    // rejection is silent, per the request-id contract. The capture has been live for
+    // every drive above, so these absence claims are made against a stream that really
+    // rendered the accepted at-limit id.
+    let captured = capture.fragments();
+    assert!(
+        captured.iter().any(|f| f.contains(&at_limit)),
+        "the accepted id must have rendered under the request span, got {captured:?}"
+    );
+    for rejected in [&over_limit, &hostile] {
+        assert_absent_plain_and_encoded(&captured, &format!("request_id={rejected}"));
+    }
 }
 
 // ---------------------------------------------------------------------------
