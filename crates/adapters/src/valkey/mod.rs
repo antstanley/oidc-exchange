@@ -49,7 +49,11 @@ impl ValkeySessionRepository {
 
 #[async_trait]
 impl SessionRepository for ValkeySessionRepository {
-    #[instrument(skip(self))]
+    // The whole `Session` carries the lookup-key digest and client provenance
+    // (`ip_address`, `user_agent`, `device_id`), so it must be skipped wholesale rather
+    // than left to `#[instrument]`'s default argument recording; only the permitted
+    // `user_id` is captured, by value-shaping reference before any skip applies.
+    #[instrument(skip(self, session), fields(user_id = %session.user_id))]
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
         // Compute TTL from expires_at first and reject before issuing any write: a session
         // whose expires_at is not strictly in the future would otherwise leave a TTL-less (or
@@ -138,7 +142,9 @@ impl SessionRepository for ValkeySessionRepository {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    // The digest is skipped explicitly (not left to a name collision with the schema
+    // field), so a parameter rename cannot silently re-expose the session lookup key.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
     async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
         let key = self.session_key(token_hash);
 
@@ -208,7 +214,10 @@ impl SessionRepository for ValkeySessionRepository {
         }))
     }
 
-    #[instrument(skip(self))]
+    // Same redaction contract as the lookup path: the digest argument is skipped
+    // explicitly, and the bare `token_hash` field stays declared-but-empty for schema
+    // stability.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
         let key = self.session_key(token_hash);
 
@@ -489,7 +498,13 @@ impl SessionRepository for ValkeySessionRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
 
     /// Env var carrying the Valkey/Redis URL used by the `#[ignore]`d tests below; defaults to
     /// a local server, matching how the DynamoDB Local tests hardcode their endpoint.
@@ -979,5 +994,224 @@ mod tests {
             counter_after, 1,
             "the counter must equal the live-key count (1) after cleanup with no drift"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Span-redaction regression tests (same capture technique as LMDB's)
+    // ---------------------------------------------------------------
+
+    /// Distinctive marker strings planted in a session's sensitive fields; none of them may
+    /// ever surface in captured span output.
+    const HASH_SENTINEL: &str = "feedface0123456789abcdefcafebabefeedface0123456789abcdef0987";
+    const DEVICE_SENTINEL: &str = "valkey-span-device-sentinel";
+    const USER_AGENT_SENTINEL: &str = "valkey-span-user-agent/1.0";
+    const IP_SENTINEL: &str = "198.51.100.7";
+    const USER_ID_SENTINEL: &str = "usr_valkey_span_redaction";
+
+    /// All client-provenance values carried by a session; no span may record any of them,
+    /// nor the hash.
+    const PROVENANCE_SENTINELS: [&str; 3] = [DEVICE_SENTINEL, USER_AGENT_SENTINEL, IP_SENTINEL];
+
+    /// A clonable in-memory writer the fmt subscriber renders into, so tests can assert on
+    /// exactly what was produced rather than scraping stdout.
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records the *declared* field schema `(span name, field name)` of every span created
+    /// while installed. The fmt formatter renders only fields that actually received a
+    /// value — an empty-but-declared schema field like `token_hash` never appears in the
+    /// text stream — so schema observability can only be proven against the metadata.
+    struct DeclaredFieldsLayer {
+        declared: Arc<Mutex<HashSet<(String, String)>>>,
+    }
+
+    impl<S> Layer<S> for DeclaredFieldsLayer
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            let span_name = attrs.metadata().name().to_string();
+            let mut declared = self
+                .declared
+                .lock()
+                .expect("capture mutex must not be poisoned");
+            for field in attrs.metadata().fields() {
+                declared.insert((span_name.clone(), field.name().to_string()));
+            }
+            assert!(
+                !declared.is_empty(),
+                "every instrumented span must declare its field schema"
+            );
+        }
+    }
+
+    /// The capture bundle a span-leak test needs: hold `_guard` for the whole test body,
+    /// read rendered telemetry from `buffer`, and assert declared schema via `declared`.
+    struct SpanCapture {
+        _guard: tracing::subscriber::DefaultGuard,
+        buffer: SharedBuffer,
+        declared: Arc<Mutex<HashSet<(String, String)>>>,
+    }
+
+    /// Install a fmt subscriber writing into `buffer` with explicit span-open/close events
+    /// enabled, alongside the schema-capture layer. Without `FmtSpan::CLOSE` the stock
+    /// subscriber would never render span teardown, letting a broken skip look clean
+    /// because nothing was asserted against.
+    ///
+    /// Keep the returned handle alive for the whole test body: dropping it uninstalls the
+    /// thread-local subscriber.
+    fn install_span_capture(buffer: SharedBuffer) -> SpanCapture {
+        let declared = Arc::new(Mutex::new(HashSet::new()));
+        // The writer closure owns a clone; the test keeps the original for assertions.
+        let writer_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(move || writer_buffer.clone())
+                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                    .with_ansi(false),
+            )
+            .with(DeclaredFieldsLayer {
+                declared: declared.clone(),
+            });
+        SpanCapture {
+            _guard: tracing::subscriber::set_default(subscriber),
+            buffer,
+            declared,
+        }
+    }
+
+    /// Asserts a span declared exactly one of its expected schema fields, so the log-schema
+    /// contract survives even though the formatter prints nothing for empty fields.
+    fn assert_declares(
+        declared: &Mutex<HashSet<(String, String)>>,
+        span_name: &str,
+        field_name: &str,
+    ) {
+        let key = (span_name.to_string(), field_name.to_string());
+        assert!(
+            declared
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .contains(&key),
+            "span {span_name} must keep declaring the {field_name} schema field"
+        );
+    }
+
+    fn sentinel_session() -> Session {
+        let now = Utc::now();
+        Session {
+            user_id: USER_ID_SENTINEL.to_string(),
+            refresh_token_hash: HASH_SENTINEL.to_string(),
+            provider: "google".to_string(),
+            expires_at: now + chrono::Duration::hours(1),
+            device_id: Some(DEVICE_SENTINEL.to_string()),
+            user_agent: Some(USER_AGENT_SENTINEL.to_string()),
+            ip_address: Some(IP_SENTINEL.to_string()),
+            created_at: now,
+        }
+    }
+
+    fn rendered_output(buffer: &SharedBuffer) -> String {
+        let bytes = buffer
+            .0
+            .lock()
+            .expect("capture mutex must not be poisoned")
+            .clone();
+        String::from_utf8(bytes).expect("captured telemetry is utf-8")
+    }
+
+    /// Regression for the Valkey whole-session span exposure: across write, lookup, and
+    /// revoke, neither the refresh-token hash nor the client provenance recorded on the
+    /// session may render, while `user_id` and the declared-but-empty `token_hash` schema
+    /// field stay observable. Requires a live Valkey like its sibling integration tests.
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn session_spans_exclude_hash_and_provenance_but_keep_permitted_fields() {
+        let buffer = SharedBuffer::default();
+        // Single-threaded `#[tokio::test]`: every poll happens on this thread, so the
+        // thread-local default subscriber sees every span open and close below.
+        let capture = install_span_capture(buffer);
+        let repo = create_test_repo().await;
+        let session = sentinel_session();
+
+        repo.store_refresh_token(&session)
+            .await
+            .expect("store_refresh_token");
+        let fetched = repo
+            .get_session_by_refresh_token(&session.refresh_token_hash)
+            .await
+            .expect("get_session_by_refresh_token")
+            .expect("stored session must be retrievable");
+        assert_eq!(fetched.user_id, session.user_id, "lookup must find the row");
+        repo.revoke_session(&session.refresh_token_hash)
+            .await
+            .expect("revoke_session");
+
+        let rendered = rendered_output(&capture.buffer);
+
+        // Non-vacuousness: all three instrumented spans must have both opened and closed
+        // inside this capture before any absence claim means anything.
+        for span_name in [
+            "store_refresh_token",
+            "get_session_by_refresh_token",
+            "revoke_session",
+        ] {
+            let mentions = rendered.matches(span_name).count();
+            assert!(
+                mentions >= 2,
+                "span {span_name} must appear at both open and close, found {mentions}"
+            );
+        }
+        assert_eq!(
+            rendered.matches("close").count(),
+            3,
+            "exactly the three driven spans must have closed in this capture"
+        );
+
+        // Permitted observability survives: the write span records `user_id`, and the
+        // lookup/revoke spans keep their (value-less) `token_hash` log-schema field.
+        assert!(
+            rendered.contains(&format!("user_id={USER_ID_SENTINEL}")),
+            "the write span must still record user_id"
+        );
+        assert_declares(&capture.declared, "store_refresh_token", "user_id");
+        assert_declares(
+            &capture.declared,
+            "get_session_by_refresh_token",
+            "token_hash",
+        );
+        assert_declares(&capture.declared, "revoke_session", "token_hash");
+
+        // Negative space: no sensitive value anywhere in the rendered telemetry.
+        assert!(
+            !rendered.contains(HASH_SENTINEL),
+            "refresh-token hash must never reach span output"
+        );
+        for provenance in PROVENANCE_SENTINELS {
+            assert!(
+                !rendered.contains(provenance),
+                "client provenance value ({provenance}) must never reach span output"
+            );
+        }
     }
 }

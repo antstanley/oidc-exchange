@@ -2793,6 +2793,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "ulid",
  "wiremock",
 ]
