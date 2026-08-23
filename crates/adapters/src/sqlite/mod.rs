@@ -515,7 +515,9 @@ impl SessionRepository for SqliteRepository {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(token_hash))]
+    // The digest argument is skipped explicitly (not left to a name collision with the
+    // schema field) so a parameter rename cannot silently re-expose the lookup key.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
     async fn get_session_by_refresh_token(
         &self,
         token_hash: &Secret<String>,
