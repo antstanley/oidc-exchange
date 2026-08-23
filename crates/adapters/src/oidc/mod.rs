@@ -251,11 +251,18 @@ impl IdentityProvider for OidcProvider {
             })?;
 
         if !response.status().is_success() {
+            // Bounded read + the one redacting constructor: an intermediary that echoes
+            // the submitted form cannot put the token being revoked into the detail
+            // (and from there into a log line).
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = crate::shared::http::read_bounded(&self.provider_id, response).await?;
+            let detail = format!(
+                "revocation: {}",
+                crate::shared::upstream::error_detail(status, body)
+            );
             return Err(Error::ProviderError {
                 provider: self.provider_id.clone(),
-                detail: format!("Revocation returned {status}: {body}"),
+                detail,
             });
         }
 
@@ -1218,6 +1225,126 @@ mod tests {
         assert!(
             matches!(result2, Err(Error::InvalidGrant { .. })),
             "repeated unknown kid must still fail closed without a new network fetch"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Revocation boundary (plan task 05): a non-2xx revocation response is
+    // read bounded and rendered only through upstream::error_detail, so an
+    // intermediary echoing the submitted form — raw or percent-encoded —
+    // cannot put the token being revoked into the detail that later reaches
+    // an error log. Sentinels are obviously fake.
+    // -------------------------------------------------------------------
+
+    /// Provider wired to explicit endpoints on a fresh mock server; discovery is
+    /// skipped by supplying every endpoint in the config. The caller mounts whichever
+    /// revocation responses the test drives.
+    async fn provider_with_revocation(revocation_path: Option<&str>) -> (OidcProvider, MockServer) {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let revocation_endpoint = revocation_path.map(|p| format!("{uri}{p}"));
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            revocation_endpoint,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+        (provider, server)
+    }
+
+    #[tokio::test]
+    async fn revoke_token_returns_ok_on_2xx() {
+        let (provider, server) = provider_with_revocation(Some("/oauth/revoke")).await;
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        provider
+            .revoke_token("SENTINEL-REVOKE-TOKEN")
+            .await
+            .expect("a 2xx revocation must succeed");
+    }
+
+    #[tokio::test]
+    async fn revoke_is_noop_without_endpoint() {
+        let (provider, server) = provider_with_revocation(None).await;
+
+        provider
+            .revoke_token("whatever-token")
+            .await
+            .expect("without a revocation endpoint this is a documented no-op");
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests.is_empty(),
+            "the no-op path must not touch the network at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_non_2xx_never_leaks_submitted_token_raw_or_encoded() {
+        let (provider, server) = provider_with_revocation(Some("/oauth/revoke")).await;
+
+        // Echo the submitted form back: once as a raw pair, once percent-encoded under
+        // the same sensitive key. Both shapes decode to text containing the sentinel,
+        // so both must be masked before the detail becomes loggable.
+        let echo = "error=invalid_request&error_description=cannot revoke\
+                    &token=SENTINEL-REVOKE-TOKEN-VALUE&token=1%2F%2FSENTINEL-REVOKE-TOKEN-VALUE";
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(echo))
+            .mount(&server)
+            .await;
+
+        let err = provider
+            .revoke_token("SENTINEL-REVOKE-TOKEN-VALUE")
+            .await
+            .expect_err("a 400 revocation must fail");
+
+        assert!(
+            matches!(err, Error::ProviderError { .. }),
+            "revocation failure must surface as ProviderError"
+        );
+        let message = err.to_string();
+        assert!(
+            !message.contains("SENTINEL-REVOKE-TOKEN-VALUE"),
+            "echoed revoked token (raw or decoded) must never reach the detail, \
+             got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_non_2xx_structured_error_stays_conformant_and_masked() {
+        let (provider, server) = provider_with_revocation(Some("/oauth/revoke")).await;
+
+        // Structured RFC 6749 content: the error code stays visible to operators while
+        // an echoed pair inside the description is masked.
+        let body = r#"{"error":"invalid_request","error_description":"rejected token=SENTINEL-STRUCT-ECHO"}"#;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let message = provider
+            .revoke_token("irrelevant-token")
+            .await
+            .expect_err("a 400 revocation must fail")
+            .to_string();
+
+        assert!(
+            message.contains("invalid_request"),
+            "structured OAuth error code must stay visible, got: {message}"
+        );
+        assert!(
+            !message.contains("SENTINEL-STRUCT-ECHO"),
+            "an echoed pair inside error_description must be masked, got: {message}"
         );
     }
 }

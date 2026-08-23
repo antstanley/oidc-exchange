@@ -10,6 +10,7 @@ use oidc_exchange_adapters::shared::jwks::JwksCache;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
+use oidc_exchange_core::Secret;
 use serde::{Deserialize, Serialize};
 
 const APPLE_ISSUER: &str = "https://appleid.apple.com";
@@ -184,7 +185,11 @@ impl AppleProvider {
     }
 
     /// Generate a short-lived ES256-signed client secret JWT for Apple's token endpoint.
-    fn generate_client_secret(&self) -> Result<String> {
+    ///
+    /// Returns the assertion wrapped as `Secret<String>`: it is a freshly minted bearer
+    /// credential, so it can be posted but never formatted — the only legitimate use is
+    /// `expose()` at the outbound form boundary.
+    fn generate_client_secret(&self) -> Result<Secret<String>> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| Error::ProviderError {
@@ -204,10 +209,12 @@ impl AppleProvider {
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(self.key_id.clone());
 
-        encode(&header, &claims, &self.signing_key).map_err(|e| Error::ProviderError {
-            provider: "apple".into(),
-            detail: format!("failed to sign client secret JWT: {e}"),
-        })
+        encode(&header, &claims, &self.signing_key)
+            .map(Secret::new)
+            .map_err(|e| Error::ProviderError {
+                provider: "apple".into(),
+                detail: format!("failed to sign client secret JWT: {e}"),
+            })
     }
 }
 
@@ -219,7 +226,8 @@ impl IdentityProvider for AppleProvider {
         oidc_exchange_adapters::shared::token_endpoint::exchange_code(
             &self.token_endpoint,
             &self.client_id,
-            Some(&client_secret),
+            // Reveal the freshly signed assertion only at the outbound form boundary.
+            Some(client_secret.expose().as_str()),
             code,
             redirect_uri,
         )
@@ -332,8 +340,9 @@ impl IdentityProvider for AppleProvider {
             .post(endpoint)
             .form(&[
                 ("token", token),
-                ("client_id", &self.client_id),
-                ("client_secret", &client_secret),
+                ("client_id", self.client_id.as_str()),
+                // The assertion is revealed only inside the outbound form body.
+                ("client_secret", client_secret.expose().as_str()),
                 ("token_type_hint", "access_token"),
             ])
             .send()
@@ -344,11 +353,19 @@ impl IdentityProvider for AppleProvider {
             })?;
 
         if !response.status().is_success() {
+            // Bounded read + the one redacting constructor: neither the token being
+            // revoked nor a hostile echo of it (nor the posted assertion) can reach the
+            // detail — and from there an error log.
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body =
+                oidc_exchange_adapters::shared::http::read_bounded("apple", response).await?;
+            let detail = format!(
+                "revocation: {}",
+                oidc_exchange_adapters::shared::upstream::error_detail(status, body),
+            );
             return Err(Error::ProviderError {
                 provider: "apple".into(),
-                detail: format!("Revocation returned {status}: {body}"),
+                detail,
             });
         }
 
@@ -448,6 +465,10 @@ mod tests {
             .generate_client_secret()
             .expect("should generate client secret");
 
+        // The assertion is a Secret now; unwrap it deliberately for the test's
+        // inspection only.
+        let secret = secret.into_inner();
+
         // Decode header (unverified) to check kid + alg
         let header = decode_header(&secret).expect("valid JWT header");
         assert_eq!(header.alg, Algorithm::ES256);
@@ -488,7 +509,8 @@ mod tests {
 
         let secret = provider
             .generate_client_secret()
-            .expect("should generate client secret");
+            .expect("should generate client secret")
+            .into_inner();
 
         // Build a decoding key from the JWKS
         let key_json = &jwks["keys"][0];
@@ -644,6 +666,115 @@ mod tests {
             .revoke_token("some-refresh-token")
             .await
             .expect("revoke should succeed");
+    }
+
+    // ---------------------------------------------------------------
+    // Test 6b: Revocation non-2xx is bounded + redacted — neither the token
+    // being revoked nor the generated client assertion can reach the error
+    // detail, raw or percent-encoded (plan task 05).
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn revoke_non_2xx_never_leaks_token_or_generated_assertion() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let (pem, _jwks, _kid) = generate_es256_test_keys();
+        let token_endpoint_uri = format!("{uri}/auth/token");
+        let jwks_uri = format!("{uri}/auth/keys");
+        let revoke_uri = format!("{uri}/auth/revoke");
+
+        let provider = make_test_provider(&pem, &token_endpoint_uri, &jwks_uri, Some(revoke_uri));
+
+        // Phase 1: drive one failing revoke to capture the assertion the provider
+        // actually signed — wiremock records the request bodies it received.
+        Mock::given(method("POST"))
+            .and(path("/auth/revoke"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("rejected"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        assert!(
+            provider.revoke_token("SENTINEL-APPLE-TOKEN").await.is_err(),
+            "the phase-1 400 must fail"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording must be available");
+        assert!(!requests.is_empty(), "phase 1 must have hit the mock");
+
+        // Pull the client_secret pair out of the recorded form body.
+        let form = String::from_utf8(requests[0].body.clone()).expect("form body is UTF-8");
+        let assertion: String = form
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("client_secret="))
+            .map(String::from)
+            .filter(|v| !v.is_empty())
+            .expect("phase-1 request must carry a generated client_secret");
+
+        // Phase 2: echo the sensitive material back — token raw and percent-encoded,
+        // plus the real captured assertion.
+        let echo = format!(
+            "token=SENTINEL-APPLE-TOKEN&client_secret={assertion}\
+             &echo=token%3D1%2F%2FSENTINEL-APPLE-TOKEN"
+        );
+        Mock::given(method("POST"))
+            .and(path("/auth/revoke"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(echo))
+            .mount(&server)
+            .await;
+
+        let err = provider
+            .revoke_token("SENTINEL-APPLE-TOKEN")
+            .await
+            .expect_err("a 400 echo must fail");
+
+        let message = err.to_string();
+        assert!(
+            !message.contains("SENTINEL-APPLE-TOKEN"),
+            "revoked token (raw or decoded) must never reach the detail, got: {message}"
+        );
+        assert!(
+            !message.contains(&assertion),
+            "the generated client assertion must never reach the detail, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_non_2xx_structured_error_stays_visible_and_masked() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let (pem, _jwks, _kid) = generate_es256_test_keys();
+        let token_endpoint_uri = format!("{uri}/auth/token");
+        let jwks_uri = format!("{uri}/auth/keys");
+        let revoke_uri = format!("{uri}/auth/revoke");
+
+        let provider = make_test_provider(&pem, &token_endpoint_uri, &jwks_uri, Some(revoke_uri));
+
+        // Structured RFC 6749 content: the error code stays visible to operators while
+        // an echoed pair inside the description is masked.
+        let body = r#"{"error":"invalid_request","error_description":"rejected token=SENTINEL-STRUCT-ECHO"}"#;
+        Mock::given(method("POST"))
+            .and(path("/auth/revoke"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let message = provider
+            .revoke_token("irrelevant")
+            .await
+            .expect_err("a 400 revocation must fail")
+            .to_string();
+
+        assert!(
+            message.contains("invalid_request"),
+            "structured OAuth error code must stay visible, got: {message}"
+        );
+        assert!(
+            !message.contains("SENTINEL-STRUCT-ECHO"),
+            "an echoed pair inside error_description must be masked, got: {message}"
+        );
     }
 
     // ---------------------------------------------------------------
