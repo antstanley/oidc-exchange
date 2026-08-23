@@ -2798,6 +2798,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oidc-exchange-conformance"
+version = "0.0.0"
+dependencies = [
+ "oidc-exchange-ffi",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "oidc-exchange-core"
 version = "0.2.0"
 dependencies = [

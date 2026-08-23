@@ -25,6 +25,7 @@
 
 ## Audit / evidence
 
-- `node conformance/report.mjs`: 12 fixtures across 6 declared shapes; baseline differences native 0, FFI 4, Node 4, Lambda 4, ASGI 6, WSGI 7. Reporting mode remains intentionally non-gating until task 10.
-- `cargo test -p oidc-exchange-ffi`: 8 passed, 0 failed.
-- Qualification: this first reporting slice records shape-specific replay disagreements and transport limitations in one shared executable report. Host migrations and merge-gated agreement remain tasks 06–10; no divergence was hidden or converted into a skip.
+- Remediation audit (2026-08-23): the original `report.mjs` was only a static table and did not execute any host. That evidence was incomplete and has been replaced rather than promoted.
+- `node conformance/report.mjs`: built the Rust conformance driver and production Node/Python bindings, then executed all 72 runner/fixture pairings. Results: native 12/0 qualified, direct FFI 12/0, Node 12/0, Lambda 12/8, ASGI 12/6, WSGI 12/6; zero unqualified field mismatches.
+- Qualified inputs are explicit host-fidelity variants only: API Gateway v1 decoded paths/body framing and duplicate-header representation; ASGI without `raw_path` and without Content-Length framing; WSGI without raw-target or ordered-header extensions. All other fixtures use the host's faithful production path.
+- The orchestrator rejects a short/missing runner result, compares method/decoded path/query/ordered headers/status, prints shape/fixture/field values, and exits nonzero on every unqualified mismatch. Task 10 still owns promotion from reporting CI to a required merge gate.

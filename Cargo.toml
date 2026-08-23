@@ -9,6 +9,7 @@ members = [
     "crates/test-utils",
     "bindings/nodejs",
     "bindings/python",
+    "conformance",
 ]
 
 [workspace.package]
