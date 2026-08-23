@@ -34,3 +34,7 @@
 - Source lifecycle: `.specs/changes/2026-08-05-runtime_parity_across_interfaces.md` remains Proposed and unmoved; `.specs/README.md` therefore remains correctly indexed as proposed.
 - Zero done certificates: no certificate was introduced; task 10 itself is the reviewable completion record.
 - F3 review evidence confirms the documented three-level panic stack at its shared FFI boundary: injected router-future and response-body polling panics cannot unwind through async `handle` or the deprecated synchronous trampoline, and map to the generic safe 500 without panic, token, subject, or invalid request-ID reflection.
+
+## PR #27 F4/F5/F7 follow-up evidence
+
+Release parity is enforced by `scripts/check-release-version.mjs` across six npm manifests, native optional dependencies, Lambda peer range, Cargo workspace/lock, Python pyproject/uv lock, and pnpm workspace metadata. pnpm 11.9.0 dry-run packs verified all six npm artifacts; platform tarballs contain metadata/README only because CI-produced native binaries are unavailable on this macOS arm64 workspace, so no cross-platform install success is claimed.

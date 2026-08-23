@@ -30,3 +30,7 @@
 - `cargo check -p oidc-exchange-nodejs`: passed. The async work is a napi `AsyncTask`, so router work executes on libuv's worker pool rather than Node's host thread.
 - Malformed method/path and over-limit body resolve to 400/413 responses; duplicate ordered headers, separate query bytes, the 32-byte configured limit, and deprecated sync calls are covered.
 - Unwind decision: no napi `noop`/abort-on-panic feature is enabled. FFI catches request-normalisation panics and returns the stable `PANIC` boundary error. A forced router panic cannot currently be injected through the public binding, so unwind containment beyond that measured FFI boundary remains a documented test limitation rather than an unverified claim.
+
+## PR #27 F5 follow-up evidence
+
+The Node binding now forwards typed `basePath` into FFI configuration before service/router construction. Binding tests cover `/auth/health` routing, `/authorize/health` sibling rejection, strict rejection of `""`, `/`, `auth`, and `/auth/`, omitted-option preservation of TOML `/configured`, and isolation across override/default instances.

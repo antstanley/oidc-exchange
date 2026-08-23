@@ -32,3 +32,7 @@
 - `node conformance/report.mjs`: 12 fixtures/6 shapes; final known differences native 0, FFI 4, Node 4, Lambda 4, ASGI 6, WSGI 7. Reporting remains intentionally non-gating until task 10.
 - Final Rust gates: fmt clean; workspace clippy clean; nextest 405 passed, 0 failed, 27 skipped.
 - Qualification: `basePath` remains an accepted deployment option but translation never strips or decodes it; service configuration/shared middleware owns base-path routing. AWS v1/ALB provide decoded path fields and cannot claim raw fidelity.
+
+## PR #27 F7 follow-up evidence
+
+Production `translateResponse` coverage proves API Gateway v2 emits ordered repeated Set-Cookie values via `cookies` and joins duplicate ordinary headers in order; API Gateway v1 and ALB preserve ordered repeats in `multiValueHeaders`, retain single-value `headers`, status, and base64 body. `createHandler` invokes this translator directly.
