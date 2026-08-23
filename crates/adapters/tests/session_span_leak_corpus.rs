@@ -27,8 +27,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{Duration, Utc};
 
 use oidc_exchange_adapters::lmdb::LmdbSessionRepository;
-use oidc_exchange_core::domain::Session;
-use oidc_exchange_core::ports::SessionRepository;
+use oidc_exchange_core::domain::{NewUser, Session};
+use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 use oidc_exchange_core::Secret;
 use oidc_exchange_test_utils::telemetry::{
     assert_absent_plain_and_encoded, assert_declares, install_span_capture, SharedBuffer,
@@ -46,19 +46,20 @@ const LIFECYCLE_SPANS: [&str; 3] = [
 
 /// One backend's sentinel set. Values are obviously fake but shaped like the real
 /// thing (64-hex digest, documentation-range IP) so the rendering paths under test are
-/// the ones production traffic exercises.
+/// the ones production traffic exercises. The `user_id` is threaded separately: the
+/// Postgres variant must drive a real JIT-provisioned user row to satisfy the
+/// sessions table's foreign key, so its id is created at runtime.
 struct Sentinels {
     hash: &'static str,
     device: &'static str,
     user_agent: &'static str,
     ip: &'static str,
-    user_id: &'static str,
 }
 
-fn sentinel_session(s: &Sentinels) -> Session {
+fn sentinel_session(s: &Sentinels, user_id: &str) -> Session {
     let now = Utc::now();
     Session {
-        user_id: s.user_id.to_string(),
+        user_id: user_id.to_string(),
         refresh_token_hash: Secret::new(s.hash.to_string()),
         provider: "google".to_string(),
         expires_at: now + Duration::hours(1),
@@ -72,8 +73,8 @@ fn sentinel_session(s: &Sentinels) -> Session {
 /// Drive the full session lifecycle against `repo`: two stored sessions (so revoke-all
 /// has something to sweep), a lookup, a single revoke, then the user-wide revoke-all.
 /// Returns nothing; every call must succeed or the test fails loudly.
-async fn drive_lifecycle(repo: &dyn SessionRepository, s: &Sentinels) {
-    let first = sentinel_session(s);
+async fn drive_lifecycle(repo: &dyn SessionRepository, s: &Sentinels, user_id: &str) {
+    let first = sentinel_session(s, user_id);
     repo.store_refresh_token(&first)
         .await
         .expect("store_refresh_token");
@@ -83,20 +84,17 @@ async fn drive_lifecycle(repo: &dyn SessionRepository, s: &Sentinels) {
         .await
         .expect("get_session_by_refresh_token")
         .expect("stored session must be retrievable");
-    assert_eq!(
-        fetched.user_id, s.user_id,
-        "lookup must find the stored row"
-    );
+    assert_eq!(fetched.user_id, user_id, "lookup must find the stored row");
 
     repo.revoke_session(&first.refresh_token_hash)
         .await
         .expect("revoke_session");
 
-    let second = sentinel_session(s);
+    let second = sentinel_session(s, user_id);
     repo.store_refresh_token(&second)
         .await
         .expect("store second session for revoke-all");
-    repo.revoke_all_user_sessions(s.user_id)
+    repo.revoke_all_user_sessions(user_id)
         .await
         .expect("revoke_all_user_sessions");
 
@@ -114,6 +112,7 @@ fn assert_no_leak(
     rendered: &str,
     declared: &oidc_exchange_test_utils::telemetry::DeclaredFields,
     s: &Sentinels,
+    user_id: &str,
 ) {
     for span_name in LIFECYCLE_SPANS {
         let mentions = rendered.matches(span_name).count();
@@ -126,7 +125,7 @@ fn assert_no_leak(
 
     // Permitted observability survives alongside redaction.
     assert!(
-        rendered.contains(&format!("user_id={}", s.user_id)),
+        rendered.contains(&format!("user_id={user_id}")),
         "the write span must still record user_id"
     );
     assert_declares(declared, "store_refresh_token", "user_id");
@@ -149,7 +148,6 @@ const LMDB: Sentinels = Sentinels {
     device: "corpus-lmdb-device",
     user_agent: "corpus-lmdb-agent/1.0",
     ip: "192.0.2.10",
-    user_id: "usr_corpus_lmdb",
 };
 
 #[tokio::test]
@@ -160,11 +158,11 @@ async fn lmdb_session_spans_never_render_sentinels() {
     let repo = LmdbSessionRepository::new(path.to_str().expect("utf-8 temp path"), 16)
         .expect("open lmdb environment");
 
-    drive_lifecycle(&repo, &LMDB).await;
+    drive_lifecycle(&repo, &LMDB, "usr_corpus_lmdb").await;
 
     let declared = capture.declared();
     let rendered = capture.rendered();
-    assert_no_leak(&rendered, &declared, &LMDB);
+    assert_no_leak(&rendered, &declared, &LMDB, "usr_corpus_lmdb");
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +174,6 @@ const SQLITE: Sentinels = Sentinels {
     device: "corpus-sqlite-device",
     user_agent: "corpus-sqlite-agent/1.0",
     ip: "192.0.2.11",
-    user_id: "usr_corpus_sqlite",
 };
 
 #[tokio::test]
@@ -189,11 +186,11 @@ async fn sqlite_session_spans_never_render_sentinels() {
         .expect("open migrated sqlite pool");
     let repo = oidc_exchange_adapters::sqlite::SqliteRepository::new(pool);
 
-    drive_lifecycle(&repo, &SQLITE).await;
+    drive_lifecycle(&repo, &SQLITE, "usr_corpus_sqlite").await;
 
     let declared = capture.declared();
     let rendered = capture.rendered();
-    assert_no_leak(&rendered, &declared, &SQLITE);
+    assert_no_leak(&rendered, &declared, &SQLITE, "usr_corpus_sqlite");
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +202,6 @@ const MOCK: Sentinels = Sentinels {
     device: "corpus-mock-device",
     user_agent: "corpus-mock-agent/1.0",
     ip: "192.0.2.12",
-    user_id: "usr_corpus_mock",
 };
 
 #[tokio::test]
@@ -215,8 +211,8 @@ async fn mock_repository_emits_no_sentinels_if_instrumented_later() {
 
     // Positive control: something DID render under this subscriber, so the absence
     // claims below are made against a live capture rather than an inert one.
-    tracing::info!("corpus-marker: driving mock session lifecycle");
-    drive_lifecycle(&repo, &MOCK).await;
+    tracing::info!(target: "oidc_exchange_corpus", "corpus-marker: driving mock session lifecycle");
+    drive_lifecycle(&repo, &MOCK, "usr_corpus_mock").await;
 
     let rendered = capture.rendered();
     assert!(
@@ -239,7 +235,6 @@ const VALKEY: Sentinels = Sentinels {
     device: "corpus-valkey-device",
     user_agent: "corpus-valkey-agent/1.0",
     ip: "198.51.100.21",
-    user_id: "usr_corpus_valkey",
 };
 
 #[tokio::test]
@@ -261,11 +256,11 @@ async fn valkey_session_spans_never_render_sentinels() {
         .expect("connect to local Valkey (VALKEY_TEST_URL or redis://localhost:6379)");
 
     let capture = install_span_capture(SharedBuffer::default());
-    drive_lifecycle(&repo, &VALKEY).await;
+    drive_lifecycle(&repo, &VALKEY, "usr_corpus_valkey").await;
 
     let declared = capture.declared();
     let rendered = capture.rendered();
-    assert_no_leak(&rendered, &declared, &VALKEY);
+    assert_no_leak(&rendered, &declared, &VALKEY, "usr_corpus_valkey");
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +272,6 @@ const POSTGRES: Sentinels = Sentinels {
     device: "corpus-postgres-device",
     user_agent: "corpus-postgres-agent/1.0",
     ip: "198.51.100.22",
-    user_id: "usr_corpus_postgres",
 };
 
 #[tokio::test]
@@ -294,12 +288,24 @@ async fn postgres_session_spans_never_render_sentinels() {
         .expect("connect to live Postgres and ensure schema");
     let repo = oidc_exchange_adapters::postgres::PostgresRepository::new(pool);
 
+    // `sessions.user_id` carries a foreign key to `users`, so the lifecycle must run
+    // against a real user row — the same JIT-provisioning order production uses.
+    let created = repo
+        .create_user(&NewUser {
+            external_id: "corpus-postgres-sub".to_string(),
+            provider: "corpus-postgres".to_string(),
+            email: Some("corpus-postgres@example.com".to_string()),
+            display_name: None,
+        })
+        .await
+        .expect("seed user row for the sessions foreign key");
+
     let capture = install_span_capture(SharedBuffer::default());
-    drive_lifecycle(&repo, &POSTGRES).await;
+    drive_lifecycle(&repo, &POSTGRES, &created.id).await;
 
     let declared = capture.declared();
     let rendered = capture.rendered();
-    assert_no_leak(&rendered, &declared, &POSTGRES);
+    assert_no_leak(&rendered, &declared, &POSTGRES, &created.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +317,6 @@ const DYNAMO: Sentinels = Sentinels {
     device: "corpus-dynamo-device",
     user_agent: "corpus-dynamo-agent/1.0",
     ip: "203.0.113.31",
-    user_id: "usr_corpus_dynamo",
 };
 
 #[tokio::test]
@@ -433,9 +438,9 @@ async fn dynamodb_session_spans_never_render_sentinels() {
         oidc_exchange_adapters::dynamo::DynamoRepository::new(client, "leak-corpus".to_string());
 
     let capture = install_span_capture(SharedBuffer::default());
-    drive_lifecycle(&repo, &DYNAMO).await;
+    drive_lifecycle(&repo, &DYNAMO, "usr_corpus_dynamo").await;
 
     let declared = capture.declared();
     let rendered = capture.rendered();
-    assert_no_leak(&rendered, &declared, &DYNAMO);
+    assert_no_leak(&rendered, &declared, &DYNAMO, "usr_corpus_dynamo");
 }

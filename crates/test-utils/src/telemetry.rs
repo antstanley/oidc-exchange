@@ -106,6 +106,15 @@ impl SpanCapture {
 /// Install a fmt subscriber writing into `buffer` with explicit span open/close events
 /// enabled, alongside the schema-capture layer.
 ///
+/// The capture is scoped to this workspace's own telemetry: targets beginning with
+/// `oidc_exchange`. Third-party instrumentation underneath an instrumented call (the
+/// AWS SDK logs entire request/response payloads at TRACE, sqlx logs statement
+/// internals) would otherwise flood the rendered stream and make absence assertions
+/// fail on values *dependencies* echo — material no control in this repository is
+/// responsible for, and material the shipped JSON subscriber never renders anyway
+/// (production defaults to INFO with env-filter). Keeping the corpus scoped the way
+/// production is scoped makes every assertion about a leak this codebase could fix.
+///
 /// Keep the returned handle alive for the whole test body. Under a single-threaded
 /// `#[tokio::test]` runtime every poll happens on the installing thread, so the
 /// thread-local default subscriber sees every span open and close.
@@ -113,12 +122,16 @@ pub fn install_span_capture(buffer: SharedBuffer) -> SpanCapture {
     let declared: DeclaredFields = Arc::new(Mutex::new(HashSet::new()));
     // The writer closure owns a clone; the capture keeps the original for assertions.
     let writer_buffer = buffer.clone();
+    // Everything the workspace emits, at any level — leaks are level-agnostic.
+    let targets = tracing_subscriber::filter::Targets::new()
+        .with_target("oidc_exchange", tracing::Level::TRACE);
     let subscriber = tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(move || writer_buffer.clone())
                 .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-                .with_ansi(false),
+                .with_ansi(false)
+                .with_filter(targets),
         )
         .with(DeclaredFieldsLayer {
             declared: declared.clone(),

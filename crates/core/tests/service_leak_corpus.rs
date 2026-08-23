@@ -101,7 +101,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
     let service = make_service(corpus_config(), MockAuditLog::new());
 
     // Positive control: the capture is live before any absence claim means anything.
-    tracing::info!("corpus-marker: lifecycle start");
+    tracing::info!(target: "oidc_exchange_corpus", "corpus-marker: lifecycle start");
 
     // --- store path (exchange mints + stores the session) ---
     let [device, user_agent, ip] = provenance_request_fields();
@@ -112,7 +112,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
             id_token: None,
             provider: "test".to_string(),
             ip_address: ip,
-            user_agent: user_agent,
+            user_agent,
             device_id: device,
         })
         .await
@@ -132,7 +132,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
         .refresh(RefreshRequest {
             refresh_token: refresh_token_one.clone(),
             ip_address: ip,
-            user_agent: user_agent,
+            user_agent,
             device_id: device,
         })
         .await
@@ -150,7 +150,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
             token: refresh_token_one.clone(),
             token_type_hint: Some("refresh_token".to_string()),
             ip_address: ip,
-            user_agent: user_agent,
+            user_agent,
             device_id: device,
         })
         .await
@@ -210,7 +210,7 @@ async fn audit_fallback_payloads_carry_no_credentials() {
             id_token: None,
             provider: "test".to_string(),
             ip_address: ip,
-            user_agent: user_agent,
+            user_agent,
             device_id: device,
         })
         .await

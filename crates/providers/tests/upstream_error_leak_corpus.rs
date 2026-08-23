@@ -75,7 +75,7 @@ async fn oidc_revoke_non_2xx_echo_leaks_nothing_into_error_or_telemetry() {
         .await;
 
     let capture = install_span_capture(SharedBuffer::default());
-    tracing::info!("corpus-marker: oidc revoke start");
+    tracing::info!(target: "oidc_exchange_corpus", "corpus-marker: oidc revoke start");
     let provider = oidc_provider(Some(format!("{}/revoke", server.uri()))).await;
 
     let err = provider
@@ -259,7 +259,7 @@ async fn apple_revoke_non_2xx_leaks_no_token_or_generated_assertion() {
         .await;
 
     let capture = install_span_capture(SharedBuffer::default());
-    tracing::info!("corpus-marker: apple revoke start");
+    tracing::info!(target: "oidc_exchange_corpus", "corpus-marker: apple revoke start");
     let provider = oidc_exchange_providers::apple::AppleProvider::from_config(&config_map)
         .await
         .expect("build Apple provider from config map");

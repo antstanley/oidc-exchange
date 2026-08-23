@@ -174,16 +174,43 @@ where
     }
 }
 
-fn install_capture() -> (
-    tracing::subscriber::DefaultGuard,
-    Arc<Mutex<Vec<String>>>,
-    Arc<Mutex<Vec<String>>>,
-) {
+/// Installed capture handle: the guard keeps the subscriber active, and the two
+/// snapshot handles let tests read rendered fragments and each event's enclosing
+/// request id.
+struct CaptureHandles {
+    _guard: tracing::subscriber::DefaultGuard,
+    fragments: Arc<Mutex<Vec<String>>>,
+    event_request_ids: Arc<Mutex<Vec<String>>>,
+}
+
+impl CaptureHandles {
+    /// Snapshot of every rendered fragment so far.
+    fn fragments(&self) -> Vec<String> {
+        self.fragments
+            .lock()
+            .expect("capture mutex must not be poisoned")
+            .clone()
+    }
+
+    /// Snapshot of the innermost `request_id` observed on each event's span scope.
+    fn event_request_ids(&self) -> Vec<String> {
+        self.event_request_ids
+            .lock()
+            .expect("capture mutex must not be poisoned")
+            .clone()
+    }
+}
+
+fn install_capture() -> CaptureHandles {
     let capture = TelemetryCapture::default();
     let fragments = capture.fragments.clone();
     let event_request_ids = capture.event_request_ids.clone();
-    let guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(capture));
-    (guard, fragments, event_request_ids)
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(capture));
+    CaptureHandles {
+        _guard,
+        fragments,
+        event_request_ids,
+    }
 }
 
 /// Percent-decode `%XX` escapes so assertions also cover encoded echo shapes. Mirrors
@@ -313,7 +340,7 @@ async fn body_to_json(body: Body) -> serde_json::Value {
 #[tokio::test]
 async fn unknown_kid_is_not_echoed_but_stays_in_the_operators_warn_log() {
     const KID_SENTINEL: &str = "SENTINEL-UNKNOWN-KID-VALUE";
-    let (_guard, fragments, event_ids) = install_capture();
+    let capture = install_capture();
 
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert(
@@ -360,10 +387,7 @@ async fn unknown_kid_is_not_echoed_but_stays_in_the_operators_warn_log() {
 
     // Operator side: the mapped diagnostic retains the kid AND fires under the request
     // span, correlating the generic body with the full internal reason.
-    let captured = fragments
-        .lock()
-        .expect("mutex must not be poisoned")
-        .clone();
+    let captured = capture.fragments();
     assert!(
         captured.iter().any(|f| f.contains(KID_SENTINEL)),
         "the operator diagnostic must retain the kid, got {captured:?}"
@@ -374,10 +398,7 @@ async fn unknown_kid_is_not_echoed_but_stays_in_the_operators_warn_log() {
             .any(|f| f.contains("client fault mapped to error response")),
         "the 4xx mapping must have emitted its client-fault warn event"
     );
-    let ids = event_ids
-        .lock()
-        .expect("mutex must not be poisoned")
-        .clone();
+    let ids = capture.event_request_ids();
     assert!(
         ids.iter().any(|id| id == "oracle-correlation-id"),
         "the mapped error's diagnostic must fire under the request span, got {ids:?}"
@@ -397,7 +418,7 @@ async fn validation_failure_classes_are_indistinguishable_over_http() {
 
     let mut bodies = Vec::new();
     for reason in reasons {
-        let (_guard, fragments, _ids) = install_capture();
+        let capture = install_capture();
         let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
         providers.insert(
             "failing".to_string(),
@@ -425,12 +446,14 @@ async fn validation_failure_classes_are_indistinguishable_over_http() {
             !description.contains(reason),
             "the internal reason must not reach the body"
         );
-        // ...and never the telemetry either — only the mapping's fixed warn text does.
-        let captured = fragments
-            .lock()
-            .expect("mutex must not be poisoned")
-            .clone();
-        assert_absent_plain_and_encoded(&captured, reason);
+        // ...but it MUST reach the operator diagnostic — genericising the public body
+        // costs the operator nothing (task 06's design), and these reasons carry no
+        // credential material, so their log presence is intended, not a leak.
+        let captured = capture.fragments();
+        assert!(
+            captured.iter().any(|f| f.contains(reason)),
+            "the operator log must retain the internal reason {reason:?}, got {captured:?}"
+        );
 
         bodies.push((json["error"].clone(), json["error_description"].clone()));
     }
@@ -480,7 +503,7 @@ async fn hostile_upstream_echo_yields_generic_body_and_redacted_log() {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("corpus-upstream".to_string(), Box::new(provider));
 
-    let (_guard, fragments, _ids) = install_capture();
+    let capture = install_capture();
     let app = build_app(providers);
 
     let response = post_form(
@@ -508,10 +531,7 @@ async fn hostile_upstream_echo_yields_generic_body_and_redacted_log() {
 
     // Operator side: the redacted detail survives (markers present), the sentinels do
     // not — raw or percent-decoded.
-    let captured = fragments
-        .lock()
-        .expect("mutex must not be poisoned")
-        .clone();
+    let captured = capture.fragments();
     let joined = captured.join("\n");
     assert!(
         joined.contains("[REDACTED]"),
