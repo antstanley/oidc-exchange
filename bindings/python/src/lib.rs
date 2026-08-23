@@ -101,6 +101,7 @@ impl OidcExchange {
         // keep running while the request is serviced. All inputs are owned/Send
         // Rust values by this point, so the closure satisfies `allow_threads`'
         // `Send` bound with no restructuring.
+        #[allow(deprecated)]
         let response = py
             .allow_threads(|| self.inner.handle_request(&method, &path, headers, body))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;

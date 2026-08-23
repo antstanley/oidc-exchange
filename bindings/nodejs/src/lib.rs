@@ -72,6 +72,7 @@ impl OidcExchange {
 
         let body = request.body.map(|b| b.to_vec()).unwrap_or_default();
 
+        #[allow(deprecated)]
         let response = self
             .inner
             .handle_request(&request.method, &request.path, headers, body)

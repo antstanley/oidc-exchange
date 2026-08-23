@@ -1,6 +1,19 @@
+#![allow(deprecated)]
+
 use std::process::Command;
 
-use oidc_exchange_ffi::OidcExchange;
+use oidc_exchange_ffi::{OidcExchange, TransportHints, WireRequest};
+
+fn wire(method: &str, raw_path: &[u8]) -> WireRequest {
+    WireRequest {
+        method: method.to_string(),
+        raw_path: raw_path.to_vec(),
+        query: None,
+        headers: vec![],
+        body: vec![],
+        hints: TransportHints { path_is_raw: true },
+    }
+}
 
 /// Generate an Ed25519 PEM key file at the given path using `openssl`.
 fn setup_test_key(path: &std::path::Path) {
@@ -181,9 +194,99 @@ fn test_valid_config_constructs_successfully() {
 fn test_invalid_method() {
     let (exchange, _tmp) = setup();
 
-    // HTTP method tokens cannot contain spaces; this triggers INVALID_METHOD.
+    #[allow(deprecated)]
     match exchange.handle_request("NOT A METHOD", "/health", vec![], vec![]) {
-        Err(err) => assert_eq!(err.code, "INVALID_METHOD"),
-        Ok(_) => panic!("expected error for invalid method"),
+        Ok(resp) => assert_eq!(resp.status, 400),
+        Err(err) => panic!("invalid method has HTTP meaning, got boundary error: {err}"),
     }
+}
+
+#[test]
+fn async_wire_normalises_empty_path_and_separate_query() {
+    let (exchange, _tmp) = setup();
+    let mut request = wire("GET", b"");
+    request.query = Some(b"check=1".to_vec());
+    let response = exchange
+        .runtime_handle_for_test(request)
+        .expect("wire request must produce a response");
+    assert_eq!(response.status, 404);
+}
+
+#[test]
+fn async_wire_preserves_encoded_delimiters_as_path_data() {
+    let (exchange, _tmp) = setup();
+    for path in [b"/a%2Fb".as_slice(), b"/a%3Fb", b"/a%23b", b"/a/%2E%2E/b"] {
+        let response = exchange
+            .runtime_handle_for_test(wire("GET", path))
+            .expect("encoded path must produce a response");
+        assert_eq!(response.status, 404, "path={path:?}");
+    }
+}
+
+#[test]
+fn async_wire_rejects_non_origin_form_and_invalid_method_as_400() {
+    let (exchange, _tmp) = setup();
+    for mut request in [
+        wire("GET", b"relative"),
+        wire("GET", b"//authority/path"),
+        wire("NOT A METHOD", b"/health"),
+    ] {
+        let response = exchange
+            .runtime_handle_for_test(request.clone())
+            .expect("shaping failure must be an HTTP response");
+        assert_eq!(response.status, 400);
+        request.raw_path = b"/health".to_vec();
+    }
+}
+
+#[test]
+fn async_wire_drops_invalid_headers_and_keeps_valid_duplicates() {
+    let (exchange, _tmp) = setup();
+    let mut request = wire("GET", b"/health");
+    request.headers = vec![
+        ("x-forwarded-for".into(), "192.0.2.1".into()),
+        ("bad header".into(), "ignored".into()),
+        ("x-forwarded-for".into(), "198.51.100.2".into()),
+    ];
+    let response = exchange
+        .runtime_handle_for_test(request)
+        .expect("invalid header must be dropped, not fatal");
+    assert_eq!(response.status, 200);
+}
+
+#[test]
+fn async_wire_enforces_published_body_limit_at_boundary() {
+    let (exchange, _tmp) = setup();
+    let limit = exchange.limits().max_body_bytes;
+    assert_eq!(limit, 2 * 1024 * 1024);
+
+    let mut at_limit = wire("POST", b"/token");
+    at_limit.body = vec![b'x'; limit as usize];
+    assert_ne!(
+        exchange
+            .runtime_handle_for_test(at_limit)
+            .expect("at-limit body reaches router")
+            .status,
+        413
+    );
+
+    let mut over_limit = wire("POST", b"/token");
+    over_limit.body = vec![b'x'; limit as usize + 1];
+    assert_eq!(
+        exchange
+            .runtime_handle_for_test(over_limit)
+            .expect("over-limit body yields response")
+            .status,
+        413
+    );
+}
+
+#[test]
+fn deprecated_shim_splits_only_first_query_delimiter() {
+    let (exchange, _tmp) = setup();
+    #[allow(deprecated)]
+    let response = exchange
+        .handle_request("GET", "/health?first=1?second=2", vec![], vec![])
+        .expect("legacy shim must remain compatible");
+    assert_eq!(response.status, 200);
 }

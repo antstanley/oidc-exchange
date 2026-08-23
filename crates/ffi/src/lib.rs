@@ -1,15 +1,12 @@
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::str::FromStr;
 
 use axum::Router;
+use http::{HeaderName, HeaderValue, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Error type returned by FFI operations.
 #[derive(Debug)]
 pub struct FfiError {
     pub code: String,
@@ -24,54 +21,65 @@ impl fmt::Display for FfiError {
 
 impl std::error::Error for FfiError {}
 
-// ---------------------------------------------------------------------------
-// Response type
-// ---------------------------------------------------------------------------
-
-/// Simplified HTTP response returned to FFI callers.
 pub struct FfiResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 
-// ---------------------------------------------------------------------------
-// Main wrapper
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TransportHints {
+    pub path_is_raw: bool,
+}
 
-/// Wraps the OIDC-Exchange Axum application for use from foreign language
-/// bindings (Node.js via napi-rs, Python via PyO3, etc.).
+#[derive(Debug, Clone)]
+pub struct WireRequest {
+    pub method: String,
+    pub raw_path: Vec<u8>,
+    pub query: Option<Vec<u8>>,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub hints: TransportHints,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NormalisationLimits {
+    pub max_body_bytes: u64,
+}
+
 pub struct OidcExchange {
     runtime: tokio::runtime::Runtime,
     router: Router,
+    limits: NormalisationLimits,
 }
 
 impl OidcExchange {
-    /// Create a new instance by parsing a TOML configuration string.
     pub fn new(config_toml: &str) -> Result<Self, FfiError> {
         let config = oidc_exchange::bootstrap::parse_config(config_toml).map_err(|e| FfiError {
             code: "CONFIG_ERROR".to_string(),
             message: e.to_string(),
         })?;
-
+        let limits = NormalisationLimits {
+            max_body_bytes: config.server.max_request_body_bytes as u64,
+        };
         let runtime = tokio::runtime::Runtime::new().map_err(|e| FfiError {
             code: "RUNTIME_ERROR".to_string(),
             message: e.to_string(),
         })?;
-
         let service = runtime
             .block_on(oidc_exchange::bootstrap::build_service(&config))
             .map_err(|e| FfiError {
                 code: "SERVICE_ERROR".to_string(),
                 message: e.to_string(),
             })?;
-
         let router = oidc_exchange::bootstrap::build_router(&config, service);
-
-        Ok(Self { runtime, router })
+        Ok(Self {
+            runtime,
+            router,
+            limits,
+        })
     }
 
-    /// Create a new instance by reading configuration from a file path.
     pub fn from_file(path: &str) -> Result<Self, FfiError> {
         let config_toml = std::fs::read_to_string(path).map_err(|e| FfiError {
             code: "IO_ERROR".to_string(),
@@ -80,7 +88,103 @@ impl OidcExchange {
         Self::new(&config_toml)
     }
 
-    /// Send an HTTP request through the Axum router and return the response.
+    pub fn limits(&self) -> NormalisationLimits {
+        self.limits
+    }
+
+    /// Total asynchronous wire boundary. Host-originated shaping failures become HTTP
+    /// responses; `FfiError` is reserved for failures with no HTTP meaning.
+    pub async fn handle(&self, request: WireRequest) -> Result<FfiResponse, FfiError> {
+        let outcome =
+            catch_unwind(AssertUnwindSafe(|| self.normalise_request(request))).map_err(|_| {
+                FfiError {
+                    code: "PANIC".to_string(),
+                    message: "request handling panicked".to_string(),
+                }
+            })?;
+        let request = match outcome {
+            Ok(request) => request,
+            Err(status) => return Ok(status_response(status)),
+        };
+
+        let response = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .map_err(|e| FfiError {
+                code: "ROUTER_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+        response_to_ffi(response).await
+    }
+
+    fn normalise_request(
+        &self,
+        request: WireRequest,
+    ) -> Result<http::Request<axum::body::Body>, StatusCode> {
+        if request.body.len() as u64 > self.limits.max_body_bytes {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        let method =
+            http::Method::from_str(&request.method).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let raw_path = if request.raw_path.is_empty() {
+            b"/".as_slice()
+        } else {
+            request.raw_path.as_slice()
+        };
+        if !raw_path.starts_with(b"/") || raw_path.starts_with(b"//") {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        if raw_path.contains(&b'?') || raw_path.contains(&b'#') {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let path = std::str::from_utf8(raw_path).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let query = match request.query.as_deref() {
+            Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| StatusCode::BAD_REQUEST)?),
+            None => None,
+        };
+        let path_and_query = match query {
+            Some(query) => format!("{path}?{query}"),
+            None => path.to_string(),
+        };
+        let uri = http::Uri::from_str(&path_and_query).map_err(|_| StatusCode::BAD_REQUEST)?;
+        if uri.scheme().is_some() || uri.authority().is_some() || !uri.path().starts_with('/') {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let mut built = http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(axum::body::Body::from(request.body))
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        let mut dropped_headers = 0_u64;
+        for (name, value) in request.headers {
+            match (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(&value),
+            ) {
+                (Ok(name), Ok(value)) => {
+                    built.headers_mut().append(name, value);
+                }
+                _ => dropped_headers += 1,
+            }
+        }
+        if dropped_headers > 0 {
+            tracing::warn!(
+                dropped_headers,
+                "invalid request headers dropped at FFI boundary"
+            );
+        }
+        Ok(built)
+    }
+
+    #[doc(hidden)]
+    pub fn runtime_handle_for_test(&self, request: WireRequest) -> Result<FfiResponse, FfiError> {
+        self.runtime.block_on(self.handle(request))
+    }
+
+    /// Deprecated compatibility route. New bindings should pass a `WireRequest` to `handle`.
+    #[deprecated(note = "use async handle(WireRequest)")]
     pub fn handle_request(
         &self,
         method: &str,
@@ -88,62 +192,55 @@ impl OidcExchange {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<FfiResponse, FfiError> {
-        let method = http::Method::from_str(method).map_err(|e| FfiError {
-            code: "INVALID_METHOD".to_string(),
-            message: e.to_string(),
-        })?;
-
-        let mut builder = http::Request::builder().method(method).uri(path);
-
-        for (key, value) in &headers {
-            builder = builder.header(key.as_str(), value.as_str());
-        }
-
-        let request = builder
-            .body(axum::body::Body::from(body))
-            .map_err(|e| FfiError {
-                code: "REQUEST_BUILD_ERROR".to_string(),
-                message: e.to_string(),
-            })?;
-
-        let router = self.router.clone();
-
-        let response = self.runtime.block_on(async {
-            router.oneshot(request).await.map_err(|e| FfiError {
-                code: "ROUTER_ERROR".to_string(),
-                message: e.to_string(),
-            })
-        })?;
-
-        let status = response.status().as_u16();
-
-        let resp_headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_string(),
-                    v.to_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect();
-
-        let body_bytes = self.runtime.block_on(async {
-            response
-                .into_body()
-                .collect()
-                .await
-                .map(|collected| collected.to_bytes().to_vec())
-                .map_err(|e| FfiError {
-                    code: "BODY_ERROR".to_string(),
-                    message: e.to_string(),
-                })
-        })?;
-
-        Ok(FfiResponse {
-            status,
-            headers: resp_headers,
-            body: body_bytes,
-        })
+        let (raw_path, query) = path
+            .split_once('?')
+            .map_or((path.as_bytes().to_vec(), None), |(path, query)| {
+                (path.as_bytes().to_vec(), Some(query.as_bytes().to_vec()))
+            });
+        self.runtime.block_on(self.handle(WireRequest {
+            method: method.to_string(),
+            raw_path,
+            query,
+            headers,
+            body,
+            hints: TransportHints { path_is_raw: false },
+        }))
     }
+}
+
+fn status_response(status: StatusCode) -> FfiResponse {
+    FfiResponse {
+        status: status.as_u16(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    }
+}
+
+async fn response_to_ffi(response: axum::response::Response) -> Result<FfiResponse, FfiError> {
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| FfiError {
+            code: "BODY_ERROR".to_string(),
+            message: e.to_string(),
+        })?
+        .to_bytes()
+        .to_vec();
+    Ok(FfiResponse {
+        status,
+        headers,
+        body,
+    })
 }
