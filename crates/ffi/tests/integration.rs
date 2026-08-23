@@ -108,6 +108,7 @@ fn test_jwks_endpoint() {
 fn test_openid_discovery() {
     let (exchange, _tmp) = setup();
 
+    #[allow(deprecated)]
     let resp = exchange
         .handle_request("GET", "/.well-known/openid-configuration", vec![], vec![])
         .expect("handle_request failed");

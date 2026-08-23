@@ -8,6 +8,12 @@ use http::{HeaderName, HeaderValue, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+const PATH_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'.')
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'~');
+
 #[derive(Debug)]
 pub struct FfiError {
     pub code: String,
@@ -176,10 +182,9 @@ impl OidcExchange {
         };
         // Re-encode decoded host path data before constructing `http::Uri`; this keeps
         // decoded `?` and `#` inside the path rather than promoting them to URI delimiters.
-        let encoded_path =
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-                .replace("%2F", "/");
+        let encoded_path = percent_encoding::utf8_percent_encode(&path, PATH_ENCODE_SET)
+            .to_string()
+            .replace("%2F", "/");
         let path_and_query = match query {
             Some(query) => format!("{encoded_path}?{query}"),
             None => encoded_path,
