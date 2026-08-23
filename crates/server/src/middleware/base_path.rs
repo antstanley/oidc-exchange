@@ -76,8 +76,14 @@ impl Service<Request<Body>> for BasePathStripService {
 /// request path actually starts with it at a path-segment boundary (see
 /// [`strip_prefix_at_segment_boundary`]); otherwise return `request` completely unmodified.
 ///
-/// This is the pure core [`with_base_path_strip`] wraps: no I/O, no logging, just a URI
-/// rewrite, which is what makes it directly unit-testable without spinning up a router.
+/// This is the pure core [`with_base_path_strip`] wraps: no I/O, just a URI rewrite that is
+/// total over host-supplied request data — which is what makes it directly unit-testable
+/// without spinning up a router. Every step that could fail on adversarial input (the URI
+/// reconstruction in particular) is fallible here and degrades to leaving the request
+/// untouched with a structured warning, never to a panic: this middleware runs on every
+/// request, so any panic would take the whole service down repeatably rather than failing
+/// once, closed, at config load. The outer catch-panic layer in `build_router` backs this up
+/// as defence in depth, but nothing on this path is expected to reach it.
 fn strip_base_path(mut request: Request<Body>, prefix: Option<&str>) -> Request<Body> {
     // Treat "no prefix" and "empty-string prefix" identically: `Some("")` is not rejected by
     // config deserialization, and `str::strip_prefix("")` would trivially match every path
@@ -110,39 +116,67 @@ fn strip_base_path(mut request: Request<Body>, prefix: Option<&str>) -> Request<
         None => new_path.to_string(),
     };
 
-    let mut parts = request.uri().clone().into_parts();
-    parts.path_and_query = Some(new_path_and_query.parse().unwrap_or_else(|err| {
-        panic!(
-            "rewritten path/query {new_path_and_query:?} (from path {path:?}, prefix \
-             {prefix:?}) must itself be a valid URI path-and-query: {err}"
-        )
-    }));
-    let new_uri = axum::http::Uri::from_parts(parts).unwrap_or_else(|err| {
-        panic!(
-            "replacing only the path-and-query component of a valid request URI must not \
-             invalidate it: {err}"
-        )
-    });
-    // Postcondition: the rewritten URI must remain an absolute path the router can match
-    // against — never empty, which axum's matcher does not treat as `/`.
-    assert!(
+    let Some(new_uri) = rebuild_uri_with_path_and_query(request.uri(), &new_path_and_query) else {
+        // Unreachable for a URI that already parsed (the replacement is assembled only
+        // from substrings of it), but a hostile or exotic wire value must degrade to
+        // pass-through, not unwind: the inner router then routes the original path and
+        // answers 404, exactly as it would have without this layer. The raw path/query is
+        // deliberately absent from the log — request URLs routinely carry codes, tokens,
+        // or PII in their query strings — so only coarse facts are recorded.
+        tracing::warn!(
+            reason = "rewritten-path-and-query-failed-uri-validation",
+            prefix = %prefix,
+            path_len_bytes = path.len(),
+            had_query = request.uri().query().is_some(),
+            "base-path strip discarded; forwarding the request unmodified"
+        );
+        return request;
+    };
+    // Checked postcondition (was an `assert_ne!`): a genuine boundary-matched strip removes
+    // at least `prefix.len()` bytes or collapses the bare prefix to `/`, so the rewritten
+    // path can never equal the original. Reaching this branch would mean the boundary check
+    // above let a no-op "match" through — refuse the rewrite and pass the request through
+    // instead of trusting it.
+    if new_uri.path() == path {
+        tracing::warn!(
+            reason = "base-path-strip-produced-no-op-rewrite",
+            prefix = %prefix,
+            path_len_bytes = path.len(),
+            "base-path strip was a no-op; forwarding the request unmodified"
+        );
+        return request;
+    }
+
+    // Programmer-error assertion pairing the checks above: unreachable while they hold,
+    // kept enabled in tests so an invariant-breaking edit fails loudly there.
+    debug_assert!(
         !new_uri.path().is_empty(),
         "rewritten URI path must never be empty, got {:?} from prefix {prefix:?} on {path:?}",
         new_uri.path()
     );
-    // Postcondition: a genuine boundary-matched strip (this branch only, `prefix` is
-    // non-empty here by construction) must always change the path — it removed at least
-    // `prefix.len()` bytes, or collapsed the bare prefix down to `/`. Either way the
-    // rewritten path can never equal the original; catching that here would mean the
-    // boundary check above let a no-op "match" through unnoticed.
-    assert_ne!(
-        new_uri.path(),
-        path,
-        "boundary-matched strip of prefix {prefix:?} must change the path, got {path:?} unchanged"
-    );
 
     *request.uri_mut() = new_uri;
     request
+}
+
+/// Rebuild `uri` with its path-and-query replaced by `new_path_and_query`, preserving every
+/// other component (scheme, authority). Returns `None` when the replacement is not a valid
+/// URI path-and-query or the assembled URI fails validation — the caller then passes the
+/// request through unmodified instead of panicking on host-supplied bytes.
+fn rebuild_uri_with_path_and_query(
+    uri: &axum::http::Uri,
+    new_path_and_query: &str,
+) -> Option<axum::http::Uri> {
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(new_path_and_query.parse().ok()?);
+    let new_uri = axum::http::Uri::from_parts(parts).ok()?;
+    // Postcondition: the rewritten URI must remain an absolute path the router can match
+    // against — never empty, which axum's matcher does not treat as `/`. Returning `None`
+    // steers the caller to its pass-through branch.
+    if new_uri.path().is_empty() {
+        return None;
+    }
+    Some(new_uri)
 }
 
 /// Strip `prefix` from the start of `path`, but only when `prefix` ends exactly on a
@@ -154,7 +188,12 @@ fn strip_base_path(mut request: Request<Body>, prefix: Option<&str>) -> Request<
 /// the literal bytes `/prod` with `prefix` in both cases, but only the first has a boundary
 /// (`/` or end-of-string) right after them. A raw `str::strip_prefix` alone cannot tell these
 /// apart, which is exactly the bug this helper exists to rule out.
-fn strip_prefix_at_segment_boundary<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+///
+/// Public because this is the repository's single segment-boundary implementation: the
+/// server's strip layer applies it here and the FFI request normaliser must reproduce
+/// exactly these semantics for embedded hosts, so it reuses this function rather than
+/// keeping a second copy that can drift.
+pub fn strip_prefix_at_segment_boundary<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     let rest = path.strip_prefix(prefix)?;
     (rest.is_empty() || rest.starts_with('/')).then_some(rest)
 }
@@ -232,6 +271,123 @@ mod tests {
         // per-request panic — this middleware runs on every request.
         let request = strip_base_path(get_req("/health"), Some(""));
         assert_eq!(request.uri().path(), "/health");
+    }
+
+    /// The fallible rebuild accepts a well-formed replacement and preserves the URI's other
+    /// components (scheme + authority survive when the original was absolute-form), which is
+    /// the property every success-path assertion above leans on.
+    #[test]
+    fn rebuild_uri_with_path_and_query_rebuilds_and_preserves_authority() {
+        let uri: axum::http::Uri = "/prod/health?x=1".parse().unwrap();
+        let rebuilt =
+            rebuild_uri_with_path_and_query(&uri, "/health?x=1").expect("valid rewrite must pass");
+        assert_eq!(rebuilt.path(), "/health");
+        assert_eq!(rebuilt.query(), Some("x=1"));
+
+        let absolute: axum::http::Uri = "http://backend.internal/prod/keys".parse().unwrap();
+        let rebuilt = rebuild_uri_with_path_and_query(&absolute, "/keys")
+            .expect("absolute-form rewrite must pass");
+        assert_eq!(rebuilt.path(), "/keys");
+        assert_eq!(
+            rebuilt.authority().map(|a| a.as_str()),
+            Some("backend.internal"),
+            "only the path-and-query component may change"
+        );
+    }
+
+    /// Negative space: a replacement that is not a valid URI path-and-query yields `None`
+    /// instead of a panic — this is the containment seam the middleware maps to
+    /// pass-through.
+    #[test]
+    fn rebuild_uri_with_path_and_query_rejects_malformed_target() {
+        let uri: axum::http::Uri = "/prod/health".parse().unwrap();
+
+        assert!(
+            rebuild_uri_with_path_and_query(&uri, "/bad\nnewline").is_none(),
+            "a control character must fail URI validation"
+        );
+        assert!(
+            rebuild_uri_with_path_and_query(&uri, "/bad percent").is_none(),
+            "an unescaped space must fail URI validation"
+        );
+    }
+
+    /// Totality over hostile wire data: for every combination of a parseable-but-nasty
+    /// request URI and any prefix configuration, stripping either leaves the request
+    /// unmodified or produces a non-empty absolute path — and never panics. This is the
+    /// regression test for the removed URI-reconstruction panics: a panic anywhere in
+    /// `strip_base_path` fails this test.
+    #[test]
+    fn strip_base_path_is_total_over_hostile_request_uris() {
+        let hostile_paths = [
+            "/",
+            "//",
+            "/%2F%2E%2E",
+            "/%",
+            "/%zz",
+            "/seg with space",
+            "/authorize",
+            "/auth/keys",
+            "/prod/../..",
+            "http://host.example/prod/health?q=%FF",
+            "http://host.example",
+            "/x?y=",
+            "/x?",
+        ];
+        let prefixes = [
+            None,
+            Some(""),
+            Some("/"),
+            Some("//"),
+            Some("/prod"),
+            Some("/prod/"),
+            Some("/auth"),
+        ];
+
+        for raw_path in hostile_paths {
+            let Ok(original) = raw_path.parse::<axum::http::Uri>() else {
+                continue; // not expressible on the wire at all; nothing to contain
+            };
+            for prefix in prefixes {
+                let request = Request::builder()
+                    .uri(original.clone())
+                    .body(Body::empty())
+                    .unwrap();
+                let stripped = strip_base_path(request, prefix);
+
+                let result_path = stripped.uri().path();
+                assert!(
+                    !result_path.is_empty(),
+                    "stripped path must never be empty (input {raw_path:?}, prefix {prefix:?})"
+                );
+                assert!(
+                    result_path.starts_with('/'),
+                    "stripped path must stay origin-form (input {raw_path:?}, prefix {prefix:?}), \
+                     got {result_path:?}"
+                );
+            }
+        }
+    }
+
+    /// Sibling-segment regression at the routing level: an `/auth` base path strips its own
+    /// subtree but never mangles the sibling `/authorize` into `orize` — the request passes
+    /// through untouched and 404s against the unprefixed routes.
+    #[tokio::test]
+    async fn sibling_authorize_path_survives_an_auth_base_path_untouched() {
+        let inner = Router::new()
+            .route("/keys", get(|| async { StatusCode::OK }))
+            .route("/health", get(|| async { StatusCode::OK }));
+        let app = with_base_path_strip(inner, Some("/auth".to_string()));
+
+        let response = app.clone().oneshot(get_req("/auth/keys")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "own subtree strips");
+
+        let response = app.oneshot(get_req("/authorize")).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "sibling /authorize must not be treated as prefixed by /auth"
+        );
     }
 
     /// Regression test for the mechanism itself: proves stripping happens early enough to

@@ -27,6 +27,23 @@ pub struct AppConfig {
 const ALLOWED_SERVER_ROLES: [&str; 3] = ["all", "exchange", "admin"];
 
 impl AppConfig {
+    /// Canonicalise every field with a documented normal form, in place,
+    /// before [`AppConfig::validate`] runs. Called by both configuration
+    /// entry points (`load_config_from_dir` and `parse_config`) immediately
+    /// after deserialization, so every consumer downstream of config load —
+    /// the router builder, adapters, and embedded hosts — sees the same
+    /// canonical shapes and never re-implements tolerance for sloppy ones.
+    ///
+    /// Normalisations:
+    /// - `server.base_path`: `""` and `"/"` resolve to `None` (unset), and a
+    ///   single trailing `/` is trimmed (`"/prod/"` → `"/prod"`). A value
+    ///   without a leading `/` is deliberately left alone here so
+    ///   [`AppConfig::validate`] can reject it by name rather than silently
+    ///   rewriting what the operator wrote.
+    pub fn normalise(&mut self) {
+        self.server.base_path = normalise_base_path(self.server.base_path.take());
+    }
+
     /// Validate the loaded configuration once, at startup, so malformed
     /// config fails closed instead of being absorbed and discovered later
     /// (an unmounted router, a per-request panic, or an over-permissive
@@ -34,6 +51,11 @@ impl AppConfig {
     ///
     /// Checks, each returning a `ConfigError` naming the offending field:
     /// - `server.role` is one of [`ALLOWED_SERVER_ROLES`].
+    /// - `server.base_path`, when set, is in its canonical form: a leading
+    ///   `/` plus at least one further character, and no trailing `/`
+    ///   (`""`, `"/"`, `"prod"`, and `"/prod/"` are all rejected — the
+    ///   first two belong as unset, the third needs its leading slash, and
+    ///   the last should have been trimmed by [`AppConfig::normalise`]).
     /// - `server.request_timeout`, `token.access_token_ttl`, and
     ///   `token.refresh_token_ttl` parse via
     ///   [`crate::service::parse_duration_secs`].
@@ -43,6 +65,20 @@ impl AppConfig {
     ///   `all`, and `internal_api.enabled == true`),
     ///   `internal_api.shared_secret` is present and non-empty.
     pub fn validate(&self) -> Result<(), Error> {
+        if let Some(base_path) = &self.server.base_path {
+            let is_canonical =
+                base_path.len() > 1 && base_path.starts_with('/') && !base_path.ends_with('/');
+            if !is_canonical {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "server.base_path {base_path:?} must start with '/' and carry at least \
+                         one non-slash character (\"\" and \"/\" mean unset, a trailing \"/\" is \
+                         trimmed at load)"
+                    ),
+                });
+            }
+        }
+
         if !ALLOWED_SERVER_ROLES.contains(&self.server.role.as_str()) {
             return Err(Error::ConfigError {
                 detail: format!(
@@ -90,6 +126,38 @@ impl AppConfig {
         }
 
         Ok(())
+    }
+}
+
+/// Canonicalise a `[server] base_path` value from its deserialized form:
+///
+/// - `None` stays `None`.
+/// - `Some("")` and `Some("/")` become `None` — both spell "no mount
+///   prefix", and keeping them as `Some` would force every consumer
+///   (strip middleware, embedded hosts) to re-derive that fact.
+/// - A single trailing `/` is trimmed (`Some("/prod/")` → `Some("/prod")`),
+///   because the strip layer matches at a segment boundary and a trailing
+///   slash would otherwise make `"/prod/health"` fail to match its own
+///   prefix.
+///
+/// A value without a leading `/` is returned unchanged: normalisation never
+/// invents path structure the operator did not write; [`AppConfig::validate`]
+/// rejects it instead, naming the field.
+fn normalise_base_path(base_path: Option<String>) -> Option<String> {
+    let Some(base_path) = base_path else {
+        return None;
+    };
+    // Trim exactly one trailing slash, then fold any resulting root/empty
+    // form back to unset (`"/"` → `None`, `"//"` → `None`) so the canonical
+    // set is closed under the operation.
+    let trimmed = match base_path.strip_suffix('/') {
+        Some(head) => head.to_string(),
+        None => base_path,
+    };
+    if trimmed.is_empty() || trimmed == "/" {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 
@@ -146,6 +214,12 @@ pub struct ServerConfig {
     /// Absent (`None`) by default; exists for deployments fronted by a mount prefix such as
     /// an API Gateway stage, where the platform includes the stage name in the request path
     /// but the app's routes are defined without it.
+    ///
+    /// Canonical by the time any consumer sees it: both configuration entry points run
+    /// [`AppConfig::normalise`] (which folds `""`/`"/"` into `None` and trims one trailing
+    /// `/`) followed by [`AppConfig::validate`] (which rejects a value with no leading `/`
+    /// or a residual trailing `/`). The strip middleware therefore never has to re-derive
+    /// these cases on the per-request path.
     pub base_path: Option<String>,
 }
 
@@ -679,6 +753,157 @@ host = "0.0.0.0"
         )
         .expect("omitting base_path must still deserialize");
         assert!(absent.server.base_path.is_none());
+    }
+
+    /// Every tolerated sloppy spelling of `[server] base_path` lands on its canonical
+    /// form: unset stays unset, empty/root fold to unset, one trailing slash is trimmed,
+    /// and a residual root (`"//"`) folds to unset too.
+    #[test]
+    fn normalise_base_path_canonicalises_unset_root_and_trailing_slash() {
+        assert_eq!(normalise_base_path(None), None, "unset must stay unset");
+
+        assert_eq!(
+            normalise_base_path(Some(String::new())),
+            None,
+            "an empty base_path must normalise to unset"
+        );
+        assert_eq!(
+            normalise_base_path(Some("/".to_string())),
+            None,
+            "a bare root base_path must normalise to unset"
+        );
+
+        assert_eq!(
+            normalise_base_path(Some("/prod/".to_string())),
+            Some("/prod".to_string()),
+            "one trailing slash must be trimmed"
+        );
+        assert_eq!(
+            normalise_base_path(Some("/prod".to_string())),
+            Some("/prod".to_string()),
+            "an already-canonical value must pass through unchanged"
+        );
+        assert_eq!(
+            normalise_base_path(Some("//".to_string())),
+            None,
+            "a double slash must fold to unset, not survive as a degenerate prefix"
+        );
+    }
+
+    /// Negative space: normalisation never invents path structure — a value with no
+    /// leading slash survives normalisation untouched so that `validate` can reject it
+    /// by name instead of silently rewriting what the operator wrote.
+    #[test]
+    fn normalise_base_path_leaves_missing_leading_slash_for_validate_to_reject() {
+        assert_eq!(
+            normalise_base_path(Some("prod".to_string())),
+            Some("prod".to_string()),
+            "normalise must not prepend a leading slash; validate rejects this instead"
+        );
+    }
+
+    /// Postcondition of the canonicalisation: no normalised output ever carries a
+    /// trailing slash or lacks a leading one — the invariant the strip middleware and
+    /// later embedded hosts rely on without re-checking.
+    #[test]
+    fn normalised_base_path_is_always_canonical() {
+        for candidate in ["/prod", "/prod/deep", "/a"] {
+            let normalised = normalise_base_path(Some(candidate.to_string()))
+                .unwrap_or_else(|| panic!("{candidate:?} is already canonical and must survive"));
+            assert!(
+                normalised.starts_with('/') && !normalised.ends_with('/'),
+                "normalised {candidate:?} must be boundary-safe, got {normalised:?}"
+            );
+        }
+    }
+
+    /// `validate` accepts every post-normalisation shape and rejects each non-canonical
+    /// one by name — including the forms `normalise` would have folded away, so a caller
+    /// that skips `normalise` still fails closed rather than reaching the router.
+    #[test]
+    fn validate_rejects_non_canonical_base_path_shapes() {
+        let mut config = AppConfig::default();
+        config.server.base_path = Some("prod".to_string());
+        let err = config
+            .validate()
+            .expect_err("base_path without a leading slash must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("server.base_path"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("prod"),
+                    "detail must echo the offending value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+
+        for rejected in ["", "/", "/prod/"] {
+            let mut config = AppConfig::default();
+            config.server.base_path = Some(rejected.to_string());
+            assert!(
+                config.validate().is_err(),
+                "non-canonical base_path {rejected:?} must fail validate when normalise was \
+                 skipped"
+            );
+        }
+
+        // The paired positive space: the canonical form validate exists to guard.
+        let mut config = AppConfig::default();
+        config.server.base_path = Some("/prod".to_string());
+        assert!(
+            config.validate().is_ok(),
+            "canonical base_path must pass validate: {:?}",
+            config.validate()
+        );
+    }
+
+    /// Load-time contract end to end: through `AppConfig::normalise` + `validate`, the
+    /// tolerated spellings resolve to their canonical values and only genuinely invalid
+    /// ones abort the load.
+    #[test]
+    fn normalise_then_validate_yields_load_time_base_path_contract() {
+        let mut unset_empty: AppConfig = toml::from_str(
+            r#"
+[server]
+base_path = ""
+"#,
+        )
+        .expect("empty base_path must deserialize");
+        unset_empty.normalise();
+        unset_empty
+            .validate()
+            .expect("empty base_path must normalise to unset and load cleanly");
+        assert_eq!(unset_empty.server.base_path, None);
+
+        let mut trailing: AppConfig = toml::from_str(
+            r#"
+[server]
+base_path = "/prod/"
+"#,
+        )
+        .expect("trailing-slash base_path must deserialize");
+        trailing.normalise();
+        trailing
+            .validate()
+            .expect("trailing slash must be trimmed at load, not rejected");
+        assert_eq!(trailing.server.base_path.as_deref(), Some("/prod"));
+
+        let mut missing_leading: AppConfig = toml::from_str(
+            r#"
+[server]
+base_path = "prod"
+"#,
+        )
+        .expect("missing-leading-slash base_path must deserialize");
+        missing_leading.normalise();
+        assert!(
+            missing_leading.validate().is_err(),
+            "missing leading slash must abort the load even after normalisation"
+        );
     }
 
     #[test]

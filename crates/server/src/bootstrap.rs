@@ -112,7 +112,10 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
 
     let mut merged = builder.build()?;
     resolve_placeholders(&mut merged.cache)?;
-    let config: AppConfig = merged.try_deserialize()?;
+    let mut config: AppConfig = merged.try_deserialize()?;
+    // Normalise before validating so validation always sees the canonical forms
+    // (e.g. a trailing-slash `base_path` is trimmed here, not rejected).
+    config.normalise();
     config.validate()?;
     Ok(config)
 }
@@ -122,7 +125,10 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
 /// (`OidcExchange::new`/`from_file`) is rejected at construction on the same
 /// terms as an invalid config on disk would be rejected at server startup.
 pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let config: AppConfig = toml::from_str(toml_str)?;
+    let mut config: AppConfig = toml::from_str(toml_str)?;
+    // Same normalise-then-validate order as `load_config_from_dir`, so config supplied
+    // through the FFI bindings is canonicalised on identical terms.
+    config.normalise();
     config.validate()?;
     Ok(config)
 }
@@ -323,6 +329,16 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 /// path used by both the hyper and Lambda runtimes — when `config.server.base_path` is `None`
 /// the wrapper still runs on every request but is a pure pass-through, so there is no separate
 /// Lambda-only branch that installs it only sometimes.
+///
+/// Finally a **second, outer** [`CatchPanicLayer`] wraps the base-path-aware service, giving
+/// the stack two guards (`04-http-api.md` → Middleware stack): the inner one nearest the
+/// handlers keeps a caught *handler* panic's response inside the request-id layer so it still
+/// carries `x-request-id`, while the outer one contains panics raised in the request-id,
+/// timeout, audit-context, or base-path layers themselves — turning what used to be a killed
+/// connection into the standard structured `500`. The base-path layer is total over
+/// host-supplied paths (its URI reconstruction degrades to pass-through rather than
+/// panicking), so nothing is expected to reach the outer guard; it exists so a defect in any
+/// of those layers degrades to a clean error response instead of taking the worker down.
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     let role = config.server.role.as_str();
 
@@ -359,7 +375,15 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         .layer(axum::middleware::from_fn(request_id_layer))
         .with_state(state);
 
-    with_base_path_strip(router, config.server.base_path.clone())
+    let base_path_aware = with_base_path_strip(router, config.server.base_path.clone());
+
+    // Outer guard around the base-path service and everything inside it (see the doc
+    // comment): composed through its own routeless router — the same shape
+    // `with_base_path_strip` uses — because `Router::layer` cannot wrap a router as an
+    // opaque unit, and the guard must sit outside the base-path rewrite, not merely around
+    // each already-matched endpoint.
+    let outer_guarded = CatchPanicLayer::custom(panic_handler).layer(base_path_aware);
+    Router::new().fallback_service(outer_guarded)
 }
 
 /// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
@@ -1602,8 +1626,10 @@ mod request_timeout_tests {
 
         // Mirrors `build_router`'s exact layer ordering (see its doc comment): applied
         // innermost first, so request-id ends up outermost and the timeout layer sits
-        // between it and audit-context/catch-panic.
-        Router::new()
+        // between it and audit-context/catch-panic — and, as in production, the whole
+        // stated router is wrapped by the base-path service (a pass-through with no prefix
+        // configured) under the outer catch-panic guard.
+        let inner = Router::new()
             .route("/fast", get(fast_handler))
             .route("/slow", get(slow_handler))
             .layer(CatchPanicLayer::custom(panic_handler))
@@ -1612,7 +1638,9 @@ mod request_timeout_tests {
                 StatusCode::REQUEST_TIMEOUT,
                 timeout,
             ))
-            .layer(axum::middleware::from_fn(request_id_layer))
+            .layer(axum::middleware::from_fn(request_id_layer));
+        let base_path_aware = with_base_path_strip(inner, None);
+        Router::new().fallback_service(CatchPanicLayer::custom(panic_handler).layer(base_path_aware))
     }
 
     /// A handler that runs longer than `server.request_timeout` is aborted with `408`, and
