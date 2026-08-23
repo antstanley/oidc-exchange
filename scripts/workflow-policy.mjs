@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import YAML from "yaml";
+
+const ROOT = resolve(import.meta.dirname, "..");
+const PYPROJECT = resolve(ROOT, "bindings/python/pyproject.toml");
+const UV_LOCK = resolve(ROOT, "bindings/python/uv.lock");
 
 export const ALLOWED_WRITE_PERMISSIONS = new Map([
   ["release.yml:build-binaries", new Set(["id-token", "attestations"])],
@@ -12,6 +17,8 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
 ]);
 
 const ACTION_SHA = /^[^\s@]+@[0-9a-f]{40}$/;
+const EXACT_STABLE_VERSION = /^\d+\.\d+\.\d+$/;
+const MATURIN_ACTION = /^PyO3\/maturin-action@/;
 const DYNAMIC_COMMANDS = [
   /\bnpx\b/,
   /\bpnpm\s+(?:dlx|add\s+-g)\b/,
@@ -20,9 +27,25 @@ const DYNAMIC_COMMANDS = [
   /curl[^\n|]*\|\s*(?:ba)?sh\b/,
 ];
 
+function auditedMaturinVersion() {
+  const pyproject = readFileSync(PYPROJECT, "utf8");
+  const buildSystem = /^requires = \["maturin==([^"\]]+)"\]$/m.exec(pyproject)?.[1];
+  const buildGroup = /^\s*"maturin==([^"\]]+)",?$/m.exec(pyproject)?.[1];
+  const lock = readFileSync(UV_LOCK, "utf8");
+  const lockedBuildGroup = /^build = \[\{ name = "maturin", specifier = "==([^"]+)" \}\]$/m.exec(lock)?.[1];
+  assert.ok(buildSystem, "pyproject build-system maturin pin is required");
+  assert.ok(buildGroup, "pyproject build group maturin pin is required");
+  assert.ok(lockedBuildGroup, "locked build group maturin pin is required");
+  assert.equal(buildSystem, buildGroup, "pyproject maturin pins must match");
+  assert.equal(buildSystem, lockedBuildGroup, "locked build group maturin pin must match");
+  assert.match(buildSystem, EXACT_STABLE_VERSION, "maturin pin must be exact and stable");
+  return buildSystem;
+}
+
 export function validateWorkflow(text, workflowName) {
   const workflow = YAML.parse(text);
   const errors = [];
+  const maturinVersion = auditedMaturinVersion();
   assert.equal(typeof workflow.jobs, "object");
   assert.ok(Object.keys(workflow.jobs).length > 0);
 
@@ -44,6 +67,13 @@ export function validateWorkflow(text, workflowName) {
     for (const step of job.steps) {
       if (step.uses && !ACTION_SHA.test(step.uses))
         errors.push(`${key}: action is not pinned: ${step.uses}`);
+      if (MATURIN_ACTION.test(String(step.uses ?? ""))) {
+        const version = step.with?.["maturin-version"];
+        if (typeof version !== "string" || !EXACT_STABLE_VERSION.test(version))
+          errors.push(`${key}: maturin-action requires literal exact stable maturin-version`);
+        else if (version !== maturinVersion)
+          errors.push(`${key}: maturin-action version ${version} does not match audited maturin ${maturinVersion}`);
+      }
       if (String(step.uses ?? "").startsWith("actions/checkout@")) {
         if (permissions.contents !== "read" && permissions.contents !== "write")
           errors.push(`${key}: checkout lacks contents scope`);

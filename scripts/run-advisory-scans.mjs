@@ -83,11 +83,13 @@ function pythonFindings() {
   const result = run("uv", ["export", "--frozen", "--only-group", "build", "--no-emit-project", "--format", "requirements-txt", "--output-file", requirements], resolve(ROOT, "bindings/python"));
   if (result.error || result.status !== 0) throw new Error("uv frozen build export failed");
   const exported = readFileSync(requirements, "utf8");
-  const packages = [...exported.matchAll(/^([A-Za-z0-9_.-]+)==([^ \;]+).*$/gm)].map((match) => ({ name: match[1].toLowerCase(), version: match[2] }));
+  const packages = [...exported.matchAll(/^([A-Za-z0-9_.-]+)==([^\s;]+).*$/gm)].map((match) => ({ name: match[1].toLowerCase(), version: match[2] }));
   if (packages.length === 0) throw new Error("uv frozen build export is empty");
   const maturin = packages.find((pkg) => pkg.name === "maturin");
   if (!maturin) throw new Error("uv frozen build export is missing maturin");
   if (maturin.version !== MATURIN_VERSION) throw new Error(`uv frozen build export has maturin ${maturin.version}, expected ${MATURIN_VERSION}`);
+  if (!/^tomli==2\.4\.1\s*;\s*python_full_version\s*<\s*['"]3\.11['"](?:\s*\\)?\s*$/m.test(exported))
+    throw new Error("uv frozen build export is missing audited conditional tomli");
   const audit = run("pip-audit", ["--requirement", requirements, "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"]);
   if (audit.error || ![0, 1].includes(audit.status)) throw new Error("pip-audit tool or vulnerability DB failure");
   let report;
