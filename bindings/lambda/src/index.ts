@@ -72,34 +72,7 @@ export function createHandler(
 
     const response = await oidc.handleRequest(request);
 
-    const bodyBase64 = Buffer.from(response.body).toString("base64");
-
-    if (isApiGatewayV2(event)) {
-      const headers: Record<string, string> = {};
-      const cookies: string[] = [];
-      for (const { name, value } of response.headers) {
-        if (name.toLowerCase() === "set-cookie") cookies.push(value);
-        else if (!(name in headers)) headers[name] = value;
-      }
-      return {
-        statusCode: response.status,
-        headers,
-        ...(cookies.length ? { cookies } : {}),
-        body: bodyBase64,
-        isBase64Encoded: true,
-      } satisfies APIGatewayProxyResultV2;
-    }
-
-    const multiValueHeaders: Record<string, string[]> = {};
-    for (const { name, value } of response.headers) {
-      (multiValueHeaders[name] ??= []).push(value);
-    }
-    return {
-      statusCode: response.status,
-      multiValueHeaders,
-      body: bodyBase64,
-      isBase64Encoded: true,
-    } satisfies APIGatewayProxyResult;
+    return translateResponse(event, response);
   };
 }
 
@@ -108,4 +81,33 @@ function normalise(event: LambdaEvent, maxBodyBytes: number) {
   if (isAlbEvent(event)) return fromAlbEvent(event, maxBodyBytes);
   if (isApiGatewayV1(event)) return fromApiGatewayV1(event, maxBodyBytes);
   return fromApiGatewayV1(event as APIGatewayProxyEvent, maxBodyBytes);
+}
+
+export function translateResponse(
+  event: LambdaEvent,
+  response: { status: number; headers: Array<{ name: string; value: string }>; body: Uint8Array },
+): LambdaResult {
+  const body = Buffer.from(response.body).toString("base64");
+  if (isApiGatewayV2(event)) {
+    const headers: Record<string, string> = {};
+    const cookies: string[] = [];
+    for (const { name, value } of response.headers) {
+      if (name.toLowerCase() === "set-cookie") cookies.push(value);
+      else headers[name] = name in headers ? `${headers[name]}, ${value}` : value;
+    }
+    return {
+      statusCode: response.status,
+      headers,
+      ...(cookies.length ? { cookies } : {}),
+      body,
+      isBase64Encoded: true,
+    };
+  }
+  const headers: Record<string, string> = {};
+  const multiValueHeaders: Record<string, string[]> = {};
+  for (const { name, value } of response.headers) {
+    (multiValueHeaders[name] ??= []).push(value);
+    if (!(name in headers)) headers[name] = value;
+  }
+  return { statusCode: response.status, headers, multiValueHeaders, body, isBase64Encoded: true };
 }

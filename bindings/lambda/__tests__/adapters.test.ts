@@ -118,7 +118,7 @@ describe("fromApiGatewayV1", () => {
     } as unknown as APIGatewayProxyEvent;
 
     const req = fromApiGatewayV1(event);
-    expect(Buffer.from(req.rawPath).toString()).toBe("/health")
+    expect(Buffer.from(req.rawPath).toString()).toBe("/health");
     expect(Buffer.from(req.query!).toString()).toBe("debug=true");
   });
 
@@ -177,7 +177,7 @@ describe("fromApiGatewayV2", () => {
 
     const req = fromApiGatewayV2(event);
     expect(req.method).toBe("GET");
-    expect(Buffer.from(req.rawPath).toString()).toBe("/auth/keys")
+    expect(Buffer.from(req.rawPath).toString()).toBe("/auth/keys");
     expect(Buffer.from(req.query!).toString()).toBe("format=jwks");
   });
 

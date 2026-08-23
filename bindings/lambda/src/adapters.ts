@@ -14,10 +14,17 @@ export function isApiGatewayV2(event: unknown): event is APIGatewayProxyEventV2 
 }
 export function isAlbEvent(event: unknown): event is ALBEvent {
   const e = event as Record<string, unknown>;
-  return typeof e.httpMethod === "string" && typeof e.requestContext === "object" && (e.requestContext as Record<string, unknown>).elb !== undefined;
+  return (
+    typeof e.httpMethod === "string" &&
+    typeof e.requestContext === "object" &&
+    (e.requestContext as Record<string, unknown>).elb !== undefined
+  );
 }
 
-export function fromApiGatewayV1(event: APIGatewayProxyEvent, maxBodyBytes = Number.MAX_SAFE_INTEGER): NormalisedRequest {
+export function fromApiGatewayV1(
+  event: APIGatewayProxyEvent,
+  maxBodyBytes = Number.MAX_SAFE_INTEGER,
+): NormalisedRequest {
   return {
     method: event.httpMethod,
     rawPath: Buffer.from(event.path || "/"),
@@ -28,7 +35,10 @@ export function fromApiGatewayV1(event: APIGatewayProxyEvent, maxBodyBytes = Num
   };
 }
 
-export function fromApiGatewayV2(event: APIGatewayProxyEventV2, maxBodyBytes = Number.MAX_SAFE_INTEGER): NormalisedRequest {
+export function fromApiGatewayV2(
+  event: APIGatewayProxyEventV2,
+  maxBodyBytes = Number.MAX_SAFE_INTEGER,
+): NormalisedRequest {
   return {
     method: event.requestContext?.http?.method ?? "GET",
     rawPath: Buffer.from(event.rawPath || event.requestContext?.http?.path || "/"),
@@ -39,7 +49,10 @@ export function fromApiGatewayV2(event: APIGatewayProxyEventV2, maxBodyBytes = N
   };
 }
 
-export function fromAlbEvent(event: ALBEvent, maxBodyBytes = Number.MAX_SAFE_INTEGER): NormalisedRequest {
+export function fromAlbEvent(
+  event: ALBEvent,
+  maxBodyBytes = Number.MAX_SAFE_INTEGER,
+): NormalisedRequest {
   return {
     method: event.httpMethod,
     rawPath: Buffer.from(event.path || "/"),
@@ -50,27 +63,49 @@ export function fromAlbEvent(event: ALBEvent, maxBodyBytes = Number.MAX_SAFE_INT
   };
 }
 
-function flattenHeaders(single?: Record<string, string | undefined> | null, multi?: Record<string, string[] | undefined> | null): HeaderEntry[] {
+function flattenHeaders(
+  single?: Record<string, string | undefined> | null,
+  multi?: Record<string, string[] | undefined> | null,
+): HeaderEntry[] {
   const headers: HeaderEntry[] = [];
-  if (multi) for (const [name, values] of Object.entries(multi)) for (const value of values ?? []) headers.push({ name, value });
-  else if (single) for (const [name, value] of Object.entries(single)) if (value !== undefined) headers.push({ name, value });
+  if (multi)
+    for (const [name, values] of Object.entries(multi))
+      for (const value of values ?? []) headers.push({ name, value });
+  else if (single)
+    for (const [name, value] of Object.entries(single))
+      if (value !== undefined) headers.push({ name, value });
   return headers;
 }
 
-function flattenV2Headers(single?: Record<string, string | undefined> | null, cookies?: string[]): HeaderEntry[] {
+function flattenV2Headers(
+  single?: Record<string, string | undefined> | null,
+  cookies?: string[],
+): HeaderEntry[] {
   const headers = flattenHeaders(single);
   for (const value of cookies ?? []) headers.push({ name: "cookie", value });
   return headers;
 }
 
-function encodeQuery(multi?: Record<string, string[] | undefined> | null, single?: Record<string, string | undefined> | null): Buffer | undefined {
+function encodeQuery(
+  multi?: Record<string, string[] | undefined> | null,
+  single?: Record<string, string | undefined> | null,
+): Buffer | undefined {
   const pairs: string[] = [];
-  if (multi) for (const [name, values] of Object.entries(multi)) for (const value of values ?? []) pairs.push(`${encodeURIComponent(name)}=${encodeURIComponent(value)}`);
-  else if (single) for (const [name, value] of Object.entries(single)) if (value != null) pairs.push(`${encodeURIComponent(name)}=${encodeURIComponent(value)}`);
+  if (multi)
+    for (const [name, values] of Object.entries(multi))
+      for (const value of values ?? [])
+        pairs.push(`${encodeURIComponent(name)}=${encodeURIComponent(value)}`);
+  else if (single)
+    for (const [name, value] of Object.entries(single))
+      if (value != null) pairs.push(`${encodeURIComponent(name)}=${encodeURIComponent(value)}`);
   return pairs.length ? Buffer.from(pairs.join("&")) : undefined;
 }
 
-function decodeBody(body: string | null | undefined, base64: boolean | undefined, limit: number): Buffer | undefined {
+function decodeBody(
+  body: string | null | undefined,
+  base64: boolean | undefined,
+  limit: number,
+): Buffer | undefined {
   if (!body) return undefined;
   if (base64 && Math.floor(body.length / 4) * 3 > limit + 2) throw new BodyTooLargeError();
   if (!base64 && Buffer.byteLength(body, "utf8") > limit) throw new BodyTooLargeError();
