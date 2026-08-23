@@ -12,7 +12,7 @@
 - [x] Create `deny.toml` with the named Cargo advisory entries, reachability rationales, and expiry dates; distinguish advisory failures from unmaintained/yanked warnings.
 - [x] Add reporting-mode Cargo, pnpm, and Python audit steps to a dedicated CI advisories job, using committed lockfiles/environments and conventional per-ecosystem ignore locations rather than treating `deny.toml` as universal.
 - [x] Add equivalent release gates before publishing work and transition unrecorded advisories to blocking behavior after the baseline findings are explicitly recorded.
-- [x] Upgrade `pyo3` past the documented advisory line, confirm ABI/maturin compatibility, regenerate lockfiles as required, and remove now-obsolete Cargo ignore entries.
+- [x] Upgrade `pyo3` past the documented advisory line, confirm ABI/maturin compatibility, regenerate lockfiles as required, and remove now-obsolete Cargo ignore entries. Evidence: `pyo3` 0.22.6 → 0.29.2; the `extension-module` + `abi3-py310` release wheel is tagged `cp310-abi3`, installs with `maturin develop`, imports, and passes the synchronous request-boundary suite; live Cargo advisory output contains neither RUSTSEC-2025-0020 nor RUSTSEC-2026-0177.
 - [x] Add deterministic fixtures or command-wrapper tests for missing policy entries, unexpired documented entries, expired entries, warning-only unmaintained/yanked findings, and each graph’s reporting-to-blocking behavior.
 
 ## Definition of done

@@ -59,7 +59,7 @@ impl OidcExchange {
             .extract()?;
 
         let headers: Vec<(String, String)> = if let Some(h) = request.get_item("headers")? {
-            let hdict: &Bound<'py, PyDict> = h.downcast()?;
+            let hdict: &Bound<'py, PyDict> = h.cast()?;
             let mut vec = Vec::new();
             for (k, v) in hdict.iter() {
                 vec.push((k.extract::<String>()?, v.extract::<String>()?));
@@ -88,28 +88,28 @@ impl OidcExchange {
         assert!(!method.is_empty(), "method must be a non-empty string");
         assert!(!path.is_empty(), "path must be a non-empty string");
 
-        // Release the GIL for the blocking FFI call so other Python threads —
-        // including an asyncio event loop driving this call via an executor —
-        // keep running while the request is serviced. All inputs are owned/Send
-        // Rust values by this point, so the closure satisfies `allow_threads`'
-        // `Send` bound with no restructuring.
+        // Detach from the interpreter for the blocking FFI call so other Python
+        // threads — including an asyncio event loop driving this call via an
+        // executor — keep running while the request is serviced. All inputs are
+        // owned/Send Rust values by this point, so the closure satisfies
+        // `Python::detach`'s `Ungil` bound without restructuring.
         let response = py
-            .allow_threads(|| self.inner.handle_request(&method, &path, headers, body))
+            .detach(|| self.inner.handle_request(&method, &path, headers, body))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        // The GIL is re-held here; only now do we touch Python objects again.
-        let result = PyDict::new_bound(py);
+        // This thread is attached again; only now do we touch Python objects.
+        let result = PyDict::new(py);
         result.set_item("status", response.status)?;
 
         // Use a dict for headers. Note: duplicate header names (e.g. Set-Cookie)
         // will be collapsed. For full multi-value header support, consumers should
         // check the raw response. This covers the common case.
-        let resp_headers = PyDict::new_bound(py);
+        let resp_headers = PyDict::new(py);
         for (k, v) in &response.headers {
             resp_headers.set_item(k, v)?;
         }
         result.set_item("headers", resp_headers)?;
-        result.set_item("body", PyBytes::new_bound(py, &response.body))?;
+        result.set_item("body", PyBytes::new(py, &response.body))?;
 
         // Postcondition on the built response: the caller-facing contract
         // documented above promises a `status` key on every successful result.
