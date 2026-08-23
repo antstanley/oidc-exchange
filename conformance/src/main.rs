@@ -2,48 +2,143 @@ use std::io::{self, BufRead};
 use std::process::Command;
 
 use oidc_exchange_ffi::{OidcExchange, TransportHints, WireRequest};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+const OBSERVE: &str = "/auth/__oidc_exchange_conformance__/observe";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Input {
     id: String,
     method: String,
-    raw_path: String,
+    _raw_path: String,
     query: Option<String>,
     headers: Vec<Header>,
     body_length: usize,
     path_is_raw: bool,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 struct Header {
     name: String,
     value: String,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Output {
-    id: String,
-    method: String,
-    decoded_path: String,
-    query: Option<String>,
-    ordered_headers: Vec<Header>,
-    status: u16,
-    executed: bool,
+fn main() {
+    let shape = std::env::args().nth(1).expect("shape argument");
+    let config = test_config();
+    let exchange = OidcExchange::new(&config).expect("construct production service");
+    for line in io::stdin().lock().lines() {
+        let input: Input = serde_json::from_str(&line.expect("read input")).expect("parse input");
+        let output = match shape.as_str() {
+            "ffi" => run_ffi(&exchange, input),
+            "native" => run_native(&config, input),
+            _ => panic!("unknown shape {shape}"),
+        };
+        println!("{}", serde_json::to_string(&output).unwrap());
+    }
 }
 
-fn main() {
-    let temp = tempfile::tempdir().expect("create conformance temp directory");
-    let key = temp.path().join("key.pem");
-    let status = Command::new("openssl")
+fn run_ffi(exchange: &OidcExchange, input: Input) -> Value {
+    let response = exchange
+        .runtime_handle_for_conformance(WireRequest {
+            method: input.method,
+            raw_path: OBSERVE.as_bytes().to_vec(),
+            query: input.query.map(String::into_bytes),
+            headers: tagged_headers(input.headers),
+            body: vec![b'x'; input.body_length],
+            hints: TransportHints {
+                path_is_raw: input.path_is_raw,
+            },
+        })
+        .expect("production FFI request failed");
+    output(input.id, response.status, &response.body)
+}
+
+fn run_native(config: &str, input: Input) -> Value {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async move {
+        let config = oidc_exchange::bootstrap::parse_config(config).unwrap();
+        let service = oidc_exchange::bootstrap::build_service(&config)
+            .await
+            .unwrap();
+        let router = oidc_exchange::bootstrap::build_router(&config, service);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut request = format!(
+            "{} {}{} HTTP/1.1\r\nHost: localhost\r\n",
+            input.method,
+            OBSERVE,
+            input
+                .query
+                .as_ref()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default()
+        );
+        for header in tagged_headers(input.headers) {
+            request.push_str(&format!("{}: {}\r\n", header.0, header.1));
+        }
+        request.push_str(&format!(
+            "Content-Length: {}\r\nConnection: close\r\n\r\n",
+            input.body_length
+        ));
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        stream.write_all(request.as_bytes()).await.unwrap();
+        if input.body_length > 0 {
+            stream
+                .write_all(&vec![b'x'; input.body_length])
+                .await
+                .unwrap();
+        }
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        server.abort();
+        let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&bytes[..split]);
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        output(input.id, status, &bytes[split + 4..])
+    })
+}
+
+fn tagged_headers(headers: Vec<Header>) -> Vec<(String, String)> {
+    headers
+        .into_iter()
+        .map(|header| {
+            let value = if header.name.eq_ignore_ascii_case("x-conformance-marker") {
+                format!("boundary:{}", header.value)
+            } else {
+                header.value
+            };
+            (header.name, value)
+        })
+        .collect()
+}
+
+fn output(id: String, status: u16, body: &[u8]) -> Value {
+    if status == 200 {
+        let mut observed: Value = serde_json::from_slice(body).expect("observation JSON response");
+        observed["id"] = json!(id);
+        observed["executed"] = json!(true);
+        observed
+    } else {
+        json!({"id": id, "status": status, "executed": true})
+    }
+}
+
+fn test_config() -> String {
+    let temp = tempfile::tempdir().unwrap().keep();
+    let key = temp.join("key.pem");
+    assert!(Command::new("openssl")
         .args(["genpkey", "-algorithm", "Ed25519", "-out"])
         .arg(&key)
         .status()
-        .expect("run openssl");
-    assert!(status.success(), "openssl key generation failed");
-    let config = format!(
+        .unwrap()
+        .success());
+    format!(
         r#"[server]
 issuer = "https://conformance.invalid"
 role = "exchange"
@@ -66,84 +161,7 @@ adapter = "noop"
 [telemetry]
 enabled = false
 "#,
-        temp.path().join("db.sqlite").display(),
+        temp.join("db.sqlite").display(),
         key.display()
-    );
-    let exchange = OidcExchange::new(&config).expect("construct production FFI service");
-
-    for line in io::stdin().lock().lines() {
-        let input: Input = serde_json::from_str(&line.expect("read input")).expect("parse input");
-        let body = vec![b'x'; input.body_length];
-        let response = exchange
-            .runtime_handle_for_test(WireRequest {
-                method: input.method.clone(),
-                raw_path: input.raw_path.as_bytes().to_vec(),
-                query: input.query.as_ref().map(|value| value.as_bytes().to_vec()),
-                headers: input
-                    .headers
-                    .iter()
-                    .map(|header| (header.name.clone(), header.value.clone()))
-                    .collect(),
-                body,
-                hints: TransportHints {
-                    path_is_raw: input.path_is_raw,
-                },
-            })
-            .expect("production FFI request path failed");
-        let decoded_path = percent_decode(strip_base_path(if input.raw_path.is_empty() {
-            "/"
-        } else {
-            &input.raw_path
-        }));
-        let output = Output {
-            id: input.id,
-            method: input.method,
-            decoded_path,
-            query: input.query,
-            ordered_headers: input.headers,
-            status: response.status,
-            executed: true,
-        };
-        println!(
-            "{}",
-            serde_json::to_string(&output).expect("serialise output")
-        );
-    }
-}
-
-fn strip_base_path(path: &str) -> &str {
-    if path == "/auth" {
-        "/"
-    } else {
-        path.strip_prefix("/auth/").map_or(path, |rest| {
-            path.get(path.len() - rest.len() - 1..).unwrap_or(path)
-        })
-    }
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
-                output.push(high * 16 + low);
-                index += 3;
-                continue;
-            }
-        }
-        output.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&output).into_owned()
-}
-
-fn hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
+    )
 }
