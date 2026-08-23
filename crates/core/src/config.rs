@@ -258,14 +258,27 @@ impl AppConfig {
             });
         }
 
-        prefix_config_error(
+        let failure_window_secs = prefix_config_error(
             crate::service::parse_duration_secs(&self.internal_api.auth_failure_window),
             "internal_api.auth_failure_window",
         )?;
-        prefix_config_error(
+        if failure_window_secs == 0 {
+            // A syntactically valid but zero-length window would make the
+            // throttle either meaningless or permanent; refuse it at load
+            // instead of letting the limiter discover it at startup.
+            return Err(Error::ConfigError {
+                detail: "internal_api.auth_failure_window must be non-zero".to_string(),
+            });
+        }
+        let lockout_secs = prefix_config_error(
             crate::service::parse_duration_secs(&self.internal_api.auth_lockout),
             "internal_api.auth_lockout",
         )?;
+        if lockout_secs == 0 {
+            return Err(Error::ConfigError {
+                detail: "internal_api.auth_lockout must be non-zero".to_string(),
+            });
+        }
         if self.internal_api.max_auth_failures == 0 {
             return Err(Error::ConfigError {
                 detail: "internal_api.max_auth_failures must be non-zero".to_string(),
@@ -1705,5 +1718,239 @@ role = "admin"
             "a disabled admin listener cannot collide: {result:?}"
         );
         assert!(!config.internal_api.enabled);
+    }
+
+    // -----------------------------------------------------------------------
+    // Operator-auth mechanism validation (task 05)
+    // -----------------------------------------------------------------------
+
+    /// The source spec's exact floor boundary: a 31-byte shared secret fails
+    /// startup while a 32-byte one boots. Length is the only measurable
+    /// proxy for strength at load time, so the boundary is load-bearing.
+    #[test]
+    fn shared_secret_length_floor_boundary_is_enforced() {
+        let below = "x".repeat(MIN_SHARED_SECRET_BYTES - 1);
+        assert_eq!(below.len(), MIN_SHARED_SECRET_BYTES - 1);
+
+        let mut short = AppConfig::default();
+        short.server.role = "admin".to_string();
+        short.internal_api.enabled = true;
+        short.internal_api.shared_secret = Some(below);
+        let err = short
+            .validate()
+            .expect_err("a secret one byte under the floor must fail startup");
+        match &err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("at least"),
+                    "detail must state the floor, not the value: {detail}"
+                );
+                // Only the length is reported — never any part of the value.
+                assert!(
+                    !detail.contains("xxx"),
+                    "the error must not echo the secret value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+
+        let mut exact = AppConfig::default();
+        exact.server.role = "admin".to_string();
+        exact.internal_api.enabled = true;
+        exact.internal_api.shared_secret = Some("y".repeat(MIN_SHARED_SECRET_BYTES));
+        assert!(
+            exact.validate().is_ok(),
+            "a secret exactly at the floor must boot"
+        );
+    }
+
+    /// The operator-token mechanism requires a real key manager: on the
+    /// admin role (which otherwise builds the noop manager) a noop adapter
+    /// with `operator_token` enabled must fail startup rather than serve a
+    /// mechanism that can never verify a signature.
+    #[test]
+    fn validate_rejects_operator_token_on_the_noop_key_manager() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.server.issuer = "https://auth.example.com".to_string();
+        config.internal_api.enabled = true;
+        config.key_manager.adapter = "noop".to_string();
+        config.internal_api.auth_methods = vec!["operator_token".to_string()];
+
+        let err = config
+            .validate()
+            .expect_err("operator_token cannot run on the noop key manager");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("key_manager.adapter") && detail.contains("operator_token"),
+                    "detail must name both the adapter and the mechanism: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Paired positive: the same mechanism with a real adapter and a non-empty
+    /// issuer validates.
+    #[test]
+    fn validate_accepts_operator_token_with_a_real_key_manager_and_issuer() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.server.issuer = "https://auth.example.com".to_string();
+        config.internal_api.enabled = true;
+        config.key_manager.adapter = "local".to_string();
+        config.key_manager.local = Some(crate::config::LocalKeyConfig {
+            private_key_path: "/tmp/operator-signing-key.pem".to_string(),
+            algorithm: "EdDSA".to_string(),
+            kid: "operator-test-key".to_string(),
+        });
+        config.internal_api.auth_methods = vec!["operator_token".to_string()];
+        config.internal_api.shared_secret = None;
+
+        let result = config.validate();
+
+        assert!(
+            result.is_ok(),
+            "a real key manager with an issuer satisfies operator_token: {result:?}"
+        );
+    }
+
+    /// An empty `auth_methods` list on a served plane is rejected: a served
+    /// admin API with no way in would answer every request `not_configured`
+    /// forever.
+    #[test]
+    fn validate_rejects_served_internal_api_with_no_mechanisms() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.auth_methods = Vec::new();
+
+        let err = config
+            .validate()
+            .expect_err("an empty mechanism list must be rejected when served");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(detail.contains("non-empty"), "got: {detail}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Unknown mechanism names are rejected loudly rather than silently
+    /// ignored (a typo like `operater_token` would otherwise disable every
+    /// other configured path to the plane).
+    #[test]
+    fn validate_rejects_unknown_auth_mechanism_names() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.auth_methods = vec![
+            "shared_secret".to_string(),
+            "operater_token".to_string(), // deliberate typo
+        ];
+        config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
+
+        let err = config
+            .validate()
+            .expect_err("an unknown mechanism name must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("operater_token"),
+                    "detail must name the unknown entry: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Duplicate mechanisms would double-evaluate credentials; the list is
+    /// closed and duplicate-free.
+    #[test]
+    fn validate_rejects_duplicate_auth_mechanisms() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.auth_methods =
+            vec!["shared_secret".to_string(), "shared_secret".to_string()];
+        config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
+
+        let err = config
+            .validate()
+            .expect_err("duplicate mechanisms must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(detail.contains("more than once"), "got: {detail}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// An empty mtls subject header cannot assert identities; validation
+    /// refuses the combination up front.
+    #[test]
+    fn validate_rejects_empty_mtls_subject_header_when_mtls_enabled() {
+        let mut config = AppConfig::default();
+        config.server.role = "admin".to_string();
+        config.internal_api.enabled = true;
+        config.internal_api.auth_methods = vec!["mtls".to_string()];
+        config.internal_api.mtls = Some(MtlsConfig {
+            subject_header: "   ".to_string(),
+        });
+
+        let err = config
+            .validate()
+            .expect_err("a blank mtls subject header must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(detail.contains("subject_header"), "got: {detail}");
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Throttle bounds are validated at load: a zero budget or zero window
+    /// would produce either an always-open or an always-closed throttle.
+    #[test]
+    fn validate_rejects_degenerate_throttle_bounds() {
+        let base = || {
+            let mut config = AppConfig::default();
+            config.server.role = "admin".to_string();
+            config.internal_api.enabled = true;
+            config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
+            config
+        };
+
+        let mut zero_budget = base();
+        zero_budget.internal_api.max_auth_failures = 0;
+        let err = zero_budget
+            .validate()
+            .expect_err("a zero failure budget must be rejected");
+        assert!(
+            matches!(err, Error::ConfigError { ref detail } if detail.contains("max_auth_failures")),
+            "got: {err:?}"
+        );
+
+        let mut zero_window = base();
+        zero_window.internal_api.auth_failure_window = "0s".to_string();
+        let err = zero_window
+            .validate()
+            .expect_err("a zero failure window must be rejected");
+        assert!(
+            matches!(err, Error::ConfigError { ref detail } if detail.contains("auth_failure_window")),
+            "got: {err:?}"
+        );
+
+        let mut zero_lockout = base();
+        zero_lockout.internal_api.auth_lockout = "0m".to_string();
+        let err = zero_lockout
+            .validate()
+            .expect_err("a zero lockout must be rejected");
+        assert!(
+            matches!(err, Error::ConfigError { ref detail } if detail.contains("auth_lockout")),
+            "got: {err:?}"
+        );
     }
 }

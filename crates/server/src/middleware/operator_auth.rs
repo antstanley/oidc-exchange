@@ -442,23 +442,27 @@ impl OperatorAuthGate {
 
     /// Try each configured mechanism in order; first success wins.
     ///
-    /// When everything fails, the returned reason follows the spec's
-    /// precedence: `invalid_credential` beats `missing_credential` (something
-    /// was presented and rejected outranks nothing being presented), and
-    /// `not_configured` is reserved for a served plane that somehow reached
-    /// here with no usable mechanism.
+    /// When everything fails, the returned reason follows the spec's fixed
+    /// vocabulary: something was presented and rejected outranks nothing
+    /// being presented (`invalid_credential` beats `missing_credential`),
+    /// while `not_configured` stays reserved for its spec meaning — an
+    /// internal API with no usable mechanism — and never describes a request
+    /// that merely arrived without credentials.
     pub async fn authenticate(
         &self,
         input: &AuthInput<'_>,
     ) -> Result<OperatorPrincipal, OperatorAuthFailureReason> {
         let mut saw_presented_credential = false;
+        let mut saw_missing_credential = false;
         for authenticator in &self.authenticators {
             match authenticator.authenticate(input).await {
                 Ok(principal) => {
                     principal.assert_invariants();
                     return Ok(principal);
                 }
-                Err(OperatorAuthFailureReason::MissingCredential) => continue,
+                Err(OperatorAuthFailureReason::MissingCredential) => {
+                    saw_missing_credential = true;
+                }
                 Err(OperatorAuthFailureReason::InvalidCredential) => {
                     saw_presented_credential = true;
                 }
@@ -468,6 +472,8 @@ impl OperatorAuthGate {
 
         Err(if saw_presented_credential {
             OperatorAuthFailureReason::InvalidCredential
+        } else if saw_missing_credential {
+            OperatorAuthFailureReason::MissingCredential
         } else {
             OperatorAuthFailureReason::NotConfigured
         })
@@ -873,8 +879,8 @@ mod tests {
             .expect_err("no credential must fail");
         assert_eq!(
             reason,
-            OperatorAuthFailureReason::NotConfigured,
-            "with no mechanism able to even evaluate a credential, the plane reports \\\n             not_configured"
+            OperatorAuthFailureReason::MissingCredential,
+            "an absent credential is missing_credential — not_configured stays reserved \\\n             for a plane with no usable mechanism"
         );
     }
 

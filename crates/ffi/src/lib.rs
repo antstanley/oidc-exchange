@@ -72,7 +72,11 @@ impl OidcExchange {
         // public plane and logs a startup warning naming the unmounted
         // internal routes. Plane separation on this runtime is expressed by
         // constructing a second instance with `role = "admin"`.
-        let routers = oidc_exchange::bootstrap::build_routers(&config, service);
+        let routers =
+            oidc_exchange::bootstrap::build_routers(&config, service).map_err(|e| FfiError {
+                code: "SERVICE_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
         let router = routers.single_plane().ok_or_else(|| FfiError {
             code: "SERVICE_ERROR".to_string(),
             message: "configured role produces no servable router plane".to_string(),
