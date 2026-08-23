@@ -20,6 +20,12 @@
 //!    (`missing_credential` | `invalid_credential` | `not_configured`) plus a
 //!    `tracing::warn!` inside the request span — the presented credential is
 //!    never recorded anywhere.
+//!
+//! Both events travel the *mandatory* audit channel. When the channel's sink
+//! fails at a severity meeting `[audit] blocking_threshold` (default
+//! `warning`; both events warn), the blocking contract applies and the
+//! request fails closed with a generic `500` rather than being answered on a
+//! silently-dropped mandatory record.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -83,13 +89,19 @@ pub async fn internal_auth_layer(
             Ok(oidc_exchange_core::domain::RateLimitDecision::Allow) => {}
             Ok(oidc_exchange_core::domain::RateLimitDecision::Deny { retry_after_secs }) => {
                 let route = request.uri().path().to_string();
-                emit_security_event_or_log(
+                if require_security_event(
                     &state,
                     SecurityEvent::ThrottleExceeded,
                     &client_addr,
                     &route,
                 )
-                .await;
+                .await
+                .is_err()
+                {
+                    // The lockout event could not be durably recorded at a
+                    // severity meeting the blocking threshold: fail closed.
+                    return audit_blocking_error_response();
+                }
                 tracing::warn!(
                     route = %route,
                     retry_after_secs,
@@ -141,13 +153,20 @@ pub async fn internal_auth_layer(
                     tracing::error!(error = %err, "rate limiter failed recording an auth failure");
                 }
             }
-            emit_security_event_or_log(
+            if require_security_event(
                 &state,
                 SecurityEvent::OperatorAuthenticationFailed { reason },
                 &client_addr,
                 &route,
             )
-            .await;
+            .await
+            .is_err()
+            {
+                // The mandatory event could not be recorded at a severity
+                // meeting the blocking threshold: fail closed instead of
+                // answering 401 on a dropped record.
+                return audit_blocking_error_response();
+            }
             tracing::warn!(reason = reason.as_str(), route = %route, "operator authentication failed");
             unauthorized_response(reason)
         }
@@ -163,16 +182,20 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Emit a mandatory-channel security event; on sink failure, honour the
-/// blocking-threshold contract by surfacing a 500 (the event's severity meets
-/// the default threshold), otherwise continue having logged the fallback.
-async fn emit_security_event_or_log(
+/// Emit a mandatory-channel security event, honouring the
+/// blocking-threshold contract. These events warn, which meets the default
+/// `[audit] blocking_threshold`, so a sink failure surfaces here as `Err` —
+/// `emit_security_event` has already logged the fallback rendering — and the
+/// caller must fail the request closed (500) rather than serve on a
+/// silently-dropped mandatory record. Below-threshold sink failures never
+/// reach the caller: they log-and-continue inside `emit_security_event`.
+async fn require_security_event(
     state: &AppState,
     event: SecurityEvent,
     client_addr: &ClientAddr,
     route: &str,
-) {
-    if let Err(err) = state
+) -> Result<(), oidc_exchange_core::error::Error> {
+    state
         .service
         .emit_security_event(
             event,
@@ -192,9 +215,20 @@ async fn emit_security_event_or_log(
             auth_event_detail(route),
         )
         .await
-    {
-        tracing::error!(error = %err, "failed to persist operator-auth security event");
-    }
+}
+
+/// The generic 500 surfaced when a mandatory security event cannot be durably
+/// recorded at a severity meeting `[audit] blocking_threshold`. Deliberately
+/// opaque: no audit-adapter internals reach the wire.
+fn audit_blocking_error_response() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": "server_error",
+            "error_description": "internal server error",
+        })),
+    )
+        .into_response()
 }
 
 /// Map a rejection reason to its 401 response. Descriptions are fixed strings:

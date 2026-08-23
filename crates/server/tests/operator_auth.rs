@@ -315,6 +315,114 @@ async fn locked_out_peers_get_429_with_retry_after_before_credentials_are_evalua
 }
 
 // ---------------------------------------------------------------------------
+// Blocking-audit contract on the mandatory channel: a sink failure at a
+// severity meeting `[audit] blocking_threshold` (default `warning`; both
+// admin-plane security events warn) must fail the request closed with a
+// generic 500 — never answer the request on a dropped mandatory record.
+// ---------------------------------------------------------------------------
+
+/// Build the admin plane over mocks, keeping the mock handles, from a
+/// caller-supplied config.
+async fn plane_with(config: &AppConfig) -> AdminPlane {
+    let (service, audit, limiter) = mock_service(config, HashMap::new());
+    let routers = build_routers(config, service).expect("the test config builds routers");
+    AdminPlane {
+        app: routers.admin.expect("role admin binds the admin plane"),
+        audit,
+        limiter,
+    }
+}
+
+#[tokio::test]
+async fn failed_auth_fails_closed_500_when_the_mandatory_audit_sink_blocks() {
+    let config = admin_config(&["shared_secret"]);
+    let plane = plane_with(&config).await;
+    // The audit sink is down. `OperatorAuthenticationFailed` warns, which
+    // meets the default `blocking_threshold = "warning"`, so the event cannot
+    // be recorded and the request must fail closed instead of answering 401.
+    plane.audit.set_fail_mode(true).await;
+
+    let response = plane.send("GET", "/internal/stats", None, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a blocking-threshold audit failure must fail the request closed"
+    );
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "server_error");
+
+    // The failed attempt still drew its budget unit before the emission —
+    // the throttle accounting is unaffected by the audit channel's state.
+    assert_eq!(plane.limiter.consume_calls().await, 1);
+    // And nothing pretends the event was durably recorded.
+    assert!(plane.audit.events().await.is_empty());
+}
+
+#[tokio::test]
+async fn failed_auth_stays_401_when_the_audit_failure_is_below_the_blocking_threshold() {
+    let mut config = admin_config(&["shared_secret"]);
+    // On the RFC 5424 scale warning is less severe than critical, so a sink
+    // failure under this threshold logs the fallback and lets the request
+    // proceed to its normal outcome.
+    config.audit.blocking_threshold = "critical".to_string();
+    let plane = plane_with(&config).await;
+    plane.audit.set_fail_mode(true).await;
+
+    let response = plane.send("GET", "/internal/stats", None, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "below the blocking threshold the normal rejection stands"
+    );
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unauthorized");
+    assert_eq!(plane.limiter.consume_calls().await, 1);
+}
+
+#[tokio::test]
+async fn throttle_denial_fails_closed_500_when_the_mandatory_audit_sink_blocks() {
+    let config = admin_config(&["shared_secret"]);
+    let plane = plane_with(&config).await;
+    plane.limiter.set_deny_mode(true).await;
+    plane.audit.set_fail_mode(true).await;
+
+    let response = plane
+        .send("GET", "/internal/stats", Some(TEST_SECRET), None)
+        .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a lockout whose ThrottleExceeded event cannot be recorded at the \
+         blocking threshold fails closed rather than answering 429"
+    );
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "server_error");
+    assert!(plane.audit.events().await.is_empty());
+}
+
+#[tokio::test]
+async fn throttle_denial_stays_429_when_the_audit_failure_is_below_the_blocking_threshold() {
+    let mut config = admin_config(&["shared_secret"]);
+    config.audit.blocking_threshold = "critical".to_string();
+    let plane = plane_with(&config).await;
+    plane.limiter.set_deny_mode(true).await;
+    plane.audit.set_fail_mode(true).await;
+
+    let response = plane
+        .send("GET", "/internal/stats", Some(TEST_SECRET), None)
+        .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the lockout itself is unaffected below the blocking threshold"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // mTLS mechanism: proxy-asserted subject becomes the named principal
 // ---------------------------------------------------------------------------
 
