@@ -158,10 +158,10 @@ impl OidcExchange {
         if !raw_path.starts_with(b"/") || raw_path.starts_with(b"//") {
             return Err(StatusCode::BAD_REQUEST);
         }
-        if raw_path.contains(&b'?') || raw_path.contains(&b'#') {
+        let raw_path = std::str::from_utf8(raw_path).map_err(|_| StatusCode::BAD_REQUEST)?;
+        if request.hints.path_is_raw && (raw_path.contains('?') || raw_path.contains('#')) {
             return Err(StatusCode::BAD_REQUEST);
         }
-        let raw_path = std::str::from_utf8(raw_path).map_err(|_| StatusCode::BAD_REQUEST)?;
         let path = if request.hints.path_is_raw {
             percent_encoding::percent_decode_str(raw_path)
                 .decode_utf8()
@@ -174,10 +174,14 @@ impl OidcExchange {
             Some(b"") | None => None,
             Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| StatusCode::BAD_REQUEST)?),
         };
-        let encoded_path =
-            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-                .replace("%2F", "/");
+        // Re-encode decoded host path data before constructing `http::Uri`; this keeps
+        // decoded `?` and `#` inside the path rather than promoting them to URI delimiters.
+        let encoded_path = percent_encoding::utf8_percent_encode(
+            &path,
+            percent_encoding::NON_ALPHANUMERIC,
+        )
+        .to_string()
+        .replace("%2F", "/");
         let path_and_query = match query {
             Some(query) => format!("{encoded_path}?{query}"),
             None => encoded_path,

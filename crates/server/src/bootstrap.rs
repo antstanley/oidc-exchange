@@ -490,6 +490,9 @@ pub(crate) async fn conformance_observe(
                 .decode_utf8()
                 .ok()?;
             let prefix = "/auth";
+            if decoded == "/" {
+                return Some(decoded.into_owned());
+            }
             let stripped =
                 crate::middleware::base_path::strip_prefix_at_segment_boundary(&decoded, prefix)?;
             Some(if stripped.is_empty() { "/" } else { stripped }.to_string())

@@ -33,7 +33,7 @@ export function fromApiGatewayV2(event: APIGatewayProxyEventV2, maxBodyBytes = N
     method: event.requestContext?.http?.method ?? "GET",
     rawPath: Buffer.from(event.rawPath || event.requestContext?.http?.path || "/"),
     query: event.rawQueryString ? Buffer.from(event.rawQueryString) : undefined,
-    headers: flattenHeaders(event.headers),
+    headers: flattenV2Headers(event.headers, event.cookies),
     body: decodeBody(event.body, event.isBase64Encoded, maxBodyBytes),
     pathIsRaw: Boolean(event.rawPath),
   };
@@ -54,6 +54,12 @@ function flattenHeaders(single?: Record<string, string | undefined> | null, mult
   const headers: HeaderEntry[] = [];
   if (multi) for (const [name, values] of Object.entries(multi)) for (const value of values ?? []) headers.push({ name, value });
   else if (single) for (const [name, value] of Object.entries(single)) if (value !== undefined) headers.push({ name, value });
+  return headers;
+}
+
+function flattenV2Headers(single?: Record<string, string | undefined> | null, cookies?: string[]): HeaderEntry[] {
+  const headers = flattenHeaders(single);
+  for (const value of cookies ?? []) headers.push({ name: "cookie", value });
   return headers;
 }
 

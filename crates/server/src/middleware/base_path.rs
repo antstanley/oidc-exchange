@@ -111,6 +111,9 @@ fn qualifies_for_conformance_observation(
     conformance_path: Option<&ConformancePath>,
 ) -> bool {
     let path = conformance_path.map_or(path, |path| path.0.as_str());
+    if path == "/" {
+        return true;
+    }
     match base_path.filter(|prefix| !prefix.is_empty() && *prefix != "/") {
         Some(prefix) => {
             strip_prefix_at_segment_boundary(path, prefix).is_some()

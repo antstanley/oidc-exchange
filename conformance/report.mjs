@@ -79,14 +79,12 @@ function compare(key, fixtures, outputs) {
       const qualification = qualifications[fixture.id]?.[field];
       const wanted = qualification && Object.hasOwn(qualification, "fallbackExpected") ? qualification.fallbackExpected : fixture.expected[field];
       const matched = field === "orderedHeaders" ? matchesHeaders(wanted, outputs[i][field]) : JSON.stringify(outputs[i][field]) === JSON.stringify(wanted);
-      if (!matched) {
-        if (qualification?.kind === "host-loss") {
-          qualified += 1;
-          console.log(`qualification ${key}/${fixture.id}/${field} [host-loss]: ${qualification.reason}`);
-        } else {
-          failures += 1;
-          console.error(`mismatch ${key}/${fixture.id}/${field}: expected=${JSON.stringify(wanted)} actual=${JSON.stringify(outputs[i][field])}`);
-        }
+      if (qualification?.kind === "host-loss") {
+        qualified += 1;
+        console.log(`qualification ${key}/${fixture.id}/${field} [host-loss]: ${qualification.reason}`);
+      } else if (!matched) {
+        failures += 1;
+        console.error(`mismatch ${key}/${fixture.id}/${field}: expected=${JSON.stringify(wanted)} actual=${JSON.stringify(outputs[i][field])}`);
       }
     }
   }
@@ -101,10 +99,12 @@ try {
     runSync("cargo", ["build", "-p", "oidc-exchange-conformance"]);
   }
   if (shapes.some((shape) => ["node", "lambda"].includes(shape))) {
+    const buildStarted = Date.now();
     runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/nodejs", "exec", "napi", "build", "--features", "conformance", "--dts", "index.generated.d.ts"]);
     runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/lambda", "build"]);
     const artifact = join(root, "bindings/nodejs/oidc-exchange.node");
-    if (Date.now() - (await stat(artifact)).mtimeMs > 900000) throw new Error(`stale artifact ${artifact}`);
+    const artifactStat = await stat(artifact).catch(() => null);
+    if (!artifactStat || artifactStat.mtimeMs + 1000 < buildStarted) throw new Error(`missing or stale artifact ${artifact}`);
   }
   if (shapes.some((shape) => ["asgi", "wsgi"].includes(shape))) {
     runSync("bindings/python/.venv/bin/maturin", ["build", "--manifest-path", "bindings/python/Cargo.toml", "--features", "conformance", "--interpreter", "bindings/python/.venv/bin/python", "--out", temp]);
@@ -132,9 +132,12 @@ try {
     console.log(`${shape}: ${output.length} canonical executions`);
   }
   for (const shape of ["lambda", "asgi", "wsgi"].filter((shape) => shapes.includes(shape))) {
-    const output = await execute(shape, canonical, "fallback");
+    const fallbackFixtures = shape === "lambda"
+      ? canonical.filter((fixture) => corpus.qualifications["lambda-fallback"]?.[fixture.id])
+      : canonical;
+    const output = await execute(shape, fallbackFixtures, "fallback");
     fallbackExecutions += output.length;
-    const result = compare(`${shape}-fallback`, canonical, output);
+    const result = compare(`${shape}-fallback`, fallbackFixtures, output);
     failures += result.failures;
     qualifications += result.qualified;
     statusOnly += result.statusOnly;

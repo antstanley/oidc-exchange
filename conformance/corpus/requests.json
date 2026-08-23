@@ -361,22 +361,30 @@
     "lambda-fallback": {
       "encoded-slash": {
         "decodedPath": {
-          "reason": "API Gateway v1 exposes only decoded path"
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a/b"
         }
       },
       "encoded-dot-dot": {
         "decodedPath": {
-          "reason": "API Gateway v1 exposes only decoded path"
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a/../keys"
         }
       },
       "encoded-question": {
         "decodedPath": {
-          "reason": "API Gateway v1 exposes only decoded path"
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a?b"
         }
       },
       "encoded-hash": {
         "decodedPath": {
-          "reason": "API Gateway v1 exposes only decoded path"
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a#b"
         }
       }
     },

@@ -199,6 +199,25 @@ describe("fromApiGatewayV2", () => {
     expect(Buffer.from(req.rawPath).toString()).toBe("/token");
     expect(req.body?.toString("utf-8")).toBe("grant_type=authorization_code");
   });
+
+  it("preserves v2 cookies as ordered duplicate request headers", () => {
+    const event = {
+      version: "2.0",
+      requestContext: { http: { method: "GET", path: "/auth/health" } },
+      headers: { accept: "application/json" },
+      cookies: ["first=1", "second=2"],
+      rawPath: "/auth/health",
+      rawQueryString: "",
+      body: null,
+      isBase64Encoded: false,
+    } as unknown as APIGatewayProxyEventV2;
+
+    expect(fromApiGatewayV2(event).headers).toEqual([
+      { name: "accept", value: "application/json" },
+      { name: "cookie", value: "first=1" },
+      { name: "cookie", value: "second=2" },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
