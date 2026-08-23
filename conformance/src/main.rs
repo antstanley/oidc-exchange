@@ -92,13 +92,24 @@ fn run_native(config: &str, input: Input) -> Value {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         stream.write_all(request.as_bytes()).await.unwrap();
         if input.body_length > 0 {
-            stream
-                .write_all(&vec![b'x'; input.body_length])
-                .await
-                .unwrap();
+            if let Err(error) = stream.write_all(&vec![b'x'; input.body_length]).await {
+                if error.kind() != std::io::ErrorKind::ConnectionReset
+                    && error.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    panic!("write native body: {error}");
+                }
+            }
         }
         let mut bytes = Vec::new();
-        stream.read_to_end(&mut bytes).await.unwrap();
+        let mut chunk = [0_u8; 16 * 1024];
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) => panic!("read native response: {error}"),
+            }
+        }
         server.abort();
         let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
         let head = String::from_utf8_lossy(&bytes[..split]);
@@ -107,7 +118,11 @@ fn run_native(config: &str, input: Input) -> Value {
     })
 }
 
-fn tagged_headers(headers: Vec<Header>) -> Vec<(String, String)> {
+fn tagged_headers(mut headers: Vec<Header>) -> Vec<(String, String)> {
+    headers.push(Header {
+        name: "x-oidc-conformance-observe".into(),
+        value: "1".into(),
+    });
     headers
         .into_iter()
         .map(|header| {

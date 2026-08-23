@@ -95,7 +95,7 @@ impl OidcExchange {
             },
         };
         let response = py
-            .allow_threads(|| self.inner.runtime_handle_for_test(wire))
+            .allow_threads(|| self.inner.runtime_handle_for_conformance(wire))
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let result = PyDict::new_bound(py);
         result.set_item("status", response.status)?;

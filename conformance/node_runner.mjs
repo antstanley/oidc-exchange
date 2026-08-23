@@ -13,14 +13,14 @@ let createHandler;
 if (shape === "lambda") ({ createHandler } = await import("../bindings/lambda/dist/index.js"));
 
 function request(fixture) {
-  return { method: fixture.method, rawPath: Buffer.from(fixture.rawPath), query: fixture.query == null ? undefined : Buffer.from(fixture.query), headers: fixture.headers, body: Buffer.alloc(fixture.bodyLength, 120), pathIsRaw: fixture.pathIsRaw };
+  return { method: fixture.method, rawPath: Buffer.from(fixture.rawPath), query: fixture.query == null ? undefined : Buffer.from(fixture.query), headers: [...fixture.headers,{name:"x-oidc-conformance-observe",value:"1"}], body: Buffer.alloc(fixture.bodyLength, 120), pathIsRaw: fixture.pathIsRaw };
 }
 function parse(id, response) {
   if (response.status === 413 || !response.body?.length) return { id, status: response.status, executed: true };
   const observed = JSON.parse(Buffer.from(response.body).toString());
   return { id, ...observed, executed: true };
 }
-function headerMaps(headers) {
+function headerMaps(original) { const headers=[...original,{name:"x-oidc-conformance-observe",value:"1"}];
   const multi = {};
   for (const {name,value} of headers) (multi[name] ??= []).push(value);
   return { headers: Object.fromEntries(headers.map(({name,value}) => [name,value])), multi };

@@ -368,6 +368,8 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 
     #[cfg(feature = "conformance")]
     let app = app.fallback(conformance_observe);
+    #[cfg(feature = "conformance")]
+    let app = app.layer(axum::middleware::from_fn(conformance_intercept));
 
     let router = apply_route_layers(
         app,
@@ -432,6 +434,19 @@ fn wrap_with_base_path_under_outer_guard(router: Router, base_path: Option<Strin
 /// test that skipped `validate`) is treated as a programmer error and panics loudly instead
 /// of silently substituting [`oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT`].
 #[cfg(feature = "conformance")]
+async fn conformance_intercept(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if request.headers().contains_key("x-oidc-conformance-observe") {
+        conformance_observe(request).await
+    } else {
+        next.run(request).await
+    }
+}
+
+#[cfg(feature = "conformance")]
 async fn conformance_observe(request: axum::extract::Request) -> axum::response::Response {
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
@@ -445,7 +460,12 @@ async fn conformance_observe(request: axum::extract::Request) -> axum::response:
     let ordered_headers = parts
         .headers
         .iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "host" | "connection"))
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_str(),
+                "host" | "connection" | "x-oidc-conformance-observe"
+            )
+        })
         .filter_map(|(name, value)| {
             value
                 .to_str()

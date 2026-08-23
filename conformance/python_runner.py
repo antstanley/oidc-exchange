@@ -32,7 +32,7 @@ async def asgi(app: Any, f: dict[str, Any]) -> dict[str, Any]:
     messages=[{"type":"http.request","body":body(f),"more_body":False}]; sent=[]
     async def receive(): return messages.pop(0)
     async def send(message): sent.append(message)
-    scope={"type":"http","method":f["method"],"path":decoded(f["rawPath"]),"query_string":(f.get("query") or "").encode("latin-1"),"headers":[(h["name"].encode("latin-1"),h["value"].encode("latin-1")) for h in f["headers"]]}
+    scope={"type":"http","method":f["method"],"path":decoded(f["rawPath"]),"query_string":(f.get("query") or "").encode("latin-1"),"headers":[(h["name"].encode("latin-1"),h["value"].encode("latin-1")) for h in f["headers"]]+[(b"x-oidc-conformance-observe",b"1")]}
     if variant=="faithful": scope["raw_path"]=f["rawPath"].encode("latin-1")
     await app(scope,receive,send)
     status=next(m["status"] for m in sent if m["type"]=="http.response.start")
@@ -43,10 +43,10 @@ def wsgi(app: Any, f: dict[str, Any]) -> dict[str, Any]:
     captured={}
     def start_response(status,headers): captured.update(status=int(status.split()[0]),headers=headers)
     content=next((h["value"] for h in f["headers"] if h["name"].lower()=="content-length"),str(f["bodyLength"]))
-    environ={"REQUEST_METHOD":f["method"],"PATH_INFO":decoded(f["rawPath"]),"QUERY_STRING":f.get("query") or "","wsgi.input":io.BytesIO(body(f)),"CONTENT_LENGTH":content}
+    environ={"HTTP_X_OIDC_CONFORMANCE_OBSERVE":"1","REQUEST_METHOD":f["method"],"PATH_INFO":decoded(f["rawPath"]),"QUERY_STRING":f.get("query") or "","wsgi.input":io.BytesIO(body(f)),"CONTENT_LENGTH":content}
     if variant=="faithful":
         environ["RAW_URI"]=f["rawPath"]+(("?"+f["query"]) if f.get("query") else "")
-        environ["oidc_exchange.headers"]=[(h["name"],h["value"]) for h in f["headers"]]
+        environ["oidc_exchange.headers"]=[(h["name"],h["value"]) for h in f["headers"]]+[("x-oidc-conformance-observe","1")]
     else:
         for h in f["headers"]:
             if h["name"].lower() not in ("content-length","content-type"): environ["HTTP_"+h["name"].upper().replace("-","_")]=h["value"]
