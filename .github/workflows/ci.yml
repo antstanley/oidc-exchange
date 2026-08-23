@@ -117,7 +117,7 @@ jobs:
         run: uv run pytest tests/
 
   web-apps:
-    name: Web Apps (lint, format, typecheck)
+    name: Web Apps (lint, format, typecheck, test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -126,7 +126,7 @@ jobs:
           node-version: 24.18.0
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
       - name: Website — lint
         working-directory: apps/website
         run: pnpm lint
@@ -145,3 +145,6 @@ jobs:
       - name: Admin UI — type-check
         working-directory: apps/admin-ui
         run: pnpm typecheck
+      - name: Admin UI — test
+        working-directory: apps/admin-ui
+        run: pnpm test
