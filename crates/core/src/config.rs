@@ -195,6 +195,9 @@ fn validate_allowlist_entry(entry: &str) -> Result<(), Error> {
 /// See `06-configuration.md` → Sections → `[server]` and Defaults summary.
 pub const DEFAULT_REQUEST_TIMEOUT: &str = "30s";
 
+/// Default request-body ceiling shared by native and embedded hosts: 2 MiB.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
@@ -208,6 +211,8 @@ pub struct ServerConfig {
     /// [`AppConfig::validate`] — an unparseable value fails config load rather than silently
     /// falling back to [`DEFAULT_REQUEST_TIMEOUT`].
     pub request_timeout: String,
+    /// Maximum request body accepted by every host before buffering.
+    pub max_request_body_bytes: usize,
     /// Path prefix (e.g. `"/prod"`) stripped from incoming request paths before routing.
     /// Absent (`None`) by default; exists for deployments fronted by a mount prefix such as
     /// an API Gateway stage, where the platform includes the stage name in the request path
@@ -229,6 +234,7 @@ impl Default for ServerConfig {
             issuer: String::new(),
             role: "all".to_string(),
             request_timeout: DEFAULT_REQUEST_TIMEOUT.to_string(),
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             base_path: None,
         }
     }

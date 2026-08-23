@@ -1,7 +1,9 @@
 """Tests for OidcExchange WSGI adapter."""
 
+import io
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -64,6 +66,39 @@ def test_wsgi_health(test_config):
     client = Client(app)
     response = client.get("/health")
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(("length", "expected"), [(3, 404), (4, 404), (5, 413)])
+def test_wsgi_body_limit_boundary(test_config, length, expected):
+    """WSGI accepts at/below the cap and rejects one byte above without reading it."""
+    from oidc_exchange._wsgi import make_wsgi_app
+
+    instance = OidcExchange(config_string=test_config)
+    app = make_wsgi_app(instance, max_request_body_bytes=4)
+    client = Client(app)
+    response = client.post("/nonexistent", data=b"x" * length)
+    assert response.status_code == expected
+
+
+@pytest.mark.parametrize(("length", "expected"), [("invalid", 400), (str(sys.maxsize), 413)])
+def test_wsgi_malformed_and_huge_content_lengths(test_config, length, expected):
+    """Malformed and huge lengths return typed HTTP errors without reading the stream."""
+    from oidc_exchange._wsgi import make_wsgi_app
+
+    instance = OidcExchange(config_string=test_config)
+    app = make_wsgi_app(instance, max_request_body_bytes=4)
+    status = []
+    result = app(
+        {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/",
+            "CONTENT_LENGTH": length,
+            "wsgi.input": io.BytesIO(b"unused"),
+        },
+        lambda line, _headers: status.append(line),
+    )
+    assert list(result) == [b""]
+    assert status[0].startswith(str(expected))
 
 
 def test_wsgi_jwks(test_config):

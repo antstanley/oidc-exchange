@@ -366,7 +366,12 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         );
     }
 
-    let router = apply_route_layers(app, request_timeout_duration(config)).with_state(state);
+    let router = apply_route_layers(
+        app,
+        request_timeout_duration(config),
+        config.server.max_request_body_bytes,
+    )
+    .with_state(state);
 
     wrap_with_base_path_under_outer_guard(router, config.server.base_path.clone())
 }
@@ -380,11 +385,16 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 /// layer order cannot drift from the shipped one because they are the same code. The
 /// `Clone + Send + Sync + 'static` bounds are what `Router::layer` demands of the state; both
 /// callers (`Router<AppState>` in production, bare `Router<()>` in tests) satisfy them.
-fn apply_route_layers<S>(app: Router<S>, request_timeout: std::time::Duration) -> Router<S>
+fn apply_route_layers<S>(
+    app: Router<S>,
+    request_timeout: std::time::Duration,
+    max_request_body_bytes: usize,
+) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    app.layer(CatchPanicLayer::custom(panic_handler))
+    app.layer(axum::extract::DefaultBodyLimit::max(max_request_body_bytes))
+        .layer(CatchPanicLayer::custom(panic_handler))
         .layer(axum::middleware::from_fn(audit_context_layer))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
@@ -1650,7 +1660,11 @@ mod request_timeout_tests {
         let inner = Router::new()
             .route("/fast", get(fast_handler))
             .route("/slow", get(slow_handler));
-        let stated = apply_route_layers(inner, timeout);
+        let stated = apply_route_layers(
+            inner,
+            timeout,
+            oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
+        );
         wrap_with_base_path_under_outer_guard(stated, None)
     }
 
@@ -1733,7 +1747,11 @@ mod panic_containment_tests {
     /// (inner catch-panic innermost) → [`wrap_with_base_path_under_outer_guard`].
     fn inner_panic_app() -> Router {
         let inner = Router::new().route("/boom", get(panicking_handler));
-        let stated = apply_route_layers(inner, std::time::Duration::from_secs(30));
+        let stated = apply_route_layers(
+            inner,
+            std::time::Duration::from_secs(30),
+            oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
+        );
         wrap_with_base_path_under_outer_guard(stated, None)
     }
 
@@ -1741,8 +1759,12 @@ mod panic_containment_tests {
     /// layers (so the inner guard never sees it) but still inside the outer guard.
     fn outer_panic_app() -> Router {
         let inner = Router::new().route("/fast", get(|| async { "ok" }));
-        let stated = apply_route_layers(inner, std::time::Duration::from_secs(30))
-            .layer(axum::middleware::from_fn(panicking_outer_layer_middleware));
+        let stated = apply_route_layers(
+            inner,
+            std::time::Duration::from_secs(30),
+            oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
+        )
+        .layer(axum::middleware::from_fn(panicking_outer_layer_middleware));
         wrap_with_base_path_under_outer_guard(stated, None)
     }
 
@@ -1824,7 +1846,11 @@ mod panic_containment_tests {
     #[tokio::test]
     async fn happy_path_passes_through_both_guards_unchanged() {
         let inner = Router::new().route("/fast", get(|| async { "ok" }));
-        let stated = apply_route_layers(inner, std::time::Duration::from_secs(30));
+        let stated = apply_route_layers(
+            inner,
+            std::time::Duration::from_secs(30),
+            oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
+        );
         let app = wrap_with_base_path_under_outer_guard(stated, None);
 
         let response = get_response(app, "/fast").await;
