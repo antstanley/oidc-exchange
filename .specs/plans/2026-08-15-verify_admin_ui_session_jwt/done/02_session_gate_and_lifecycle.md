@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** Intentionally omitted at user direction; do not create a certificate file.
 
-**Implements:** [change spec §Proposed changes — Authentication model](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--authentication-model-modify), [§Type changes](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#type-changes), and [§Implementation notes 4–7](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes)
+**Implements:** [change spec §Proposed changes — Authentication model](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--authentication-model-modify), [§Type changes](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#type-changes), and [§Implementation notes 4–7](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes)
 **Depends on:** 01
 **Produces:** every protected route and login decision uses a verified payload, and verified admin login mints only the hardened `__Host-admin_session` cookie.
 **Pointers:** `apps/admin-ui/src/hooks.server.ts:1-40`; `apps/admin-ui/src/routes/login/+page.server.ts:1-58`; `apps/admin-ui/src/routes/logout/+page.server.ts:1-8`; `apps/admin-ui/src/app.d.ts:4-7`; `apps/admin-ui/src/lib/auth.ts:1-55`

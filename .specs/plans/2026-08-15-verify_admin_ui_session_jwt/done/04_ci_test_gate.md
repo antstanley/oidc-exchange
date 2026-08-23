@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** Intentionally omitted at user direction; do not create a certificate file.
 
-**Implements:** [change spec §Proposed changes — Development Guidelines](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#specsdevelopment-guidelinesmd--decisions-three-toolchains-one-ci-modify) and [§Implementation notes 8](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes)
+**Implements:** [change spec §Proposed changes — Development Guidelines](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#specsdevelopment-guidelinesmd--decisions-three-toolchains-one-ci-modify) and [§Implementation notes 8](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes)
 **Depends on:** 03
 **Produces:** the existing `web-apps` workflow invokes `pnpm test` in `apps/admin-ui` after its lint, format, and typecheck gates.
 **Pointers:** `.github/workflows/ci.yml:121-147`; `apps/admin-ui/package.json:6-17`; `.specs/development-guidelines.md:330-344`

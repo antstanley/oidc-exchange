@@ -1,6 +1,6 @@
 # Change: Verify the admin console's session JWT against the service JWKS
 
-**Status:** Proposed · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Target:** apps/admin-ui
+**Status:** Merged · **Date:** 2026-08-05 · **Merged:** 2026-08-23 · **Owner:** Ant Stanley · **Target:** apps/admin-ui
 
 Make the admin console verify the JWS signature of every token it treats as a credential,
 against the JWKS the exchange service already publishes, before any claim of that token
@@ -30,14 +30,14 @@ into every access token it subsequently signs. The console already ships the mis
 anywhere in the repository. The verification step was written and never wired in. This violates
 the repository's own invariants I1 ("signature before trust", which names `apps/admin-ui`'s
 session check) and I13, and it is the console-side twin of the service-side fix already merged as
-[2026-07-01-require_iss_aud_in_token_validation.md](merged/2026-07-01-require_iss_aud_in_token_validation.md).
+[2026-07-01-require_iss_aud_in_token_validation.md](2026-07-01-require_iss_aud_in_token_validation.md).
 
 Whether any operator runs this console on a reachable network is **not resolved by this
 repository, and this change spec does not assume it away**. `apps/admin-ui/package.json` is
 `private: true` at `0.0.1`; `.github/workflows/release.yml` has no admin-ui job and the root
 `Dockerfile` builds only the Rust binary; `.github/workflows/ci.yml:139-147` runs `pnpm lint`,
 `format:check` and `typecheck` for the console and never `pnpm build` or a test. Against that,
-[admin-ui/specs/00-overview.md](../admin-ui/specs/00-overview.md) is marked `Implemented` and
+[admin-ui/specs/00-overview.md](../../admin-ui/specs/00-overview.md) is marked `Implemented` and
 describes a separate deployed service holding `INTERNAL_API_SECRET`, and `svelte.config.js`
 targets `@sveltejs/adapter-node`. The exposure question is recorded in Open questions and is
 tracked as blocking nothing here: the source defect is unconditional, the fix is small, and a
@@ -53,11 +53,11 @@ and the `String()` coercion in `hasAdminClaim` (`src/lib/auth.ts:43`).
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/admin-ui/specs/00-overview.md`](../admin-ui/specs/00-overview.md) | Replace the `Authentication model` section with the verifying gate and the single `verifyAccessToken` helper; extend `Environment` with the two new required variables; extend Assumptions, Decisions, and Open questions |
-| [`.specs/development-guidelines.md`](../development-guidelines.md) | Extend the *Three toolchains, one CI* Decision: the `web-apps` job also runs `pnpm test` for `apps/admin-ui` |
+| [`.specs/admin-ui/specs/00-overview.md`](../../admin-ui/specs/00-overview.md) | Replace the `Authentication model` section with the verifying gate and the single `verifyAccessToken` helper; extend `Environment` with the two new required variables; extend Assumptions, Decisions, and Open questions |
+| [`.specs/development-guidelines.md`](../../development-guidelines.md) | Extend the *Three toolchains, one CI* Decision: the `web-apps` job also runs `pnpm test` for `apps/admin-ui` |
 
 No service-side spec changes. The console consumes `GET /.well-known/openid-configuration` and
-`GET /keys` exactly as [service/specs/04-http-api.md](../service/specs/04-http-api.md) already
+`GET /keys` exactly as [service/specs/04-http-api.md](../../service/specs/04-http-api.md) already
 documents them; this change reuses that surface rather than inventing one. `apps/admin-ui` has no
 `canonical-types.schema.json` sidecar and this change does not add one.
 
@@ -126,7 +126,7 @@ Replaces the section in full.
 > console serves no authenticated route: there is no configuration in which it accepts a token
 > without binding both claims. `ADMIN_UI_AUDIENCE` must match the service's `[token] audience`
 > ([service/specs/06-configuration.md](../../service/specs/06-configuration.md)). That key is
-> required service-side — [2026-08-05-fail_closed_across_config_and_adapters.md](2026-08-05-fail_closed_across_config_and_adapters.md)
+> required service-side — [2026-08-05-fail_closed_across_config_and_adapters.md](../2026-08-05-fail_closed_across_config_and_adapters.md)
 > merges first and makes an unset `token.audience` a startup error rather than an empty `aud` —
 > so the pairing is well defined: a service that boots has an audience, and this console must
 > be configured with the same value.
@@ -273,10 +273,10 @@ Findings: `g4-admin-console-unverified-jwt-session-gate`,
 ## Merge plan
 
 1. Apply the five `Proposed changes` blocks to
-   [admin-ui/specs/00-overview.md](../admin-ui/specs/00-overview.md); bump its `**Date:**` to the
+   [admin-ui/specs/00-overview.md](../../admin-ui/specs/00-overview.md); bump its `**Date:**` to the
    merge date.
 2. Apply the *Three toolchains, one CI* block to
-   [development-guidelines.md](../development-guidelines.md); bump its `**Date:**`.
+   [development-guidelines.md](../../development-guidelines.md); bump its `**Date:**`.
 3. No schema to fold in; no new canonical page.
 4. Flip this file's `**Status:**` to `Merged`, add `**Merged:** YYYY-MM-DD`, and move it to
    `.specs/changes/merged/`.
@@ -312,7 +312,7 @@ Findings: `g4-admin-console-unverified-jwt-session-gate`,
 - *Fail-closed on JWKS unavailability.* **A failed discovery or JWKS fetch ends the session
   rather than falling back to a stale-but-usable cache beyond its TTL or to unverified claims.**
   Matches the service's own fail-closed JWKS handling
-  ([merged/2026-07-01-harden_outbound_provider_http.md](merged/2026-07-01-harden_outbound_provider_http.md));
+  ([merged/2026-07-01-harden_outbound_provider_http.md](2026-07-01-harden_outbound_provider_http.md));
   the alternative degrades to exactly the behaviour this change removes.
 - *Existing sessions end at deploy.* **Renaming the cookie invalidates every session in flight.**
   Every session that exists under the current code is one that was admitted without a signature
@@ -332,7 +332,7 @@ Findings: `g4-admin-console-unverified-jwt-session-gate`,
 - The console still holds `INTERNAL_API_SECRET` and spends it on behalf of whoever its gate
   admits. This change locks the front door and leaves the confused-deputy shape intact. Whether
   to scope the console's credential down to the operations it needs is open and belongs to
-  [2026-08-05-harden_admin_plane.md](2026-08-05-harden_admin_plane.md). Merge order: that
+  [2026-08-05-harden_admin_plane.md](../2026-08-05-harden_admin_plane.md). Merge order: that
   sibling names this spec a prerequisite, and its Environment and Decisions blocks for the same
   admin-ui page are written against the text this spec leaves behind — so this spec merges
   strictly first, and any change to those two blocks here means re-checking that sibling's.

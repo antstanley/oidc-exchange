@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** Intentionally omitted at user direction; do not create a certificate file.
 
-**Implements:** [change spec §Implementation notes 8–9](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes), [§Proposed changes — Authentication model](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--authentication-model-modify), and [§Proposed changes — Environment](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--environment-modify)
+**Implements:** [change spec §Implementation notes 8–9](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes), [§Proposed changes — Authentication model](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--authentication-model-modify), and [§Proposed changes — Environment](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--environment-modify)
 **Depends on:** 01, 02
 **Produces:** deterministic Vitest coverage generates a signing key/JWKS fixture and proves verifier, hook, and login behavior across valid and adversarial JWT inputs.
 **Pointers:** `apps/admin-ui/package.json:6-37`; `apps/admin-ui/vite.config.ts:1-10`; `apps/admin-ui/src/lib/auth.ts:1-55`; `apps/admin-ui/src/hooks.server.ts:1-40`; `apps/admin-ui/src/routes/login/+page.server.ts:1-58`; `bindings/lambda/__tests__/adapters.test.ts:1-20`

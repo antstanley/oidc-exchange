@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** Intentionally omitted at user direction; do not create a certificate file.
 
-**Implements:** [change spec §Proposed changes — Authentication model](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--authentication-model-modify), [§Proposed changes — Environment](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--environment-modify), [§Type changes](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#type-changes), and [§Implementation notes 1–3](../../../changes/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes)
+**Implements:** [change spec §Proposed changes — Authentication model](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--authentication-model-modify), [§Proposed changes — Environment](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#specsadmin-uispecs00-overviewmd--environment-modify), [§Type changes](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#type-changes), and [§Implementation notes 1–3](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#implementation-notes)
 **Depends on:** —
 **Produces:** `verifyAccessToken(token)` returns only a signature-verified, issuer- and audience-bound payload using discovery-resolved JWKS; no helper decodes claims without verification.
 **Pointers:** `apps/admin-ui/package.json:6-37`; `pnpm-lock.yaml:15-68`; `apps/admin-ui/src/lib/auth.ts:1-55`; `apps/admin-ui/src/app.d.ts:1-11`; `.specs/service/specs/04-http-api.md:49-54`

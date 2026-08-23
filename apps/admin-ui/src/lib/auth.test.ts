@@ -35,7 +35,13 @@ function jsonResponse(value: unknown, status = 200): Response {
 
 async function signToken(
   claims: Record<string, unknown> = {},
-  options: { key?: CryptoKey; kid?: string; algorithm?: string; typ?: string; omit?: string[] } = {},
+  options: {
+    key?: CryptoKey;
+    kid?: string;
+    algorithm?: string;
+    typ?: string;
+    omit?: string[];
+  } = {},
 ): Promise<string> {
   const omit = new Set(options.omit ?? []);
   const payload: Record<string, unknown> = { role: "admin" };
@@ -44,11 +50,16 @@ async function signToken(
     kid: options.kid ?? "primary",
     typ: options.typ ?? "JWT",
   });
-  if (!omit.has("iss")) signer = signer.setIssuer(typeof claims.iss === "string" ? claims.iss : ISSUER);
-  if (!omit.has("aud")) signer = signer.setAudience(typeof claims.aud === "string" ? claims.aud : AUDIENCE);
-  if (!omit.has("sub")) signer = signer.setSubject(typeof claims.sub === "string" ? claims.sub : "operator-1");
-  if (!omit.has("iat")) signer = signer.setIssuedAt(typeof claims.iat === "number" ? claims.iat : now);
-  if (!omit.has("exp")) signer = signer.setExpirationTime(typeof claims.exp === "number" ? claims.exp : now + 300);
+  if (!omit.has("iss"))
+    signer = signer.setIssuer(typeof claims.iss === "string" ? claims.iss : ISSUER);
+  if (!omit.has("aud"))
+    signer = signer.setAudience(typeof claims.aud === "string" ? claims.aud : AUDIENCE);
+  if (!omit.has("sub"))
+    signer = signer.setSubject(typeof claims.sub === "string" ? claims.sub : "operator-1");
+  if (!omit.has("iat"))
+    signer = signer.setIssuedAt(typeof claims.iat === "number" ? claims.iat : now);
+  if (!omit.has("exp"))
+    signer = signer.setExpirationTime(typeof claims.exp === "number" ? claims.exp : now + 300);
   if (typeof claims.nbf === "number") signer = signer.setNotBefore(claims.nbf);
   for (const [name, value] of Object.entries(claims)) {
     if (!["iss", "aud", "sub", "iat", "exp", "nbf"].includes(name)) payload[name] = value;
@@ -62,7 +73,12 @@ beforeAll(async () => {
   privateKey = primary.privateKey;
   alternateKey = alternate.privateKey;
   publicJwk = { ...(await exportJWK(primary.publicKey)), kid: "primary", alg: "RS256", use: "sig" };
-  alternateJwk = { ...(await exportJWK(alternate.publicKey)), kid: "alternate", alg: "RS256", use: "sig" };
+  alternateJwk = {
+    ...(await exportJWK(alternate.publicKey)),
+    kid: "alternate",
+    alg: "RS256",
+    use: "sig",
+  };
 });
 
 beforeEach(async () => {
@@ -76,18 +92,21 @@ beforeEach(async () => {
     id_token_signing_alg_values_supported: ["RS256"],
   };
   jwks = { keys: [publicJwk] };
-  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
-    const url = String(input);
-    if (url === DISCOVERY_URL) {
-      discoveryFetches += 1;
-      return fetchFailure === "discovery" ? jsonResponse({}, 503) : jsonResponse(discovery);
-    }
-    if (url === JWKS_URL) {
-      jwksFetches += 1;
-      return fetchFailure === "jwks" ? jsonResponse({}, 503) : jsonResponse(jwks);
-    }
-    throw new Error("Unexpected request");
-  }));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === DISCOVERY_URL) {
+        discoveryFetches += 1;
+        return fetchFailure === "discovery" ? jsonResponse({}, 503) : jsonResponse(discovery);
+      }
+      if (url === JWKS_URL) {
+        jwksFetches += 1;
+        return fetchFailure === "jwks" ? jsonResponse({}, 503) : jsonResponse(jwks);
+      }
+      throw new Error("Unexpected request");
+    }),
+  );
   const { resetAuthCacheForTesting } = await import("./auth");
   resetAuthCacheForTesting();
 });
@@ -120,13 +139,22 @@ describe("verifyAccessToken", () => {
 
   it.each(["exp", "iss", "aud", "sub", "iat"])("requires %s", async (claim) => {
     const { verifyAccessToken } = await import("./auth");
-    await expect(verifyAccessToken(await signToken({}, { omit: [claim] }))).rejects.toBeInstanceOf(Error);
+    await expect(verifyAccessToken(await signToken({}, { omit: [claim] }))).rejects.toBeInstanceOf(
+      Error,
+    );
   });
 
   it("rejects malformed and unsecured tokens", async () => {
     const { verifyAccessToken } = await import("./auth");
     await expect(verifyAccessToken("not-a-jwt")).rejects.toBeInstanceOf(Error);
-    const unsecured = new UnsecuredJWT({ role: "admin", iss: ISSUER, aud: AUDIENCE, sub: "operator-1", exp: now + 60, iat: now }).encode();
+    const unsecured = new UnsecuredJWT({
+      role: "admin",
+      iss: ISSUER,
+      aud: AUDIENCE,
+      sub: "operator-1",
+      exp: now + 60,
+      iat: now,
+    }).encode();
     await expect(verifyAccessToken(unsecured)).rejects.toBeInstanceOf(Error);
   });
 
@@ -135,7 +163,11 @@ describe("verifyAccessToken", () => {
     const { verifyAccessToken } = await import("./auth");
     const token = await new SignJWT({ role: "admin" })
       .setProtectedHeader({ alg: "ES256", kid: "ec", typ: "JWT" })
-      .setIssuer(ISSUER).setAudience(AUDIENCE).setSubject("operator-1").setIssuedAt(now).setExpirationTime(now + 60)
+      .setIssuer(ISSUER)
+      .setAudience(AUDIENCE)
+      .setSubject("operator-1")
+      .setIssuedAt(now)
+      .setExpirationTime(now + 60)
       .sign(ec.privateKey);
     await expect(verifyAccessToken(token)).rejects.toBeInstanceOf(Error);
   });
@@ -150,26 +182,74 @@ describe("verifyAccessToken", () => {
     expect(jwksFetches).toBe(2);
   });
 
-  it.each(["discovery", "jwks"] as const)("fails closed when %s fetch fails and does not cache failure", async (target) => {
-    const { verifyAccessToken } = await import("./auth");
-    fetchFailure = target;
-    const token = await signToken();
-    await expect(verifyAccessToken(token)).rejects.toBeInstanceOf(Error);
-    fetchFailure = undefined;
-    await expect(verifyAccessToken(token)).resolves.toMatchObject({ sub: "operator-1" });
-    expect(discoveryFetches).toBeGreaterThanOrEqual(1);
-    expect(jwksFetches).toBeGreaterThanOrEqual(target === "jwks" ? 2 : 1);
-  });
+  it.each(["discovery", "jwks"] as const)(
+    "fails closed when %s fetch fails and does not cache failure",
+    async (target) => {
+      const { verifyAccessToken } = await import("./auth");
+      fetchFailure = target;
+      const token = await signToken();
+      await expect(verifyAccessToken(token)).rejects.toBeInstanceOf(Error);
+      fetchFailure = undefined;
+      await expect(verifyAccessToken(token)).resolves.toMatchObject({ sub: "operator-1" });
+      expect(discoveryFetches).toBeGreaterThanOrEqual(1);
+      expect(jwksFetches).toBeGreaterThanOrEqual(target === "jwks" ? 2 : 1);
+    },
+  );
 
   it.each([
-    ["issuer mismatch", () => { discovery.issuer = "https://foreign.example"; }],
-    ["cross-origin JWKS", () => { discovery.jwks_uri = "https://keys.example/jwks"; }],
-    ["insecure JWKS", () => { discovery.jwks_uri = "http://issuer.example/keys"; }],
-    ["empty algorithms", () => { discovery.id_token_signing_alg_values_supported = []; }],
-    ["none algorithm", () => { discovery.id_token_signing_alg_values_supported = ["none"]; }],
-    ["too many algorithms", () => { discovery.id_token_signing_alg_values_supported = Array.from({ length: 17 }, (_, index) => `A${index}`); }],
-    ["empty JWKS", () => { jwks = { keys: [] }; }],
-    ["too many keys", () => { jwks = { keys: Array.from({ length: 33 }, (_, index) => ({ ...publicJwk, kid: `key-${index}` })) }; }],
+    [
+      "issuer mismatch",
+      () => {
+        discovery.issuer = "https://foreign.example";
+      },
+    ],
+    [
+      "cross-origin JWKS",
+      () => {
+        discovery.jwks_uri = "https://keys.example/jwks";
+      },
+    ],
+    [
+      "insecure JWKS",
+      () => {
+        discovery.jwks_uri = "http://issuer.example/keys";
+      },
+    ],
+    [
+      "empty algorithms",
+      () => {
+        discovery.id_token_signing_alg_values_supported = [];
+      },
+    ],
+    [
+      "none algorithm",
+      () => {
+        discovery.id_token_signing_alg_values_supported = ["none"];
+      },
+    ],
+    [
+      "too many algorithms",
+      () => {
+        discovery.id_token_signing_alg_values_supported = Array.from(
+          { length: 17 },
+          (_, index) => `A${index}`,
+        );
+      },
+    ],
+    [
+      "empty JWKS",
+      () => {
+        jwks = { keys: [] };
+      },
+    ],
+    [
+      "too many keys",
+      () => {
+        jwks = {
+          keys: Array.from({ length: 33 }, (_, index) => ({ ...publicJwk, kid: `key-${index}` })),
+        };
+      },
+    ],
   ])("rejects bounded discovery/JWKS case: %s", async (_name, mutate) => {
     mutate();
     const { verifyAccessToken } = await import("./auth");
@@ -178,8 +258,11 @@ describe("verifyAccessToken", () => {
 });
 
 describe("hasAdminClaim", () => {
-  it.each([undefined, ["admin"], 1, { value: "admin" }])("rejects non-string value %j", async (role) => {
-    const { hasAdminClaim } = await import("./auth");
-    expect(hasAdminClaim({ role } as never)).toBe(false);
-  });
+  it.each([undefined, ["admin"], 1, { value: "admin" }])(
+    "rejects non-string value %j",
+    async (role) => {
+      const { hasAdminClaim } = await import("./auth");
+      expect(hasAdminClaim({ role } as never)).toBe(false);
+    },
+  );
 });

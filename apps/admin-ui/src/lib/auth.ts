@@ -39,7 +39,8 @@ function requireEnvironment(name: string): string {
 function requireHttpsUrl(value: string, name: string): URL {
   const url = new URL(value);
   if (url.protocol !== "https:") throw new Error(`${name} must use HTTPS`);
-  if (url.username || url.password || url.hash) throw new Error(`${name} contains forbidden URL components`);
+  if (url.username || url.password || url.hash)
+    throw new Error(`${name} contains forbidden URL components`);
   return url;
 }
 
@@ -74,24 +75,42 @@ function parseDiscovery(value: unknown, exchangeUrl: URL): DiscoveryDocument {
   const jwksUrl = requireHttpsUrl(value.jwks_uri, "Discovery jwks_uri");
   if (jwksUrl.origin !== exchangeUrl.origin) throw new Error("Discovery jwks_uri origin mismatch");
   const rawAlgorithms = value.id_token_signing_alg_values_supported;
-  if (!Array.isArray(rawAlgorithms) || rawAlgorithms.length === 0 || rawAlgorithms.length > MAX_ALGORITHMS) {
+  if (
+    !Array.isArray(rawAlgorithms) ||
+    rawAlgorithms.length === 0 ||
+    rawAlgorithms.length > MAX_ALGORITHMS
+  ) {
     throw new Error("Discovery signing algorithms are invalid");
   }
   const algorithms = rawAlgorithms.filter(
-    (algorithm): algorithm is string => typeof algorithm === "string" && algorithm.length > 0 && algorithm !== "none",
+    (algorithm): algorithm is string =>
+      typeof algorithm === "string" && algorithm.length > 0 && algorithm !== "none",
   );
-  if (algorithms.length !== rawAlgorithms.length || new Set(algorithms).size !== algorithms.length) {
+  if (
+    algorithms.length !== rawAlgorithms.length ||
+    new Set(algorithms).size !== algorithms.length
+  ) {
     throw new Error("Discovery signing algorithms are invalid");
   }
   return { issuer: value.issuer, jwksUri: jwksUrl.href, algorithms };
 }
 
 function parseJwks(value: unknown): { keys: Record<string, unknown>[] } {
-  if (!isRecord(value) || !Array.isArray(value.keys) || value.keys.length === 0 || value.keys.length > MAX_JWKS_KEYS) {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.keys) ||
+    value.keys.length === 0 ||
+    value.keys.length > MAX_JWKS_KEYS
+  ) {
     throw new Error("JWKS is invalid");
   }
   const keys = value.keys.map((key) => {
-    if (!isRecord(key) || typeof key.kty !== "string" || typeof key.kid !== "string" || key.kid.length === 0) {
+    if (
+      !isRecord(key) ||
+      typeof key.kty !== "string" ||
+      typeof key.kid !== "string" ||
+      key.kid.length === 0
+    ) {
       throw new Error("JWKS key is invalid");
     }
     return key;
@@ -109,7 +128,8 @@ async function loadVerificationMaterial(): Promise<CachedVerificationMaterial> {
 
 async function getVerificationMaterial(forceRefresh = false): Promise<CachedVerificationMaterial> {
   const now = Date.now();
-  if (!forceRefresh && cachedMaterial && now - cachedMaterial.cachedAt < CACHE_TTL_MS) return cachedMaterial;
+  if (!forceRefresh && cachedMaterial && now - cachedMaterial.cachedAt < CACHE_TTL_MS)
+    return cachedMaterial;
   if (!materialRequest) {
     materialRequest = loadVerificationMaterial()
       .then((material) => {
@@ -123,9 +143,13 @@ async function getVerificationMaterial(forceRefresh = false): Promise<CachedVeri
   return materialRequest;
 }
 
-async function verifyWithMaterial(token: string, material: CachedVerificationMaterial): Promise<VerifiedAccessTokenClaims> {
+async function verifyWithMaterial(
+  token: string,
+  material: CachedVerificationMaterial,
+): Promise<VerifiedAccessTokenClaims> {
   const header = decodeProtectedHeader(token);
-  if (typeof header.kid !== "string" || header.kid.length === 0) throw new Error("JWT kid is required");
+  if (typeof header.kid !== "string" || header.kid.length === 0)
+    throw new Error("JWT kid is required");
   if (typeof header.alg !== "string" || !material.discovery.algorithms.includes(header.alg)) {
     throw new Error("JWT algorithm is not allowed");
   }
@@ -139,7 +163,8 @@ async function verifyWithMaterial(token: string, material: CachedVerificationMat
     requiredClaims: ["exp", "iss", "aud", "sub", "iat"],
     typ: header.typ,
   });
-  if (typeof payload.sub !== "string" || payload.sub.length === 0) throw new Error("JWT sub is invalid");
+  if (typeof payload.sub !== "string" || payload.sub.length === 0)
+    throw new Error("JWT sub is invalid");
   if (typeof payload.iat !== "number" || payload.iat > Math.floor(Date.now() / 1000)) {
     throw new Error("JWT iat is invalid");
   }

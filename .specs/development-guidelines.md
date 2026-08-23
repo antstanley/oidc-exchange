@@ -360,7 +360,8 @@ A change is done when:
 - *Three toolchains, one CI.* **Rust (rustfmt/clippy/nextest), TS (oxfmt/oxlint/tsc/vitest+pnpm),
   Python (ruff/pyright/pytest+uv) run as CI jobs.** Each language uses its idiomatic tools; one
   workflow enforces them. The Astro/SvelteKit apps add a `web-apps` job (oxlint/oxfmt + `astro
-  check`/`svelte-check`).
+  check`/`svelte-check`), and that job runs `pnpm test` for `apps/admin-ui`, whose session
+  verification boundary is security-critical.
 - *jj as the front end.* **Jujutsu is the sole VCS interface over the Git backend.** Avoids the
   index/working-copy mismatch of mixing `git` commands into a jj working copy.
 - *Manual version parity, machine-checked.* **Versions are bumped by hand in three manifests
