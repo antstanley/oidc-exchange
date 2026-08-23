@@ -2317,6 +2317,32 @@ mod tests {
     /// How long the cache test waits to observe TTL expiry (TTL plus margin).
     const TEST_STATS_CACHE_EXPIRY_WAIT: Duration = Duration::from_millis(1100);
 
+    /// The `[internal_api] stats_cache_ttl` bounds validated by
+    /// `AppConfig` must stay within the range this adapter's builder accepts:
+    /// a config value that passes validation must never panic at wiring time.
+    #[test]
+    fn config_stats_cache_bounds_stay_within_adapter_bounds() {
+        use oidc_exchange_core::config::{MAX_STATS_CACHE_TTL_SECS, MIN_STATS_CACHE_TTL_SECS};
+
+        assert!(
+            Duration::from_secs(MIN_STATS_CACHE_TTL_SECS) >= MIN_STATS_CACHE_TTL,
+            "the config minimum must satisfy the builder's own floor"
+        );
+        assert_eq!(
+            Duration::from_secs(MAX_STATS_CACHE_TTL_SECS),
+            MAX_STATS_CACHE_TTL,
+            "the config maximum must equal the adapter's documented ceiling"
+        );
+        // The documented default sits inside the accepted window too.
+        let default = Duration::from_secs(
+            oidc_exchange_core::service::parse_duration_secs(
+                oidc_exchange_core::config::DEFAULT_STATS_CACHE_TTL,
+            )
+            .expect("the documented default parses"),
+        );
+        assert!(default >= MIN_STATS_CACHE_TTL && default <= MAX_STATS_CACHE_TTL);
+    }
+
     /// Records every request the SDK issues and every ConsumedCapacity the
     /// responses report, so tests can assert how much an admin read cost —
     /// the spec's capacity-based verification — instead of wall-clock time.

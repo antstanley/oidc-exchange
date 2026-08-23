@@ -164,6 +164,10 @@ impl AppConfig {
     ///   bootstrap otherwise builds a noop manager).
     /// - parseable `auth_failure_window` and `auth_lockout`, and a non-zero
     ///   `max_auth_failures`.
+    /// - parseable `stats_cache_ttl` within
+    ///   `[MIN_STATS_CACHE_TTL_SECS, MAX_STATS_CACHE_TTL_SECS]` — a
+    ///   zero-length TTL would serve "cached" numbers that are never usable,
+    ///   and beyond an hour the dashboard counts stop being estimates.
     fn validate_internal_api(&self) -> Result<(), Error> {
         let methods = &self.internal_api.auth_methods;
         if methods.is_empty() {
@@ -282,6 +286,28 @@ impl AppConfig {
         if self.internal_api.max_auth_failures == 0 {
             return Err(Error::ConfigError {
                 detail: "internal_api.max_auth_failures must be non-zero".to_string(),
+            });
+        }
+
+        let stats_cache_secs = prefix_config_error(
+            crate::service::parse_duration_secs(&self.internal_api.stats_cache_ttl),
+            "internal_api.stats_cache_ttl",
+        )?;
+        if stats_cache_secs < MIN_STATS_CACHE_TTL_SECS {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "internal_api.stats_cache_ttl must be at least \
+                     {MIN_STATS_CACHE_TTL_SECS}s (got {stats_cache_secs}s)"
+                ),
+            });
+        }
+        if stats_cache_secs > MAX_STATS_CACHE_TTL_SECS {
+            // The bound is stated, never any cached value.
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "internal_api.stats_cache_ttl exceeds the maximum of \
+                     {MAX_STATS_CACHE_TTL_SECS}s (got {stats_cache_secs}s)"
+                ),
             });
         }
 
@@ -663,6 +689,22 @@ pub const DEFAULT_AUTH_FAILURE_WINDOW: &str = "1m";
 /// peer stays denied after exhausting its failure budget.
 pub const DEFAULT_AUTH_LOCKOUT: &str = "5m";
 
+/// Default `[internal_api] stats_cache_ttl` (humantime): how long the DynamoDB
+/// adapter may serve cached dashboard counts (`count_active_sessions`) before
+/// re-scanning the table.
+pub const DEFAULT_STATS_CACHE_TTL: &str = "60s";
+
+/// Lower bound, in seconds, on `[internal_api] stats_cache_ttl`. The duration
+/// parser resolves whole seconds, and a zero-length TTL would make the cache
+/// useless while still reporting "cached" numbers, so validation refuses
+/// anything below one second.
+pub const MIN_STATS_CACHE_TTL_SECS: u64 = 1;
+
+/// Upper bound, in seconds, on `[internal_api] stats_cache_ttl`: beyond one
+/// hour the "active sessions" figure would be an audit-grade lie rather than a
+/// cached estimate. Matches the DynamoDB adapter's own `MAX_STATS_CACHE_TTL`.
+pub const MAX_STATS_CACHE_TTL_SECS: u64 = 3600;
+
 /// The only values `internal_api.auth_methods` accepts, tried in configured
 /// order. `shared_secret` is the compatibility mechanism; it identifies nobody.
 const ALLOWED_AUTH_METHODS: [&str; 3] = ["operator_token", "mtls", "shared_secret"];
@@ -776,6 +818,11 @@ pub struct InternalApiConfig {
     pub auth_failure_window: String,
     /// Lockout duration once the failure budget is exhausted (humantime).
     pub auth_lockout: String,
+    /// How long the DynamoDB adapter may serve cached dashboard counts
+    /// (`count_active_sessions`) before re-scanning (humantime). Validated to
+    /// `[MIN_STATS_CACHE_TTL_SECS, MAX_STATS_CACHE_TTL_SECS]`; only the
+    /// DynamoDB adapter consumes it.
+    pub stats_cache_ttl: String,
 }
 
 impl Default for InternalApiConfig {
@@ -793,6 +840,7 @@ impl Default for InternalApiConfig {
             max_auth_failures: DEFAULT_MAX_AUTH_FAILURES,
             auth_failure_window: DEFAULT_AUTH_FAILURE_WINDOW.to_string(),
             auth_lockout: DEFAULT_AUTH_LOCKOUT.to_string(),
+            stats_cache_ttl: DEFAULT_STATS_CACHE_TTL.to_string(),
         }
     }
 }
@@ -866,6 +914,7 @@ impl std::fmt::Debug for InternalApiConfig {
             .field("max_auth_failures", &self.max_auth_failures)
             .field("auth_failure_window", &self.auth_failure_window)
             .field("auth_lockout", &self.auth_lockout)
+            .field("stats_cache_ttl", &self.stats_cache_ttl)
             .finish()
     }
 }
@@ -1950,6 +1999,75 @@ role = "admin"
             .expect_err("a zero lockout must be rejected");
         assert!(
             matches!(err, Error::ConfigError { ref detail } if detail.contains("auth_lockout")),
+            "got: {err:?}"
+        );
+    }
+
+    /// `stats_cache_ttl` is validated at load like every other duration: the
+    /// documented default boots, the exact bounds boot, and a zero-length,
+    /// sub-minimum, over-maximum, or unparseable value fails startup naming
+    /// the field.
+    #[test]
+    fn validate_bounds_stats_cache_ttl() {
+        let base = || {
+            let mut config = AppConfig::default();
+            config.server.role = "admin".to_string();
+            config.internal_api.enabled = true;
+            config.internal_api.shared_secret = Some(TEST_SHARED_SECRET.to_string());
+            config
+        };
+
+        // The documented default parses and passes as-is.
+        let config = base();
+        assert_eq!(config.internal_api.stats_cache_ttl, "60s");
+        assert!(config.validate().is_ok());
+
+        // Exact bounds are accepted.
+        let mut low = base();
+        low.internal_api.stats_cache_ttl = "1s".to_string();
+        assert!(low.validate().is_ok(), "the minimum bound boots");
+        let mut high = base();
+        high.internal_api.stats_cache_ttl = "3600s".to_string();
+        assert!(high.validate().is_ok(), "the maximum bound boots");
+
+        // Zero is refused: a cache that never serves is worse than no cache,
+        // because the number still presents itself as cached.
+        let mut zero = base();
+        zero.internal_api.stats_cache_ttl = "0s".to_string();
+        let err = zero
+            .validate()
+            .expect_err("a zero stats-cache TTL must be rejected");
+        assert!(
+            matches!(err, Error::ConfigError { ref detail } if detail.contains("stats_cache_ttl")),
+            "got: {err:?}"
+        );
+
+        // Above the one-hour maximum the dashboard counts stop being
+        // estimates; refuse loudly rather than serving an audit-grade lie.
+        let mut over = base();
+        over.internal_api.stats_cache_ttl = "3601s".to_string();
+        let err = over
+            .validate()
+            .expect_err("a stats-cache TTL beyond the maximum must be rejected");
+        match &err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("stats_cache_ttl") && detail.contains("maximum"),
+                    "the rejection must name the field and the bound: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+
+        // Unparseable durations fail with the field named by the shared
+        // duration-error prefixing.
+        let mut garbage = base();
+        garbage.internal_api.stats_cache_ttl = "soon".to_string();
+        let err = garbage
+            .validate()
+            .expect_err("an unparseable stats-cache TTL must be rejected");
+        assert!(
+            matches!(err, Error::ConfigError { ref detail } if detail.contains("stats_cache_ttl")),
             "got: {err:?}"
         );
     }

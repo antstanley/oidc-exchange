@@ -653,6 +653,41 @@ fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Parse `[internal_api] stats_cache_ttl` into the `Duration` the DynamoDB
+/// repository builder wires into its dashboard-count cache — how long
+/// `count_active_sessions` may serve a cached walk before re-scanning.
+///
+/// Every production entry point (`load_config`, `parse_config`) runs
+/// `AppConfig::validate` — which parses and bounds this same field — before an
+/// adapter is ever built, so reaching this function with an invalid value (a
+/// hand-built `AppConfig` in a test that skipped `validate`) is a programmer
+/// error and panics loudly instead of silently substituting the default. The
+/// bounds mirror the adapter's own assertions in
+/// `DynamoRepository::with_stats_cache_ttl`; the core-side constants are kept
+/// aligned with the adapter's by a test in the adapters crate.
+fn stats_cache_ttl(config: &AppConfig) -> std::time::Duration {
+    let secs =
+        oidc_exchange_core::service::parse_duration_secs(&config.internal_api.stats_cache_ttl)
+            .unwrap_or_else(|err| {
+                panic!(
+                "internal_api.stats_cache_ttl {:?} is invalid: {err} (AppConfig::validate should \
+                     have rejected this before any repository was built)",
+                config.internal_api.stats_cache_ttl
+            )
+            });
+    assert!(
+        secs >= oidc_exchange_core::config::MIN_STATS_CACHE_TTL_SECS,
+        "parsed stats_cache_ttl of {secs}s is below the usable minimum of {}s",
+        oidc_exchange_core::config::MIN_STATS_CACHE_TTL_SECS
+    );
+    assert!(
+        secs <= oidc_exchange_core::config::MAX_STATS_CACHE_TTL_SECS,
+        "parsed stats_cache_ttl of {secs}s exceeds the maximum of {}s",
+        oidc_exchange_core::config::MAX_STATS_CACHE_TTL_SECS
+    );
+    std::time::Duration::from_secs(secs)
+}
+
 // ---------------------------------------------------------------------------
 // Adapter builders (private)
 // ---------------------------------------------------------------------------
@@ -687,7 +722,8 @@ async fn build_user_repository(
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name)
+                    .with_stats_cache_ttl(stats_cache_ttl(config)),
             ))
         }
         "postgres" => {
@@ -747,7 +783,8 @@ async fn build_session_repository(
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name)
+                    .with_stats_cache_ttl(stats_cache_ttl(config)),
             ))
         }
         "postgres" => {
@@ -2055,6 +2092,50 @@ mod request_timeout_tests {
             response.headers().get("x-request-id").is_some(),
             "a normal response must still carry the request id"
         );
+    }
+}
+
+/// Unit coverage for `stats_cache_ttl`, the `[internal_api] stats_cache_ttl`
+/// resolver wired into both DynamoDB repository builders — same contract as
+/// `request_timeout_duration`: validated configs resolve exactly, and a value
+/// that skipped `AppConfig::validate` panics loudly instead of defaulting.
+#[cfg(test)]
+mod stats_cache_ttl_tests {
+    use super::*;
+
+    /// The documented default (`"60s"`) resolves to exactly 60 seconds, and an
+    /// explicit override parses to its own duration.
+    #[test]
+    fn stats_cache_ttl_resolves_default_and_override() {
+        let config = AppConfig::default();
+        assert_eq!(config.internal_api.stats_cache_ttl, "60s");
+        assert_eq!(stats_cache_ttl(&config), std::time::Duration::from_secs(60));
+
+        let mut config = AppConfig::default();
+        config.internal_api.stats_cache_ttl = "2m".to_string();
+        assert_eq!(
+            stats_cache_ttl(&config),
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    /// Negative-space: an out-of-window or unparseable TTL must panic rather
+    /// than silently build a repository around an unusable cache —
+    /// `AppConfig::validate` is expected to have rejected these at load.
+    #[test]
+    fn stats_cache_ttl_panics_on_values_validation_should_have_rejected() {
+        for bad in ["0s", "3601s", "not-a-duration"] {
+            let mut config = AppConfig::default();
+            config.internal_api.stats_cache_ttl = bad.to_string();
+
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stats_cache_ttl(&config)));
+
+            assert!(
+                result.is_err(),
+                "stats_cache_ttl {bad:?} must panic at wiring time, not silently default"
+            );
+        }
     }
 }
 
