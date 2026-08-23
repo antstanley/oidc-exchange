@@ -1,8 +1,9 @@
 use std::fmt;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 
 use axum::Router;
+use futures_util::FutureExt;
 use http::{HeaderName, HeaderValue, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -95,28 +96,33 @@ impl OidcExchange {
     /// Total asynchronous wire boundary. Host-originated shaping failures become HTTP
     /// responses; `FfiError` is reserved for failures with no HTTP meaning.
     pub async fn handle(&self, request: WireRequest) -> Result<FfiResponse, FfiError> {
-        let outcome =
-            catch_unwind(AssertUnwindSafe(|| self.normalise_request(request))).map_err(|_| {
-                FfiError {
-                    code: "PANIC".to_string(),
-                    message: "request handling panicked".to_string(),
-                }
-            })?;
-        let request = match outcome {
-            Ok(request) => request,
-            Err(status) => return Ok(status_response(status)),
+        let request_id = request_id(&request.headers);
+        let future = async {
+            let request = match self.normalise_request(request) {
+                Ok(request) => request,
+                Err(status) => return Ok(status_response(status)),
+            };
+            let response = self
+                .router
+                .clone()
+                .oneshot(request)
+                .await
+                .map_err(|e| FfiError {
+                    code: "ROUTER_ERROR".to_string(),
+                    message: e.to_string(),
+                })?;
+            response_to_ffi(response).await
         };
-
-        let response = self
-            .router
-            .clone()
-            .oneshot(request)
-            .await
-            .map_err(|e| FfiError {
-                code: "ROUTER_ERROR".to_string(),
-                message: e.to_string(),
-            })?;
-        response_to_ffi(response).await
+        match AssertUnwindSafe(future).catch_unwind().await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::error!(
+                    request_id = request_id.as_deref().unwrap_or("unavailable"),
+                    "panic contained at FFI request boundary"
+                );
+                Ok(panic_response(request_id.as_deref()))
+            }
+        }
     }
 
     fn normalise_request(
@@ -214,6 +220,25 @@ fn status_response(status: StatusCode) -> FfiResponse {
         headers: Vec::new(),
         body: Vec::new(),
     }
+}
+
+fn request_id(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+        .map(|(_, value)| value.clone())
+}
+
+fn panic_response(request_id: Option<&str>) -> FfiResponse {
+    let mut response = status_response(StatusCode::INTERNAL_SERVER_ERROR);
+    if let Some(request_id) = request_id {
+        if HeaderValue::from_str(request_id).is_ok() {
+            response
+                .headers
+                .push(("x-request-id".to_string(), request_id.to_string()));
+        }
+    }
+    response
 }
 
 async fn response_to_ffi(response: axum::response::Response) -> Result<FfiResponse, FfiError> {
