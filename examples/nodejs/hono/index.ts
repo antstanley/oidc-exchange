@@ -12,8 +12,11 @@ const app = new Hono()
 app.all('/auth/*', async (c) => {
   const req = c.req.raw
 
-  const url = new URL(req.url)
-  const oidcPath = url.pathname.replace(/^\/auth/, '') || '/'
+  const targetStart = req.url.indexOf('/', req.url.indexOf('://') + 3)
+  const rawTarget = targetStart < 0 ? '/' : req.url.slice(targetStart)
+  const queryIndex = rawTarget.indexOf('?')
+  const rawPath = rawTarget.slice(0, queryIndex < 0 ? undefined : queryIndex)
+  const query = queryIndex < 0 ? undefined : rawTarget.slice(queryIndex + 1)
 
   const headers: { name: string; value: string }[] = []
   req.headers.forEach((value, name) => {
@@ -22,11 +25,13 @@ app.all('/auth/*', async (c) => {
 
   const body = req.body ? Buffer.from(await req.arrayBuffer()) : undefined
 
-  const response = oidc.handleRequest({
+  const response = await oidc.handleRequest({
     method: req.method,
-    path: oidcPath,
+    rawPath: Buffer.from(rawPath),
+    query: query === undefined ? undefined : Buffer.from(query),
     headers,
     body,
+    pathIsRaw: true,
   })
 
   const responseHeaders = new Headers()

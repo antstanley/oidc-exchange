@@ -14,15 +14,24 @@ const app = express();
 app.all("/auth/*", (req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
-  req.on("end", () => {
+  req.on("end", async () => {
     const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
     const headers = [];
     const raw = req.rawHeaders;
     for (let i = 0; i < raw.length; i += 2) {
       headers.push({ name: raw[i], value: raw[i + 1] });
     }
-    const oidcPath = req.originalUrl.replace(/^\/auth/, "") || "/";
-    const response = oidc.handleRequest({ method: req.method, path: oidcPath, headers, body });
+    const queryIndex = req.originalUrl.indexOf("?");
+    const rawPath = req.originalUrl.slice(0, queryIndex < 0 ? undefined : queryIndex);
+    const query = queryIndex < 0 ? undefined : req.originalUrl.slice(queryIndex + 1);
+    const response = await oidc.handleRequest({
+      method: req.method,
+      rawPath: Buffer.from(rawPath),
+      query: query === undefined ? undefined : Buffer.from(query),
+      headers,
+      body,
+      pathIsRaw: true,
+    });
     for (const { name, value } of response.headers) {
       res.setHeader(name, value);
     }

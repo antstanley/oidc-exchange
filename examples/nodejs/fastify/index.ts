@@ -16,7 +16,10 @@ app.addContentTypeParser("*", { parseAs: "buffer" }, (_req, body, done) => {
 });
 
 app.all("/auth/*", async (request, reply) => {
-  const oidcPath = request.url.replace(/^\/auth/, "") || "/";
+  const queryIndex = request.raw.url?.indexOf("?") ?? -1;
+  const rawTarget = request.raw.url ?? request.url;
+  const rawPath = rawTarget.slice(0, queryIndex < 0 ? undefined : queryIndex);
+  const query = queryIndex < 0 ? undefined : rawTarget.slice(queryIndex + 1);
 
   const headers = [];
   for (const [name, value] of Object.entries(request.headers)) {
@@ -34,11 +37,13 @@ app.all("/auth/*", async (request, reply) => {
       ? request.body
       : undefined;
 
-  const response = oidc.handleRequest({
+  const response = await oidc.handleRequest({
     method: request.method,
-    path: oidcPath,
+    rawPath: Buffer.from(rawPath),
+    query: query === undefined ? undefined : Buffer.from(query),
     headers,
     body,
+    pathIsRaw: true,
   });
 
   for (const { name, value } of response.headers) {

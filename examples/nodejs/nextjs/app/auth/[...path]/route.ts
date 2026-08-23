@@ -6,8 +6,11 @@ const oidc = new OidcExchange({
 })
 
 async function handler(request: Request) {
-  const url = new URL(request.url)
-  const oidcPath = url.pathname.replace(/^\/auth/, '') || '/'
+  const targetStart = request.url.indexOf('/', request.url.indexOf('://') + 3)
+  const rawTarget = targetStart < 0 ? '/' : request.url.slice(targetStart)
+  const queryIndex = rawTarget.indexOf('?')
+  const rawPath = rawTarget.slice(0, queryIndex < 0 ? undefined : queryIndex)
+  const query = queryIndex < 0 ? undefined : rawTarget.slice(queryIndex + 1)
 
   const headers: { name: string; value: string }[] = []
   request.headers.forEach((value, name) => {
@@ -18,11 +21,13 @@ async function handler(request: Request) {
     ? Buffer.from(await request.arrayBuffer())
     : undefined
 
-  const response = oidc.handleRequest({
+  const response = await oidc.handleRequest({
     method: request.method,
-    path: oidcPath,
+    rawPath: Buffer.from(rawPath),
+    query: query === undefined ? undefined : Buffer.from(query),
     headers,
     body,
+    pathIsRaw: true,
   })
 
   const responseHeaders = new Headers()
