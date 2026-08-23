@@ -3,16 +3,27 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
-use oidc_exchange_core::domain::{AuditEventType, NewUser, UserPatch, UserStatus};
+use oidc_exchange_core::domain::{
+    AuditEventType, NewUser, OperatorAuthMechanism, OperatorPrincipal, UserPatch, UserStatus,
+};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
 use oidc_exchange_core::service::exchange::ExchangeRequest;
-use oidc_exchange_core::service::AppService;
+use oidc_exchange_core::service::{create_audit_event, AppService};
 
 use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
     MockUserSync, UserSyncCall,
 };
+
+/// The principal every direct-service test acts as. Attribution assertions
+/// read this same shape back out of recorded audit events.
+fn operator() -> OperatorPrincipal {
+    OperatorPrincipal {
+        id: "usr_operator_test".to_string(),
+        mechanism: OperatorAuthMechanism::OperatorToken,
+    }
+}
 
 fn make_config() -> AppConfig {
     AppConfig {
@@ -121,7 +132,7 @@ async fn admin_create_user_triggers_sync() {
 
     let nu = new_user("ext-1", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -154,7 +165,7 @@ async fn admin_update_user_partial_patch_reports_changed_fields() {
     // Create a user first
     let nu = new_user("ext-2", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -167,7 +178,7 @@ async fn admin_update_user_partial_patch_reports_changed_fields() {
         status: None,
     };
     let updated = svc
-        .admin_update_user(&user.id, &patch)
+        .admin_update_user(&operator(), &user.id, &patch)
         .await
         .expect("update should succeed");
 
@@ -200,21 +211,21 @@ async fn admin_merge_claims_preserves_existing() {
     // Create user
     let nu = new_user("ext-3", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
     // Set initial claims {"a": 1}
     let mut initial = HashMap::new();
     initial.insert("a".to_string(), json!(1));
-    svc.admin_set_claims(&user.id, initial)
+    svc.admin_set_claims(&operator(), &user.id, initial)
         .await
         .expect("set claims should succeed");
 
     // Merge {"b": 2}
     let mut merge = HashMap::new();
     merge.insert("b".to_string(), json!(2));
-    svc.admin_merge_claims(&user.id, merge)
+    svc.admin_merge_claims(&operator(), &user.id, merge)
         .await
         .expect("merge claims should succeed");
 
@@ -239,7 +250,7 @@ async fn admin_set_claims_replaces_entirely() {
     // Create user
     let nu = new_user("ext-4", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -247,14 +258,14 @@ async fn admin_set_claims_replaces_entirely() {
     let mut initial = HashMap::new();
     initial.insert("a".to_string(), json!(1));
     initial.insert("b".to_string(), json!(2));
-    svc.admin_set_claims(&user.id, initial)
+    svc.admin_set_claims(&operator(), &user.id, initial)
         .await
         .expect("set claims should succeed");
 
     // Replace with {"c": 3}
     let mut replacement = HashMap::new();
     replacement.insert("c".to_string(), json!(3));
-    svc.admin_set_claims(&user.id, replacement)
+    svc.admin_set_claims(&operator(), &user.id, replacement)
         .await
         .expect("set claims should succeed");
 
@@ -280,7 +291,7 @@ async fn admin_clear_claims_empties_map() {
     // Create user
     let nu = new_user("ext-5", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -288,12 +299,12 @@ async fn admin_clear_claims_empties_map() {
     let mut initial = HashMap::new();
     initial.insert("x".to_string(), json!("hello"));
     initial.insert("y".to_string(), json!(42));
-    svc.admin_set_claims(&user.id, initial)
+    svc.admin_set_claims(&operator(), &user.id, initial)
         .await
         .expect("set claims should succeed");
 
     // Clear
-    svc.admin_clear_claims(&user.id)
+    svc.admin_clear_claims(&operator(), &user.id)
         .await
         .expect("clear claims should succeed");
 
@@ -344,7 +355,7 @@ async fn admin_set_claims_rejects_every_reserved_claim_name() {
 
     let nu = new_user("ext-reserved-set", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -356,7 +367,7 @@ async fn admin_set_claims_rejects_every_reserved_claim_name() {
         claims.insert("tenant".to_string(), json!("acme"));
 
         let err = svc
-            .admin_set_claims(&user.id, claims)
+            .admin_set_claims(&operator(), &user.id, claims)
             .await
             .expect_err("a reserved claim name must be rejected by set");
         assert!(
@@ -397,7 +408,7 @@ async fn admin_set_claims_still_accepts_and_persists_non_reserved_names() {
 
     let nu = new_user("ext-reserved-set-ok", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -405,7 +416,7 @@ async fn admin_set_claims_still_accepts_and_persists_non_reserved_names() {
     claims.insert("role".to_string(), json!("admin"));
     claims.insert("Sub".to_string(), json!("case-sensitive"));
     claims.insert("tenant".to_string(), json!("acme"));
-    svc.admin_set_claims(&user.id, claims)
+    svc.admin_set_claims(&operator(), &user.id, claims)
         .await
         .expect("non-reserved names must be accepted");
 
@@ -426,13 +437,13 @@ async fn admin_merge_claims_rejects_reserved_delta_but_preserves_existing() {
 
     let nu = new_user("ext-reserved-merge", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
     let mut seed = HashMap::new();
     seed.insert("tier".to_string(), json!("gold"));
-    svc.admin_set_claims(&user.id, seed)
+    svc.admin_set_claims(&operator(), &user.id, seed)
         .await
         .expect("seed set should succeed");
 
@@ -441,7 +452,7 @@ async fn admin_merge_claims_rejects_reserved_delta_but_preserves_existing() {
         delta.insert(name.to_string(), json!("forged"));
 
         let err = svc
-            .admin_merge_claims(&user.id, delta)
+            .admin_merge_claims(&operator(), &user.id, delta)
             .await
             .expect_err("a reserved claim name must be rejected by merge");
         assert!(
@@ -474,7 +485,7 @@ async fn admin_update_user_rejects_reserved_names_in_claims_patch() {
 
     let nu = new_user("ext-reserved-patch", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -490,7 +501,7 @@ async fn admin_update_user_rejects_reserved_names_in_claims_patch() {
             status: None,
         };
         let err = svc
-            .admin_update_user(&user.id, &patch)
+            .admin_update_user(&operator(), &user.id, &patch)
             .await
             .expect_err("a reserved claim name must be rejected by update");
         assert!(
@@ -525,7 +536,7 @@ async fn admin_update_user_accepts_non_reserved_claims_patch() {
 
     let nu = new_user("ext-patch-ok", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -539,7 +550,7 @@ async fn admin_update_user_accepts_non_reserved_claims_patch() {
         claims: Some(patch_claims),
         status: None,
     };
-    svc.admin_update_user(&user.id, &patch)
+    svc.admin_update_user(&operator(), &user.id, &patch)
         .await
         .expect("a non-reserved claims patch must apply");
 
@@ -575,7 +586,9 @@ async fn admin_set_claims_unknown_id_returns_not_found() {
 
     let mut claims = HashMap::new();
     claims.insert("a".to_string(), json!(1));
-    let result = svc.admin_set_claims("usr_does_not_exist", claims).await;
+    let result = svc
+        .admin_set_claims(&operator(), "usr_does_not_exist", claims)
+        .await;
     assert!(matches!(result, Err(Error::NotFound { .. })));
 
     // The rejected set must not have written a user row.
@@ -590,7 +603,9 @@ async fn admin_merge_claims_unknown_id_returns_not_found() {
 
     let mut claims = HashMap::new();
     claims.insert("a".to_string(), json!(1));
-    let result = svc.admin_merge_claims("usr_does_not_exist", claims).await;
+    let result = svc
+        .admin_merge_claims(&operator(), "usr_does_not_exist", claims)
+        .await;
     assert!(matches!(result, Err(Error::NotFound { .. })));
 
     // The rejected merge must not have written a user row.
@@ -603,7 +618,9 @@ async fn admin_clear_claims_unknown_id_returns_not_found() {
     let user_sync = MockUserSync::new();
     let (svc, repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
 
-    let result = svc.admin_clear_claims("usr_does_not_exist").await;
+    let result = svc
+        .admin_clear_claims(&operator(), "usr_does_not_exist")
+        .await;
     assert!(matches!(result, Err(Error::NotFound { .. })));
 
     // The rejected clear must not have written a user row.
@@ -641,7 +658,7 @@ async fn admin_delete_user_revokes_sessions() {
     let user_id = sessions[0].user_id.clone();
 
     // Delete the user via admin
-    svc.admin_delete_user(&user_id)
+    svc.admin_delete_user(&operator(), &user_id)
         .await
         .expect("delete should succeed");
 
@@ -720,7 +737,7 @@ async fn patch_to_suspended_revokes_sessions() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
     let updated = svc
-        .admin_update_user(&user_id, &status_patch(UserStatus::Suspended))
+        .admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Suspended))
         .await
         .expect("suspend patch should succeed");
     assert_eq!(updated.status, UserStatus::Suspended);
@@ -737,7 +754,7 @@ async fn patch_to_deleted_revokes_sessions() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
     let updated = svc
-        .admin_update_user(&user_id, &status_patch(UserStatus::Deleted))
+        .admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Deleted))
         .await
         .expect("delete patch should succeed");
     assert_eq!(updated.status, UserStatus::Deleted);
@@ -753,13 +770,13 @@ async fn patch_to_deleted_revokes_sessions() {
 async fn reactivated_user_has_no_surviving_sessions() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
-    svc.admin_update_user(&user_id, &status_patch(UserStatus::Suspended))
+    svc.admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Suspended))
         .await
         .expect("suspend should succeed");
     assert!(repo_clone.get_all_sessions().await.is_empty());
 
     let reactivated = svc
-        .admin_update_user(&user_id, &status_patch(UserStatus::Active))
+        .admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Active))
         .await
         .expect("reactivation should succeed");
     assert_eq!(reactivated.status, UserStatus::Active);
@@ -775,11 +792,11 @@ async fn reactivated_user_has_no_surviving_sessions() {
 async fn suspend_then_delete_succeeds_and_leaves_user_deleted() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
-    svc.admin_update_user(&user_id, &status_patch(UserStatus::Suspended))
+    svc.admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Suspended))
         .await
         .expect("suspend should succeed");
 
-    svc.admin_delete_user(&user_id)
+    svc.admin_delete_user(&operator(), &user_id)
         .await
         .expect("deleting a suspended user should succeed");
 
@@ -804,7 +821,7 @@ async fn suspend_then_delete_succeeds_and_leaves_user_deleted() {
 async fn suspended_to_suspended_is_a_noop_and_does_not_re_revoke() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
-    svc.admin_update_user(&user_id, &status_patch(UserStatus::Suspended))
+    svc.admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Suspended))
         .await
         .expect("suspend should succeed");
     assert!(repo_clone.get_all_sessions().await.is_empty());
@@ -830,7 +847,7 @@ async fn suspended_to_suspended_is_a_noop_and_does_not_re_revoke() {
     assert_eq!(repo_clone.get_all_sessions().await.len(), 1);
 
     let updated = svc
-        .admin_update_user(&user_id, &status_patch(UserStatus::Suspended))
+        .admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Suspended))
         .await
         .expect("Suspended -> Suspended should be an accepted no-op");
     assert_eq!(updated.status, UserStatus::Suspended);
@@ -847,12 +864,12 @@ async fn suspended_to_suspended_is_a_noop_and_does_not_re_revoke() {
 async fn deleted_to_active_is_rejected() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
-    svc.admin_delete_user(&user_id)
+    svc.admin_delete_user(&operator(), &user_id)
         .await
         .expect("delete should succeed");
 
     let result = svc
-        .admin_update_user(&user_id, &status_patch(UserStatus::Active))
+        .admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Active))
         .await;
     assert!(matches!(result, Err(Error::InvalidRequest { .. })));
 
@@ -866,12 +883,12 @@ async fn deleted_to_active_is_rejected() {
 async fn deleted_to_deleted_is_rejected() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
-    svc.admin_delete_user(&user_id)
+    svc.admin_delete_user(&operator(), &user_id)
         .await
         .expect("delete should succeed");
 
     let result = svc
-        .admin_update_user(&user_id, &status_patch(UserStatus::Deleted))
+        .admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Deleted))
         .await;
     assert!(matches!(result, Err(Error::InvalidRequest { .. })));
 
@@ -886,7 +903,7 @@ async fn deleted_to_deleted_is_rejected() {
 async fn second_delete_on_already_deleted_user_is_rejected() {
     let (svc, user_id, repo_clone, _sync_clone) = service_with_active_session().await;
 
-    svc.admin_delete_user(&user_id)
+    svc.admin_delete_user(&operator(), &user_id)
         .await
         .expect("first delete should succeed");
     let version_after_first_delete = repo_clone
@@ -897,7 +914,7 @@ async fn second_delete_on_already_deleted_user_is_rejected() {
         .expect("user exists")
         .version;
 
-    let result = svc.admin_delete_user(&user_id).await;
+    let result = svc.admin_delete_user(&operator(), &user_id).await;
     assert!(matches!(result, Err(Error::InvalidRequest { .. })));
 
     // A rejected second delete must not have written to the repository again.
@@ -918,7 +935,11 @@ async fn admin_update_user_unknown_id_returns_not_found() {
     let (svc, _repo_clone, _sync_clone) = make_service_with_mocks(repo, user_sync);
 
     let result = svc
-        .admin_update_user("usr_does_not_exist", &status_patch(UserStatus::Suspended))
+        .admin_update_user(
+            &operator(),
+            "usr_does_not_exist",
+            &status_patch(UserStatus::Suspended),
+        )
         .await;
     assert!(matches!(result, Err(Error::NotFound { .. })));
 
@@ -932,7 +953,7 @@ async fn admin_update_user_unknown_id_returns_not_found() {
         status: None,
     };
     let result2 = svc
-        .admin_update_user("usr_does_not_exist", &plain_patch)
+        .admin_update_user(&operator(), "usr_does_not_exist", &plain_patch)
         .await;
     assert!(matches!(result2, Err(Error::NotFound { .. })));
 }
@@ -943,7 +964,9 @@ async fn admin_delete_user_unknown_id_returns_not_found() {
     let user_sync = MockUserSync::new();
     let (svc, repo_clone, sync_clone) = make_service_with_mocks(repo, user_sync);
 
-    let result = svc.admin_delete_user("usr_does_not_exist").await;
+    let result = svc
+        .admin_delete_user(&operator(), "usr_does_not_exist")
+        .await;
     assert!(matches!(result, Err(Error::NotFound { .. })));
 
     // The rejected delete must not have written a user row or fired the
@@ -967,7 +990,7 @@ async fn admin_create_user_emits_user_created_audit_event() {
 
     let nu = new_user("audit-create-1", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -995,7 +1018,7 @@ async fn admin_update_user_non_status_patch_emits_user_updated() {
 
     let nu = new_user("audit-update-1", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
@@ -1006,7 +1029,7 @@ async fn admin_update_user_non_status_patch_emits_user_updated() {
         claims: None,
         status: None,
     };
-    svc.admin_update_user(&user.id, &patch)
+    svc.admin_update_user(&operator(), &user.id, &patch)
         .await
         .expect("update should succeed");
 
@@ -1031,11 +1054,11 @@ async fn admin_update_user_suspend_patch_emits_user_suspended_not_user_updated()
 
     let nu = new_user("audit-suspend-1", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
-    svc.admin_update_user(&user.id, &status_patch(UserStatus::Suspended))
+    svc.admin_update_user(&operator(), &user.id, &status_patch(UserStatus::Suspended))
         .await
         .expect("suspend should succeed");
 
@@ -1064,11 +1087,11 @@ async fn admin_delete_user_emits_user_deleted_audit_event() {
 
     let nu = new_user("audit-delete-1", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
-    svc.admin_delete_user(&user.id)
+    svc.admin_delete_user(&operator(), &user.id)
         .await
         .expect("delete should succeed");
 
@@ -1092,23 +1115,23 @@ async fn admin_claims_mutations_emit_user_updated_with_operation_in_detail() {
 
     let nu = new_user("audit-claims-1", "google");
     let user = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect("create should succeed");
 
     let mut claims = HashMap::new();
     claims.insert("a".to_string(), json!(1));
-    svc.admin_set_claims(&user.id, claims.clone())
+    svc.admin_set_claims(&operator(), &user.id, claims.clone())
         .await
         .expect("set claims should succeed");
 
     let mut merge = HashMap::new();
     merge.insert("b".to_string(), json!(2));
-    svc.admin_merge_claims(&user.id, merge)
+    svc.admin_merge_claims(&operator(), &user.id, merge)
         .await
         .expect("merge claims should succeed");
 
-    svc.admin_clear_claims(&user.id)
+    svc.admin_clear_claims(&operator(), &user.id)
         .await
         .expect("clear claims should succeed");
 
@@ -1198,7 +1221,7 @@ async fn admin_create_user_blocking_audit_failure_propagates_err_and_skips_sync(
 
     let nu = new_user("audit-blocking-1", "google");
     let err = svc
-        .admin_create_user(&nu)
+        .admin_create_user(&operator(), &nu)
         .await
         .expect_err("a blocking audit failure must propagate as Err");
 
@@ -1211,4 +1234,128 @@ async fn admin_create_user_blocking_audit_failure_propagates_err_and_skips_sync(
         sync_clone.calls().await.is_empty(),
         "a blocking audit failure must short-circuit before the best-effort sync notify runs"
     );
+}
+
+// ─── Operator attribution on admin mutations (task 05) ─────────────────────
+
+/// The principal recorded on a successful mutation's audit event must be the
+/// acting operator, carried verbatim — that is the whole point of the
+/// attribution field.
+#[tokio::test]
+async fn admin_mutations_record_the_acting_operator() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    let nu = new_user("attribution-1", "google");
+    let user = svc
+        .admin_create_user(&operator(), &nu)
+        .await
+        .expect("create should succeed");
+
+    svc.admin_update_user(&operator(), &user.id, &status_patch(UserStatus::Suspended))
+        .await
+        .expect("update should succeed");
+    svc.admin_set_claims(&operator(), &user.id, HashMap::new())
+        .await
+        .expect("set_claims should succeed");
+    svc.admin_merge_claims(&operator(), &user.id, HashMap::new())
+        .await
+        .expect("merge_claims should succeed");
+    svc.admin_clear_claims(&operator(), &user.id)
+        .await
+        .expect("clear_claims should succeed");
+    svc.admin_delete_user(&operator(), &user.id)
+        .await
+        .expect("delete should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        6,
+        "each of the six mutations emits exactly one event"
+    );
+    // Every emitted event must carry the acting principal, and the actor is
+    // the subject of the action while the operator is who performed it — the
+    // two fields answer different questions on the same record.
+    for event in &events {
+        assert_eq!(event.actor.as_deref(), Some(user.id.as_str()));
+        assert_eq!(
+            event.operator.as_ref(),
+            Some(&operator()),
+            "every admin mutation must carry the acting principal"
+        );
+    }
+    let types: Vec<AuditEventType> = events.iter().map(|e| e.event_type.clone()).collect();
+    assert_eq!(
+        types,
+        vec![
+            AuditEventType::UserCreated,
+            AuditEventType::UserSuspended,
+            AuditEventType::UserUpdated,
+            AuditEventType::UserUpdated,
+            AuditEventType::UserUpdated,
+            AuditEventType::UserDeleted,
+        ],
+        "attribution must not disturb the per-operation event classification"
+    );
+}
+
+/// The shared-secret compatibility path records the explicit `unattributed`
+/// principal rather than omitting identity: an audit reader can distinguish
+/// "authenticated as nobody" from "field missing" without configuration.
+#[tokio::test]
+async fn shared_secret_mutations_record_the_unattributed_principal() {
+    let repo = MockRepository::new();
+    let user_sync = MockUserSync::new();
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, user_sync, audit, make_config());
+
+    let nu = new_user("attribution-2", "google");
+    let user = svc
+        .admin_create_user(&OperatorPrincipal::unattributed(), &nu)
+        .await
+        .expect("create should succeed");
+
+    let events = audit_clone.events().await;
+    assert_eq!(events.len(), 1, "create emits exactly one event");
+    let operator = events[0]
+        .operator
+        .as_ref()
+        .expect("the shared-secret path must still attribute explicitly");
+    assert_eq!(operator.id, "unattributed");
+    assert_eq!(
+        operator.mechanism,
+        OperatorAuthMechanism::SharedSecret,
+        "the unattributed id travels with its mechanism so the record is self-describing"
+    );
+    assert_eq!(
+        events[0].actor.as_deref(),
+        Some(user.id.as_str()),
+        "actor (subject) and operator (performer) remain distinct fields"
+    );
+}
+
+/// Exchange-plane events keep null operator attribution: `create_audit_event`
+/// leaves `operator` unset, and nothing outside `attributed()` stamps it.
+#[test]
+fn exchange_plane_events_retain_null_operator_attribution() {
+    let event = create_audit_event(
+        AuditEventType::TokenExchange,
+        oidc_exchange_core::domain::AuditSeverity::Info,
+        oidc_exchange_core::domain::AuditOutcome::Success,
+        Some("usr_subject".to_string()),
+        Some("google".to_string()),
+        None,
+        None,
+    );
+
+    assert!(
+        event.operator.is_none(),
+        "an exchange-plane event has no operator; the field stays None, never a placeholder"
+    );
+    assert_eq!(event.actor.as_deref(), Some("usr_subject"));
 }

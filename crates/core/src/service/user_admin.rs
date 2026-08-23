@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::domain::{
-    AuditEventType, AuditOutcome, AuditSeverity, NewUser, User, UserPatch, UserStatus,
+    AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, NewUser, OperatorPrincipal, User,
+    UserPatch, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::{claims::find_reserved_claim_key, create_audit_event, AppService};
@@ -12,6 +13,31 @@ use crate::service::{claims::find_reserved_claim_key, create_audit_event, AppSer
 /// `merge_claims` / `clear_claims`) is recorded in a `UserUpdated` audit
 /// event's `detail` map.
 const CLAIMS_OPERATION_DETAIL_KEY: &str = "operation";
+
+/// Stamp the acting [`OperatorPrincipal`] onto an admin mutation's audit
+/// event.
+///
+/// Attribution is applied by exactly this function and nowhere else, so it can
+/// never happen silently: every admin mutation chooses to pass its principal
+/// through here, and an event that somehow arrived pre-attributed is a
+/// programmer error. The principal's invariants are re-checked at this
+/// boundary (write-time validation of what the audit stream will record) —
+/// in particular a shared-secret principal must be the reserved
+/// `unattributed` shape, never a name.
+fn attributed(mut event: AuditEvent, operator: &OperatorPrincipal) -> AuditEvent {
+    operator.assert_invariants();
+    assert!(
+        event.operator.is_none(),
+        "attribution must be applied exactly once, by attributed()"
+    );
+    event.operator = Some(operator.clone());
+    assert_eq!(
+        event.operator.as_ref(),
+        Some(operator),
+        "attribution must carry the acting principal verbatim"
+    );
+    event
+}
 
 /// Reject a caller-supplied claims map carrying a reserved protocol claim
 /// name.
@@ -37,19 +63,27 @@ impl AppService {
     /// Create a new user via admin API.
     ///
     /// Calls `repo.create_user()`, emits a blocking `UserCreated` audit event
-    /// (admin operations carry no client `ip`/`user_agent` context, unlike
-    /// the client-facing flows), then notifies user sync (non-blocking).
-    pub async fn admin_create_user(&self, new_user: &NewUser) -> Result<User> {
+    /// attributed to `operator` (admin operations carry no client
+    /// `ip`/`user_agent` context, unlike the client-facing flows), then
+    /// notifies user sync (non-blocking).
+    pub async fn admin_create_user(
+        &self,
+        operator: &OperatorPrincipal,
+        new_user: &NewUser,
+    ) -> Result<User> {
         let user = self.user_repo.create_user(new_user).await?;
 
-        self.emit_audit(create_audit_event(
-            AuditEventType::UserCreated,
-            AuditSeverity::Notice,
-            AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(user.provider.clone()),
-            None,
-            None,
+        self.emit_audit(attributed(
+            create_audit_event(
+                AuditEventType::UserCreated,
+                AuditSeverity::Notice,
+                AuditOutcome::Success,
+                Some(user.id.clone()),
+                Some(user.provider.clone()),
+                None,
+                None,
+            ),
+            operator,
         ))
         .await?;
 
@@ -61,6 +95,10 @@ impl AppService {
     }
 
     /// Get a user by ID via admin API.
+    ///
+    /// Reads take no `OperatorPrincipal`: attribution exists only where an
+    /// audit event is emitted, and the read paths emit none — there is no
+    /// attribution surface for a principal to attach to.
     pub async fn admin_get_user(&self, user_id: &str) -> Result<Option<User>> {
         self.user_repo.get_user_by_id(user_id).await
     }
@@ -122,7 +160,12 @@ impl AppService {
     /// when the applied patch sets `status = Suspended`, `UserUpdated`
     /// otherwise — then notifies user sync with the list of changed fields
     /// (non-blocking).
-    pub async fn admin_update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User> {
+    pub async fn admin_update_user(
+        &self,
+        operator: &OperatorPrincipal,
+        user_id: &str,
+        patch: &UserPatch,
+    ) -> Result<User> {
         let user = self.apply_validated_patch(user_id, patch).await?;
 
         let mut changed_fields: Vec<&str> = Vec::new();
@@ -147,14 +190,17 @@ impl AppService {
         } else {
             AuditEventType::UserUpdated
         };
-        self.emit_audit(create_audit_event(
-            event_type,
-            AuditSeverity::Notice,
-            AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(user.provider.clone()),
-            None,
-            None,
+        self.emit_audit(attributed(
+            create_audit_event(
+                event_type,
+                AuditSeverity::Notice,
+                AuditOutcome::Success,
+                Some(user.id.clone()),
+                Some(user.provider.clone()),
+                None,
+                None,
+            ),
+            operator,
         ))
         .await?;
 
@@ -177,7 +223,11 @@ impl AppService {
     /// `Error::InvalidRequest`, and an unknown id returns `Error::NotFound`.
     /// On success, emits a blocking `UserDeleted` audit event, then notifies
     /// user sync (non-blocking).
-    pub async fn admin_delete_user(&self, user_id: &str) -> Result<()> {
+    pub async fn admin_delete_user(
+        &self,
+        operator: &OperatorPrincipal,
+        user_id: &str,
+    ) -> Result<()> {
         let patch = UserPatch {
             email: None,
             display_name: None,
@@ -187,14 +237,17 @@ impl AppService {
         };
         let user = self.apply_validated_patch(user_id, &patch).await?;
 
-        self.emit_audit(create_audit_event(
-            AuditEventType::UserDeleted,
-            AuditSeverity::Notice,
-            AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(user.provider.clone()),
-            None,
-            None,
+        self.emit_audit(attributed(
+            create_audit_event(
+                AuditEventType::UserDeleted,
+                AuditSeverity::Notice,
+                AuditOutcome::Success,
+                Some(user.id.clone()),
+                Some(user.provider.clone()),
+                None,
+                None,
+            ),
+            operator,
         ))
         .await?;
 
@@ -227,6 +280,7 @@ impl AppService {
     /// audit event recording the `set_claims` operation in `detail`.
     pub async fn admin_set_claims(
         &self,
+        operator: &OperatorPrincipal,
         user_id: &str,
         claims: HashMap<String, Value>,
     ) -> Result<()> {
@@ -252,7 +306,7 @@ impl AppService {
         };
         self.user_repo.update_user(user_id, &patch).await?;
 
-        self.emit_claims_audit_event(&existing, "set_claims")
+        self.emit_claims_audit_event(operator, &existing, "set_claims")
             .await?;
 
         Ok(())
@@ -268,6 +322,7 @@ impl AppService {
     /// recording the `merge_claims` operation in `detail`.
     pub async fn admin_merge_claims(
         &self,
+        operator: &OperatorPrincipal,
         user_id: &str,
         claims: HashMap<String, Value>,
     ) -> Result<()> {
@@ -297,7 +352,8 @@ impl AppService {
         };
         self.user_repo.update_user(user_id, &patch).await?;
 
-        self.emit_claims_audit_event(&user, "merge_claims").await?;
+        self.emit_claims_audit_event(operator, &user, "merge_claims")
+            .await?;
 
         Ok(())
     }
@@ -306,7 +362,11 @@ impl AppService {
     ///
     /// On success, emits a blocking `UserUpdated` audit event recording the
     /// `clear_claims` operation in `detail`.
-    pub async fn admin_clear_claims(&self, user_id: &str) -> Result<()> {
+    pub async fn admin_clear_claims(
+        &self,
+        operator: &OperatorPrincipal,
+        user_id: &str,
+    ) -> Result<()> {
         // Verify user exists
         let existing = self
             .user_repo
@@ -325,7 +385,7 @@ impl AppService {
         };
         self.user_repo.update_user(user_id, &patch).await?;
 
-        self.emit_claims_audit_event(&existing, "clear_claims")
+        self.emit_claims_audit_event(operator, &existing, "clear_claims")
             .await?;
 
         Ok(())
@@ -333,17 +393,26 @@ impl AppService {
 
     /// Emit the shared `UserUpdated` audit event for a claims mutation,
     /// recording `operation` in `detail` so `set_claims`/`merge_claims`/
-    /// `clear_claims` are distinguishable in the audit trail. Admin
-    /// operations carry no client `ip`/`user_agent` context.
-    async fn emit_claims_audit_event(&self, user: &User, operation: &str) -> Result<()> {
-        let mut event = create_audit_event(
-            AuditEventType::UserUpdated,
-            AuditSeverity::Notice,
-            AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(user.provider.clone()),
-            None,
-            None,
+    /// `clear_claims` are distinguishable in the audit trail, and attributing
+    /// the event to `operator`. Admin operations carry no client
+    /// `ip`/`user_agent` context.
+    async fn emit_claims_audit_event(
+        &self,
+        operator: &OperatorPrincipal,
+        user: &User,
+        operation: &str,
+    ) -> Result<()> {
+        let mut event = attributed(
+            create_audit_event(
+                AuditEventType::UserUpdated,
+                AuditSeverity::Notice,
+                AuditOutcome::Success,
+                Some(user.id.clone()),
+                Some(user.provider.clone()),
+                None,
+                None,
+            ),
+            operator,
         );
         event.detail.insert(
             CLAIMS_OPERATION_DETAIL_KEY.to_string(),

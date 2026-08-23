@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::error::ApiError;
 use crate::middleware::internal_auth::internal_auth_layer;
 use crate::state::AppState;
-use oidc_exchange_core::domain::{NewUser, UserPatch};
+use oidc_exchange_core::domain::{NewUser, OperatorPrincipal, UserPatch};
 
 /// Build the internal API surface with relative route paths, behind the
 /// operator-auth layer.
@@ -75,7 +75,15 @@ pub async fn create_user(
     State(state): State<AppState>,
     Json(new_user): Json<NewUser>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let user = state.service.admin_create_user(&new_user).await?;
+    // Interim attribution: until the operator-auth layer inserts real
+    // principals as request extensions, every authenticated caller acted
+    // through the shared secret, whose principal is explicitly
+    // unattributed.
+    let operator = OperatorPrincipal::unattributed();
+    let user = state
+        .service
+        .admin_create_user(&operator, &new_user)
+        .await?;
     Ok((StatusCode::CREATED, Json(user)))
 }
 
@@ -102,7 +110,11 @@ pub async fn update_user(
     Path(id): Path<String>,
     Json(patch): Json<UserPatch>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let user = state.service.admin_update_user(&id, &patch).await?;
+    let operator = OperatorPrincipal::unattributed();
+    let user = state
+        .service
+        .admin_update_user(&operator, &id, &patch)
+        .await?;
     Ok(Json(user))
 }
 
@@ -110,7 +122,8 @@ pub async fn delete_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_delete_user(&id).await?;
+    let operator = OperatorPrincipal::unattributed();
+    state.service.admin_delete_user(&operator, &id).await?;
     Ok(StatusCode::OK)
 }
 
@@ -131,7 +144,11 @@ pub async fn set_claims(
     Path(id): Path<String>,
     Json(claims): Json<HashMap<String, Value>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_set_claims(&id, claims).await?;
+    let operator = OperatorPrincipal::unattributed();
+    state
+        .service
+        .admin_set_claims(&operator, &id, claims)
+        .await?;
     Ok(StatusCode::OK)
 }
 
@@ -140,7 +157,11 @@ pub async fn merge_claims(
     Path(id): Path<String>,
     Json(claims): Json<HashMap<String, Value>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_merge_claims(&id, claims).await?;
+    let operator = OperatorPrincipal::unattributed();
+    state
+        .service
+        .admin_merge_claims(&operator, &id, claims)
+        .await?;
     Ok(StatusCode::OK)
 }
 
@@ -148,6 +169,7 @@ pub async fn clear_claims(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_clear_claims(&id).await?;
+    let operator = OperatorPrincipal::unattributed();
+    state.service.admin_clear_claims(&operator, &id).await?;
     Ok(StatusCode::OK)
 }

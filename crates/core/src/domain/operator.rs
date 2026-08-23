@@ -57,6 +57,27 @@ impl OperatorPrincipal {
             mechanism: OperatorAuthMechanism::SharedSecret,
         }
     }
+
+    /// Check the type's invariants: the id is non-empty, and the
+    /// shared-secret mechanism pairs only with [`UNATTRIBUTED_OPERATOR_ID`] —
+    /// that mechanism proves possession of a string and identifies nobody, so
+    /// a "shared_secret" event naming a principal would corrupt the very
+    /// distinction the reserved id exists to preserve.
+    ///
+    /// Called wherever a principal enters an audit event, so an ill-formed
+    /// principal crashes loudly instead of being recorded.
+    pub fn assert_invariants(&self) {
+        assert!(
+            !self.id.is_empty(),
+            "operator principal id must be non-empty"
+        );
+        assert_eq!(
+            self.mechanism != OperatorAuthMechanism::SharedSecret,
+            self.id != UNATTRIBUTED_OPERATOR_ID,
+            "the unattributed id belongs to the shared-secret mechanism alone, and \
+             that mechanism must never claim any other id"
+        );
+    }
 }
 
 /// A client address together with how the service learned it.
@@ -279,5 +300,57 @@ mod tests {
             OperatorAuthFailureReason::NotConfigured.as_str(),
             "not_configured"
         );
+    }
+
+    /// Invariant checks accept the two well-formed shapes: a named principal
+    /// from a named mechanism and the reserved unattributed pair.
+    #[test]
+    fn invariants_accept_well_formed_principals() {
+        let token = OperatorPrincipal {
+            id: "usr_operator_alice".to_string(),
+            mechanism: OperatorAuthMechanism::OperatorToken,
+        };
+        token.assert_invariants();
+
+        let mtls = OperatorPrincipal {
+            id: "CN=ops.example.com".to_string(),
+            mechanism: OperatorAuthMechanism::MutualTls,
+        };
+        mtls.assert_invariants();
+
+        OperatorPrincipal::unattributed().assert_invariants();
+    }
+
+    /// Negative space: a shared-secret principal naming a person, a named
+    /// mechanism claiming the reserved literal, or an empty id are all
+    /// programmer errors that must crash at the attribution boundary.
+    #[test]
+    #[should_panic(expected = "must never claim any other id")]
+    fn invariants_reject_shared_secret_claiming_a_named_id() {
+        let forged = OperatorPrincipal {
+            id: "usr_operator_alice".to_string(),
+            mechanism: OperatorAuthMechanism::SharedSecret,
+        };
+        forged.assert_invariants();
+    }
+
+    #[test]
+    #[should_panic(expected = "belongs to the shared-secret mechanism alone")]
+    fn invariants_reject_named_mechanism_claiming_the_reserved_id() {
+        let forged = OperatorPrincipal {
+            id: UNATTRIBUTED_OPERATOR_ID.to_string(),
+            mechanism: OperatorAuthMechanism::OperatorToken,
+        };
+        forged.assert_invariants();
+    }
+
+    #[test]
+    #[should_panic(expected = "id must be non-empty")]
+    fn invariants_reject_an_empty_principal_id() {
+        let empty = OperatorPrincipal {
+            id: String::new(),
+            mechanism: OperatorAuthMechanism::OperatorToken,
+        };
+        empty.assert_invariants();
     }
 }
