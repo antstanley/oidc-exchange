@@ -391,21 +391,25 @@
     "asgi-fallback": {
       "encoded-slash": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "scope raw_path extension omitted"
         }
       },
       "encoded-dot-dot": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "scope raw_path extension omitted"
         }
       },
       "encoded-question": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "scope raw_path extension omitted"
         }
       },
       "encoded-hash": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "scope raw_path extension omitted"
         }
       }
@@ -413,31 +417,37 @@
     "wsgi-fallback": {
       "encoded-slash": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "RAW_URI/REQUEST_URI extension omitted"
         }
       },
       "encoded-dot-dot": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "RAW_URI/REQUEST_URI extension omitted"
         }
       },
       "encoded-question": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "RAW_URI/REQUEST_URI extension omitted"
         }
       },
       "encoded-hash": {
         "decodedPath": {
+          "kind": "host-loss",
           "reason": "RAW_URI/REQUEST_URI extension omitted"
         }
       },
       "forwarded-for-first": {
         "orderedHeaders": {
+          "kind": "host-loss",
           "reason": "ordered header extension omitted"
         }
       },
       "forwarded-for-reversed": {
         "orderedHeaders": {
+          "kind": "host-loss",
           "reason": "ordered header extension omitted"
         }
       }

@@ -176,12 +176,10 @@ impl OidcExchange {
         };
         // Re-encode decoded host path data before constructing `http::Uri`; this keeps
         // decoded `?` and `#` inside the path rather than promoting them to URI delimiters.
-        let encoded_path = percent_encoding::utf8_percent_encode(
-            &path,
-            percent_encoding::NON_ALPHANUMERIC,
-        )
-        .to_string()
-        .replace("%2F", "/");
+        let encoded_path =
+            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+                .replace("%2F", "/");
         let path_and_query = match query {
             Some(query) => format!("{encoded_path}?{query}"),
             None => encoded_path,
