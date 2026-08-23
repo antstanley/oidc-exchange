@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::domain::{
-    AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, NewUser, OperatorPrincipal, User,
-    UserPatch, UserStatus,
+    clamp_admin_page_limit, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, NewUser,
+    OperatorPrincipal, User, UserPage, UserPatch, UserStatus, DEFAULT_ADMIN_PAGE_SIZE,
+    MAX_ADMIN_PAGE_SIZE,
 };
 use crate::error::{Error, Result};
 use crate::service::{claims::find_reserved_claim_key, create_audit_event, AppService};
@@ -443,9 +444,45 @@ impl AppService {
         })
     }
 
-    /// List users with pagination.
-    pub async fn admin_list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        self.user_repo.list_users(offset, limit).await
+    /// List users as one bounded, cursor-paginated page.
+    ///
+    /// The default and the clamp are applied *here*, in the core, not in an
+    /// HTTP handler: `limit = None` means [`DEFAULT_ADMIN_PAGE_SIZE`], and any
+    /// caller-supplied value above [`MAX_ADMIN_PAGE_SIZE`] is clamped down
+    /// before the repository port is reached. Clamping in the core (rather
+    /// than the handler) is what bounds every path to an adapter, including
+    /// non-HTTP callers; a zero limit is rejected rather than clamped because
+    /// the published schema documents `minimum: 1`.
+    pub async fn admin_list_users(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<UserPage> {
+        let effective_limit = match limit {
+            Some(requested) => clamp_admin_page_limit(requested)?,
+            None => DEFAULT_ADMIN_PAGE_SIZE,
+        };
+        assert!(
+            effective_limit >= 1,
+            "the resolved page limit must never fall below the documented minimum"
+        );
+        assert!(
+            effective_limit <= MAX_ADMIN_PAGE_SIZE,
+            "the resolved page limit must never exceed MAX_ADMIN_PAGE_SIZE"
+        );
+
+        let page = self.user_repo.list_users(cursor, effective_limit).await?;
+
+        // Postcondition on what the adapter returned: a page never exceeds the
+        // bound that was sent downstream, and an exhausted listing carries no
+        // cursor. Both would silently break the wire contract's completion
+        // signal if an adapter ever violated them.
+        assert!(
+            page.users.len() <= effective_limit as usize,
+            "adapter returned {} rows for a limit of {effective_limit}",
+            page.users.len()
+        );
+        Ok(page)
     }
 }
 

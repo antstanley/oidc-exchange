@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
+use oidc_exchange_core::cursor::KeysetCursor;
 use oidc_exchange_core::domain::{
     AuditEvent, IdentityClaims, NewUser, ProviderTokens, RateLimitDecision, RateLimitKey, Session,
-    User, UserPatch, UserStatus, INITIAL_USER_VERSION,
+    User, UserPage, UserPatch, UserStatus, INITIAL_USER_VERSION, MAX_ADMIN_PAGE_SIZE,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
@@ -204,16 +205,57 @@ impl UserRepository for MockRepository {
         Ok(counts)
     }
 
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+    /// Keyset-paginated listing ordered `created_at DESC, id DESC` — the same
+    /// ordering contract as the SQL adapters — resuming strictly after the
+    /// decoded cursor's position and peeking one row past the limit so
+    /// termination is exact (a short page is always the last page).
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        assert!(
+            (1..=MAX_ADMIN_PAGE_SIZE).contains(&limit),
+            "mock list_users expects a pre-clamped limit within 1..={MAX_ADMIN_PAGE_SIZE}, got {limit}"
+        );
+
+        let resume_after = cursor.map(KeysetCursor::decode).transpose()?;
+
         let state = self.state.lock().await;
         let mut users: Vec<User> = state.users.values().cloned().collect();
-        users.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        let start = offset as usize;
-        let end = std::cmp::min(start + limit as usize, users.len());
-        if start >= users.len() {
-            return Ok(Vec::new());
-        }
-        Ok(users[start..end].to_vec())
+        users.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+
+        // Strictly-after semantics on the composite key: a row deleted between
+        // pages neither duplicates nor skips its neighbours.
+        let remaining: Vec<&User> = match &resume_after {
+            Some(position) => users
+                .iter()
+                .filter(|u| {
+                    (u.created_at, u.id.as_str()) < (position.created_at, position.id.as_str())
+                })
+                .collect(),
+            None => users.iter().collect(),
+        };
+
+        let take = limit as usize;
+        let has_more = remaining.len() > take;
+        let page: Vec<User> = remaining.iter().take(take).map(|u| (*u).clone()).collect();
+
+        let next_cursor = if has_more {
+            let last = page.last().expect("has_more implies a non-empty page");
+            assert!(
+                page.len() == take,
+                "a continued page must carry exactly the requested limit"
+            );
+            Some(KeysetCursor::new(last.created_at, last.id.clone()).encode())
+        } else {
+            assert!(
+                remaining.len() <= take,
+                "no continuation may be signalled when every remaining row fit"
+            );
+            None
+        };
+
+        Ok(UserPage {
+            users: page,
+            next_cursor,
+        })
     }
 }
 

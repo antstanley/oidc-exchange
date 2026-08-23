@@ -11,6 +11,7 @@ use crate::error::ApiError;
 use crate::middleware::internal_auth::internal_auth_layer;
 use crate::state::AppState;
 use oidc_exchange_core::domain::{NewUser, OperatorPrincipal, UserPatch};
+use oidc_exchange_core::error::Error;
 
 /// Build the internal API surface with relative route paths, behind the
 /// operator-auth layer.
@@ -59,20 +60,41 @@ pub async fn stats(State(state): State<AppState>) -> Result<impl IntoResponse, A
 // User list
 // ---------------------------------------------------------------------------
 
+/// The `GET /internal/users` query contract, exactly as the published schema
+/// documents it: an opaque `cursor` and a `limit` the core clamps.
+///
+/// `offset` is *removed*, not deprecated — a caller that still sends one gets
+/// a deterministic rejection naming the replacement rather than a silently
+/// ignored parameter that would appear to work while always starting from the
+/// first page. The field exists on this struct only so its presence can be
+/// detected; serde ignores unknown fields, so without it an old caller would
+/// never learn it was speaking a dead contract.
 #[derive(serde::Deserialize)]
 pub struct ListUsersQuery {
-    offset: Option<u64>,
-    limit: Option<u64>,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    #[serde(rename = "offset")]
+    removed_offset: Option<String>,
 }
 
 pub async fn list_users(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ListUsersQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(50).min(200);
-    let users = state.service.admin_list_users(offset, limit).await?;
-    Ok(Json(users))
+    // Negative space: an explicit `offset` (even `offset=0`) is refused with
+    // the migration message instead of being honoured or dropped.
+    if query.removed_offset.is_some() {
+        return Err(Error::InvalidRequest {
+            reason: "the offset parameter has been removed; page with cursor/limit".to_string(),
+        }
+        .into());
+    }
+
+    let page = state
+        .service
+        .admin_list_users(query.cursor.as_deref(), query.limit)
+        .await?;
+    Ok(Json(page))
 }
 
 // ---------------------------------------------------------------------------

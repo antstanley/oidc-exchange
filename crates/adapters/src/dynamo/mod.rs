@@ -2,16 +2,21 @@ pub mod schema;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex as TokioMutex;
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
-use aws_sdk_dynamodb::types::{AttributeValue, Delete, Put, TransactWriteItem, WriteRequest};
+use aws_sdk_dynamodb::types::{
+    AttributeValue, Delete, Put, TransactWriteItem, Update, WriteRequest,
+};
 use chrono::Utc;
 use tracing::instrument;
 
 use oidc_exchange_core::domain::{
-    NewUser, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
+    NewUser, Session, User, UserPage, UserPatch, UserStatus, INITIAL_USER_VERSION,
+    MAX_ADMIN_PAGE_SIZE,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
@@ -26,6 +31,189 @@ use schema::{
 const CONDITIONAL_CHECK_FAILED_CODE: &str = "ConditionalCheckFailed";
 
 const GSI1_NAME: &str = "GSI1";
+
+/// Partition key of the transactionally-maintained user-status counter item
+/// (`count_by_status` reads this item instead of scanning the table).
+pub const STATS_COUNTER_PK: &str = "STATS#USERS";
+
+/// Sort key of the user-status counter item.
+pub const STATS_COUNTER_SK: &str = "COUNTS";
+
+/// Stats-cache TTL used when a deployment has not configured
+/// `internal_api.stats_cache_ttl` — the value the configuration spec documents
+/// as the default.
+pub const DEFAULT_STATS_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Upper bound on the stats-cache TTL: beyond one hour the "active sessions"
+/// figure on the dashboard would be an audit-grade lie rather than a cached
+/// estimate. `AppConfig::validate` refuses larger values.
+pub const MAX_STATS_CACHE_TTL: Duration = Duration::from_secs(3600);
+
+// ---------------------------------------------------------------------------
+// Scan-cursor codec
+// ---------------------------------------------------------------------------
+
+/// Opaque wire form of the list-users cursor: the base64url-encoded JSON of
+/// the scan's `LastEvaluatedKey` (`pk`/`sk` string attributes). Adapter-defined
+/// and only decodable by this adapter — a SQL keyset cursor handed to the
+/// DynamoDB adapter fails here with `InvalidRequest`, never silently starts
+/// over from the first page.
+struct ScanCursor {
+    pk: String,
+    sk: String,
+}
+
+impl ScanCursor {
+    fn from_key_map(key: &HashMap<String, AttributeValue>) -> Self {
+        let get_s = |name: &str| -> String {
+            let value = key
+                .get(name)
+                .and_then(|v| v.as_s().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    panic!("a LastEvaluatedKey must carry a string attribute named {name}")
+                });
+            assert!(
+                !value.is_empty(),
+                "a LastEvaluatedKey must carry a non-empty {name}"
+            );
+            value
+        };
+        Self {
+            pk: get_s("pk"),
+            sk: get_s("sk"),
+        }
+    }
+
+    fn to_key_map(&self) -> HashMap<String, AttributeValue> {
+        assert!(!self.pk.is_empty(), "decoded cursor carries an empty pk");
+        assert!(!self.sk.is_empty(), "decoded cursor carries an empty sk");
+        HashMap::from([
+            ("pk".to_string(), AttributeValue::S(self.pk.clone())),
+            ("sk".to_string(), AttributeValue::S(self.sk.clone())),
+        ])
+    }
+
+    fn encode(&self) -> String {
+        let json = serde_json::json!({ "pk": self.pk, "sk": self.sk }).to_string();
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as ENCODING;
+        use base64::Engine as _;
+        let encoded = ENCODING.encode(json.as_bytes());
+        // Round-trip assertion: what we hand out must decode to the same key.
+        let decoded = Self::decode(&encoded).expect("encode output must decode cleanly");
+        assert_eq!(decoded.pk, self.pk, "cursor round-trip must preserve pk");
+        assert_eq!(decoded.sk, self.sk, "cursor round-trip must preserve sk");
+        encoded
+    }
+
+    /// Parse a caller-supplied cursor; any structural failure is
+    /// `Error::InvalidRequest` (a tampered or foreign cursor is a caller
+    /// fault, never a store error).
+    fn decode(raw: &str) -> Result<Self> {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as ENCODING;
+        use base64::Engine as _;
+
+        if raw.is_empty() {
+            return Err(Error::InvalidRequest {
+                reason: "cursor must be a non-empty opaque token".to_string(),
+            });
+        }
+        let json_bytes = ENCODING
+            .decode(raw.as_bytes())
+            .map_err(|_| Error::InvalidRequest {
+                reason: "cursor is not a valid opaque token".to_string(),
+            })?;
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&json_bytes).map_err(|_| Error::InvalidRequest {
+                reason: "cursor is not a valid opaque token".to_string(),
+            })?;
+        let pk = parsed
+            .get("pk")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or(Error::InvalidRequest {
+                reason: "cursor is not a valid opaque token".to_string(),
+            })?;
+        let sk = parsed
+            .get("sk")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or(Error::InvalidRequest {
+                reason: "cursor is not a valid opaque token".to_string(),
+            })?;
+        Ok(Self {
+            pk: pk.to_string(),
+            sk: sk.to_string(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// STATS#USERS/COUNTS counter maintenance
+// ---------------------------------------------------------------------------
+
+/// Builds the transactional `Update` that moves this table's user-status
+/// counter item by one row: decrementing the status the row is leaving (when
+/// `from` is `Some`) and incrementing the one it is entering, in a single
+/// atomic item update.
+///
+/// `ADD` treats missing attributes — and a wholly missing counter item — as
+/// zero and creates what it touches, so the very first user write on a table
+/// bootstraps the counter without a separate migration step, and a racing
+/// writer that creates the item concurrently still composes correctly. The
+/// update rides inside the *same* `TransactWriteItems` call as the profile
+/// and guard writes, so the counters can never record a state no committed
+/// write produced (08-persistence.md): a cancelled transaction rolls its
+/// counter adjustment back together with everything else.
+///
+/// The status names go through expression-attribute-name placeholders because
+/// several appear in DynamoDB's reserved-word list.
+fn counter_adjustment(
+    table_name: &str,
+    from: Option<&UserStatus>,
+    to: &UserStatus,
+) -> Result<TransactWriteItem> {
+    fn status_attr(status: &UserStatus) -> &'static str {
+        match status {
+            UserStatus::Active => "active",
+            UserStatus::Suspended => "suspended",
+            UserStatus::Deleted => "deleted",
+        }
+    }
+
+    let to_name = status_attr(to);
+    let mut update = Update::builder()
+        .table_name(table_name)
+        .key("pk", AttributeValue::S(STATS_COUNTER_PK.to_string()))
+        .key("sk", AttributeValue::S(STATS_COUNTER_SK.to_string()));
+
+    match from {
+        Some(from_status) => {
+            let from_name = status_attr(from_status);
+            assert_ne!(
+                from_name, to_name,
+                "a counter adjustment moves between two different statuses, got {from_name} -> {to_name}"
+            );
+            update = update
+                .update_expression("ADD #from_status :minus_one, #to_status :plus_one")
+                .expression_attribute_names("#from_status", from_name)
+                .expression_attribute_names("#to_status", to_name)
+                .expression_attribute_values(":minus_one", AttributeValue::N("-1".to_string()))
+                .expression_attribute_values(":plus_one", AttributeValue::N("1".to_string()));
+        }
+        None => {
+            update = update
+                .update_expression("ADD #to_status :plus_one")
+                .expression_attribute_names("#to_status", to_name)
+                .expression_attribute_values(":plus_one", AttributeValue::N("1".to_string()));
+        }
+    }
+
+    let built = update.build().map_err(|e| Error::StoreError {
+        detail: e.to_string(),
+    })?;
+    Ok(TransactWriteItem::builder().update(built).build())
+}
 
 /// Maximum number of read-modify-write attempts `update_user` makes against its
 /// version-conditional `PutItem` (`version = :read_version OR attribute_not_exists(version)`)
@@ -114,11 +302,49 @@ where
 pub struct DynamoRepository {
     client: aws_sdk_dynamodb::Client,
     table_name: String,
+    /// How long [`DynamoRepository::count_active_sessions`] may serve a cached
+    /// walk before re-scanning. Configured per deployment
+    /// (`internal_api.stats_cache_ttl`); bounded below by
+    /// [`MIN_STATS_CACHE_TTL`] so the cache can never be configured into a
+    /// permanently stale answer.
+    stats_cache_ttl: Duration,
+    /// Cached `(fetched_at, active-session count)` pair behind
+    /// `count_active_sessions`; `None` until the first walk.
+    session_count_cache: Arc<TokioMutex<Option<(Instant, u64)>>>,
 }
+
+/// Lower bound on the usable stats-cache TTL. A zero (or sub-millisecond) TTL
+/// would make the cache useless while still reporting "cached" numbers;
+/// validation refuses such a configuration rather than letting an operator
+/// believe they asked for fresh counts.
+pub const MIN_STATS_CACHE_TTL: Duration = Duration::from_millis(1);
 
 impl DynamoRepository {
     pub fn new(client: aws_sdk_dynamodb::Client, table_name: String) -> Self {
-        Self { client, table_name }
+        Self {
+            client,
+            table_name,
+            stats_cache_ttl: DEFAULT_STATS_CACHE_TTL,
+            session_count_cache: Arc::new(TokioMutex::new(None)),
+        }
+    }
+
+    /// Override the stats-cache TTL (from `internal_api.stats_cache_ttl`).
+    ///
+    /// The value is asserted to be within the usable range so a misconfigured
+    /// TTL fails loudly at wiring time instead of silently serving stale or
+    /// never-cached counts.
+    pub fn with_stats_cache_ttl(mut self, ttl: Duration) -> Self {
+        assert!(
+            ttl >= MIN_STATS_CACHE_TTL,
+            "stats_cache_ttl of {ttl:?} is below the usable minimum of {MIN_STATS_CACHE_TTL:?}"
+        );
+        assert!(
+            ttl <= MAX_STATS_CACHE_TTL,
+            "stats_cache_ttl of {ttl:?} exceeds the maximum of {MAX_STATS_CACHE_TTL:?}"
+        );
+        self.stats_cache_ttl = ttl;
+        self
     }
 
     fn store_err(e: impl std::fmt::Display) -> Error {
@@ -338,10 +564,17 @@ impl UserRepository for DynamoRepository {
             .build()
             .map_err(Self::store_err)?;
 
+        // Every user create also moves the STATS#USERS/COUNTS counter: the
+        // adjustment is transactional with the profile+guard writes, so a
+        // lost uniqueness race cancels the counter increment along with the
+        // rest of the aborted transaction.
+        let counter_adjust = counter_adjustment(&self.table_name, None, &UserStatus::Active)?;
+
         self.client
             .transact_write_items()
             .transact_items(TransactWriteItem::builder().put(user_put).build())
             .transact_items(TransactWriteItem::builder().put(guard_put).build())
+            .transact_items(counter_adjust)
             .send()
             .await
             .map_err(|err| {
@@ -389,6 +622,8 @@ impl UserRepository for DynamoRepository {
             // recognized as a no-op transition rather than re-triggering the guard delete
             // below — see `is_delete_transition`.
             let was_deleted = user.status == UserStatus::Deleted;
+            // The pre-patch status, for the counter adjustment below.
+            let status_before = user.status.clone();
 
             if let Some(ref email) = patch.email {
                 user.email = Some(email.clone());
@@ -407,6 +642,18 @@ impl UserRepository for DynamoRepository {
             }
             user.updated_at = Utc::now();
             user.version = read_version + 1;
+
+            // The counter delta this patch implies: only an actual status
+            // *change* moves a row between buckets — a same-status patch (or
+            // a pure email/claims patch) adjusts nothing. Computed from the
+            // fresh read each attempt, so a retry after a version conflict
+            // recomputes the delta from the row it actually won.
+            let status_transition = match &patch.status {
+                Some(target) if *target != status_before => {
+                    Some((status_before.clone(), target.clone()))
+                }
+                _ => None,
+            };
 
             let item = user_to_item(&user);
             // A transition to `Deleted` frees `(provider, external_id)` for
@@ -428,8 +675,13 @@ impl UserRepository for DynamoRepository {
             // uniqueness invariant this guard exists to enforce.
             let is_delete_transition =
                 matches!(patch.status, Some(UserStatus::Deleted)) && !was_deleted;
+            // A status change that keeps the guard in place still moves the row
+            // between counter buckets, so its version-conditional write is
+            // promoted from a plain `PutItem` into a one-item transaction that
+            // carries the counter adjustment atomically (08-persistence.md).
+            let needs_transaction = is_delete_transition || status_transition.is_some();
 
-            if is_delete_transition {
+            if needs_transaction {
                 let user_put = Put::builder()
                     .table_name(&self.table_name)
                     .set_item(Some(item))
@@ -443,33 +695,44 @@ impl UserRepository for DynamoRepository {
                     .build()
                     .map_err(Self::store_err)?;
 
-                // Defense in depth alongside the `!was_deleted` gate above: even if this
-                // delete somehow still fired for a stale/retried request, condition it on
-                // the guard item's `user_id` still being *this* user's id, so it can never
-                // remove a guard that has since come to belong to a re-registered user for
-                // the same `(provider, external_id)`.
-                let guard_delete = Delete::builder()
-                    .table_name(&self.table_name)
-                    .key(
-                        "pk",
-                        AttributeValue::S(guard_pk(&user.provider, &user.external_id)),
-                    )
-                    .key("sk", AttributeValue::S(GUARD_SK.to_string()))
-                    .condition_expression("user_id = :user_id")
-                    .expression_attribute_values(
-                        ":user_id",
-                        AttributeValue::S(user.id.clone()),
-                    )
-                    .build()
-                    .map_err(Self::store_err)?;
-
-                let outcome = self
+                let mut transaction = self
                     .client
                     .transact_write_items()
-                    .transact_items(TransactWriteItem::builder().put(user_put).build())
-                    .transact_items(TransactWriteItem::builder().delete(guard_delete).build())
-                    .send()
-                    .await;
+                    .transact_items(TransactWriteItem::builder().put(user_put).build());
+
+                if let Some((from, to)) = &status_transition {
+                    transaction = transaction.transact_items(counter_adjustment(
+                        &self.table_name,
+                        Some(from),
+                        to,
+                    )?);
+                }
+
+                if is_delete_transition {
+                    // Defense in depth alongside the `!was_deleted` gate above: even if this
+                    // delete somehow still fired for a stale/retried request, condition it on
+                    // the guard item's `user_id` still being *this* user's id, so it can never
+                    // remove a guard that has since come to belong to a re-registered user for
+                    // the same `(provider, external_id)`.
+                    let guard_delete = Delete::builder()
+                        .table_name(&self.table_name)
+                        .key(
+                            "pk",
+                            AttributeValue::S(guard_pk(&user.provider, &user.external_id)),
+                        )
+                        .key("sk", AttributeValue::S(GUARD_SK.to_string()))
+                        .condition_expression("user_id = :user_id")
+                        .expression_attribute_values(
+                            ":user_id",
+                            AttributeValue::S(user.id.clone()),
+                        )
+                        .build()
+                        .map_err(Self::store_err)?;
+                    transaction =
+                        transaction.transact_items(TransactWriteItem::builder().delete(guard_delete).build());
+                }
+
+                let outcome = transaction.send().await;
 
                 match outcome {
                     Ok(_) => Ok(Some(user)),
@@ -487,7 +750,7 @@ impl UserRepository for DynamoRepository {
                         tracing::debug!(
                             attempt = attempt_number,
                             max_attempts = UPDATE_MAX_ATTEMPTS,
-                            "update_user (delete transition) version conflict, retrying"
+                            "update_user (transactional status write) version conflict, retrying"
                         );
                         Ok(None)
                     }
@@ -549,49 +812,126 @@ impl UserRepository for DynamoRepository {
         Ok(())
     }
 
+    /// Read the user-status counters from the transactionally-maintained
+    /// `STATS#USERS`/`COUNTS` item — a single strongly-consistent `GetItem`,
+    /// never a table walk.
+    ///
+    /// A missing item (a table that has seen no user write since the counter
+    /// shipped) reads as all-zero rather than triggering a fallback scan: the
+    /// fallback would reintroduce exactly the unbounded admin read this
+    /// adapter removed, and the counters are maintained transactionally with
+    /// every write that changes a status going forward. Pre-existing rows
+    /// written before the counter item existed are reflected only after their
+    /// next write; deployments migrating an existing table should backfill
+    /// `STATS#USERS`/`COUNTS` once out of band.
     #[instrument(skip(self))]
     async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+        let result = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(STATS_COUNTER_PK.to_string()))
+            .key("sk", AttributeValue::S(STATS_COUNTER_SK.to_string()))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(Self::store_err)?;
+
         let mut counts: HashMap<String, u64> = HashMap::new();
-        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
-
-        loop {
-            let mut scan = self
-                .client
-                .scan()
-                .table_name(&self.table_name)
-                .filter_expression("sk = :sk")
-                .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()))
-                .projection_expression("#s")
-                .expression_attribute_names("#s", "status");
-
-            if let Some(ref start_key) = exclusive_start_key {
-                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+        if let Some(item) = result.item {
+            for status in ["active", "suspended", "deleted"] {
+                let value = match item.get(status).and_then(|v| v.as_n().ok()) {
+                    Some(n) => n.parse::<u64>().map_err(|e| Error::StoreError {
+                        detail: format!("counter attribute {status} is not a count: {e}"),
+                    })?,
+                    None => 0,
+                };
+                counts.insert(status.to_string(), value);
             }
-
-            let result = scan.send().await.map_err(Self::store_err)?;
-            let items = result.items.unwrap_or_default();
-
-            for item in &items {
-                let status = item
-                    .get("status")
-                    .and_then(|v| v.as_s().ok())
-                    .unwrap_or(&"unknown".to_string())
-                    .clone();
-                *counts.entry(status).or_insert(0) += 1;
-            }
-
-            match result.last_evaluated_key {
-                Some(key) => exclusive_start_key = Some(key),
-                None => break,
-            }
+            assert_eq!(
+                counts.len(),
+                3,
+                "the counter item must report exactly the three UserStatus buckets"
+            );
         }
 
         Ok(counts)
     }
 
+    /// One bounded `Scan` per page — never a full-table materialization.
+    ///
+    /// The page size rides to DynamoDB as the scan's `Limit` and the caller's
+    /// cursor (the previous response's encoded `LastEvaluatedKey`) as its
+    /// `ExclusiveStartKey`. Because DynamoDB applies `Limit` *before* the
+    /// `sk = PROFILE` filter, a page may be shorter than the requested limit
+    /// while more matching rows remain — the source-specified short-page /
+    /// non-null-cursor behaviour — so the next cursor is derived purely from
+    /// whether DynamoDB returned a `LastEvaluatedKey`, never from how many
+    /// rows happened to survive the filter. Ordering is scan order (store
+    /// key distribution), not `created_at`; cursor paging is stable and
+    /// complete regardless.
     #[instrument(skip(self))]
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        let mut all_users: Vec<User> = Vec::new();
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        // Defense in depth alongside the core's clamp: this adapter is public
+        // to any embedder that may not have passed the value through
+        // `admin_list_users`, so the bound is re-asserted at the boundary.
+        assert!(
+            (1..=MAX_ADMIN_PAGE_SIZE).contains(&limit),
+            "list_users limit must arrive pre-clamped within 1..={MAX_ADMIN_PAGE_SIZE}, got {limit}"
+        );
+        let exclusive_start_key = match cursor {
+            Some(raw) => Some(ScanCursor::decode(raw)?.to_key_map()),
+            None => None,
+        };
+
+        let mut scan = self
+            .client
+            .scan()
+            .table_name(&self.table_name)
+            .filter_expression("sk = :sk")
+            .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()))
+            .limit(limit as i32);
+        if let Some(start_key) = exclusive_start_key {
+            scan = scan.set_exclusive_start_key(Some(start_key));
+        }
+
+        let result = scan.send().await.map_err(Self::store_err)?;
+        let items = result.items.unwrap_or_default();
+
+        let mut users = Vec::with_capacity(items.len());
+        for item in &items {
+            users.push(item_to_user(item)?);
+        }
+        assert!(
+            users.len() <= limit as usize,
+            "a single bounded scan returned {} rows against a Limit of {limit}",
+            users.len()
+        );
+
+        // A present LastEvaluatedKey means "more pages may follow", even when
+        // the filtered page came back empty; its absence is the only
+        // exhaustion signal.
+        let next_cursor = match result.last_evaluated_key {
+            Some(key) => {
+                assert!(
+                    !key.is_empty(),
+                    "DynamoDB must never report an empty LastEvaluatedKey"
+                );
+                Some(ScanCursor::from_key_map(&key).encode())
+            }
+            None => None,
+        };
+
+        Ok(UserPage { users, next_cursor })
+    }
+}
+
+impl DynamoRepository {
+    /// The uncached walk behind [`Self::count_active_sessions`]: one paginated
+    /// scan of the session items, counting those not yet expired.
+    async fn scan_active_session_count(&self) -> Result<u64> {
+        let now = Utc::now();
+        let mut count: u64 = 0;
         let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
 
         loop {
@@ -600,7 +940,7 @@ impl UserRepository for DynamoRepository {
                 .scan()
                 .table_name(&self.table_name)
                 .filter_expression("sk = :sk")
-                .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()));
+                .expression_attribute_values(":sk", AttributeValue::S("SESSION".to_string()));
 
             if let Some(ref start_key) = exclusive_start_key {
                 scan = scan.set_exclusive_start_key(Some(start_key.clone()));
@@ -610,7 +950,11 @@ impl UserRepository for DynamoRepository {
             let items = result.items.unwrap_or_default();
 
             for item in &items {
-                all_users.push(item_to_user(item)?);
+                if let Ok(session) = item_to_session(item) {
+                    if session.expires_at > now {
+                        count += 1;
+                    }
+                }
             }
 
             match result.last_evaluated_key {
@@ -619,17 +963,7 @@ impl UserRepository for DynamoRepository {
             }
         }
 
-        // Sort by created_at descending
-        all_users.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-
-        // Apply offset and limit
-        let start = offset as usize;
-        let end = std::cmp::min(start + limit as usize, all_users.len());
-        if start >= all_users.len() {
-            return Ok(Vec::new());
-        }
-
-        Ok(all_users[start..end].to_vec())
+        Ok(count)
     }
 }
 
@@ -682,41 +1016,37 @@ impl SessionRepository for DynamoRepository {
         Ok(())
     }
 
+    /// Active-session count, cached per [`DynamoRepository::stats_cache_ttl`].
+    ///
+    /// The count still comes from a walk (a scan over `sk = SESSION` counting
+    /// unexpired items) — DynamoDB's TTL reaper deletes sessions without
+    /// passing through this adapter, so a maintained counter would drift
+    /// downward with nothing to correct it — but the walk runs at most once
+    /// per configured TTL window per process, however many
+    /// `GET /internal/stats` calls arrive. The cache lock is held across the
+    /// walk so concurrent callers *wait for* the refresh rather than each
+    /// stampeding into their own full-table read.
     #[instrument(skip(self))]
     async fn count_active_sessions(&self) -> Result<u64> {
-        let now = Utc::now();
-        let mut count: u64 = 0;
-        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
-
-        loop {
-            let mut scan = self
-                .client
-                .scan()
-                .table_name(&self.table_name)
-                .filter_expression("sk = :sk")
-                .expression_attribute_values(":sk", AttributeValue::S("SESSION".to_string()));
-
-            if let Some(ref start_key) = exclusive_start_key {
-                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
-            }
-
-            let result = scan.send().await.map_err(Self::store_err)?;
-            let items = result.items.unwrap_or_default();
-
-            for item in &items {
-                if let Ok(session) = item_to_session(item) {
-                    if session.expires_at > now {
-                        count += 1;
-                    }
-                }
-            }
-
-            match result.last_evaluated_key {
-                Some(key) => exclusive_start_key = Some(key),
-                None => break,
+        let mut cache = self.session_count_cache.lock().await;
+        if let Some((fetched_at, count)) = *cache {
+            // Instant is monotonic, so `duration_since` cannot go negative.
+            let age = fetched_at.elapsed();
+            assert!(
+                fetched_at <= std::time::Instant::now(),
+                "cache timestamps must come from the monotonic clock"
+            );
+            if age < self.stats_cache_ttl {
+                return Ok(count);
             }
         }
 
+        let count = self.scan_active_session_count().await?;
+        assert!(
+            self.stats_cache_ttl >= MIN_STATS_CACHE_TTL,
+            "the cache TTL is validated at construction and never zero"
+        );
+        *cache = Some((std::time::Instant::now(), count));
         Ok(count)
     }
 

@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 
 use oidc_exchange_core::config::{AppConfig, RegistrationConfig, ServerConfig, TokenConfig};
 use oidc_exchange_core::domain::{
-    AccessTokenClaims, AuditEventType, AuditOutcome, IdentityClaims, NewUser, User, UserPatch,
-    UserStatus,
+    AccessTokenClaims, AuditEventType, AuditOutcome, IdentityClaims, NewUser, User, UserPage,
+    UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -195,8 +195,8 @@ impl UserRepository for StaleReadUserRepository {
         self.inner.count_by_status().await
     }
 
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        self.inner.list_users(offset, limit).await
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        self.inner.list_users(cursor, limit).await
     }
 }
 
@@ -260,8 +260,8 @@ impl UserRepository for FailingCreateUserRepository {
         self.inner.count_by_status().await
     }
 
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        self.inner.list_users(offset, limit).await
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        self.inner.list_users(cursor, limit).await
     }
 }
 

@@ -1177,7 +1177,7 @@ async fn admin_reads_emit_no_audit_events() {
     svc.admin_get_user(&user_id)
         .await
         .expect("get_user should succeed");
-    svc.admin_list_users(0, 10)
+    svc.admin_list_users(None, Some(10))
         .await
         .expect("list_users should succeed");
     svc.admin_stats().await.expect("stats should succeed");

@@ -8,7 +8,10 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use tracing::instrument;
 
-use oidc_exchange_core::domain::{NewUser, Session, User, UserPatch, UserStatus};
+use oidc_exchange_core::cursor::KeysetCursor;
+use oidc_exchange_core::domain::{
+    NewUser, Session, User, UserPage, UserPatch, UserStatus, MAX_ADMIN_PAGE_SIZE,
+};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
@@ -470,21 +473,74 @@ impl UserRepository for PostgresRepository {
         Ok(counts)
     }
 
+    /// Keyset-paginated listing ordered `created_at DESC, id DESC`, resuming
+    /// strictly after the decoded cursor's `(created_at, id)` position.
+    ///
+    /// Mirrors [`oidc_exchange_adapters::sqlite`]: the page size is pushed
+    /// into Postgres as a hard `LIMIT` (plus one peek row so a non-null
+    /// `next_cursor` is only emitted when a following row exists), and the
+    /// composite key keeps the ordering total so adjacent pages neither
+    /// duplicate nor skip rows on `created_at` ties.
     #[instrument(skip(self))]
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        let rows = sqlx::query("SELECT * FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2")
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(Self::store_err)?;
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        // Defense in depth alongside the core's clamp: this adapter is public
+        // to any embedder that may not have passed the value through
+        // `admin_list_users`, so the bound is re-asserted at the boundary.
+        assert!(
+            (1..=MAX_ADMIN_PAGE_SIZE).contains(&limit),
+            "list_users limit must arrive pre-clamped within 1..={MAX_ADMIN_PAGE_SIZE}, got {limit}"
+        );
+        let resume_after = cursor.map(KeysetCursor::decode).transpose()?;
 
-        let mut users = Vec::new();
-        for row in &rows {
+        let fetch_limit = i64::from(limit) + 1;
+        let rows = match &resume_after {
+            Some(position) => {
+                let created_at_str = position.created_at.to_rfc3339();
+                sqlx::query(
+                    "SELECT * FROM users \
+                     WHERE (created_at < $1) OR (created_at = $1 AND id < $2) \
+                     ORDER BY created_at DESC, id DESC LIMIT $3",
+                )
+                .bind(&created_at_str)
+                .bind(&position.id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(Self::store_err)?
+            }
+            None => sqlx::query("SELECT * FROM users ORDER BY created_at DESC, id DESC LIMIT $1")
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(Self::store_err)?,
+        };
+
+        assert!(
+            rows.len() <= fetch_limit as usize,
+            "Postgres returned more rows than the pushed LIMIT of {fetch_limit}"
+        );
+
+        // The extra row proves more pages exist and is dropped from the page.
+        let has_more = rows.len() > limit as usize;
+        let page_rows = if has_more {
+            &rows[..limit as usize]
+        } else {
+            &rows[..]
+        };
+
+        let mut users = Vec::with_capacity(page_rows.len());
+        for row in page_rows {
             users.push(row_to_user(row)?);
         }
 
-        Ok(users)
+        let next_cursor = if has_more {
+            let last = users.last().expect("a continued page is non-empty");
+            Some(KeysetCursor::new(last.created_at, last.id.clone()).encode())
+        } else {
+            None
+        };
+
+        Ok(UserPage { users, next_cursor })
     }
 }
 

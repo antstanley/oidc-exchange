@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use std::collections::HashMap;
 
-use crate::domain::{NewUser, Session, User, UserPatch};
+use crate::domain::{NewUser, Session, User, UserPage, UserPatch};
 use crate::error::Result;
 
 #[async_trait]
@@ -17,7 +17,20 @@ pub trait UserRepository: Send + Sync {
     async fn update_user(&self, user_id: &str, patch: &UserPatch) -> Result<User>;
     async fn delete_user(&self, user_id: &str) -> Result<()>;
     async fn count_by_status(&self) -> Result<HashMap<String, u64>>;
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>>;
+
+    /// Read one bounded page of users.
+    ///
+    /// `cursor` is the opaque, adapter-issued `next_cursor` from the previous
+    /// page; `None` starts the listing. `limit` is the *effective* page size —
+    /// the service layer clamps caller input to [`MAX_ADMIN_PAGE_SIZE`] before
+    /// this port is reached, and every adapter pushes that bound into the
+    /// store rather than materializing an unbounded result. The returned
+    /// [`UserPage::next_cursor`] is the only completion signal: adapters may
+    /// return a short page that still carries a non-null cursor.
+    ///
+    /// A cursor is only valid against the adapter that issued it; an
+    /// unparseable or tampered cursor is [`Error::InvalidRequest`].
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage>;
 }
 
 #[async_trait]
