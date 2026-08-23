@@ -2801,10 +2801,16 @@ dependencies = [
 name = "oidc-exchange-conformance"
 version = "0.0.0"
 dependencies = [
+ "axum",
+ "http-body-util",
+ "hyper 1.10.1",
+ "hyper-util",
+ "oidc-exchange",
  "oidc-exchange-ffi",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

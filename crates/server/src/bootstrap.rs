@@ -353,6 +353,13 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     if role == "exchange" || role == "all" {
         app = app.merge(routes::public_routes());
     }
+    #[cfg(feature = "conformance")]
+    {
+        app = app.route(
+            "/__oidc_exchange_conformance__/observe",
+            axum::routing::any(conformance_observe),
+        );
+    }
     if (role == "admin" || role == "all") && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
     }
@@ -428,6 +435,44 @@ fn wrap_with_base_path_under_outer_guard(router: Router, base_path: Option<Strin
 /// than reaching this function. Reaching it here anyway (e.g. a hand-built `AppConfig` in a
 /// test that skipped `validate`) is treated as a programmer error and panics loudly instead
 /// of silently substituting [`oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT`].
+#[cfg(feature = "conformance")]
+async fn conformance_observe(request: axum::extract::Request) -> axum::response::Response {
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+    use serde_json::json;
+
+    let (parts, body) = request.into_parts();
+    let body = match to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(_) => return axum::http::StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    };
+    let ordered_headers = parts
+        .headers
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "host" | "connection"))
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| json!({"name": name.as_str(), "value": value}))
+        })
+        .collect::<Vec<_>>();
+    let request_id = parts
+        .headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok());
+    let response = json!({
+        "method": parts.method.as_str(),
+        "decodedPath": parts.uri.path(),
+        "query": parts.uri.query(),
+        "orderedHeaders": ordered_headers,
+        "requestId": request_id,
+        "bodyLength": body.len(),
+        "status": 200
+    });
+    (axum::http::StatusCode::OK, axum::Json(response)).into_response()
+}
+
 fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
     let secs = oidc_exchange_core::service::parse_duration_secs(&config.server.request_timeout)
         .unwrap_or_else(|err| {

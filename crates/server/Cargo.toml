@@ -3,6 +3,10 @@ name = "oidc-exchange"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+conformance = []
+
 [dependencies]
 oidc-exchange-core.workspace = true
 oidc-exchange-adapters.workspace = true

@@ -3,6 +3,10 @@ name = "oidc-exchange-ffi"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+conformance = ["oidc-exchange/conformance"]
+
 [dependencies]
 oidc-exchange = { path = "../server" }
 oidc-exchange-core.workspace = true
