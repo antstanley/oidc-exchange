@@ -9,6 +9,10 @@ import { validateWorkflow, validateWorkflowFile } from "../workflow-policy.mjs";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const WORKFLOW_DIRECTORY = join(REPO_ROOT, ".github/workflows");
 const FIXTURE_DIRECTORY = join(REPO_ROOT, "scripts/__tests__/fixtures/workflow-policy");
+const ATTESTATION_FIXTURE_DIRECTORY = join(
+  REPO_ROOT,
+  "scripts/__tests__/fixtures/workflow-policy-attestation",
+);
 
 function fixture(name) {
   const text = readFileSync(join(FIXTURE_DIRECTORY, name), "utf8");
@@ -57,4 +61,29 @@ test("workflow fixtures are valid YAML objects", () => {
   const names = readdirSync(FIXTURE_DIRECTORY).filter((name) => name.endsWith(".yml"));
   assert.equal(names.length, 8);
   for (const name of names) assert.equal(typeof YAML.parse(fixture(name)).jobs, "object");
+});
+
+
+test("attestation policy fixtures reject broken subject and authority handoff", () => {
+  const expected = new Map([
+    ["missing-binary.yml", "missing pinned provenance action"],
+    ["wrong-digest.yml", "platform image attestation uses wrong digest"],
+    ["mutable-tag.yml", "mutable image tag attested"],
+    ["missing-permissions.yml", "missing attestation permissions"],
+    ["missing-dependency.yml", "release does not depend on attested artifacts"],
+    ["unpinned-attestation.yml", "action is not pinned"],
+  ]);
+  assert.equal(expected.size, 6);
+  for (const [name, message] of expected) {
+    const text = readFileSync(join(ATTESTATION_FIXTURE_DIRECTORY, name), "utf8");
+    const errors = validateWorkflow(text, "release.yml");
+    assert.ok(errors.some((error) => error.includes(message)), `${name}: ${errors.join(", ")}`);
+  }
+  assert.deepEqual(
+    validateWorkflow(
+      readFileSync(join(ATTESTATION_FIXTURE_DIRECTORY, "valid.yml"), "utf8"),
+      "release.yml",
+    ),
+    [],
+  );
 });

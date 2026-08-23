@@ -119,6 +119,11 @@ jobs:
             cp oidc-exchange "${{ matrix.artifact }}"
           fi
           sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+      - name: Attest release binary
+        # actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-checksums: target/${{ matrix.target }}/release/${{ matrix.artifact }}.sha256
       - name: Smoke test
         if: "!matrix.use_cross"
         shell: bash
@@ -137,6 +142,8 @@ jobs:
             target/${{ matrix.target }}/release/${{ matrix.artifact }}.sha256
     permissions:
       contents: read
+      id-token: write
+      attestations: write
   build-docker:
     name: Build Docker (${{ matrix.platform }})
     needs: validate
@@ -183,6 +190,13 @@ jobs:
           mkdir -p "${{ runner.temp }}/digests"
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
+      - name: Attest platform image digest
+        # actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
       - name: Upload digest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -193,6 +207,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
   docker-manifest:
     name: Merge Docker manifest
     needs: build-docker
@@ -238,8 +254,28 @@ jobs:
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+      - name: Resolve immutable multi-arch manifest digest
+        id: manifest
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest.Digest}}' | jq -r .)
+          case "$digest" in
+            sha256:[0-9a-f][0-9a-f]*) ;;
+            *) echo "::error::invalid manifest digest: $digest"; exit 1 ;;
+          esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest multi-arch manifest digest
+        # actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
       - name: Inspect
-        run: docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect ghcr.io/${{ github.repository }}@${{ steps.manifest.outputs.digest }}
       - name: Sync Docker Hub description
         continue-on-error: true
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa
@@ -252,6 +288,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
   build-nodejs:
     name: Build Node.js (${{ matrix.target }})
     needs: validate

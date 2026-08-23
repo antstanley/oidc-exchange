@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import YAML from "yaml";
 
 export const ALLOWED_WRITE_PERMISSIONS = new Map([
-  ["release.yml:build-docker", new Set(["packages"])],
-  ["release.yml:docker-manifest", new Set(["packages"])],
+  ["release.yml:build-binaries", new Set(["id-token", "attestations"])],
+  ["release.yml:build-docker", new Set(["packages", "id-token", "attestations"])],
+  ["release.yml:docker-manifest", new Set(["packages", "id-token", "attestations"])],
   ["release.yml:publish-npm", new Set(["id-token"])],
   ["release.yml:publish-pypi", new Set(["id-token"])],
   ["release.yml:create-release", new Set(["contents"])],
@@ -66,6 +67,43 @@ export function validateWorkflow(text, workflowName) {
     const needs = Array.isArray(publishNpm.needs) ? publishNpm.needs : [publishNpm.needs];
     if (!needs.includes("validate-npm-package") || !needs.includes("build-nodejs"))
       errors.push(`${workflowName}: publish-npm bypasses validation or artifacts`);
+  }
+
+  if (workflowName === "release.yml") {
+    const attestAction =
+      "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a";
+    const binaryJob = workflow.jobs["build-binaries"];
+    const dockerJob = workflow.jobs["build-docker"];
+    const manifestJob = workflow.jobs["docker-manifest"];
+    const releaseJob = workflow.jobs["create-release"];
+    for (const [name, job] of [
+      ["build-binaries", binaryJob],
+      ["build-docker", dockerJob],
+      ["docker-manifest", manifestJob],
+    ]) {
+      if (!job) {
+        errors.push(`${workflowName}: missing ${name} attestation job`);
+        continue;
+      }
+      if (job.permissions?.["id-token"] !== "write" || job.permissions?.attestations !== "write")
+        errors.push(`${workflowName}:${name}: missing attestation permissions`);
+      if (!job.steps.some((step) => step.uses === attestAction))
+        errors.push(`${workflowName}:${name}: missing pinned provenance action`);
+    }
+    const binaryAttest = binaryJob?.steps.find((step) => step.uses === attestAction);
+    if (!String(binaryAttest?.with?.["subject-checksums"] ?? "").includes("matrix.artifact"))
+      errors.push(`${workflowName}: binary attestation does not consume produced checksum`);
+    const dockerAttest = dockerJob?.steps.find((step) => step.uses === attestAction);
+    if (dockerAttest?.with?.["subject-digest"] !== "${{ steps.build.outputs.digest }}")
+      errors.push(`${workflowName}: platform image attestation uses wrong digest`);
+    if (/:[^@]+$/.test(String(dockerAttest?.with?.["subject-name"] ?? "")))
+      errors.push(`${workflowName}: mutable image tag attested`);
+    const manifestAttest = manifestJob?.steps.find((step) => step.uses === attestAction);
+    if (manifestAttest?.with?.["subject-digest"] !== "${{ steps.manifest.outputs.digest }}")
+      errors.push(`${workflowName}: manifest attestation uses wrong digest`);
+    const releaseNeeds = Array.isArray(releaseJob?.needs) ? releaseJob.needs : [releaseJob?.needs];
+    if (!releaseNeeds.includes("build-binaries") || !releaseNeeds.includes("docker-manifest"))
+      errors.push(`${workflowName}: release does not depend on attested artifacts`);
   }
   return errors;
 }
