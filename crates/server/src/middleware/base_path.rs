@@ -85,15 +85,19 @@ impl Service<Request<Body>> for BasePathStripService {
 /// once, closed, at config load. The outer catch-panic layer in `build_router` backs this up
 /// as defence in depth, but nothing on this path is expected to reach it.
 fn strip_base_path(mut request: Request<Body>, prefix: Option<&str>) -> Request<Body> {
-    // Treat "no prefix" and "empty-string prefix" identically: `Some("")` is not rejected by
-    // config deserialization, and `str::strip_prefix("")` would trivially match every path
-    // (a no-op strip in effect, since the "stripped" remainder is the whole original path).
-    // Folding it into the same early return as `None` here keeps that case cheap (no
-    // allocation, no URI reconstruction) and — more importantly — keeps a misconfigured empty
-    // prefix a harmless pass-through instead of a per-request failure mode: this middleware
-    // runs on every request, so any panic here would take the whole service down repeatedly
-    // rather than failing once, closed, at config load.
-    let Some(prefix) = prefix.filter(|p| !p.is_empty()) else {
+    // Treat "no prefix" and the two degenerate spellings — empty string and bare root
+    // "/" — identically: `Some("")` is not rejected by config deserialization, and
+    // `str::strip_prefix("")` would trivially match every path (a no-op strip in effect,
+    // since the "stripped" remainder is the whole original path); a `Some("/")` prefix is
+    // equally degenerate, since every origin-form path already starts with `/`, and
+    // stripping it would rewrite e.g. `//x` to `/x` by consuming one byte of path
+    // structure. Config load folds both spellings to unset (`AppConfig::normalise`), so
+    // reaching this branch means a hand-built router skipped that step; folding them in
+    // here as well keeps a misconfigured degenerate prefix a harmless pass-through instead
+    // of a per-request failure mode: this middleware runs on every request, so any panic or
+    // wrong-path routing here would hit every request repeatedly rather than failing once,
+    // closed, at config load.
+    let Some(prefix) = prefix.filter(|p| !p.is_empty() && *p != "/") else {
         return request;
     };
 

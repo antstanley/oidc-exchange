@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use config::{Config, Environment, File, FileFormat, Value, ValueKind};
+use tower::Layer;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::timeout::TimeoutLayer;
 
