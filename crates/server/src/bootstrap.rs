@@ -16,6 +16,8 @@ use oidc_exchange_core::service::AppService;
 
 use crate::middleware::audit_context::audit_context_layer;
 use crate::middleware::base_path::with_base_path_strip;
+#[cfg(feature = "conformance")]
+use crate::middleware::base_path::with_base_path_strip_and_observe;
 use crate::middleware::error_handler::panic_handler;
 use crate::middleware::request_id::request_id_layer;
 use crate::routes;
@@ -374,9 +376,15 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
     .with_state(state);
 
     #[cfg(feature = "conformance")]
-    let router = router.layer(axum::middleware::from_fn(conformance_intercept));
+    let router = with_base_path_strip_and_observe(
+        router,
+        config.server.base_path.clone(),
+        config.server.max_request_body_bytes,
+    );
+    #[cfg(not(feature = "conformance"))]
+    let router = with_base_path_strip(router, config.server.base_path.clone());
 
-    wrap_with_base_path_under_outer_guard(router, config.server.base_path.clone())
+    wrap_under_outer_guard(router)
 }
 
 /// Apply the per-route middleware stack every router this crate builds shares — inner
@@ -416,8 +424,11 @@ where
 /// with the panic-containment tests for the same drift-proofing reason as
 /// [`apply_route_layers`].
 fn wrap_with_base_path_under_outer_guard(router: Router, base_path: Option<String>) -> Router {
-    let base_path_aware = with_base_path_strip(router, base_path);
-    Router::new().fallback_service(CatchPanicLayer::custom(panic_handler).layer(base_path_aware))
+    wrap_under_outer_guard(with_base_path_strip(router, base_path))
+}
+
+fn wrap_under_outer_guard(router: Router) -> Router {
+    Router::new().fallback_service(CatchPanicLayer::custom(panic_handler).layer(router))
 }
 
 /// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
@@ -432,28 +443,22 @@ fn wrap_with_base_path_under_outer_guard(router: Router, base_path: Option<Strin
 /// test that skipped `validate`) is treated as a programmer error and panics loudly instead
 /// of silently substituting [`oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT`].
 #[cfg(feature = "conformance")]
-async fn conformance_intercept(
+pub(crate) async fn conformance_observe(
     request: axum::extract::Request,
-    next: axum::middleware::Next,
+    max_request_body_bytes: usize,
 ) -> axum::response::Response {
-    if request.headers().contains_key("x-oidc-conformance-observe") {
-        conformance_observe(request).await
-    } else {
-        next.run(request).await
-    }
-}
-
-#[cfg(feature = "conformance")]
-async fn conformance_observe(request: axum::extract::Request) -> axum::response::Response {
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
     use serde_json::json;
 
     let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, usize::MAX).await {
+    let body = match to_bytes(body, max_request_body_bytes.saturating_add(1)).await {
         Ok(body) => body,
         Err(_) => return axum::http::StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
+    if body.len() > max_request_body_bytes {
+        return axum::http::StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
     let ordered_headers = parts
         .headers
         .iter()

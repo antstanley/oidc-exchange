@@ -2805,6 +2805,7 @@ dependencies = [
  "http-body-util",
  "hyper 1.10.1",
  "hyper-util",
+ "libc",
  "oidc-exchange",
  "oidc-exchange-ffi",
  "serde",

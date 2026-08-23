@@ -39,6 +39,53 @@ pub fn with_base_path_strip(inner: Router, base_path: Option<String>) -> Router 
     Router::new().fallback_service(service)
 }
 
+#[cfg(feature = "conformance")]
+pub(crate) fn with_base_path_strip_and_observe(
+    inner: Router,
+    base_path: Option<String>,
+    max_request_body_bytes: usize,
+) -> Router {
+    let service = BasePathStripService {
+        inner,
+        base_path: base_path.map(Arc::from),
+    };
+    Router::new().fallback_service(ConformanceBasePathService {
+        inner: service,
+        max_request_body_bytes,
+    })
+}
+
+#[cfg(feature = "conformance")]
+#[derive(Clone)]
+struct ConformanceBasePathService {
+    inner: BasePathStripService,
+    max_request_body_bytes: usize,
+}
+
+#[cfg(feature = "conformance")]
+impl Service<Request<Body>> for ConformanceBasePathService {
+    type Response = Response;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request<Body>) -> Self::Future {
+        let base_path = self.inner.base_path.clone();
+        if request.headers().contains_key("x-oidc-conformance-observe") {
+            let cap = self.max_request_body_bytes;
+            Box::pin(async move {
+                let request = strip_base_path(request, base_path.as_deref());
+                Ok(crate::bootstrap::conformance_observe(request, cap).await)
+            })
+        } else {
+            self.inner.call(request)
+        }
+    }
+}
+
 /// The `tower::Service` behind [`with_base_path_strip`]'s outer router fallback.
 ///
 /// Deliberately minimal: `poll_ready` is always ready (matching `Router`'s own `Service` impl,
@@ -48,7 +95,7 @@ pub fn with_base_path_strip(inner: Router, base_path: Option<String>) -> Router 
 /// `&mut Router` across `.await` points is the standard pattern for calling a `Router` as a
 /// `Service` from another `Service`.
 #[derive(Clone)]
-struct BasePathStripService {
+pub(crate) struct BasePathStripService {
     inner: Router,
     base_path: Option<Arc<str>>,
 }

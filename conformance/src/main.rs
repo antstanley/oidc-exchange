@@ -1,5 +1,6 @@
 use std::io::{self, BufRead};
 use std::process::Command;
+use std::time::Duration;
 
 use oidc_exchange_ffi::{OidcExchange, TransportHints, WireRequest};
 use serde::Deserialize;
@@ -66,8 +67,14 @@ fn run_native(config: &str, input: Input) -> Value {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let deadline = Duration::from_secs(3);
 
-        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut stream = tokio::time::timeout(deadline, tokio::net::TcpStream::connect(address))
+            .await
+            .unwrap_or_else(|_| panic!("native transport timed out connecting for {}", input.id))
+            .unwrap_or_else(|error| {
+                panic!("native transport connect failed for {}: {error}", input.id)
+            });
         let mut request = format!(
             "{} {}{} HTTP/1.1\r\nHost: localhost\r\n",
             input.method,
@@ -92,28 +99,91 @@ fn run_native(config: &str, input: Input) -> Value {
         }
         request.push_str("Connection: close\r\n\r\n");
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        stream.write_all(request.as_bytes()).await.unwrap();
-        if input.body_length > 0 && input.body_length <= 2_097_153 {
-            if let Err(error) = stream.write_all(&vec![b'x'; input.body_length]).await {
-                if error.kind() != std::io::ErrorKind::ConnectionReset
-                    && error.kind() != std::io::ErrorKind::BrokenPipe
-                {
-                    panic!("write native body: {error}");
+        tokio::time::timeout(deadline, stream.write_all(request.as_bytes()))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "native transport timed out writing headers for {}",
+                    input.id
+                )
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "native transport header write failed for {}: {error}",
+                    input.id
+                )
+            });
+        let bounded_body_length = input.body_length.min(2_097_153);
+        if bounded_body_length > 0 {
+            let body = vec![b'x'; bounded_body_length];
+            match tokio::time::timeout(deadline, stream.write_all(&body)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) => {}
+                Ok(Err(error)) => panic!(
+                    "native transport body write failed for {}: {error}",
+                    input.id
+                ),
+                Err(_) => panic!("native transport timed out writing body for {}", input.id),
+            }
+        }
+        if has_content_length {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                let result = unsafe { libc::shutdown(stream.as_raw_fd(), libc::SHUT_WR) };
+                if result != 0 {
+                    let error = std::io::Error::last_os_error();
+                    panic!(
+                        "native transport half-close failed for {}: {error}",
+                        input.id
+                    );
                 }
             }
+            #[cfg(not(unix))]
+            stream.shutdown().await.unwrap_or_else(|error| {
+                panic!(
+                    "native transport half-close failed for {}: {error}",
+                    input.id
+                )
+            });
         }
         let mut bytes = Vec::new();
-        let mut chunk = [0_u8; 16 * 1024];
-        loop {
-            match stream.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(count) => bytes.extend_from_slice(&chunk[..count]),
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
-                Err(error) => panic!("read native response: {error}"),
-            }
-        }
+        tokio::time::timeout(deadline, stream.read_to_end(&mut bytes))
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "native transport timed out awaiting response for {}",
+                    input.id
+                )
+            })
+            .unwrap_or_else(|error| {
+                if error.kind() == std::io::ErrorKind::ConnectionReset {
+                    0
+                } else {
+                    panic!(
+                        "native transport response read failed for {}: {error}",
+                        input.id
+                    )
+                }
+            });
         server.abort();
-        let split = bytes.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        tokio::time::timeout(deadline, server)
+            .await
+            .unwrap_or_else(|_| panic!("native server task did not stop for {}", input.id))
+            .ok();
+        assert!(
+            !bytes.is_empty(),
+            "native transport returned no response for {}",
+            input.id
+        );
+        let split = bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or_else(|| panic!("native response lacked header terminator for {}", input.id));
         let head = String::from_utf8_lossy(&bytes[..split]);
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
         output(input.id, status, &bytes[split + 4..])
