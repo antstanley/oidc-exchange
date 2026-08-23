@@ -1,19 +1,366 @@
 {
-  "schemaVersion": 1,
-  "limits": { "maxBodyBytes": 2097152 },
-  "fieldsCompared": ["method", "decodedPath", "query", "orderedHeaders", "status"],
+  "schemaVersion": 2,
+  "limits": {
+    "maxBodyBytes": 2097152
+  },
+  "fieldsCompared": [
+    "method",
+    "decodedPath",
+    "query",
+    "orderedHeaders",
+    "status"
+  ],
   "fixtures": [
-    { "id": "encoded-slash", "request": { "method": "GET", "rawPath": "/auth/a%2Fb", "headers": [] }, "expected": { "method": "GET", "decodedPath": "/a/b", "query": null, "orderedHeaders": [], "status": 404 } },
-    { "id": "encoded-dot-dot", "request": { "method": "GET", "rawPath": "/auth/a/%2E%2E/keys", "headers": [] }, "expected": { "method": "GET", "decodedPath": "/a/../keys", "query": null, "orderedHeaders": [], "status": 404 } },
-    { "id": "encoded-question", "request": { "method": "GET", "rawPath": "/auth/a%3Fb", "query": "source=corpus", "headers": [] }, "expected": { "method": "GET", "decodedPath": "/a?b", "query": "source=corpus", "orderedHeaders": [], "status": 404 } },
-    { "id": "encoded-hash", "request": { "method": "GET", "rawPath": "/auth/a%23b", "headers": [] }, "expected": { "method": "GET", "decodedPath": "/a#b", "query": null, "orderedHeaders": [], "status": 404 } },
-    { "id": "forwarded-for-first", "request": { "method": "GET", "rawPath": "/auth/health", "headers": [{ "name": "x-forwarded-for", "value": "192.0.2.1" }, { "name": "x-forwarded-for", "value": "198.51.100.2" }] }, "expected": { "method": "GET", "decodedPath": "/health", "query": null, "orderedHeaders": [{ "name": "x-forwarded-for", "value": "192.0.2.1" }, { "name": "x-forwarded-for", "value": "198.51.100.2" }], "status": 200 } },
-    { "id": "forwarded-for-reversed", "request": { "method": "GET", "rawPath": "/auth/health", "headers": [{ "name": "x-forwarded-for", "value": "198.51.100.2" }, { "name": "x-forwarded-for", "value": "192.0.2.1" }] }, "expected": { "method": "GET", "decodedPath": "/health", "query": null, "orderedHeaders": [{ "name": "x-forwarded-for", "value": "198.51.100.2" }, { "name": "x-forwarded-for", "value": "192.0.2.1" }], "status": 200 } },
-    { "id": "base-path-sibling", "request": { "method": "GET", "rawPath": "/authorize", "headers": [] }, "expected": { "method": "GET", "decodedPath": "/authorize", "query": null, "orderedHeaders": [], "status": 404 } },
-    { "id": "base-path-child", "request": { "method": "GET", "rawPath": "/auth/keys", "headers": [] }, "expected": { "method": "GET", "decodedPath": "/keys", "query": null, "orderedHeaders": [], "status": 200 } },
-    { "id": "empty-path", "request": { "method": "GET", "rawPath": "", "headers": [] }, "expected": { "method": "GET", "decodedPath": "/", "query": null, "orderedHeaders": [], "status": 404 }, "qualifications": { "native": "HTTP origin-form cannot carry an empty request target; the native runner substitutes root.", "lambda": "AWS event path fields default to root rather than representing an empty request target.", "wsgi": "PATH_INFO may be empty; raw-path fidelity depends on the pinned server exposing RAW_URI or REQUEST_URI." } },
-    { "id": "malformed-content-length", "request": { "method": "POST", "rawPath": "/auth/token", "headers": [{ "name": "content-length", "value": "not-a-number" }] }, "expected": { "method": "POST", "decodedPath": "/token", "query": null, "orderedHeaders": [{ "name": "content-length", "value": "not-a-number" }], "status": 400 }, "qualifications": { "asgi": "ASGI supplies framed body messages rather than CONTENT_LENGTH parsing.", "lambda": "AWS events supply a decoded body and do not expose malformed Content-Length framing." } },
-    { "id": "huge-content-length", "request": { "method": "POST", "rawPath": "/auth/token", "headers": [{ "name": "content-length", "value": "9223372036854775807" }] }, "expected": { "method": "POST", "decodedPath": "/token", "query": null, "orderedHeaders": [{ "name": "content-length", "value": "9223372036854775807" }], "status": 413 }, "qualifications": { "asgi": "ASGI supplies framed body messages rather than CONTENT_LENGTH parsing.", "lambda": "AWS events supply a decoded body and do not expose huge Content-Length framing." } },
-    { "id": "body-one-over-cap", "request": { "method": "POST", "rawPath": "/auth/token", "headers": [], "body": { "repeatByte": 120, "length": 2097153 } }, "expected": { "method": "POST", "decodedPath": "/token", "query": null, "orderedHeaders": [], "status": 413 } }
-  ]
+    {
+      "id": "encoded-slash",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a%2Fb",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a/b",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404
+      }
+    },
+    {
+      "id": "encoded-dot-dot",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a/%2E%2E/keys",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a/../keys",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404
+      }
+    },
+    {
+      "id": "encoded-question",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a%3Fb",
+        "query": "source=corpus",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a?b",
+        "query": "source=corpus",
+        "orderedHeaders": [],
+        "status": 404
+      }
+    },
+    {
+      "id": "encoded-hash",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a%23b",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a#b",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404
+      }
+    },
+    {
+      "id": "forwarded-for-first",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/health",
+        "headers": [
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          }
+        ]
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/health",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          }
+        ],
+        "status": 200
+      }
+    },
+    {
+      "id": "forwarded-for-reversed",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/health",
+        "headers": [
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          }
+        ]
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/health",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          }
+        ],
+        "status": 200
+      }
+    },
+    {
+      "id": "base-path-sibling",
+      "request": {
+        "method": "GET",
+        "rawPath": "/authorize",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/authorize",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404
+      }
+    },
+    {
+      "id": "base-path-child",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/keys",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/keys",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 200
+      }
+    },
+    {
+      "id": "empty-path",
+      "request": {
+        "method": "GET",
+        "rawPath": "",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404
+      }
+    },
+    {
+      "id": "malformed-content-length",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/token",
+        "headers": [
+          {
+            "name": "content-length",
+            "value": "not-a-number"
+          }
+        ]
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/token",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "content-length",
+            "value": "not-a-number"
+          }
+        ],
+        "status": 400
+      }
+    },
+    {
+      "id": "huge-content-length",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/token",
+        "headers": [
+          {
+            "name": "content-length",
+            "value": "9223372036854775807"
+          }
+        ]
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/token",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "content-length",
+            "value": "9223372036854775807"
+          }
+        ],
+        "status": 413
+      }
+    },
+    {
+      "id": "body-one-over-cap",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/token",
+        "headers": [],
+        "body": {
+          "repeatByte": 120,
+          "length": 2097153
+        }
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/token",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 413
+      }
+    }
+  ],
+  "qualifications": {
+    "native": {
+      "empty-path": {
+        "decodedPath": {
+          "reason": "HTTP origin-form cannot represent an empty target",
+          "fallbackExpected": "/"
+        }
+      }
+    },
+    "lambda-fallback": {
+      "encoded-slash": {
+        "decodedPath": {
+          "reason": "API Gateway v1 exposes only decoded path"
+        }
+      },
+      "encoded-dot-dot": {
+        "decodedPath": {
+          "reason": "API Gateway v1 exposes only decoded path"
+        }
+      },
+      "encoded-question": {
+        "decodedPath": {
+          "reason": "API Gateway v1 exposes only decoded path"
+        }
+      },
+      "encoded-hash": {
+        "decodedPath": {
+          "reason": "API Gateway v1 exposes only decoded path"
+        }
+      },
+      "malformed-content-length": {
+        "status": {
+          "reason": "AWS supplies a decoded body, not HTTP framing",
+          "fallbackExpected": 415
+        }
+      },
+      "huge-content-length": {
+        "status": {
+          "reason": "AWS supplies a decoded body, not HTTP framing",
+          "fallbackExpected": 415
+        }
+      }
+    },
+    "asgi-fallback": {
+      "encoded-slash": {
+        "decodedPath": {
+          "reason": "scope raw_path extension omitted"
+        }
+      },
+      "encoded-dot-dot": {
+        "decodedPath": {
+          "reason": "scope raw_path extension omitted"
+        }
+      },
+      "encoded-question": {
+        "decodedPath": {
+          "reason": "scope raw_path extension omitted"
+        }
+      },
+      "encoded-hash": {
+        "decodedPath": {
+          "reason": "scope raw_path extension omitted"
+        }
+      },
+      "malformed-content-length": {
+        "status": {
+          "reason": "ASGI body framing does not parse Content-Length",
+          "fallbackExpected": 415
+        }
+      },
+      "huge-content-length": {
+        "status": {
+          "reason": "ASGI body framing does not parse Content-Length",
+          "fallbackExpected": 415
+        }
+      }
+    },
+    "wsgi-fallback": {
+      "encoded-slash": {
+        "decodedPath": {
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "encoded-dot-dot": {
+        "decodedPath": {
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "encoded-question": {
+        "decodedPath": {
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "encoded-hash": {
+        "decodedPath": {
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "forwarded-for-first": {
+        "orderedHeaders": {
+          "reason": "ordered header extension omitted"
+        }
+      },
+      "forwarded-for-reversed": {
+        "orderedHeaders": {
+          "reason": "ordered header extension omitted"
+        }
+      }
+    }
+  }
 }
