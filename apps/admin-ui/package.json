@@ -13,12 +13,14 @@
     "lint": "oxlint --deny-warnings",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "d3-array": "^3.2.4",
     "d3-scale": "^4.0.2",
     "d3-shape": "^3.2.0",
+    "jose": "^6.2.10",
     "layerchart": "^1.0.13"
   },
   "devDependencies": {
@@ -34,7 +36,8 @@
     "svelte-check": "^4.7.1",
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
-    "vite": "^8.1.1"
+    "vite": "^8.1.1",
+    "vitest": "^4.1.9"
   },
   "engines": {
     "node": ">= 24.18.0"
