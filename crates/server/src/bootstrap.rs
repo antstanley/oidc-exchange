@@ -377,8 +377,13 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 ///
 /// Generic over the router's state type and parameterised on the resolved timeout so the
 /// panic-containment tests can compose this exact function over test routers — the tested
-/// layer order cannot drift from the shipped one because they are the same code.
-fn apply_route_layers<S>(app: Router<S>, request_timeout: std::time::Duration) -> Router<S> {
+/// layer order cannot drift from the shipped one because they are the same code. The
+/// `Clone + Send + Sync + 'static` bounds are what `Router::layer` demands of the state; both
+/// callers (`Router<AppState>` in production, bare `Router<()>` in tests) satisfy them.
+fn apply_route_layers<S>(app: Router<S>, request_timeout: std::time::Duration) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     app.layer(CatchPanicLayer::custom(panic_handler))
         .layer(axum::middleware::from_fn(audit_context_layer))
         .layer(TimeoutLayer::with_status_code(
