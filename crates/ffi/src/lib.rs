@@ -161,14 +161,22 @@ impl OidcExchange {
         if raw_path.contains(&b'?') || raw_path.contains(&b'#') {
             return Err(StatusCode::BAD_REQUEST);
         }
-        let path = std::str::from_utf8(raw_path).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let raw_path = std::str::from_utf8(raw_path).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let path = if request.hints.path_is_raw {
+            percent_encoding::percent_decode_str(raw_path)
+                .decode_utf8()
+                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .into_owned()
+        } else {
+            raw_path.to_string()
+        };
         let query = match request.query.as_deref() {
+            Some(b"") | None => None,
             Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| StatusCode::BAD_REQUEST)?),
-            None => None,
         };
         let path_and_query = match query {
             Some(query) => format!("{path}?{query}"),
-            None => path.to_string(),
+            None => path.clone(),
         };
         let uri = http::Uri::from_str(&path_and_query).map_err(|_| StatusCode::BAD_REQUEST)?;
         if uri.scheme().is_some() || uri.authority().is_some() || !uri.path().starts_with('/') {

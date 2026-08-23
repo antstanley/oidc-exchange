@@ -2846,6 +2846,7 @@ dependencies = [
  "oidc-exchange-core",
  "oidc-exchange-test-utils",
  "pem",
+ "percent-encoding",
  "serde_json",
  "tempfile",
  "tokio",

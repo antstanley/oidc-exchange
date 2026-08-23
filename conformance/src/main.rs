@@ -82,16 +82,18 @@ fn run_native(config: &str, input: Input) -> Value {
                 .map(|q| format!("?{q}"))
                 .unwrap_or_default()
         );
+        let mut has_content_length = false;
         for header in tagged_headers(input.headers) {
+            has_content_length |= header.0.eq_ignore_ascii_case("content-length");
             request.push_str(&format!("{}: {}\r\n", header.0, header.1));
         }
-        request.push_str(&format!(
-            "Content-Length: {}\r\nConnection: close\r\n\r\n",
-            input.body_length
-        ));
+        if !has_content_length {
+            request.push_str(&format!("Content-Length: {}\r\n", input.body_length));
+        }
+        request.push_str("Connection: close\r\n\r\n");
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         stream.write_all(request.as_bytes()).await.unwrap();
-        if input.body_length > 0 {
+        if input.body_length > 0 && input.body_length <= 2_097_153 {
             if let Err(error) = stream.write_all(&vec![b'x'; input.body_length]).await {
                 if error.kind() != std::io::ErrorKind::ConnectionReset
                     && error.kind() != std::io::ErrorKind::BrokenPipe

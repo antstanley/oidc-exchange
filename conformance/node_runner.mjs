@@ -16,7 +16,7 @@ function request(fixture) {
   return { method: fixture.method, rawPath: Buffer.from(fixture.rawPath), query: fixture.query == null ? undefined : Buffer.from(fixture.query), headers: [...fixture.headers,{name:"x-oidc-conformance-observe",value:"1"}], body: Buffer.alloc(fixture.bodyLength, 120), pathIsRaw: fixture.pathIsRaw };
 }
 function parse(id, response) {
-  if (response.status === 413 || !response.body?.length) return { id, status: response.status, executed: true };
+  if (!response.body?.length) return { id, status: response.status, executed: true };
   const observed = JSON.parse(Buffer.from(response.body).toString());
   return { id, ...observed, executed: true };
 }

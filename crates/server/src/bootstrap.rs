@@ -366,17 +366,15 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         );
     }
 
-    #[cfg(feature = "conformance")]
-    let app = app.fallback(conformance_observe);
-    #[cfg(feature = "conformance")]
-    let app = app.layer(axum::middleware::from_fn(conformance_intercept));
-
     let router = apply_route_layers(
         app,
         request_timeout_duration(config),
         config.server.max_request_body_bytes,
     )
     .with_state(state);
+
+    #[cfg(feature = "conformance")]
+    let router = router.layer(axum::middleware::from_fn(conformance_intercept));
 
     wrap_with_base_path_under_outer_guard(router, config.server.base_path.clone())
 }
@@ -438,7 +436,6 @@ async fn conformance_intercept(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse;
     if request.headers().contains_key("x-oidc-conformance-observe") {
         conformance_observe(request).await
     } else {
@@ -463,7 +460,7 @@ async fn conformance_observe(request: axum::extract::Request) -> axum::response:
         .filter(|(name, _)| {
             !matches!(
                 name.as_str(),
-                "host" | "connection" | "x-oidc-conformance-observe"
+                "host" | "connection" | "content-length" | "x-oidc-conformance-observe"
             )
         })
         .filter_map(|(name, value)| {

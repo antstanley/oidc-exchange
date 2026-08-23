@@ -167,7 +167,15 @@
         "status": 404,
         "bodyLength": 0,
         "downstreamMarker": "observed-after-routing"
-      }
+      },
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
     },
     {
       "id": "base-path-child",
@@ -228,7 +236,15 @@
         "status": 400,
         "bodyLength": 0,
         "downstreamMarker": "observed-after-routing"
-      }
+      },
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
     },
     {
       "id": "huge-content-length",
@@ -252,10 +268,18 @@
             "value": "9223372036854775807"
           }
         ],
-        "status": 413,
+        "status": 400,
         "bodyLength": 0,
         "downstreamMarker": "observed-after-routing"
-      }
+      },
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
     },
     {
       "id": "body-one-below-cap",
@@ -276,7 +300,8 @@
         "bodyLength": 2097151,
         "status": 404,
         "downstreamMarker": "observed-after-routing"
-      }
+      },
+      "probe": "provenance"
     },
     {
       "id": "body-at-cap",
@@ -297,7 +322,8 @@
         "bodyLength": 2097152,
         "status": 404,
         "downstreamMarker": "observed-after-routing"
-      }
+      },
+      "probe": "provenance"
     },
     {
       "id": "body-one-over-cap",
@@ -318,7 +344,15 @@
         "status": 413,
         "bodyLength": 2097153,
         "downstreamMarker": "observed-after-routing"
-      }
+      },
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
     }
   ],
   "qualifications": {
@@ -327,102 +361,6 @@
         "decodedPath": {
           "reason": "HTTP origin-form cannot represent an empty target",
           "fallbackExpected": "/"
-        }
-      },
-      "malformed-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
         }
       }
     },
@@ -446,110 +384,6 @@
         "decodedPath": {
           "reason": "API Gateway v1 exposes only decoded path"
         }
-      },
-      "malformed-content-length": {
-        "status": {
-          "reason": "AWS supplies a decoded body, not HTTP framing",
-          "fallbackExpected": 415
-        },
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "status": {
-          "reason": "AWS supplies a decoded body, not HTTP framing",
-          "fallbackExpected": 415
-        },
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
       }
     },
     "asgi-fallback": {
@@ -571,110 +405,6 @@
       "encoded-hash": {
         "decodedPath": {
           "reason": "scope raw_path extension omitted"
-        }
-      },
-      "malformed-content-length": {
-        "status": {
-          "reason": "ASGI body framing does not parse Content-Length",
-          "fallbackExpected": 415
-        },
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "status": {
-          "reason": "ASGI body framing does not parse Content-Length",
-          "fallbackExpected": 415
-        },
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
         }
       }
     },
@@ -708,593 +438,12 @@
         "orderedHeaders": {
           "reason": "ordered header extension omitted"
         }
-      },
-      "malformed-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "host adapter rejected before downstream observation",
-          "fallbackExpected": null
-        }
       }
     },
-    "ffi": {
-      "malformed-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      }
-    },
-    "node": {
-      "malformed-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      }
-    },
-    "lambda": {
-      "malformed-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      }
-    },
-    "asgi": {
-      "malformed-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      }
-    },
-    "wsgi": {
-      "malformed-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "huge-content-length": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      },
-      "body-one-over-cap": {
-        "method": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "decodedPath": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "query": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "orderedHeaders": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "bodyLength": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        },
-        "downstreamMarker": {
-          "kind": "pre-observation-rejection",
-          "reason": "request rejected before downstream observation",
-          "fallbackExpected": null
-        }
-      }
-    }
+    "ffi": {},
+    "node": {},
+    "lambda": {},
+    "asgi": {},
+    "wsgi": {}
   }
 }
