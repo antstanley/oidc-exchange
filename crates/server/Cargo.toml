@@ -34,3 +34,11 @@ tokio = { workspace = true, features = ["full"] }
 base64.workspace = true
 tempfile = "3"
 chrono.workspace = true
+# The end-to-end leak-oracle suite mounts a real OIDC adapter against a mock upstream
+# and implements failing IdentityProviders, so it needs the trait's macro + wiremock.
+async-trait.workspace = true
+wiremock = "0.6"
+# The HTTP leak regression derives the stored SHA-256-hex lookup key from a minted
+# refresh token to prove neither ever reaches telemetry.
+sha2.workspace = true
+hex.workspace = true

@@ -17,12 +17,11 @@
 
 use std::collections::HashMap;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use oidc_exchange_core::error::Error;
+use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_test_utils::telemetry::{
     assert_absent_plain_and_encoded, install_span_capture, SharedBuffer,
 };
@@ -57,6 +56,8 @@ async fn oidc_provider(
         jwks_uri: Some("https://issuer.example.com/jwks.json".to_string()),
         token_endpoint: Some("https://issuer.example.com/token".to_string()),
         revocation_endpoint,
+        scopes: Vec::new(),
+        additional_params: HashMap::new(),
     };
     oidc_exchange_adapters::oidc::OidcProvider::from_config("corpus-oidc", &config)
         .await
@@ -168,6 +169,8 @@ async fn exchange_non_2xx_leaks_no_code_or_secret() {
         jwks_uri: Some("https://issuer.example.com/jwks.json".to_string()),
         token_endpoint: Some(format!("{}/token", server.uri())),
         revocation_endpoint: None,
+        scopes: Vec::new(),
+        additional_params: HashMap::new(),
     };
     let provider =
         oidc_exchange_adapters::oidc::OidcProvider::from_config("corpus-exchange", &config)

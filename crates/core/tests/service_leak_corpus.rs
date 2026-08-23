@@ -126,7 +126,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
     // Same digest derivation as the service: SHA-256, hex-encoded.
     let hash_one = hex::encode(Sha256::digest(refresh_token_one.as_bytes()));
 
-    // --- refresh path (rotation) ---
+    // --- refresh path: re-presents the same token for a new access token ---
     let [device, user_agent, ip] = provenance_request_fields();
     let refreshed = service
         .refresh(RefreshRequest {
@@ -137,23 +137,17 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
         })
         .await
         .expect("refresh");
-    let refresh_token_two = refreshed
-        .refresh_token
-        .as_ref()
-        .expect("rotation must mint a new refresh token")
-        .expose()
-        .clone();
-    let hash_two = hex::encode(Sha256::digest(refresh_token_two.as_bytes()));
-    assert_ne!(
-        refresh_token_one, refresh_token_two,
-        "rotation must replace the token"
+    // The refresh flow deliberately does not rotate: the presented token stays valid.
+    assert!(
+        refreshed.refresh_token.is_none(),
+        "refresh must not mint a replacement refresh token"
     );
 
     // --- revoke paths ---
     let [device, user_agent, ip] = provenance_request_fields();
     service
         .revoke(RevokeRequest {
-            token: refresh_token_two.clone(),
+            token: refresh_token_one.clone(),
             token_type_hint: Some("refresh_token".to_string()),
             ip_address: ip,
             user_agent: user_agent,
@@ -161,11 +155,11 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
         })
         .await
         .expect("revoke of the live token");
-    // An unknown token exercises the ValidationFailed audit reason without surfacing
-    // the presented material anywhere.
+    // An unknown token exercises the ValidationFailed-style silent path without
+    // surfacing the presented material anywhere.
     service
         .revoke(RevokeRequest {
-            token: format!("SENTINEL-UNKNOWN-TOKEN-{refresh_token_one}"),
+            token: format!("SENTINEL-UNKNOWN-TOKEN-PREFIX-{refresh_token_one}"),
             token_type_hint: Some("refresh_token".to_string()),
             ip_address: None,
             user_agent: None,
@@ -185,9 +179,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
     // Negative space — every credential-derived value, plain and percent-decoded:
     assert_absent_plain_and_encoded(&rendered, CODE_SENTINEL);
     assert_absent_plain_and_encoded(&rendered, &refresh_token_one);
-    assert_absent_plain_and_encoded(&rendered, &refresh_token_two);
     assert_absent_plain_and_encoded(&rendered, &hash_one);
-    assert_absent_plain_and_encoded(&rendered, &hash_two);
     assert_absent_plain_and_encoded(&rendered, WEBHOOK_SECRET_SENTINEL);
     assert_absent_plain_and_encoded(&rendered, SHARED_SECRET_SENTINEL);
 }

@@ -2738,6 +2738,7 @@ dependencies = [
 name = "oidc-exchange"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "aws-config",
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
@@ -2747,6 +2748,7 @@ dependencies = [
  "chrono",
  "config",
  "futures",
+ "hex",
  "http-body-util",
  "lambda_http",
  "oidc-exchange-adapters",
@@ -2755,6 +2757,7 @@ dependencies = [
  "oidc-exchange-test-utils",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "tempfile",
  "tokio",
@@ -2764,6 +2767,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
