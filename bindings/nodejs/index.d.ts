@@ -5,9 +5,14 @@ export interface HeaderEntry {
 
 export interface HttpRequest {
   method: string;
-  path: string;
+  /** Raw path bytes only; never include the query string. */
+  rawPath: Buffer;
+  /** Raw query bytes without the leading question mark. */
+  query?: Buffer;
   headers: HeaderEntry[];
   body?: Buffer;
+  /** True only when rawPath came from a host-provided raw request target. */
+  pathIsRaw: boolean;
 }
 
 export interface HttpResponse {
@@ -16,19 +21,20 @@ export interface HttpResponse {
   body: Buffer;
 }
 
+export interface Limits {
+  maxBodyBytes: number;
+}
+
 export interface OidcExchangeOptions {
-  /** Path to a TOML configuration file. */
   config?: string;
-  /** Inline TOML configuration string. */
   configString?: string;
 }
 
 export class OidcExchange {
   constructor(options: OidcExchangeOptions);
-
-  /** Route an HTTP request through the embedded OIDC-Exchange server. */
-  handleRequest(request: HttpRequest): HttpResponse;
-
-  /** Graceful shutdown (currently a no-op). */
+  handleRequest(request: HttpRequest): Promise<HttpResponse>;
+  /** @deprecated Await handleRequest instead. */
+  handleRequestSync(request: HttpRequest): HttpResponse;
+  limits(): Limits;
   shutdown(): void;
 }

@@ -34,11 +34,13 @@ import { OidcExchange } from "@oidc-exchange/node";
 const oidc = new OidcExchange({ config: "./config.toml" });
 // or: new OidcExchange({ configString: "[server]\nissuer = \"https://auth.example.com\"\n…" })
 
-const res = oidc.handleRequest({
+const res = await oidc.handleRequest({
   method: "POST",
-  path: "/token",
+  rawPath: Buffer.from("/token"),
+  query: undefined,
   headers: [{ name: "content-type", value: "application/json" }],
   body: Buffer.from(JSON.stringify({ grant_type: "authorization_code", code, provider: "google" })),
+  pathIsRaw: true,
 });
 
 console.log(res.status); // e.g. 200
@@ -50,15 +52,20 @@ console.log(res.body.toString("utf8")); // { "access_token": …, "refresh_token
 ```ts
 class OidcExchange {
   constructor(options: { config?: string; configString?: string });
-  handleRequest(request: HttpRequest): HttpResponse;
+  handleRequest(request: HttpRequest): Promise<HttpResponse>;
+  /** @deprecated Await handleRequest instead. */
+  handleRequestSync(request: HttpRequest): HttpResponse;
+  limits(): { maxBodyBytes: number };
   shutdown(): void; // graceful shutdown (currently a no-op)
 }
 
 interface HttpRequest {
   method: string;
-  path: string;
+  rawPath: Buffer;
+  query?: Buffer;
   headers: { name: string; value: string }[];
   body?: Buffer;
+  pathIsRaw: boolean;
 }
 interface HttpResponse {
   status: number;

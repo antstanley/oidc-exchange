@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
 const PLATFORM_MAP = {
   "linux-x64": "@oidc-exchange/linux-x64-gnu",
   "linux-arm64": "@oidc-exchange/linux-arm64-gnu",
@@ -15,31 +14,23 @@ const PLATFORM_MAP = {
 
 let nativeBinding = null;
 let loadError = null;
-
 const platformKey = `${platform}-${arch}`;
 const packageName = PLATFORM_MAP[platformKey];
 
 if (packageName) {
   try {
-    nativeBinding = require(packageName);
-  } catch (primaryError) {
-    // The platform package resolved but failed to load — most often an
-    // ABI/glibc mismatch (e.g. "version `GLIBC_2.39' not found" when the
-    // published addon was linked against a newer glibc than this host has).
-    // Fall back to a co-located dev build, but keep `primaryError`: it is the
-    // informative one, whereas the fallback's "Cannot find module" masks it.
+    // Development builds must take precedence over an installed older release.
+    nativeBinding = require(join(__dirname, "oidc-exchange.node"));
+  } catch (localError) {
     try {
-      nativeBinding = require(join(__dirname, "oidc-exchange.node"));
-    } catch (fallbackError) {
+      nativeBinding = require(packageName);
+    } catch (primaryError) {
       loadError = new Error(
-        `Failed to load the native binding for ${platformKey}: the platform ` +
-          `package "${packageName}" did not load and no local dev build ` +
-          `(oidc-exchange.node) was found. See \`error.cause\` for the ` +
-          `underlying failure — a "GLIBC_x.yz not found" there means the ` +
-          `published addon needs a newer glibc than this host provides.`,
+        `Failed to load the native binding for ${platformKey}: neither the local ` +
+          `development build nor platform package "${packageName}" loaded.`,
         { cause: primaryError },
       );
-      loadError.fallbackError = fallbackError;
+      loadError.localError = localError;
     }
   }
 } else {
