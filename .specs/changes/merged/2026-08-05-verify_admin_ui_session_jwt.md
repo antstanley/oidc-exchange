@@ -304,11 +304,13 @@ Findings: `g4-admin-console-unverified-jwt-session-gate`,
   them would land partial states in which the console looks hardened but is not. The coercion
   fix in particular is only reachable as a bypass once signatures are verified, so shipping it
   separately would be a no-op patch to a still-open door.
-- *Access tokens verified with the ID-token algorithm list.* **The console pins on
-  `id_token_signing_alg_values_supported`.** The field is named for ID tokens, but the service
-  populates it from `KeyManager::algorithm()` and signs access tokens with the same key manager,
-  so it truthfully describes the key that will have produced the signature. It is the only
-  algorithm metadata the service publishes.
+- *Discovery narrows a hard cryptographic allowlist.* **The console accepts only the algorithms
+  implemented by the service key managers: EdDSA, RS256/384/512, PS256/384/512, and
+  ES256/384/512.** `id_token_signing_alg_values_supported` must be a nonempty unique subset of
+  that immutable set; discovery cannot introduce `none`, HS*, or future algorithms. The field is
+  named for ID tokens, but the service populates it from the same `KeyManager::algorithm()` used
+  to sign access tokens. JWK `alg`, type, curve/strength, use, and key operations are bound before
+  `jose` sees the local set.
 - *Fail-closed on JWKS unavailability.* **A failed discovery or JWKS fetch ends the session
   rather than falling back to a stale-but-usable cache beyond its TTL or to unverified claims.**
   Matches the service's own fail-closed JWKS handling

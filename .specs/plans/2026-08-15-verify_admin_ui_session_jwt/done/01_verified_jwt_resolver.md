@@ -30,3 +30,6 @@
 - Discovery and JWKS URLs require HTTPS and same origin; malformed data, redirects, unsupported types/algorithms, missing claims, invalid time claims, and failed fetches reject without exposing response bodies.
 - `apps/admin-ui/src/app.d.ts` retains verified claims instead of a raw token.
 - Repository `pnpm format:check` is intentionally deferred/skipped under jj per standing instruction; direct package formatting is used in final gates.
+- Round-1 remediation fixes the trust algorithm set at EdDSA, RS256/384/512, PS256/384/512, and ES256/384/512 and requires discovery to be a unique nonempty subset. JWKs require unique 128-character-safe kids, mandatory matching alg, signature use/verification-only operations, Ed25519 or exact NIST curves, or RSA >=2048 bits.
+- JSON is streamed under a one-MiB cap with JSON media-type, final-origin, redirect, Content-Length, five-second whole-response timeout, overflow cancellation, and no unbounded arrayBuffer path. Rotation is one retry under a 30-second global cooldown plus deterministic 128-entry negative-kid cache; non-rotation failures never refetch.
+- Tokens are <=16 KiB with 30-second tolerance, one-hour maximum age and lifetime, exp > iat, bounded JOSE/issuer/subject/audience/configured claim strings, and at most eight audiences.

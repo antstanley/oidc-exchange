@@ -26,7 +26,7 @@
 
 ## Evidence
 
-- `corepack pnpm@11.9.0 --dir apps/admin-ui test`: 2 files, 40 tests passed. Generated RSA keys/tokens remain in memory and are never printed or snapshotted.
-- Resolver cases cover valid and malformed tokens, signature/key/kid/rotation/cache behavior, algorithm/type, required/time/issuer/audience/admin claims, discovery/JWKS network failures, URL and collection bounds.
+- `corepack pnpm@11.9.0 --dir apps/admin-ui test`: 2 files, 63 tests passed after round-1 remediation. Generated RSA keys/tokens remain in memory and are never printed or snapshotted.
+- Resolver cases cover the immutable algorithm set and algorithm/key mismatch; duplicate and malformed JWKS semantics; exact stream cap, malformed/deceptive lengths, media types, redirects, timeout and cancellation; no-refetch claim errors; exact concurrent/random-kid/same-kid rotation counts and cooldown; and token age/lifetime/skew/string/count boundaries.
 - Hook/login/logout tests cover protected enforcement, locals, denial, invalid clearing/no-persistence, exact cookie attributes/lifetime, and matching logout deletion.
 - `corepack pnpm@11.9.0 --dir apps/admin-ui lint`: 0 warnings/errors. `typecheck`: 0 errors and one pre-existing Svelte warning in `routes/(app)/users/[id]/+page.svelte`.

@@ -18,7 +18,7 @@ in the global spec layer.
 | clippy | latest | `cargo clippy --workspace -- -D warnings` (zero warnings) |
 | cargo-nextest | latest | `cargo nextest run --workspace`; config in `.config/nextest.toml` |
 | TypeScript | strict mode, `.ts` only | every package is ESM (`"type": "module"`) |
-| pnpm | 10.x | `pnpm install`; `pnpm-lock.yaml` is the lockfile of record |
+| pnpm | 11.9.0 | `corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts`; `pnpm-lock.yaml` is the lockfile of record |
 | oxfmt | latest | `pnpm format` / `pnpm format:check` |
 | oxlint | latest | `pnpm lint` |
 | tsc / astro check / svelte-check | latest | `pnpm typecheck` per TS workspace (`tsc --noEmit` for the bindings; `astro check` / `svelte-check` for the apps) |

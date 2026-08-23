@@ -3,6 +3,7 @@ import { hasAdminClaim, verifyAccessToken } from "$lib/auth";
 import type { Actions, PageServerLoad } from "./$types";
 
 const SESSION_COOKIE = "__Host-admin_session";
+const MAX_COOKIE_AGE_SECONDS = 3_600;
 const COOKIE_OPTIONS = {
   path: "/",
   secure: true,
@@ -35,7 +36,8 @@ export const actions: Actions = {
     try {
       const claims = await verifyAccessToken(tokenValue);
       if (!hasAdminClaim(claims)) throw redirect(303, "/denied");
-      const maxAge = claims.exp! - Math.floor(Date.now() / 1000);
+      const remainingAge = claims.exp! - Math.floor(Date.now() / 1000);
+      const maxAge = Math.min(remainingAge, MAX_COOKIE_AGE_SECONDS);
       if (maxAge <= 0) return fail(401, { error: "Invalid token" });
       cookies.set(SESSION_COOKIE, tokenValue, { ...COOKIE_OPTIONS, maxAge });
       throw redirect(303, "/");

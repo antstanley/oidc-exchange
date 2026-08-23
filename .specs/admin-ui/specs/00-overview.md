@@ -31,19 +31,28 @@ against the service's published JWKS. The gate reads no claim from an unverified
 `src/lib/auth.ts` exposes one token-to-claims function, `verifyAccessToken(token)`. It fetches
 `${OIDC_EXCHANGE_URL}/.well-known/openid-configuration`, requires HTTPS, checks the document's
 issuer against `OIDC_EXCHANGE_ISSUER`, requires its `jwks_uri` to be same-origin HTTPS, and
-verifies with the bounded local JWKS and advertised signing-algorithm allowlist. Discovery and
-JWKS are cached for five minutes; failed loads are not cached, concurrent loads are coalesced,
-and an initial verification failure triggers one bounded refresh for rotation. Fetches have a
-five-second timeout and one-MiB response limit; discovery allows at most 16 algorithms and JWKS
-at most 32 keys. Redirects, malformed JSON, upstream errors, unsupported `alg`/`typ`, absent or
-unknown `kid`, bad signatures, and invalid required claims fail closed without logging tokens,
-subjects, keys, or upstream bodies.
+verifies with a bounded local JWKS and the immutable service-supported asymmetric allowlist
+`EdDSA`, `RS256/384/512`, `PS256/384/512`, and `ES256/384/512`; discovery may narrow but never
+expand it. Discovery and JWKS are cached for five minutes; failed loads are not cached and
+concurrent loads are coalesced. Unknown-kid and same-kid signature failures may refresh exactly
+once, under a 30-second trust-material cooldown and a deterministic 128-entry negative-kid cache;
+claim, type, malformed-token, and unsupported-algorithm failures never refetch. Fetches have a
+five-second header-and-body timeout and one-MiB streamed response limit, require JSON or `+json`,
+reject redirects/final-origin changes, and cancel on overflow or timeout. Discovery allows at most
+9 unique supported algorithms and JWKS at most 32 keys. Each JWK has a unique 128-character
+base64url-safe `kid`, mandatory matching `alg`, absent/`sig` use, absent/verification-only
+`key_ops`, and algorithm-bound key material: Ed25519 OKP, exact NIST curve/coordinates for ES*, or
+RSA modulus at least 2048 bits. Failures expose no tokens, subjects, keys, or upstream bodies.
 
-The verifier requires `exp`, `iss`, `aud`, `sub`, and `iat`, applies `nbf` when present, rejects a
-future `iat`, requires configured issuer/audience equality, accepts only `JWT`, `at+jwt`, or an
-absent type, and never accepts `none`. Only its frozen payload reaches `hasAdminClaim`, which
-requires an exact string match against `REQUIRED_CLAIM`/`REQUIRED_VALUE` (defaults `role` and
-`admin`). Arrays, numbers, objects, and missing claims are denied without coercion.
+The verifier requires `exp`, `iss`, `aud`, `sub`, and `iat`, applies an explicit 30-second clock
+tolerance to `exp`/`nbf`/future `iat`, caps token age and `exp - iat` lifetime at one hour, and
+requires `exp > iat`. Compact tokens are at most 16 KiB; JOSE names are 16 characters, `kid` 128,
+issuer 2048, subject/audience 512, and audience arrays 8 entries. Configured issuer, audience,
+claim name, and claim value are bounded at startup. It accepts only `JWT`, `at+jwt`, or absent
+`typ`. Only its frozen payload reaches `hasAdminClaim`, which requires an exact string match
+against `REQUIRED_CLAIM`/`REQUIRED_VALUE` (defaults `role` and `admin`); arrays, numbers, objects,
+and missing claims are denied without coercion. Cookie `maxAge` is the positive minimum of the
+verified remaining expiry and the one-hour console policy.
 
 Absent or invalid protected-route sessions are cleared and redirected to `/login`; verified
 non-admin sessions go to `/denied`. Login load and action verify before reading claims; invalid

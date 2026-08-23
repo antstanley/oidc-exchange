@@ -26,7 +26,7 @@
 
 ## Evidence
 
-- Canonical Admin UI and development guidance now describe the implemented verifier, named bounds/cache, claims, cookie lifecycle, 40-test suite, and CI gate; dates are 2026-08-23.
+- Canonical Admin UI and development guidance describe the remediated verifier's immutable algorithm/key rules, one-MiB streamed fetch and cancellation, bounded refresh/negative-kid policy, one-hour token age/lifetime and cookie policy, 63-test suite, and CI gate; dates are 2026-08-23.
 - Source change status is Merged (2026-08-23), moved to `changes/merged/`, and indexed; plan status is Done and all five tasks are under `done/`. Sibling proposed specs were not modified.
 - Frozen pnpm 11.9.0 install passes; admin tests 40/40, lint 0 findings, typecheck 0 errors (one unrelated existing Svelte warning), and direct oxfmt check of nine touched package files pass.
 - CI YAML parses; local canonical/source links were checked after correcting moved-document paths. No certificate files exist. Repository `pnpm format:check` was skipped under the standing jj instruction in favor of direct oxfmt.
