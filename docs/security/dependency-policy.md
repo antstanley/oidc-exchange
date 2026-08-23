@@ -1,3 +1,7 @@
+---
+title: Dependency Policy
+---
+
 # Dependency advisory policy
 
 **Effective:** 2026-08-23  
@@ -10,4 +14,6 @@ CI reports allowed exceptions and warnings while still blocking unknown or expir
 
 Exceptions cannot contain ranges or wildcards. Each records advisory ID, exact package/version and `=version` range, rationale, owner, expiry, and review date. The current inventory is seven Cargo exceptions: Marvin for rsa 0.9.10 and 0.10.0-rc.18, three rustls-webpki 0.101.7 advisories, and h2 0.3.27 plus 0.4.15. The obsolete pyo3 advisory exceptions were removed after upgrading the Python binding to pyo3 0.29.2. Eleven pnpm exceptions cover exact transitive js-yaml, postcss, nanoid, and svgo findings in build/static-asset tooling. There are no Python exceptions. This inventory records current triage; it does not claim upstream remediation.
 
-To review, provision `pip-audit==2.9.0` from `config/pip-audit-requirements.txt` with `uv pip install --require-hashes --only-binary=:all:` in an isolated environment, put that environment on `PATH`, then run `node scripts/run-advisory-scans.mjs`. The frozen Python production export is empty because the abi3 package has no runtime Python dependencies; pip-audit is invoked without dependency resolution so that valid empty graph is still evaluated. Treat a scanner/database/network failure separately from findings. Do not update locks to make the gate green without a separately reviewed dependency change. Before extending an exception, revalidate reachability and record a new bounded date and rationale.
+To review, provision `pip-audit==2.9.0` from `config/pip-audit-requirements.txt` with `uv pip install --require-hashes --only-binary=:all:` in an isolated environment, put that environment on `PATH`, then run `node scripts/run-advisory-scans.mjs`. The frozen Python audit input is the nonempty build graph exported from the committed `build` dependency group: `maturin==1.9.4` and its conditional `tomli==2.4.1` dependency on Python <3.11. The `[build-system].requires` pin and build group intentionally use the same exact maturin version. The abi3 package has no production runtime Python dependencies; that separately empty runtime graph is not substituted for the build audit. Treat a scanner/database/network failure separately from findings. Do not update locks to make the gate green without a separately reviewed dependency change. Before extending an exception, revalidate reachability and record a new bounded date and rationale.
+
+Release cross-compilation provisions the reviewed stable crates.io release with the literal command `cargo install cross --version 0.2.5 --locked`. Workflow policy rejects missing, ranged, prerelease, or variable-only `cross` versions; release jobs remain least privilege and attest the bytes produced by this pinned tool.

@@ -490,6 +490,6 @@ holds when a future job is granted `id-token: write`.
 The canonical pages supersede provisional inventories in this proposal. In particular, pyo3 is
 0.29.2 and its two obsolete advisory exceptions are removed; the exact active advisory exception
 inventory is 7 Cargo, 11 pnpm, and 0 Python; the resolved signing-path policy evaluates two actual
-metadata modes with seven inventory entries per mode (six currently exercised; RSA is dev-only) through 2026-09-15; and the final
+metadata modes with seven inventory entries per mode (six currently exercised; RSA private-key construction is test-only; public-key verification ships at runtime) through 2026-09-15; and the final
 GHCR multi-arch manifest digest is attested in addition to each native platform digest. Docker Hub
 is a copied distribution target but is not claimed to carry GHCR build provenance or registry signing.

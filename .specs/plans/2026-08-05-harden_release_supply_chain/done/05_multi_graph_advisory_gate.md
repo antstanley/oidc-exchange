@@ -27,3 +27,7 @@
 ## Sibling boundaries
 
 - Do not fold generic config/adapters fail-closed work into the audit job; this task owns dependency graph policy only.
+
+## Review-round-1 remediation evidence
+
+- `[build-system].requires` and the committed `build` group share exact `maturin==1.9.4`; `uv.lock` resolves that backend and conditional `tomli==2.4.1` for Python <3.11. The wrapper exports that nonempty frozen build graph, requires the expected backend/version, and passes the exact file to pip-audit 2.9.0. The production runtime graph remains separately empty. A live hashed-scanner run reported zero Python findings.

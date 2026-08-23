@@ -99,13 +99,16 @@ curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "$BINARY_URL"
 echo "Downloading checksum..."
 curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "$CHECKSUM_URL"
 
-# Verify checksum
+# Verify checksum. Missing checksum tools remain warn-and-continue until sibling task 07.
+checksum_verified=false
 echo "Verifying checksum..."
 cd "$TMPDIR"
 if command -v sha256sum &>/dev/null; then
     sha256sum -c "${BINARY_FILENAME}.sha256"
+    checksum_verified=true
 elif command -v shasum &>/dev/null; then
     shasum -a 256 -c "${BINARY_FILENAME}.sha256"
+    checksum_verified=true
 else
     echo "Warning: Neither sha256sum nor shasum found. Skipping checksum verification."
 fi
@@ -120,7 +123,11 @@ if command -v gh &>/dev/null; then
         gh attestation verify             "${TMPDIR}/${BINARY_FILENAME}"             --repo "$REPO"             --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
     fi
 else
-    echo "Warning: GitHub CLI not found; checksum verified corruption only, artifact provenance was not authenticated." >&2
+    if [[ "$checksum_verified" = true ]]; then
+        echo "Warning: GitHub CLI not found; checksum verified corruption only, artifact provenance was not authenticated." >&2
+    else
+        echo "Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation." >&2
+    fi
 fi
 
 # Determine install directory

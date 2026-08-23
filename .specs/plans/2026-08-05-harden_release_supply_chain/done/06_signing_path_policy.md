@@ -26,3 +26,7 @@
 ## Sibling boundaries
 
 - Do not use this policy task to upgrade unrelated crypto crates or resolve the sibling’s installer fail-closed issue; it owns detection on the defined signing/verification path.
+
+## Review-round-1 remediation evidence
+
+- Traversal skips an edge only when all applicable dependency kinds are dev-only; mixed normal/dev, null-as-normal, build, and target-qualified fixtures retain runtime edges. Both real modes report the same seven protected prereleases, including runtime `rsa 0.10.0-rc.18`; all 14 exact path exceptions are consumed with no failures or stale entries. RSA private-key construction is test-only, but public-key verification ships.

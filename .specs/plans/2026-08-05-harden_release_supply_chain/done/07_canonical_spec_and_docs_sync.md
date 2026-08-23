@@ -42,8 +42,7 @@
   exceptions: seven in each of two actual metadata modes, all expiring 2026-09-15.
 - Exact pip-audit 2.9.0 was provisioned with `uv pip install --require-hashes --only-binary=:all:`
   from `config/pip-audit-requirements.txt`. The full live wrapper executed Cargo, pnpm, and Python.
-  Python's frozen production export is intentionally empty because the abi3 extension has no runtime
-  Python dependencies; the wrapper uses pip-audit's no-resolver mode so this clean graph is evaluated
+  Python's frozen build export is nonempty and contains maturin 1.9.4 plus conditional tomli 2.4.1; the production runtime export remains separately empty because the abi3 extension has no runtime Python dependencies; the wrapper uses pip-audit's no-resolver mode so this clean graph is evaluated
   without an unrelated nested-venv/ensurepip failure.
 - No publication, registry write, GitHub merge, bookmark move, history rewrite, secret, token, or
   certificate was created. The sibling missing-checksum-tool behavior remains unchanged.
@@ -58,3 +57,7 @@
 - Live advisory wrapper: Cargo 0 allowed/2 warning/0 failure; pnpm 11 allowed/0 warning/0 failure; Python 0/0/0.
 - Live signing path: both modes passed with 6 exercised prerelease paths each and 0 failures.
 - Workflow YAML/policy JSON, full action-SHA/permissions/attestation handoff static tests, official v3 peeled ref SHA verification (`977bb373ede98d70efdf65b84cb5f73e068dcc2a`), Bash syntax, shellcheck, and canonical/public command assertions passed. shfmt was unavailable. Repo-level pnpm scripts that trigger `prepare` were not used under jj; direct package commands passed as required.
+
+## Review-round-1 remediation evidence
+
+- Canonical and public docs now describe the audited Python build graph, seven signing findings per mode, exact cross 0.2.5 provisioning, and truthful checksum/provenance states. They explicitly preserve the sibling-owned warn-and-continue behavior when both checksum tools are missing and do not claim fail-closed checksum handling.

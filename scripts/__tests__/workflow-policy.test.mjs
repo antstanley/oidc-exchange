@@ -32,8 +32,9 @@ test("all workflows parse and satisfy structural release policy", () => {
   }
 });
 
-test("positive fixture permits read-only locked validation before publishing", () => {
+test("positive fixtures permit read-only locked validation and exact cross provisioning", () => {
   assert.deepEqual(validateWorkflow(fixture("valid.yml"), "fixture.yml"), []);
+  assert.deepEqual(validateWorkflow(fixture("cross-valid.yml"), "fixture.yml"), []);
 });
 
 test("negative fixtures reject each authority and tool-resolution violation", () => {
@@ -45,8 +46,12 @@ test("negative fixtures reject each authority and tool-resolution violation", ()
     ["dynamic-tool.yml", "dynamic command"],
     ["non-frozen-install.yml", "non-frozen pnpm install"],
     ["publish-bypass.yml", "publish-npm bypasses validation or artifacts"],
+    ["cross-missing-version.yml", "literal exact stable --version"],
+    ["cross-variable-version.yml", "literal exact stable --version"],
+    ["cross-range-version.yml", "literal exact stable --version"],
+    ["cross-prerelease-version.yml", "literal exact stable --version"],
   ]);
-  assert.equal(expected.size, 7);
+  assert.equal(expected.size, 11);
   for (const [name, message] of expected) {
     const errors = validateWorkflow(fixture(name), "fixture.yml");
     assert.ok(errors.length > 0, `${name} must fail`);
@@ -59,7 +64,7 @@ test("negative fixtures reject each authority and tool-resolution violation", ()
 
 test("workflow fixtures are valid YAML objects", () => {
   const names = readdirSync(FIXTURE_DIRECTORY).filter((name) => name.endsWith(".yml"));
-  assert.equal(names.length, 8);
+  assert.equal(names.length, 13);
   for (const name of names) assert.equal(typeof YAML.parse(fixture(name)).jobs, "object");
 });
 

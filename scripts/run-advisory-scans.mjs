@@ -8,6 +8,7 @@ const OUTPUT = resolve(process.env.ADVISORY_OUTPUT_DIR ?? resolve(ROOT, ".adviso
 const PNPM_VERSION = "11.9.0";
 const PIP_AUDIT_VERSION = "2.9.0";
 const CARGO_DENY_VERSION = "0.19.0";
+const MATURIN_VERSION = "1.9.4";
 const TODAY = process.env.ADVISORY_POLICY_DATE ?? new Date().toISOString().slice(0, 10);
 mkdirSync(OUTPUT, { recursive: true });
 
@@ -78,9 +79,16 @@ function pnpmFindings() {
 
 function pythonFindings() {
   requireVersion("pip-audit", ["--version"], PIP_AUDIT_VERSION);
-  const result = run("uv", ["export", "--frozen", "--no-dev", "--no-emit-project", "--format", "requirements-txt", "--output-file", resolve(OUTPUT, "python-requirements.txt")], resolve(ROOT, "bindings/python"));
-  if (result.error || result.status !== 0) throw new Error("uv frozen export failed");
-  const audit = run("pip-audit", ["--requirement", resolve(OUTPUT, "python-requirements.txt"), "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"]);
+  const requirements = resolve(OUTPUT, "python-build-requirements.txt");
+  const result = run("uv", ["export", "--frozen", "--only-group", "build", "--no-emit-project", "--format", "requirements-txt", "--output-file", requirements], resolve(ROOT, "bindings/python"));
+  if (result.error || result.status !== 0) throw new Error("uv frozen build export failed");
+  const exported = readFileSync(requirements, "utf8");
+  const packages = [...exported.matchAll(/^([A-Za-z0-9_.-]+)==([^ \;]+).*$/gm)].map((match) => ({ name: match[1].toLowerCase(), version: match[2] }));
+  if (packages.length === 0) throw new Error("uv frozen build export is empty");
+  const maturin = packages.find((pkg) => pkg.name === "maturin");
+  if (!maturin) throw new Error("uv frozen build export is missing maturin");
+  if (maturin.version !== MATURIN_VERSION) throw new Error(`uv frozen build export has maturin ${maturin.version}, expected ${MATURIN_VERSION}`);
+  const audit = run("pip-audit", ["--requirement", requirements, "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"]);
   if (audit.error || ![0, 1].includes(audit.status)) throw new Error("pip-audit tool or vulnerability DB failure");
   let report;
   try { report = JSON.parse(audit.stdout); } catch { throw new Error("pip-audit emitted malformed JSON"); }

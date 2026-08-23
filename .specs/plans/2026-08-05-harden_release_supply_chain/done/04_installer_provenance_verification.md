@@ -26,3 +26,7 @@
 ## Sibling boundaries
 
 - Do not make `sha256sum`/`shasum` absence fail closed or edit its tests; that exact branch is owned by the unstacked fail-closed sibling’s installer task. Coordinate the shared `install.sh` ordering at integration.
+
+## Review-round-1 remediation evidence
+
+- The installer now tracks `checksum_verified`. With no `gh`, checksum success says corruption-only; with neither checksum tool nor `gh`, the exact loud warning says neither checksum nor provenance authenticity was verified and names the current missing-tool limitation. Warn-and-continue remains unchanged for the sibling boundary. Hermetic cases cover no-checksum/no-gh and no-checksum with valid/failing `gh`; provenance remains fail-closed whenever `gh` exists. Distinct modified artifact, identity/arguments, tool error, and timeout fakes are asserted.

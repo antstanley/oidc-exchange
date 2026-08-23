@@ -1,0 +1,8 @@
+name: fixture
+on: push
+jobs:
+  check:
+    permissions:
+      contents: read
+    steps:
+      - run: cargo install cross --version 0.3.0-alpha.1 --locked

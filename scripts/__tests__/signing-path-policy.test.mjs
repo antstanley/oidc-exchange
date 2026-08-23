@@ -4,7 +4,7 @@ import { evaluateSigningPaths } from "../signing-path-policy.mjs";
 
 const DATE = "2026-08-23";
 function pkg(name, version, id = `${name} ${version}`) { return { id, name, version }; }
-function node(id, deps = []) { return { id, deps: deps.map((dep) => ({ name: dep.id.split(" ")[0], pkg: dep.id, dep_kinds: [{ kind: dep.kind ?? null, target: dep.target ?? null }] })), features: [] }; }
+function node(id, deps = []) { return { id, deps: deps.map((dep) => ({ name: dep.id.split(" ")[0], pkg: dep.id, dep_kinds: dep.dep_kinds ?? [{ kind: dep.kind ?? null, target: dep.target ?? null }] })), features: [] }; }
 function metadata(packages, edges) { return { packages, resolve: { root: null, nodes: packages.map((item) => node(item.id, edges[item.id] ?? [])) } }; }
 function policy(exceptions = [], roots = ["root@1.0.0"]) { return { version: 1, effective_date: DATE, modes: [{ name: "test", metadata_args: ["--locked"], roots }], protected_packages: ["crypto", "helper"], exceptions }; }
 function exception(overrides = {}) { return { mode: "test", package: "crypto", version: "2.0.0-rc.1", path: ["root@1.0.0", "crypto@2.0.0-rc.1"], rationale: "Bounded existing path", owner: "Security owner", expires: "2026-09-01", review_date: "2026-08-28", ...overrides }; }
@@ -36,6 +36,15 @@ test("cycles terminate and multiple roots retain shortest evidence", () => {
 });
 test("target-qualified normal edge is evaluated", () => {
   const result = evaluateSigningPaths(policy(), metadata([root, candidate], { [root.id]: [{ ...candidate, target: "cfg(target_os = \"linux\")" }] }), "test", DATE);
+  assert.equal(result[0].status, "failure");
+});
+
+test("mixed normal and dev dependency kinds preserve runtime prerelease", () => {
+  const result = evaluateSigningPaths(policy(), metadata([root, candidate], { [root.id]: [{ ...candidate, dep_kinds: [{ kind: "dev", target: null }, { kind: null, target: null }] }] }), "test", DATE);
+  assert.equal(result[0].status, "failure");
+});
+test("mixed target-qualified kinds preserve applicable normal edge", () => {
+  const result = evaluateSigningPaths(policy(), metadata([root, candidate], { [root.id]: [{ ...candidate, dep_kinds: [{ kind: "dev", target: "cfg(windows)" }, { kind: "normal", target: "cfg(linux)" }] }] }), "test", DATE);
   assert.equal(result[0].status, "failure");
 });
 test("duplicate stable and prerelease lines only flag reachable identity", () => {

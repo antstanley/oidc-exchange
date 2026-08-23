@@ -77,7 +77,8 @@ export function evaluateSigningPaths(policyInput, metadataInput, modeName, today
     if (best.has(current.id) && best.get(current.id).length <= current.path.length) continue;
     best.set(current.id, current.path);
     for (const dep of nodes.get(current.id).deps) {
-      if (dep.dep_kinds.some((kind) => kind.kind === "dev")) continue;
+      const applicableKinds = dep.dep_kinds.filter((kind) => kind.target === null || kind.target === undefined || typeof kind.target === "string");
+      if (applicableKinds.length > 0 && applicableKinds.every((kind) => kind.kind === "dev")) continue;
       if (current.path.includes(dep.pkg)) continue;
       queue.push({ id: dep.pkg, path: [...current.path, dep.pkg] });
     }

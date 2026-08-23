@@ -60,6 +60,11 @@ export function validateWorkflow(text, workflowName) {
         errors.push(`${key}: non-frozen pnpm install`);
       if (step.run.includes("pnpm exec") && !step.run.includes("--offline"))
         errors.push(`${key}: pnpm exec must be offline`);
+      for (const command of step.run.matchAll(/\bcargo\s+install\s+cross\b[^\n]*/g)) {
+        const version = /(?:^|\s)--version\s+(\S+)/.exec(command[0])?.[1];
+        if (!version || !/^\d+\.\d+\.\d+$/.test(version))
+          errors.push(`${key}: cargo install cross requires literal exact stable --version`);
+      }
     }
   }
   const publishNpm = workflow.jobs["publish-npm"];

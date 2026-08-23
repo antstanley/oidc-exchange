@@ -44,7 +44,11 @@ EOF
     cat > "$bin/gh" <<'EOF'
 #!/bin/sh
 printf 'gh %s\n' "$*" >> "$CALL_LOG"
-case "$MODE" in gh-fail) exit 1;; esac
+case "$MODE" in
+  modified) [ -f "$3" ] && printf tampered > "$3"; exit 1;;
+  wrong-identity) [ "$4 $5" = "--repo wrong/repo" ] || exit 41; exit 1;;
+  gh-error) exit 70;;
+esac
 [ "$1 $2" = 'attestation verify' ]
 [ "$4 $5" = '--repo antstanley/oidc-exchange' ]
 [ "$6 $7" = '--signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml' ]
@@ -59,16 +63,26 @@ exec "$@"
 EOF
     chmod +x "$bin"/*
     [ "$mode" = no-gh ] && rm "$bin/gh" "$bin/timeout"
+    [ "$mode" = no-checksum-no-gh ] && { rm "$bin/gh" "$bin/timeout" "$bin/sha256sum"; rm -rf "$bin/shasum"; }
+    [ "$mode" = no-checksum-gh-valid ] && { rm "$bin/sha256sum"; rm -rf "$bin/shasum"; }
+    [ "$mode" = no-checksum-gh-fail ] && { rm "$bin/sha256sum"; rm -rf "$bin/shasum"; mode=gh-error; }
+    PATH_OVERRIDE=/usr/bin:/bin
+    if [[ "$mode" == no-checksum-* ]]; then
+      for tool in bash basename cut dirname grep mkdir mktemp mv rm tr chmod; do
+        command -v "$tool" >/dev/null 2>&1 && ln -sf "$(command -v "$tool")" "$bin/$tool" || true
+      done
+      PATH_OVERRIDE=
+    fi
     set +e
-    PATH="$bin:/usr/bin:/bin" HOME="$home" CALL_LOG="$log" MODE="$mode" SANDBOX="$sandbox" \
+    PATH="$bin:$PATH_OVERRIDE" HOME="$home" CALL_LOG="$log" MODE="$mode" SANDBOX="$sandbox" \
       bash "$INSTALLER" --version "$version" >"$sandbox/out" 2>"$sandbox/err"
     status=$?
     set -e
     case "$mode" in
-      valid|no-gh)
+      valid|no-gh|no-checksum-no-gh|no-checksum-gh-valid)
         [ "$status" -eq 0 ] && [ -f "$install" ]
         ;;
-      gh-fail|timeout-fail)
+      modified|wrong-identity|gh-error|timeout-fail|no-checksum-gh-fail)
         [ "$status" -ne 0 ] && [ ! -e "$install" ]
         ;;
       invalid)
@@ -81,6 +95,9 @@ EOF
         grep -Fq -- '--repo antstanley/oidc-exchange --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml' "$log"
         ;;
       no-gh) grep -Fq 'corruption only' "$sandbox/err" ;;
+      no-checksum-no-gh) grep -Fq 'Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation.' "$sandbox/err" ;;
+      no-checksum-gh-valid) grep -Fq 'gh attestation verify' "$log" ;;
+      no-checksum-gh-fail) grep -Fq 'gh attestation verify' "$log" ;;
       cleanup) [ ! -d "$(grep '^curl ' "$log" | sed -n 's/.* -o \([^ ]*\).*/\1/p' | head -1 | xargs dirname 2>/dev/null)" ] || true ;;
     esac
     rm -rf "$sandbox"
@@ -89,11 +106,14 @@ EOF
 }
 
 run_case valid valid
-run_case modified gh-fail
-run_case wrong-identity gh-fail
-run_case gh-error gh-fail
+run_case modified modified
+run_case wrong-identity wrong-identity
+run_case gh-error gh-error
 run_case gh-timeout timeout-fail
 run_case no-gh no-gh
+run_case no-checksum-no-gh no-checksum-no-gh
+run_case no-checksum-gh-valid no-checksum-gh-valid
+run_case no-checksum-gh-fail no-checksum-gh-fail
 run_case traversal invalid ../v1.2.3
 run_case url invalid https://evil.example/v1.2.3
 run_case leading-slash invalid /v1.2.3
@@ -115,5 +135,5 @@ rm -rf "$sandbox"
 PASS=$((PASS + 1))
 printf 'ok %d - missing operand\n' "$PASS"
 
-[ "$PASS" -eq 15 ]
-printf '1..15\n'
+[ "$PASS" -eq 18 ]
+printf '1..18\n'

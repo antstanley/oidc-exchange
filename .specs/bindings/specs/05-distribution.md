@@ -80,14 +80,14 @@ through PyPI Trusted Publishing. The binding uses `pyo3 0.29.2` with `extension-
 ## Supply-chain gates
 
 - **Pinning and lockfiles.** Every action is a full commit SHA. Executed tools are locked or exact:
-  pnpm 11.9.0, cargo-deny 0.19.0, and pip-audit 2.9.0. CI/release installs are frozen; publish-path
+  pnpm 11.9.0, cargo-deny 0.19.0, pip-audit 2.9.0, maturin 1.9.4, and cross 0.2.5. CI/release installs are frozen; publish-path
   installs use `--ignore-scripts`. `minimumReleaseAge` is explicit in `pnpm-workspace.yaml`.
 - **Least privilege.** Permissions are per job. Checkout jobs explicitly retain only
   `contents: read`, disable persisted credentials when they do not push, and cannot inherit an
   omitted workflow-level write scope.
 - **Three dependency graphs.** `scripts/run-advisory-scans.mjs` scans committed `Cargo.lock`, all
-  owned pnpm lockfiles recursively, and the frozen production export of
-  `bindings/python/uv.lock`. Unknown and expired high-severity findings fail; exact unexpired
+  owned pnpm lockfiles recursively, and the nonempty frozen build export of
+  `bindings/python/uv.lock` (`maturin==1.9.4` plus its conditional `tomli==2.4.1` dependency). The production runtime export is separately empty. Unknown and expired high-severity findings fail; exact unexpired
   exceptions pass only when ecosystem, advisory, package, version/range, rationale, owner, expiry,
   and review date match. Cargo unmaintained and yanked findings warn. Scanner, database, registry,
   malformed-output, version, and frozen-export failures exit separately as tool failure rather
@@ -95,7 +95,7 @@ through PyPI Trusted Publishing. The binding uses `pyo3 0.29.2` with `extension-
 - **Signing paths.** `config/signing-path-policy.json` derives roots from the adapters source and
   evaluates locked Cargo metadata in `workspace-all-targets` and `linux-release-target` modes.
   Pre-release protected packages fail unless the exact mode/package/version/path exception is
-  present, owned, reasoned, and unexpired. Fourteen inventory entries (seven per mode; twelve currently exercised findings because the resolved RSA prerelease edge is dev-only and excluded) expire
+  present, owned, reasoned, and unexpired. Fourteen inventory entries (seven per mode, all exercised; RSA public-key verification is shipped while private-key construction is test-only) expire
   2026-09-15; drift in a path, version, feature graph, or protected package fails closed.
 
 ## Version parity

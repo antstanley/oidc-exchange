@@ -26,3 +26,7 @@
 ## Sibling boundaries
 
 - Do not implement missing-checksum-tool failure behavior from the fail-closed sibling; only release workflow and package-resolution controls are owned here.
+
+## Review-round-1 remediation evidence
+
+- All release `cargo install cross` sites use literal stable `cross 0.2.5` with `--locked`; workflow policy accepts that exact form and rejects missing, variable, range, and prerelease versions. Crates.io metadata (`cargo search cross`) reported 0.2.5 as the current stable release. Job permissions and pinned attestation actions remain unchanged, so attested bytes are still produced by the reviewed tool.

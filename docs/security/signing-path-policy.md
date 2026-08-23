@@ -1,3 +1,7 @@
+---
+title: Signing Path Policy
+---
+
 # Signing-path dependency policy
 
 **Effective:** 2026-08-23  

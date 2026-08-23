@@ -35,7 +35,7 @@ jobs:
       - name: Activate pnpm 11.9.0
         run: corepack pnpm@11.9.0 --version
       - name: Install cross
-        run: cargo install cross --locked
+        run: cargo install cross --version 0.2.5 --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
         run: corepack pnpm@11.9.0 install --frozen-lockfile
