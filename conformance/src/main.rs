@@ -12,6 +12,7 @@ const OBSERVE: &str = "/auth/__oidc_exchange_conformance__/observe";
 struct Input {
     id: String,
     method: String,
+    #[serde(rename = "rawPath")]
     _raw_path: String,
     query: Option<String>,
     headers: Vec<Header>,
