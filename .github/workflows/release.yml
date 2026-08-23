@@ -304,25 +304,24 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24.18.0
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - run: pnpm add -g @napi-rs/cli
+      - name: Activate pnpm 11.9.0
+        run: corepack pnpm@11.9.0 --version
       - name: Install cross
         # The linux-gnu legs build through `cross` (Docker-based, old-glibc image).
         if: matrix.use_cross
         run: cargo install cross --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
-        # --no-frozen-lockfile: the root optionalDependencies point at the
-        # @oidc-exchange/<triple> platform packages that THIS pipeline publishes,
-        # so they are not resolvable at build time; a frozen install would fail.
-        run: pnpm install --no-frozen-lockfile
+        # The reviewed lock resolves self-published optional platform packages,
+        # so release builds must not rewrite dependency selection.
+        run: corepack pnpm@11.9.0 install --frozen-lockfile
       - name: Build
         working-directory: bindings/nodejs
         # --platform: emit oidc-exchange.<triple>.node so each artifact is uniquely
         # named and `napi artifacts` can distribute it into its npm/<triple> package.
         # --use-cross (linux-gnu legs) builds via `cross` in an old-glibc image so the
         # addon loads on AL2023/Lambda; other targets build with plain cargo.
-        run: napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
+        run: corepack pnpm@11.9.0 exec --offline napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -349,7 +348,8 @@ jobs:
         # Node 24.8.0's bundled npm has OIDC trusted publishing but predates
         # `npm stage` (staged publishing); install a newer npm.
         run: npm install -g npm@latest
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - name: Activate pnpm 11.9.0
+        run: corepack pnpm@11.9.0 --version
       - name: Install napi CLI
         run: pnpm add -g @napi-rs/cli
 
@@ -446,9 +446,9 @@ jobs:
           if npm view "@oidc-exchange/lambda@${ver}" version >/dev/null 2>&1; then
             echo "@oidc-exchange/lambda@${ver} already published; skipping"
           else
-            pnpm install --ignore-scripts --no-frozen-lockfile
-            pnpm build
-            pnpm pack --pack-destination "${RUNNER_TEMP}"
+            corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
+            corepack pnpm@11.9.0 run build
+            corepack pnpm@11.9.0 pack --pack-destination "${RUNNER_TEMP}"
             npm stage publish --provenance --access public --ignore-scripts \
               "${RUNNER_TEMP}/oidc-exchange-lambda-${ver}.tgz"
           fi

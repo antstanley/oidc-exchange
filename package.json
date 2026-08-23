@@ -8,9 +8,11 @@
     "lint": "pnpm -r --no-bail lint",
     "format": "pnpm -r format",
     "format:check": "pnpm -r --no-bail format:check",
-    "typecheck": "pnpm -r --no-bail typecheck"
+    "typecheck": "pnpm -r --no-bail typecheck",
+    "test:supply-chain": "node --test scripts/__tests__/supply-chain.test.mjs"
   },
   "devDependencies": {
-    "lefthook": "^2.1.9"
+    "lefthook": "2.1.9",
+    "yaml": "2.9.0"
   }
 }
