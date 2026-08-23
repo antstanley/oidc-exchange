@@ -366,25 +366,40 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
         );
     }
 
-    let router = app
-        .layer(CatchPanicLayer::custom(panic_handler))
+    let router = apply_route_layers(app, request_timeout_duration(config)).with_state(state);
+
+    wrap_with_base_path_under_outer_guard(router, config.server.base_path.clone())
+}
+
+/// Apply the per-route middleware stack every router this crate builds shares — inner
+/// catch-panic nearest the handler, then audit-context, then the request-timeout layer, then
+/// request-id outermost among them (ordering rationale in [`build_router`]'s doc comment).
+///
+/// Generic over the router's state type and parameterised on the resolved timeout so the
+/// panic-containment tests can compose this exact function over test routers — the tested
+/// layer order cannot drift from the shipped one because they are the same code.
+fn apply_route_layers<S>(app: Router<S>, request_timeout: std::time::Duration) -> Router<S> {
+    app.layer(CatchPanicLayer::custom(panic_handler))
         .layer(axum::middleware::from_fn(audit_context_layer))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            request_timeout_duration(config),
+            request_timeout,
         ))
         .layer(axum::middleware::from_fn(request_id_layer))
-        .with_state(state);
+}
 
-    let base_path_aware = with_base_path_strip(router, config.server.base_path.clone());
-
-    // Outer guard around the base-path service and everything inside it (see the doc
-    // comment): composed through its own routeless router — the same shape
-    // `with_base_path_strip` uses — because `Router::layer` cannot wrap a router as an
-    // opaque unit, and the guard must sit outside the base-path rewrite, not merely around
-    // each already-matched endpoint.
-    let outer_guarded = CatchPanicLayer::custom(panic_handler).layer(base_path_aware);
-    Router::new().fallback_service(outer_guarded)
+/// Wrap an assembled router with the outer half of the production stack — the base-path
+/// strip first, then the outer catch-panic guard around it (`04-http-api.md` → Middleware
+/// stack, entries 1–2; rationale in [`build_router`]'s doc comment).
+///
+/// Composed through its own routeless router — the same shape `with_base_path_strip` uses —
+/// because `Router::layer` cannot wrap a router as an opaque unit, and the guard must sit
+/// outside the base-path rewrite, not merely around each already-matched endpoint. Shared
+/// with the panic-containment tests for the same drift-proofing reason as
+/// [`apply_route_layers`].
+fn wrap_with_base_path_under_outer_guard(router: Router, base_path: Option<String>) -> Router {
+    let base_path_aware = with_base_path_strip(router, base_path);
+    Router::new().fallback_service(CatchPanicLayer::custom(panic_handler).layer(base_path_aware))
 }
 
 /// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
@@ -1612,10 +1627,12 @@ mod request_timeout_tests {
         );
     }
 
-    /// Builds the same middleware ordering `build_router` installs — request-id, then the
-    /// timeout layer, then audit-context, then catch-panic — around two bare test handlers,
-    /// so the layer-ordering contract (timeout inside request-id, outside everything else)
-    /// is exercised directly against a slow and a fast handler.
+    /// Builds the production middleware ordering around two bare test handlers by calling
+    /// the same [`apply_route_layers`] / [`wrap_with_base_path_under_outer_guard`] functions
+    /// `build_router` uses — request-id outermost, then the timeout layer, then
+    /// audit-context/catch-panic, the whole thing wrapped by the base-path service (a
+    /// pass-through with no prefix configured) under the outer catch-panic guard — so the
+    /// layer-ordering contract is exercised directly against a slow and a fast handler.
     fn timeout_test_app(timeout: Duration) -> Router {
         async fn fast_handler() -> &'static str {
             "ok"
@@ -1625,23 +1642,11 @@ mod request_timeout_tests {
             "too slow to ever return"
         }
 
-        // Mirrors `build_router`'s exact layer ordering (see its doc comment): applied
-        // innermost first, so request-id ends up outermost and the timeout layer sits
-        // between it and audit-context/catch-panic — and, as in production, the whole
-        // stated router is wrapped by the base-path service (a pass-through with no prefix
-        // configured) under the outer catch-panic guard.
         let inner = Router::new()
             .route("/fast", get(fast_handler))
-            .route("/slow", get(slow_handler))
-            .layer(CatchPanicLayer::custom(panic_handler))
-            .layer(axum::middleware::from_fn(audit_context_layer))
-            .layer(TimeoutLayer::with_status_code(
-                StatusCode::REQUEST_TIMEOUT,
-                timeout,
-            ))
-            .layer(axum::middleware::from_fn(request_id_layer));
-        let base_path_aware = with_base_path_strip(inner, None);
-        Router::new().fallback_service(CatchPanicLayer::custom(panic_handler).layer(base_path_aware))
+            .route("/slow", get(slow_handler));
+        let stated = apply_route_layers(inner, timeout);
+        wrap_with_base_path_under_outer_guard(stated, None)
     }
 
     /// A handler that runs longer than `server.request_timeout` is aborted with `408`, and
@@ -1680,6 +1685,149 @@ mod request_timeout_tests {
         assert!(
             response.headers().get("x-request-id").is_some(),
             "a normal response must still carry the request id"
+        );
+    }
+}
+
+/// Forced-panic containment over the two-guard stack (`04-http-api.md` → Middleware stack):
+/// the inner guard nearest the handlers must turn a *handler* panic into the standard
+/// structured `500` while its response still passes back out through the request-id layer
+/// and carries `x-request-id`, and the outer guard around the base-path service must contain
+/// a panic raised *outside* that inner guard as the same `500` instead of letting an unwind
+/// escape into an embedding host or drop the connection. Both tests compose
+/// [`apply_route_layers`] / [`wrap_with_base_path_under_outer_guard`] — the very functions
+/// `build_router` uses — so what they prove about layer order is true of the shipped router,
+/// not merely of a hand-mirrored copy of it.
+#[cfg(test)]
+mod panic_containment_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Handler whose only job is to panic: the forced inner-guard probe standing in for any
+    /// handler defect.
+    async fn panicking_handler() -> &'static str {
+        panic!("forced handler panic for containment testing");
+    }
+
+    /// Middleware whose only job is to panic before calling `next`. It sits outside the
+    /// per-route stack's inner catch-panic but inside the outer guard — the same belt the
+    /// request-id, timeout, audit-context, and base-path layers occupy in production, where a
+    /// panic would previously have escaped the inner guard entirely.
+    async fn panicking_outer_layer_middleware(
+        _request: Request<Body>,
+        _next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        panic!("forced outer-layer panic for containment testing");
+    }
+
+    /// The production stack over one panicking route: routes → [`apply_route_layers`]
+    /// (inner catch-panic innermost) → [`wrap_with_base_path_under_outer_guard`].
+    fn inner_panic_app() -> Router {
+        let inner = Router::new().route("/boom", get(panicking_handler));
+        let stated = apply_route_layers(inner, std::time::Duration::from_secs(30));
+        wrap_with_base_path_under_outer_guard(stated, None)
+    }
+
+    /// The production stack with one panic-probe middleware added just outside the per-route
+    /// layers (so the inner guard never sees it) but still inside the outer guard.
+    fn outer_panic_app() -> Router {
+        let inner = Router::new().route("/fast", get(|| async { "ok" }));
+        let stated = apply_route_layers(inner, std::time::Duration::from_secs(30))
+            .layer(axum::middleware::from_fn(panicking_outer_layer_middleware));
+        wrap_with_base_path_under_outer_guard(stated, None)
+    }
+
+    async fn get_response(app: Router, uri: &str) -> axum::response::Response {
+        app.oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// A handler panic becomes the standard structured `500` — not a dropped connection —
+    /// and, because request-id wraps the inner catch-panic, the response still carries
+    /// `x-request-id`. This is the property the two-guard design exists to preserve: moving
+    /// the single guard outward would have cost this response its correlation header.
+    #[tokio::test]
+    async fn handler_panic_yields_structured_500_that_still_carries_request_id() {
+        let response = get_response(inner_panic_app(), "/boom").await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a caught handler panic must surface as the standard 500"
+        );
+        assert!(
+            response.headers().get("x-request-id").is_some(),
+            "a caught handler panic's 500 must pass back out through the request-id layer \
+             and carry x-request-id"
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("the standard 500 body is JSON");
+        assert_eq!(
+            body["error"], "server_error",
+            "the 500 body must carry the fixed error code"
+        );
+        assert_eq!(
+            body["error_description"], "internal server error",
+            "the 500 body must carry the fixed description"
+        );
+    }
+
+    /// A panic raised in a layer the inner guard does not cover (here a probe standing in
+    /// for the request-id/timeout/audit-context/base-path belt) is contained by the outer
+    /// guard as the same standard `500` instead of unwinding into the host. `x-request-id`
+    /// is absent on purpose: the probe sits outside the layer that stamps it, which is the
+    /// documented trade-off the second guard accepts rather than leaking the unwind.
+    #[tokio::test]
+    async fn outer_middleware_panic_is_contained_by_the_outer_guard_as_500() {
+        let response = get_response(outer_panic_app(), "/fast").await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "an outer-layer panic must be contained as the standard 500"
+        );
+        assert!(
+            response.headers().get("x-request-id").is_none(),
+            "a panic from a layer outside request-id cannot carry its header; asserting the \
+             absence pins the two-guard placement rather than leaving it accidental"
+        );
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("the standard 500 body is JSON");
+        assert_eq!(
+            body["error"], "server_error",
+            "the outer guard must produce the same fixed error code as the inner one"
+        );
+        assert_eq!(
+            body["error_description"], "internal server error",
+            "the outer guard must produce the same fixed description as the inner one"
+        );
+    }
+
+    /// Negative control for the containment pair above: through the identical stack, a
+    /// non-panicking request still reaches its handler and returns normally, proving both
+    /// guards are transparent on the happy path (a guard that swallowed every request would
+    /// also satisfy the two 500 tests).
+    #[tokio::test]
+    async fn happy_path_passes_through_both_guards_unchanged() {
+        let inner = Router::new().route("/fast", get(|| async { "ok" }));
+        let stated = apply_route_layers(inner, std::time::Duration::from_secs(30));
+        let app = wrap_with_base_path_under_outer_guard(stated, None);
+
+        let response = get_response(app, "/fast").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers().get("x-request-id").is_some(),
+            "an ordinary response through both guards still carries the request id"
         );
     }
 }
