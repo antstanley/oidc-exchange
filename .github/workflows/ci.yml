@@ -8,6 +8,30 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 jobs:
+  advisories:
+    name: Dependency advisories (reported policy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.18.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+      - name: Provision pinned scanners
+        run: |
+          cargo install cargo-deny --version 0.19.0 --locked
+          python -m pip install --require-hashes --only-binary=:all: -r config/pip-audit-requirements.txt
+          corepack pnpm@11.9.0 --version
+      - name: Evaluate frozen Cargo, pnpm, and Python graphs
+        run: node scripts/run-advisory-scans.mjs
+    permissions:
+      contents: read
   lint:
     name: Lint
     runs-on: ubuntu-latest

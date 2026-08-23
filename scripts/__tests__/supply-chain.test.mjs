@@ -80,8 +80,7 @@ test("owned workflow installs use the exact frozen package manager", () => {
       for (const step of job.steps) {
         if (
           typeof step.run !== "string" ||
-          !step.run.includes("pnpm") ||
-          !step.run.includes("install")
+          !/\bpnpm(?:@[\w.-]+)?\s+install\b/.test(step.run)
         )
           continue;
         installCount += 1;

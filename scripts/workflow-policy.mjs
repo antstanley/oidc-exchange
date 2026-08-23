@@ -76,6 +76,15 @@ export function validateWorkflow(text, workflowName) {
     const dockerJob = workflow.jobs["build-docker"];
     const manifestJob = workflow.jobs["docker-manifest"];
     const releaseJob = workflow.jobs["create-release"];
+    const dependencyPolicy = workflow.jobs["dependency-policy"];
+    if (dependencyPolicy || workflow.jobs.validate) {
+      if (!dependencyPolicy) errors.push(`${workflowName}: missing release dependency policy`);
+      const validateNeeds = Array.isArray(workflow.jobs.validate?.needs)
+        ? workflow.jobs.validate.needs
+        : [workflow.jobs.validate?.needs];
+      if (!validateNeeds.includes("dependency-policy"))
+        errors.push(`${workflowName}: validate bypasses dependency policy`);
+    }
     for (const [name, job] of [
       ["build-binaries", binaryJob],
       ["build-docker", dockerJob],

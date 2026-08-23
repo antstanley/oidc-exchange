@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "effective_date": "2026-08-23",
+  "severity_threshold": "high",
+  "direct_and_transitive": "same-policy",
+  "ecosystems": {
+    "cargo": {
+      "lockfile": "Cargo.lock",
+      "severity_threshold": "high",
+      "unmaintained": "warn",
+      "yanked": "warn",
+      "scanner": { "name": "cargo-deny", "version": "0.19.0" }
+    },
+    "pnpm": {
+      "lockfile": "pnpm-lock.yaml",
+      "severity_threshold": "high",
+      "unmaintained": "warn",
+      "yanked": "warn",
+      "scanner": { "name": "pnpm", "version": "11.9.0" }
+    },
+    "python": {
+      "lockfile": "bindings/python/uv.lock",
+      "severity_threshold": "high",
+      "unmaintained": "warn",
+      "yanked": "warn",
+      "scanner": { "name": "pip-audit", "version": "2.9.0" }
+    }
+  },
+  "exceptions": [
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2025-0020",
+      "package": "pyo3",
+      "version": "0.22.6",
+      "range": "=0.22.6",
+      "rationale": "The Python binding remains on its reviewed pyo3 ABI line; upgrading it is explicitly deferred because this wave forbids broad dependency upgrades. The exception is version-bound and does not cover another advisory or release.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-30",
+      "review_date": "2026-09-15"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2026-0177",
+      "package": "pyo3",
+      "version": "0.22.6",
+      "range": "=0.22.6",
+      "rationale": "The Python binding remains on its reviewed pyo3 ABI line; upgrading it is explicitly deferred because this wave forbids broad dependency upgrades. The exception is advisory- and version-specific.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-30",
+      "review_date": "2026-09-15"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.9.10",
+      "range": "=0.9.10",
+      "rationale": "This stable rsa line is reached through jsonwebtoken for public-key verification. Shipped code performs no RSA private-key operation; private-key construction is test-only. Review immediately if that reachability claim changes.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-30",
+      "review_date": "2026-09-15"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2023-0071",
+      "package": "rsa",
+      "version": "0.10.0-rc.18",
+      "range": "=0.10.0-rc.18",
+      "rationale": "Shipped KMS code parses and verifies public keys only; every RSA private-key construction is cfg(test). This exact prerelease is separately governed by signing-path policy in task 06.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-30",
+      "review_date": "2026-09-15"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2026-0098",
+      "package": "rustls-webpki",
+      "version": "0.101.7",
+      "range": "=0.101.7",
+      "rationale": "The affected legacy rustls line is transitive through AWS SDK HTTP support. Exploitation requires certificate misissuance and URI constraints not asserted by this service; no dependency update is performed in this policy-only wave.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-30",
+      "review_date": "2026-09-15"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2026-0099",
+      "package": "rustls-webpki",
+      "version": "0.101.7",
+      "range": "=0.101.7",
+      "rationale": "The affected legacy rustls line is transitive through AWS SDK HTTP support. Exploitation requires certificate misissuance and constrained wildcard names; no dependency update is performed in this policy-only wave.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-30",
+      "review_date": "2026-09-15"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2026-0104",
+      "package": "rustls-webpki",
+      "version": "0.101.7",
+      "range": "=0.101.7",
+      "rationale": "The affected CRL parser is transitive through AWS SDK HTTP support and this service does not configure CRL parsing. No dependency update is performed in this policy-only wave.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-30",
+      "review_date": "2026-09-15"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2026-0258",
+      "package": "h2",
+      "version": "0.3.27",
+      "range": "=0.3.27",
+      "rationale": "The older h2 line is transitive through the AWS SDK stack. This policy wave records rather than silently updates the frozen graph; requests already apply configured limits and timeouts.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-15",
+      "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "cargo",
+      "advisory": "RUSTSEC-2026-0258",
+      "package": "h2",
+      "version": "0.4.15",
+      "range": "=0.4.15",
+      "rationale": "The newer h2 line is transitive through HTTP clients. This policy wave records rather than silently updates the frozen graph; requests already apply configured limits and timeouts.",
+      "owner": "Ant Stanley",
+      "expires": "2026-09-15",
+      "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-52cp-r559-cp3m", "package": "js-yaml", "version": "4.1.1", "range": "=4.1.1",
+      "rationale": "Transitive build tooling input; no untrusted YAML is parsed in a shipped runtime. Frozen baseline recorded without silently updating dependencies.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-5p4m-2wfm-xmqj", "package": "js-yaml", "version": "4.1.1", "range": "=4.1.1",
+      "rationale": "Transitive build tooling input; no untrusted YAML is parsed in a shipped runtime. Frozen baseline recorded without silently updating dependencies.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-5p4m-2wfm-xmqj", "package": "js-yaml", "version": "4.3.0", "range": "=4.3.0",
+      "rationale": "Transitive build tooling input; no untrusted YAML is parsed in a shipped runtime. Frozen baseline recorded without silently updating dependencies.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-6g55-p6wh-862q", "package": "postcss", "version": "8.5.8", "range": "=8.5.8",
+      "rationale": "Transitive static-site build dependency; production services do not accept CSS for parsing. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-r28c-9q8g-f849", "package": "postcss", "version": "8.5.8", "range": "=8.5.8",
+      "rationale": "Transitive static-site build dependency; production services do not accept CSS for parsing. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-r28c-9q8g-f849", "package": "postcss", "version": "8.5.16", "range": "=8.5.16",
+      "rationale": "Transitive static-site build dependency; production services do not accept CSS for parsing. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-28wg-ghj8-5hjv", "package": "nanoid", "version": "3.3.11", "range": "=3.3.11",
+      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-28wg-ghj8-5hjv", "package": "nanoid", "version": "3.3.15", "range": "=3.3.15",
+      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-2v37-7h3g-55p8", "package": "nanoid", "version": "3.3.11", "range": "=3.3.11",
+      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-2v37-7h3g-55p8", "package": "nanoid", "version": "3.3.15", "range": "=3.3.15",
+      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    },
+    {
+      "ecosystem": "pnpm", "advisory": "GHSA-2p49-hgcm-8545", "package": "svgo", "version": "4.0.1", "range": "=4.0.1",
+      "rationale": "Transitive static asset optimizer; release workflows do not process attacker-controlled SVG. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
+    }
+  ]
+}
