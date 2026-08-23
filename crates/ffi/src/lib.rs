@@ -252,6 +252,15 @@ impl OidcExchange {
         self.runtime.block_on(self.handle(request))
     }
 
+    #[cfg(feature = "conformance")]
+    #[doc(hidden)]
+    pub fn runtime_handle_for_conformance(
+        &self,
+        request: WireRequest,
+    ) -> Result<FfiResponse, FfiError> {
+        self.runtime.block_on(self.handle(request))
+    }
+
     #[cfg(test)]
     fn with_router_for_test(router: Router, max_body_bytes: u64) -> Result<Self, FfiError> {
         let runtime = tokio::runtime::Runtime::new().map_err(|e| FfiError {
