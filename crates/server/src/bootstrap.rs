@@ -364,6 +364,14 @@ impl Routers {
     /// expressed by deploying a second function/instance with
     /// `role = "admin"`. Returns `None` when no router exists for the role at
     /// all.
+    ///
+    /// These runtures serve through the platform's request surface rather
+    /// than `into_make_service_with_connect_info`, so every `/internal/*`
+    /// request authenticates with `ClientAddr::Unknown`: no per-peer throttle
+    /// key exists, meaning failed-auth lockout and peer-attributed security
+    /// events are inactive. That degradation must never be silent — an
+    /// API-Gateway-fronted function *is* an externally reachable guessing
+    /// surface — so handing back the admin router warns loudly here.
     pub fn single_plane(&self) -> Option<Router> {
         match (&self.public, &self.admin) {
             (Some(public), _) => {
@@ -380,7 +388,23 @@ impl Routers {
                 }
                 Some(public.clone())
             }
-            (None, Some(admin)) => Some(admin.clone()),
+            (None, Some(admin)) => {
+                // No ConnectInfo exists on this runtime, so the internal-auth
+                // layer will see ClientAddr::Unknown on every request and the
+                // per-peer OperatorAuth budget cannot be consulted. The
+                // fail-open is deliberate but must be visible: say so at
+                // startup, every boot, so the deployment cannot quietly lose
+                // its lockout/audit protection behind an API Gateway.
+                tracing::warn!(
+                    plane = "admin",
+                    "serving the admin plane on a single-plane runtime without connection info; \
+                     the per-peer authentication-failure throttle (lockout) and peer-address \
+                     attribution on its security events are INACTIVE because no socket peer is \
+                     available to key them — restrict reachability at your ingress (e.g. \
+                     API-Gateway authorizers or VPC policy), not by lockout"
+                );
+                Some(admin.clone())
+            }
             (None, None) => None,
         }
     }

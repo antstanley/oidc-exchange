@@ -98,9 +98,12 @@ pub enum ClientAddr {
 impl ClientAddr {
     /// Returns an address the server established and may safely use as a
     /// rate-limit key. `Unknown` yields nothing: no key means no budget is
-    /// drawn down, which fails toward serving rather than toward lockout —
-    /// acceptable only because runtimes without a socket peer also have no
-    /// externally reachable guessing surface.
+    /// drawn down — a deliberate fail-open toward serving rather than toward
+    /// lockout. It must never be *silent*: runtimes without a socket peer can
+    /// still be externally reachable (an API-Gateway-fronted Lambda, for
+    /// instance), so bootstrap warns when the admin plane is served on such a
+    /// runtime, naming that per-peer throttle lockout and peer-attributed
+    /// audit are inactive there.
     pub fn rate_limit_key(&self) -> Option<IpAddr> {
         match self {
             ClientAddr::Peer(address) => Some(*address),

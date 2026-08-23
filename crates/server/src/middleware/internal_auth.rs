@@ -64,8 +64,11 @@ pub async fn internal_auth_layer(
     };
 
     // Peer provenance comes from the socket via the connect-info make-service;
-    // runtimes without connection info yield Unknown, which draws no budget
-    // (they also have no externally reachable guessing surface).
+    // runtimes without connection info yield Unknown, which draws no budget.
+    // That fail-open is deliberate but never silent: bootstrap warns when the
+    // admin plane is served on such a runtime (an API-Gateway-fronted
+    // function *is* an externally reachable guessing surface) that per-peer
+    // lockout and peer-attributed audit are inactive there.
     let client_addr = request
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
