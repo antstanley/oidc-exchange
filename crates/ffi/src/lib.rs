@@ -174,19 +174,28 @@ impl OidcExchange {
             Some(b"") | None => None,
             Some(bytes) => Some(std::str::from_utf8(bytes).map_err(|_| StatusCode::BAD_REQUEST)?),
         };
+        let encoded_path =
+            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+                .replace("%2F", "/");
         let path_and_query = match query {
-            Some(query) => format!("{path}?{query}"),
-            None => path.clone(),
+            Some(query) => format!("{encoded_path}?{query}"),
+            None => encoded_path,
         };
         let uri = http::Uri::from_str(&path_and_query).map_err(|_| StatusCode::BAD_REQUEST)?;
         if uri.scheme().is_some() || uri.authority().is_some() || !uri.path().starts_with('/') {
             return Err(StatusCode::BAD_REQUEST);
         }
+        let actual_body_len = request.body.len() as u64;
         let mut built = http::Request::builder()
             .method(method)
             .uri(uri)
             .body(axum::body::Body::from(request.body))
             .map_err(|_| StatusCode::BAD_REQUEST)?;
+        #[cfg(feature = "conformance")]
+        built
+            .extensions_mut()
+            .insert(oidc_exchange::middleware::base_path::ConformancePath(path));
         let mut dropped_headers = 0_u64;
         for (name, value) in request.headers {
             match (
@@ -194,6 +203,19 @@ impl OidcExchange {
                 HeaderValue::from_str(&value),
             ) {
                 (Ok(name), Ok(value)) => {
+                    if name == http::header::CONTENT_LENGTH {
+                        let declared = value
+                            .to_str()
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .ok_or(StatusCode::BAD_REQUEST)?;
+                        if declared > self.limits.max_body_bytes {
+                            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+                        }
+                        if declared != actual_body_len {
+                            return Err(StatusCode::BAD_REQUEST);
+                        }
+                    }
                     built.headers_mut().append(name, value);
                 }
                 _ => dropped_headers += 1,

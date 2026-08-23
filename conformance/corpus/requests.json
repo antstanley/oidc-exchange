@@ -268,10 +268,11 @@
             "value": "9223372036854775807"
           }
         ],
-        "status": 400,
+        "status": 413,
         "bodyLength": 0,
         "downstreamMarker": "observed-after-routing"
       },
+      "evidence": "Production Hyper rejects a declared Content-Length above server.max_request_body_bytes with 413 before handler dispatch; direct FFI enforces the same configured cap.",
       "notApplicable": [
         "method",
         "decodedPath",
@@ -356,14 +357,7 @@
     }
   ],
   "qualifications": {
-    "native": {
-      "empty-path": {
-        "decodedPath": {
-          "reason": "HTTP origin-form cannot represent an empty target",
-          "fallbackExpected": "/"
-        }
-      }
-    },
+    "native": {},
     "lambda-fallback": {
       "encoded-slash": {
         "decodedPath": {

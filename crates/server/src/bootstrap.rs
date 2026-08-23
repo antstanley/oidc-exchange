@@ -451,8 +451,11 @@ pub(crate) async fn conformance_observe(
     use axum::response::IntoResponse;
     use serde_json::json;
 
+    const OBSERVATION_BODY_OVERFLOW_BYTES: usize = 1;
+
     let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, max_request_body_bytes.saturating_add(1)).await {
+    let body_read_limit = max_request_body_bytes.saturating_add(OBSERVATION_BODY_OVERFLOW_BYTES);
+    let body = match to_bytes(body, body_read_limit).await {
         Ok(body) => body,
         Err(_) => return axum::http::StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
@@ -479,15 +482,28 @@ pub(crate) async fn conformance_observe(
         .headers
         .get("x-request-id")
         .and_then(|value| value.to_str().ok());
-    let routed_status = if matches!(parts.uri.path(), "/health" | "/keys") {
+    let observed_path = parts
+        .extensions
+        .get::<crate::middleware::base_path::ConformancePath>()
+        .and_then(|path| {
+            let decoded = percent_encoding::percent_decode_str(&path.0)
+                .decode_utf8()
+                .ok()?;
+            let prefix = "/auth";
+            let stripped =
+                crate::middleware::base_path::strip_prefix_at_segment_boundary(&decoded, prefix)?;
+            Some(if stripped.is_empty() { "/" } else { stripped }.to_string())
+        })
+        .unwrap_or_else(|| parts.uri.path().to_string());
+    let routed_status = if matches!(observed_path.as_str(), "/health" | "/keys") {
         200
     } else {
         404
     };
     let response = json!({
         "method": parts.method.as_str(),
-        "decodedPath": parts.uri.path(),
-        "query": parts.uri.query(),
+        "decodedPath": observed_path,
+        "query": parts.uri.query().and_then(|query| query.rsplit_once('?').map_or(Some(query), |(_, query)| Some(query))),
         "orderedHeaders": ordered_headers,
         "requestId": request_id,
         "bodyLength": body.len(),

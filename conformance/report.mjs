@@ -6,7 +6,13 @@ import { tmpdir } from "node:os";
 
 const root = new URL("../", import.meta.url).pathname;
 const corpus = JSON.parse(await readFile(new URL("./corpus/requests.json", import.meta.url), "utf8"));
-const shapes = ["native", "ffi", "node", "lambda", "asgi", "wsgi"];
+const allShapes = ["native", "ffi", "node", "lambda", "asgi", "wsgi"];
+const requestedShapes = process.env.CONFORMANCE_SHAPES?.split(",").map((shape) => shape.trim()).filter(Boolean);
+const shapes = requestedShapes ?? allShapes;
+const unknownShapes = shapes.filter((shape) => !allShapes.includes(shape));
+if (unknownShapes.length || new Set(shapes).size !== shapes.length || shapes.length === 0) {
+  throw new Error(`CONFORMANCE_SHAPES must be a non-empty, unique subset of ${allShapes.join(",")}`);
+}
 const canonical = corpus.fixtures.filter((fixture) => !fixture.probe);
 const probes = corpus.fixtures.filter((fixture) => fixture.probe === "provenance");
 const temp = await mkdtemp(join(tmpdir(), "oidc-conformance-"));
@@ -91,15 +97,23 @@ try {
   runSync("openssl", ["genpkey", "-algorithm", "Ed25519", "-out", key]);
   await writeFile(config, `[server]\nissuer="https://conformance.invalid"\nrole="exchange"\nbase_path="/auth"\nmax_request_body_bytes=2097152\n[registration]\nmode="open"\n[repository]\nadapter="sqlite"\n[repository.sqlite]\npath="${database}"\n[key_manager]\nadapter="local"\n[key_manager.local]\nprivate_key_path="${key}"\nalgorithm="EdDSA"\nkid="conformance"\n[audit]\nadapter="noop"\n[telemetry]\nenabled=false\n`);
   runSync("corepack", ["pnpm@11.9.0", "install", "--frozen-lockfile", "--ignore-scripts"]);
-  runSync("cargo", ["build", "-p", "oidc-exchange-conformance"]);
-  runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/nodejs", "exec", "napi", "build", "--features", "conformance", "--dts", "index.generated.d.ts"]);
-  runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/lambda", "build"]);
-  runSync("bindings/python/.venv/bin/maturin", ["build", "--manifest-path", "bindings/python/Cargo.toml", "--features", "conformance", "--interpreter", "bindings/python/.venv/bin/python", "--out", temp]);
-  const wheel = (spawnSync("bash", ["-lc", `ls '${temp}'/*.whl`], { encoding: "utf8" }).stdout || "").trim();
-  runSync("unzip", ["-q", wheel, "-d", join(temp, "wheel")]);
-  const ext = (spawnSync("bash", ["-lc", `ls '${join(temp, "wheel/oidc_exchange")}'/_oidc_exchange*.so`], { encoding: "utf8" }).stdout || "").trim();
-  runSync("cp", [ext, pyArtifact]);
-  for (const artifact of [join(root, "bindings/nodejs/oidc-exchange.node"), pyArtifact]) if (Date.now() - (await stat(artifact)).mtimeMs > 900000) throw new Error(`stale artifact ${artifact}`);
+  if (shapes.some((shape) => ["native", "ffi"].includes(shape))) {
+    runSync("cargo", ["build", "-p", "oidc-exchange-conformance"]);
+  }
+  if (shapes.some((shape) => ["node", "lambda"].includes(shape))) {
+    runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/nodejs", "exec", "napi", "build", "--features", "conformance", "--dts", "index.generated.d.ts"]);
+    runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/lambda", "build"]);
+    const artifact = join(root, "bindings/nodejs/oidc-exchange.node");
+    if (Date.now() - (await stat(artifact)).mtimeMs > 900000) throw new Error(`stale artifact ${artifact}`);
+  }
+  if (shapes.some((shape) => ["asgi", "wsgi"].includes(shape))) {
+    runSync("bindings/python/.venv/bin/maturin", ["build", "--manifest-path", "bindings/python/Cargo.toml", "--features", "conformance", "--interpreter", "bindings/python/.venv/bin/python", "--out", temp]);
+    const wheel = (spawnSync("bash", ["-lc", `ls '${temp}'/*.whl`], { encoding: "utf8" }).stdout || "").trim();
+    runSync("unzip", ["-q", wheel, "-d", join(temp, "wheel")]);
+    const ext = (spawnSync("bash", ["-lc", `ls '${join(temp, "wheel/oidc_exchange")}'/_oidc_exchange*.so`], { encoding: "utf8" }).stdout || "").trim();
+    runSync("cp", [ext, pyArtifact]);
+    if (Date.now() - (await stat(pyArtifact)).mtimeMs > 900000) throw new Error(`stale artifact ${pyArtifact}`);
+  }
 
   let failures = 0;
   let qualifications = 0;
@@ -117,7 +131,7 @@ try {
     statusOnly += result.statusOnly;
     console.log(`${shape}: ${output.length} canonical executions`);
   }
-  for (const shape of ["lambda", "asgi", "wsgi"]) {
+  for (const shape of ["lambda", "asgi", "wsgi"].filter((shape) => shapes.includes(shape))) {
     const output = await execute(shape, canonical, "fallback");
     fallbackExecutions += output.length;
     const result = compare(`${shape}-fallback`, canonical, output);

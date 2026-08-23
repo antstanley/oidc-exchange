@@ -41,10 +41,15 @@ fn main() {
 }
 
 fn run_ffi(exchange: &OidcExchange, input: Input) -> Value {
+    let raw_path = if input.raw_path.is_empty() {
+        b"/auth".to_vec()
+    } else {
+        input.raw_path.as_bytes().to_vec()
+    };
     let response = exchange
         .runtime_handle_for_conformance(WireRequest {
             method: input.method,
-            raw_path: input.raw_path.as_bytes().to_vec(),
+            raw_path,
             query: input.query.map(String::into_bytes),
             headers: tagged_headers(input.headers),
             body: vec![b'x'; input.body_length],
@@ -75,19 +80,25 @@ fn run_native(config: &str, input: Input) -> Value {
             .unwrap_or_else(|error| {
                 panic!("native transport connect failed for {}: {error}", input.id)
             });
+        let wire_path = if input.raw_path.is_empty() {
+            "/auth"
+        } else {
+            &input.raw_path
+        };
+        let marker_path = percent_encoding::percent_decode_str(wire_path)
+            .decode_utf8()
+            .unwrap()
+            .into_owned();
         let mut request = format!(
-            "{} {}{} HTTP/1.1\r\nHost: localhost\r\n",
+            "{} {}{} HTTP/1.1\r\nHost: localhost\r\nX-Oidc-Conformance-Path: {}\r\n",
             input.method,
-            if input.raw_path.is_empty() {
-                "/"
-            } else {
-                &input.raw_path
-            },
+            wire_path,
             input
                 .query
                 .as_ref()
                 .map(|q| format!("?{q}"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            marker_path
         );
         let mut has_content_length = false;
         for header in tagged_headers(input.headers) {
@@ -209,7 +220,7 @@ fn tagged_headers(mut headers: Vec<Header>) -> Vec<(String, String)> {
 }
 
 fn output(id: String, status: u16, body: &[u8]) -> Value {
-    if status == 200 {
+    if body.starts_with(b"{") {
         let mut observed: Value = serde_json::from_slice(body).expect("observation JSON response");
         observed["id"] = json!(id);
         observed["executed"] = json!(true);

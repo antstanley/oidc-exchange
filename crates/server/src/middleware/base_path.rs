@@ -74,16 +74,81 @@ impl Service<Request<Body>> for ConformanceBasePathService {
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
         let base_path = self.inner.base_path.clone();
-        if request.headers().contains_key("x-oidc-conformance-observe") {
+        let mut request = request;
+        if let Some(path) = request
+            .headers_mut()
+            .remove("x-oidc-conformance-path")
+            .and_then(|value| value.to_str().ok().map(str::to_string))
+        {
+            request.extensions_mut().insert(ConformancePath(path));
+        }
+        if request.headers().contains_key("x-oidc-conformance-observe")
+            && qualifies_for_conformance_observation(
+                request.uri().path(),
+                base_path.as_deref(),
+                request.extensions().get::<ConformancePath>(),
+            )
+        {
             let cap = self.max_request_body_bytes;
             Box::pin(async move {
-                let request = strip_base_path(request, base_path.as_deref());
+                let request = decode_and_strip_base_path(request, base_path.as_deref());
                 Ok(crate::bootstrap::conformance_observe(request, cap).await)
             })
         } else {
             self.inner.call(request)
         }
     }
+}
+
+#[cfg(feature = "conformance")]
+#[derive(Clone)]
+pub struct ConformancePath(pub String);
+
+#[cfg(feature = "conformance")]
+fn qualifies_for_conformance_observation(
+    path: &str,
+    base_path: Option<&str>,
+    conformance_path: Option<&ConformancePath>,
+) -> bool {
+    let path = conformance_path.map_or(path, |path| path.0.as_str());
+    match base_path.filter(|prefix| !prefix.is_empty() && *prefix != "/") {
+        Some(prefix) => {
+            strip_prefix_at_segment_boundary(path, prefix).is_some()
+                || percent_decode_path(path)
+                    .as_deref()
+                    .and_then(|decoded| strip_prefix_at_segment_boundary(decoded, prefix))
+                    .is_some()
+        }
+        None => true,
+    }
+}
+
+#[cfg(feature = "conformance")]
+fn percent_decode_path(path: &str) -> Option<String> {
+    percent_encoding::percent_decode_str(path)
+        .decode_utf8()
+        .ok()
+        .map(|decoded| decoded.into_owned())
+}
+
+#[cfg(feature = "conformance")]
+fn decode_and_strip_base_path(request: Request<Body>, base_path: Option<&str>) -> Request<Body> {
+    let request = strip_base_path(request, base_path);
+    let mut parts = request.uri().clone().into_parts();
+    let Some(decoded) = percent_decode_path(request.uri().path()) else {
+        return request;
+    };
+    let path_and_query = match request.uri().query() {
+        Some(query) => format!("{decoded}?{query}"),
+        None => decoded,
+    };
+    parts.path_and_query = path_and_query.parse().ok();
+    let Some(uri) = axum::http::Uri::from_parts(parts).ok() else {
+        return request;
+    };
+    let (mut request_parts, body) = request.into_parts();
+    request_parts.uri = uri;
+    Request::from_parts(request_parts, body)
 }
 
 /// The `tower::Service` behind [`with_base_path_strip`]'s outer router fallback.
