@@ -698,7 +698,8 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
             Ok(Box::new(
                 oidc_exchange_adapters::webhook::WebhookUserSync::new(
                     wh_cfg.url.clone(),
-                    wh_cfg.secret.clone(),
+                    // Reveal the HMAC key only at the adapter construction boundary.
+                    wh_cfg.secret.expose().clone(),
                     std::time::Duration::from_secs(timeout_secs),
                     retries,
                 ),
@@ -788,7 +789,7 @@ fn provider_config_to_oidc(
         provider_id: name.to_string(),
         issuer,
         client_id,
-        client_secret: get_str("client_secret"),
+        client_secret: get_str("client_secret").map(oidc_exchange_core::Secret::new),
         jwks_uri: get_str("jwks_uri"),
         token_endpoint: get_str("token_endpoint"),
         revocation_endpoint: get_str("revocation_endpoint"),
@@ -1078,11 +1079,19 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|secret| secret.expose().as_str()),
             Some("super-secret-value")
         );
         assert_ne!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|secret| secret.expose().as_str()),
             Some("${INTERNAL_API_SECRET}"),
             "the literal placeholder must never survive resolution"
         );
@@ -1131,11 +1140,19 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|secret| secret.expose().as_str()),
             Some("${LITERAL_NOT_A_VAR}")
         );
         assert_ne!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|secret| secret.expose().as_str()),
             Some("$${LITERAL_NOT_A_VAR}"),
             "the escape's leading '$$' must be collapsed to a single '$'"
         );
@@ -1227,7 +1244,11 @@ mod load_config_tests {
         );
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|secret| secret.expose().as_str()),
             Some("resolved-value")
         );
         assert_eq!(
@@ -1348,6 +1369,7 @@ mod build_router_tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
+    use oidc_exchange_core::Secret;
     use std::collections::HashMap;
     use tower::ServiceExt;
 
@@ -1400,7 +1422,7 @@ mod build_router_tests {
         let mut config = AppConfig::default();
         config.server.role = "admin".to_string();
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        config.internal_api.shared_secret = Some(Secret::new(TEST_SECRET.to_string()));
         let service = build_test_service(&config);
 
         let app = build_router(&config, service);
@@ -1423,7 +1445,7 @@ mod build_router_tests {
         let mut config = AppConfig::default();
         config.server.role = "all".to_string();
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        config.internal_api.shared_secret = Some(Secret::new(TEST_SECRET.to_string()));
         let service = build_test_service(&config);
 
         let app = build_router(&config, service);
@@ -1490,7 +1512,7 @@ mod build_router_tests {
         let mut config = AppConfig::default();
         config.server.role = "admin".to_string();
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(String::new());
+        config.internal_api.shared_secret = Some(Secret::new(String::new()));
         let service = build_test_service(&config);
 
         let app = build_router(&config, service);
@@ -1667,6 +1689,7 @@ mod postgres_bootstrap_tests {
     use chrono::{Duration, Utc};
     use oidc_exchange_core::config::PostgresConfig;
     use oidc_exchange_core::domain::{NewUser, Session};
+    use oidc_exchange_core::Secret;
     use uuid::Uuid;
 
     /// An `AppConfig` whose user repository (and, since `session_repository.adapter` is
@@ -1748,7 +1771,7 @@ mod postgres_bootstrap_tests {
         let refresh_token_hash = format!("bootstrap-test-hash-{}", Uuid::new_v4());
         let session = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: refresh_token_hash.clone(),
+            refresh_token_hash: Secret::new(refresh_token_hash.clone()),
             provider: "bootstrap-test".to_string(),
             expires_at: now + Duration::hours(1),
             device_id: None,
@@ -1760,7 +1783,7 @@ mod postgres_bootstrap_tests {
             "store_refresh_token must succeed once bootstrap has migrated the session pool",
         );
         let fetched_session = session_repo
-            .get_session_by_refresh_token(&refresh_token_hash)
+            .get_session_by_refresh_token(&Secret::new(refresh_token_hash.clone()))
             .await
             .expect("get_session_by_refresh_token")
             .expect(
@@ -1771,8 +1794,8 @@ mod postgres_bootstrap_tests {
             fetched_session.user_id, created.id,
             "round-tripped session user_id must match"
         );
-        assert_eq!(
-            fetched_session.refresh_token_hash, refresh_token_hash,
+        assert!(
+            fetched_session.refresh_token_hash == Secret::new(refresh_token_hash),
             "round-tripped session refresh_token_hash must match"
         );
     }

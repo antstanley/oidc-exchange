@@ -5,6 +5,7 @@ use heed::{Database, Env, EnvOpenOptions};
 use oidc_exchange_core::domain::Session;
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::SessionRepository;
+use oidc_exchange_core::Secret;
 use std::fs;
 use tracing::instrument;
 
@@ -78,14 +79,14 @@ impl SessionRepository for LmdbSessionRepository {
             })?;
 
             sessions_db
-                .put(&mut wtxn, &session.refresh_token_hash, &json)
+                .put(&mut wtxn, session.refresh_token_hash.expose(), &json)
                 .map_err(|e| Error::StoreError {
                     detail: e.to_string(),
                 })?;
 
             let index_key = LmdbSessionRepository::user_session_key(
                 &session.user_id,
-                &session.refresh_token_hash,
+                session.refresh_token_hash.expose(),
             );
             user_sessions_db
                 .put(&mut wtxn, &index_key, "")
@@ -112,11 +113,12 @@ impl SessionRepository for LmdbSessionRepository {
     #[instrument(skip(self, token_hash), fields(token_hash))]
     async fn get_session_by_refresh_token(
         &self,
-        token_hash: &str,
+        token_hash: &Secret<String>,
     ) -> oidc_exchange_core::error::Result<Option<Session>> {
         let env = self.env.clone();
         let sessions_db = self.sessions;
-        let token_hash = token_hash.to_owned();
+        // The raw digest is needed only here, where the LMDB key is built.
+        let token_hash = token_hash.expose().to_owned();
 
         tokio::task::spawn_blocking(move || {
             let rtxn = env.read_txn().map_err(|e| Error::StoreError {
@@ -151,11 +153,15 @@ impl SessionRepository for LmdbSessionRepository {
     // explicitly, and the bare `token_hash` field stays declared-but-empty for schema
     // stability.
     #[instrument(skip(self, token_hash), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> oidc_exchange_core::error::Result<()> {
+    async fn revoke_session(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> oidc_exchange_core::error::Result<()> {
         let env = self.env.clone();
         let sessions_db = self.sessions;
         let user_sessions_db = self.user_sessions;
-        let token_hash = token_hash.to_owned();
+        // The raw digest is needed only here, where the LMDB keys are built.
+        let token_hash = token_hash.expose().to_owned();
 
         tokio::task::spawn_blocking(move || {
             // First, read the session to get the user_id for index cleanup.
@@ -533,7 +539,7 @@ mod tests {
         let now = Utc::now();
         Session {
             user_id: USER_ID_SENTINEL.to_string(),
-            refresh_token_hash: HASH_SENTINEL.to_string(),
+            refresh_token_hash: Secret::new(HASH_SENTINEL.to_string()),
             provider: "google".to_string(),
             expires_at: now + Duration::hours(1),
             device_id: Some(DEVICE_SENTINEL.to_string()),
@@ -655,7 +661,10 @@ mod tests {
         assert_eq!(fetched.user_agent.as_deref(), Some(USER_AGENT_SENTINEL));
         assert_eq!(fetched.ip_address.as_deref(), Some(IP_SENTINEL));
         // The hash itself round-trips intact — it just must not be *logged*.
-        assert_eq!(fetched.refresh_token_hash, session.refresh_token_hash);
+        assert!(
+            fetched.refresh_token_hash == session.refresh_token_hash,
+            "the hash itself round-trips intact — it just must not be logged"
+        );
 
         repo.revoke_session(&session.refresh_token_hash)
             .await

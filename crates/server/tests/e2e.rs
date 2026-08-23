@@ -17,6 +17,7 @@ use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::AppConfig;
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
+use oidc_exchange_core::Secret;
 use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
@@ -31,7 +32,7 @@ fn build_e2e_app() -> Router {
     let mut config = AppConfig::default();
     config.server.issuer = "https://auth.example.com".to_string();
     config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    config.internal_api.shared_secret = Some(Secret::new(TEST_SECRET.to_string()));
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -286,7 +287,7 @@ async fn e2e_registration_policy_existing_users_only() {
     config.server.issuer = "https://auth.example.com".to_string();
     config.registration.mode = "existing_users_only".to_string();
     config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    config.internal_api.shared_secret = Some(Secret::new(TEST_SECRET.to_string()));
 
     let app = build_e2e_app_with_config(config);
 

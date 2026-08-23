@@ -99,7 +99,7 @@ async fn revoke_refresh_token_removes_session() {
 
     // Revoke the refresh token
     let revoke_req = RevokeRequest {
-        token: refresh_token.clone(),
+        token: refresh_token.clone().into_inner(),
         token_type_hint: Some("refresh_token".to_string()),
         ..Default::default()
     };
@@ -114,9 +114,9 @@ async fn revoke_refresh_token_removes_session() {
     );
 
     // Also verify by hash lookup
-    let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
+    let token_hash = hex::encode(Sha256::digest(refresh_token.expose().as_bytes()));
     let session = repo
-        .get_session_by_refresh_token(&token_hash)
+        .get_session_by_refresh_token(&oidc_exchange_core::Secret::new(token_hash.clone()))
         .await
         .expect("lookup should not error");
     assert!(
@@ -231,7 +231,7 @@ async fn revoke_default_hint_treats_as_refresh_token() {
 
     // Revoke with token_type_hint = None (should default to refresh_token behavior)
     let revoke_req = RevokeRequest {
-        token: refresh_token.clone(),
+        token: refresh_token.clone().into_inner(),
         token_type_hint: None,
         ..Default::default()
     };
@@ -338,7 +338,7 @@ async fn revoke_valid_refresh_token_emits_token_revocation() {
     let baseline = audit_clone.events().await.len();
 
     let revoke_req = RevokeRequest {
-        token: refresh_token,
+        token: refresh_token.into_inner(),
         token_type_hint: Some("refresh_token".to_string()),
         ip_address: Some("198.51.100.7".to_string()),
         user_agent: Some("test-agent/2.0".to_string()),

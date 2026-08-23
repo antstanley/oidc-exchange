@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::error::Error;
+use crate::secret::Secret;
 
 /// Top-level application configuration, matching the TOML structure.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -77,8 +78,8 @@ impl AppConfig {
             let secret_is_present_and_non_empty = self
                 .internal_api
                 .shared_secret
-                .as_deref()
-                .is_some_and(|secret| !secret.is_empty());
+                .as_ref()
+                .is_some_and(|secret| !secret.expose().is_empty());
             if !secret_is_present_and_non_empty {
                 return Err(Error::ConfigError {
                     detail: "internal_api.shared_secret must be non-empty when the internal API \
@@ -322,7 +323,9 @@ const DEFAULT_WEBHOOK_RETRIES: u32 = 2;
 #[derive(Clone, Deserialize)]
 pub struct WebhookConfig {
     pub url: String,
-    pub secret: String,
+    /// HMAC key for outbound webhook signatures. Wrapped so the configured value cannot
+    /// be formatted; `serde` transparency keeps TOML deserialization unchanged.
+    pub secret: Secret<String>,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
 }
@@ -388,7 +391,9 @@ impl Default for TelemetryConfig {
 pub struct InternalApiConfig {
     pub enabled: bool,
     pub auth_method: Option<String>,
-    pub shared_secret: Option<String>,
+    /// Bearer secret for the internal API. Wrapped so the configured value cannot be
+    /// formatted; `serde` transparency keeps TOML deserialization unchanged.
+    pub shared_secret: Option<Secret<String>>,
 }
 
 impl std::fmt::Debug for InternalApiConfig {
@@ -590,7 +595,11 @@ scopes = ["openid", "email", "profile"]
 
         assert!(config.internal_api.enabled);
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|secret| secret.expose().as_str()),
             Some("my-secret")
         );
 
@@ -681,11 +690,44 @@ host = "0.0.0.0"
         assert!(absent.server.base_path.is_none());
     }
 
+    /// The enclosing `Debug` impls keep their redaction contract now that the values
+    /// themselves are `Secret<String>`: a secret sentinel must never appear, and the
+    /// marker must.
+    #[test]
+    fn debug_impls_still_redact_webhook_and_internal_api_secrets() {
+        const SENTINEL: &str = "config-debug-secret-sentinel";
+
+        let webhook = WebhookConfig {
+            url: "https://hooks.example.com".to_string(),
+            secret: Secret::new(SENTINEL.to_string()),
+            timeout: None,
+            retries: None,
+        };
+        let rendered_webhook = format!("{webhook:?}");
+        assert!(rendered_webhook.contains("<redacted>"));
+        assert!(
+            !rendered_webhook.contains(SENTINEL),
+            "WebhookConfig debug output must never contain the webhook secret"
+        );
+
+        let internal = InternalApiConfig {
+            enabled: true,
+            auth_method: Some("bearer".to_string()),
+            shared_secret: Some(Secret::new(SENTINEL.to_string())),
+        };
+        let rendered_internal = format!("{internal:?}");
+        assert!(rendered_internal.contains("<redacted>"));
+        assert!(
+            !rendered_internal.contains(SENTINEL),
+            "InternalApiConfig debug output must never contain the shared secret"
+        );
+    }
+
     #[test]
     fn effective_retries_clamps_over_max_passes_through_in_range_and_default() {
         let over_max = WebhookConfig {
             url: "https://hooks.example.com".to_string(),
-            secret: "s".to_string(),
+            secret: Secret::new("s".to_string()),
             timeout: None,
             retries: Some(20),
         };
@@ -697,7 +739,7 @@ host = "0.0.0.0"
 
         let in_range = WebhookConfig {
             url: "https://hooks.example.com".to_string(),
-            secret: "s".to_string(),
+            secret: Secret::new("s".to_string()),
             timeout: None,
             retries: Some(5),
         };
@@ -709,7 +751,7 @@ host = "0.0.0.0"
 
         let unset = WebhookConfig {
             url: "https://hooks.example.com".to_string(),
-            secret: "s".to_string(),
+            secret: Secret::new("s".to_string()),
             timeout: None,
             retries: None,
         };
@@ -727,7 +769,7 @@ host = "0.0.0.0"
         // the clamp path (it is not "greater than" the maximum).
         let at_max = WebhookConfig {
             url: "https://hooks.example.com".to_string(),
-            secret: "s".to_string(),
+            secret: Secret::new("s".to_string()),
             timeout: None,
             retries: Some(MAX_WEBHOOK_RETRIES),
         };
@@ -929,7 +971,7 @@ host = "0.0.0.0"
         let mut config = AppConfig::default();
         config.server.role = "all".to_string();
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(String::new());
+        config.internal_api.shared_secret = Some(Secret::new(String::new()));
 
         let err = config
             .validate()
@@ -974,7 +1016,7 @@ host = "0.0.0.0"
         let mut config = AppConfig::default();
         config.server.role = "all".to_string();
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some("shhh".to_string());
+        config.internal_api.shared_secret = Some(Secret::new("shhh".to_string()));
 
         let result = config.validate();
 

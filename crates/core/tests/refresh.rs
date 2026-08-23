@@ -88,7 +88,10 @@ async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService
         .exchange(request)
         .await
         .expect("exchange should succeed");
-    response.refresh_token.expect("should have a refresh token")
+    response
+        .refresh_token
+        .expect("should have a refresh token")
+        .into_inner()
 }
 
 #[tokio::test]
@@ -150,11 +153,11 @@ async fn refresh_expired_token_returns_invalid_token() {
     let sessions = repo.get_all_sessions().await;
     let original_session = sessions
         .iter()
-        .find(|s| s.refresh_token_hash == token_hash)
+        .find(|s| s.refresh_token_hash.expose() == &token_hash)
         .expect("session should exist");
 
     // Revoke the original and store an expired copy
-    repo.revoke_session(&token_hash)
+    repo.revoke_session(&oidc_exchange_core::Secret::new(token_hash.clone()))
         .await
         .expect("revoke should succeed");
 
@@ -344,11 +347,11 @@ async fn refresh_expired_token_under_debug_threshold_emits_validation_failed_wit
     let sessions = repo.get_all_sessions().await;
     let original_session = sessions
         .iter()
-        .find(|s| s.refresh_token_hash == token_hash)
+        .find(|s| s.refresh_token_hash.expose() == &token_hash)
         .expect("session should exist");
     let user_id = original_session.user_id.clone();
 
-    repo.revoke_session(&token_hash)
+    repo.revoke_session(&oidc_exchange_core::Secret::new(token_hash.clone()))
         .await
         .expect("revoke should succeed");
     let expired_session = Session {

@@ -288,12 +288,16 @@ impl AppService {
             }
         };
 
-        // 5. Generate refresh token (256-bit random, base64url-encoded)
+        // 5. Generate refresh token (256-bit random, base64url-encoded). Wrapped
+        // immediately at mint so the raw token cannot be formatted anywhere downstream.
         let token_bytes: [u8; 32] = rand::random();
-        let refresh_token = URL_SAFE_NO_PAD.encode(token_bytes);
+        let refresh_token = crate::secret::Secret::new(URL_SAFE_NO_PAD.encode(token_bytes));
 
-        // 6. Hash refresh token with SHA-256 (hex-encoded)
-        let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
+        // 6. Hash refresh token with SHA-256 (hex-encoded); the digest is itself wrapped —
+        // it is the session lookup key.
+        let token_hash = crate::secret::Secret::new(hex::encode(Sha256::digest(
+            refresh_token.expose().as_bytes(),
+        )));
 
         // 7. Compute session expiry from config
         let refresh_ttl_secs = parse_duration_secs(&self.config.token.refresh_token_ttl)?;

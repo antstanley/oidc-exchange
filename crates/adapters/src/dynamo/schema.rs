@@ -4,6 +4,7 @@ use aws_sdk_dynamodb::types::AttributeValue;
 use chrono::{DateTime, Utc};
 use oidc_exchange_core::domain::{Session, User, UserStatus, INITIAL_USER_VERSION};
 use oidc_exchange_core::error::{Error, Result};
+use oidc_exchange_core::Secret;
 
 // ---------------------------------------------------------------------------
 // User <-> DynamoDB Item
@@ -137,7 +138,7 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     // Keys
     item.insert(
         "pk".to_string(),
-        AttributeValue::S(format!("SESSION#{}", session.refresh_token_hash)),
+        AttributeValue::S(format!("SESSION#{}", session.refresh_token_hash.expose())),
     );
     item.insert("sk".to_string(), AttributeValue::S("SESSION".to_string()));
 
@@ -158,7 +159,7 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     );
     item.insert(
         "refresh_token_hash".to_string(),
-        AttributeValue::S(session.refresh_token_hash.clone()),
+        AttributeValue::S(session.refresh_token_hash.expose().clone()),
     );
     item.insert(
         "provider".to_string(),
@@ -204,7 +205,7 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
 pub fn item_to_session(item: &HashMap<String, AttributeValue>) -> Result<Session> {
     Ok(Session {
         user_id: get_s(item, "user_id")?,
-        refresh_token_hash: get_s(item, "refresh_token_hash")?,
+        refresh_token_hash: Secret::new(get_s(item, "refresh_token_hash")?),
         provider: get_s(item, "provider")?,
         expires_at: parse_datetime(&get_s(item, "expires_at")?)?,
         device_id: get_s_opt(item, "device_id"),
@@ -329,7 +330,7 @@ mod tests {
         let now = Utc::now();
         Session {
             user_id: "usr_01abc".to_string(),
-            refresh_token_hash: "sha256_deadbeef".to_string(),
+            refresh_token_hash: Secret::new("sha256_deadbeef".to_string()),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
             device_id: Some("device_1".to_string()),
@@ -443,7 +444,10 @@ mod tests {
         let restored = item_to_session(&item).expect("should parse session from item");
 
         assert_eq!(session.user_id, restored.user_id);
-        assert_eq!(session.refresh_token_hash, restored.refresh_token_hash);
+        assert!(
+            session.refresh_token_hash == restored.refresh_token_hash,
+            "the digest must round-trip through the item unchanged"
+        );
         assert_eq!(session.provider, restored.provider);
         assert_eq!(session.device_id, restored.device_id);
         assert_eq!(session.user_agent, restored.user_agent);
@@ -463,7 +467,7 @@ mod tests {
         let now = Utc::now();
         let session = Session {
             user_id: "usr_01abc".to_string(),
-            refresh_token_hash: "sha256_cafe".to_string(),
+            refresh_token_hash: Secret::new("sha256_cafe".to_string()),
             provider: "atproto".to_string(),
             expires_at: now + chrono::Duration::hours(1),
             device_id: None,
@@ -522,7 +526,7 @@ mod tests {
 
         assert_eq!(
             item.get("pk").unwrap().as_s().unwrap(),
-            &format!("SESSION#{}", session.refresh_token_hash)
+            &format!("SESSION#{}", session.refresh_token_hash.expose())
         );
         assert_eq!(item.get("sk").unwrap().as_s().unwrap(), "SESSION");
         assert_eq!(

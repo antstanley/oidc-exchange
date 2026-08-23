@@ -13,6 +13,7 @@ use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
 };
+use oidc_exchange_core::Secret;
 
 // ---------------------------------------------------------------------------
 // MockRepository
@@ -222,28 +223,31 @@ impl SessionRepository for MockRepository {
         let mut state = self.state.lock().await;
         state
             .sessions
-            .insert(session.refresh_token_hash.clone(), session.clone());
+            .insert(session.refresh_token_hash.expose().clone(), session.clone());
         Ok(())
     }
 
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
         if *self.session_lookup_fail_mode.lock().await {
             return Err(Error::StoreError {
                 detail: "mock session store lookup failure".into(),
             });
         }
         let state = self.state.lock().await;
-        Ok(state.sessions.get(token_hash).cloned())
+        Ok(state.sessions.get(token_hash.expose()).cloned())
     }
 
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
         if *self.session_fail_mode.lock().await {
             return Err(Error::StoreError {
                 detail: "mock session store failure".into(),
             });
         }
         let mut state = self.state.lock().await;
-        state.sessions.remove(token_hash);
+        state.sessions.remove(token_hash.expose());
         Ok(())
     }
 

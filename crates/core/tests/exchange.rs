@@ -311,8 +311,12 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     assert_eq!(sessions.len(), 1);
 
     let refresh_token = response.refresh_token.unwrap();
-    let expected_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
-    assert_eq!(sessions[0].refresh_token_hash, expected_hash);
+    let expected_hash = hex::encode(Sha256::digest(refresh_token.expose().as_bytes()));
+    assert_eq!(
+        sessions[0].refresh_token_hash.expose(),
+        &expected_hash,
+        "the stored digest must equal the SHA-256 of the minted refresh token"
+    );
     assert_eq!(sessions[0].user_id, users[0].id);
     assert_eq!(sessions[0].provider, "mock");
 }

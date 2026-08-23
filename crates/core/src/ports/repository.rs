@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::domain::{NewUser, Session, User, UserPatch};
 use crate::error::Result;
+use crate::secret::Secret;
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -23,8 +24,15 @@ pub trait UserRepository: Send + Sync {
 #[async_trait]
 pub trait SessionRepository: Send + Sync {
     async fn store_refresh_token(&self, session: &Session) -> Result<()>;
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>>;
-    async fn revoke_session(&self, token_hash: &str) -> Result<()>;
+    /// The token-hash parameters are `&Secret<String>` rather than `&str` so an adapter
+    /// that leaves them out of its span `skip(...)` fails to compile instead of publishing
+    /// the session lookup key as a span field; the raw digest is reached through
+    /// `expose()` only where a store key is built.
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>>;
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()>;
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
     async fn count_active_sessions(&self) -> Result<u64>;
 

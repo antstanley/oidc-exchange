@@ -4,6 +4,7 @@ use oidc_exchange_core::domain::provider::OidcProviderConfig;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
+use oidc_exchange_core::Secret;
 
 use crate::shared::claims::coerce_bool;
 use crate::shared::jwks::JwksCache;
@@ -15,7 +16,7 @@ use crate::shared::jwks::JwksCache;
 pub struct OidcProvider {
     provider_id: String,
     client_id: String,
-    client_secret: Option<String>,
+    client_secret: Option<Secret<String>>,
     token_endpoint: String,
     jwks_cache: JwksCache,
     revocation_endpoint: Option<String>,
@@ -117,7 +118,8 @@ impl IdentityProvider for OidcProvider {
         crate::shared::token_endpoint::exchange_code(
             &self.token_endpoint,
             &self.client_id,
-            self.client_secret.as_deref(),
+            // Reveal only at the outbound form-post boundary.
+            self.client_secret.as_ref().map(|s| s.expose().as_str()),
             code,
             redirect_uri,
         )
@@ -369,7 +371,7 @@ mod tests {
             provider_id: "test-provider".into(),
             issuer: server_uri.to_string(),
             client_id: "test-client-id".into(),
-            client_secret: Some("test-client-secret".into()),
+            client_secret: Some(Secret::new("test-client-secret".to_string())),
             jwks_uri,
             token_endpoint,
             revocation_endpoint,

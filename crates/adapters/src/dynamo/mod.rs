@@ -15,6 +15,7 @@ use oidc_exchange_core::domain::{
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
+use oidc_exchange_core::Secret;
 
 use schema::{
     guard_pk, guard_to_item, item_to_session, item_to_user, session_to_item, user_to_item, GUARD_SK,
@@ -651,12 +652,19 @@ impl SessionRepository for DynamoRepository {
     }
 
     #[instrument(skip(self), fields(token_hash))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
         let result = self
             .client
             .get_item()
             .table_name(&self.table_name)
-            .key("pk", AttributeValue::S(format!("SESSION#{token_hash}")))
+            // The raw digest is needed only here, where the Dynamo key is built.
+            .key(
+                "pk",
+                AttributeValue::S(format!("SESSION#{}", token_hash.expose())),
+            )
             .key("sk", AttributeValue::S("SESSION".to_string()))
             .send()
             .await
@@ -669,11 +677,15 @@ impl SessionRepository for DynamoRepository {
     }
 
     #[instrument(skip(self), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
         self.client
             .delete_item()
             .table_name(&self.table_name)
-            .key("pk", AttributeValue::S(format!("SESSION#{token_hash}")))
+            // The raw digest is needed only here, where the Dynamo key is built.
+            .key(
+                "pk",
+                AttributeValue::S(format!("SESSION#{}", token_hash.expose())),
+            )
             .key("sk", AttributeValue::S("SESSION".to_string()))
             .send()
             .await
@@ -1254,7 +1266,7 @@ mod tests {
         let now = Utc::now();
         let session = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: "hash_abc123".to_string(),
+            refresh_token_hash: Secret::new("hash_abc123".to_string()),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
             device_id: Some("device-1".to_string()),
@@ -1270,17 +1282,20 @@ mod tests {
 
         // Get session
         let fetched_session = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get_session_by_refresh_token")
             .expect("session should exist");
         assert_eq!(fetched_session.user_id, created.id);
-        assert_eq!(fetched_session.refresh_token_hash, "hash_abc123");
+        assert!(
+            fetched_session.refresh_token_hash == Secret::new("hash_abc123".to_string()),
+            "fetched digest must match the stored one"
+        );
         assert_eq!(fetched_session.device_id.as_deref(), Some("device-1"));
 
         // Get non-existent session
         let none = repo
-            .get_session_by_refresh_token("hash_nonexistent")
+            .get_session_by_refresh_token(&Secret::new("hash_nonexistent".to_string()))
             .await
             .expect("get_session_by_refresh_token");
         assert!(none.is_none());
@@ -1288,7 +1303,7 @@ mod tests {
         // Store a second session for the same user
         let session2 = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: "hash_def456".to_string(),
+            refresh_token_hash: Secret::new("hash_def456".to_string()),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
             device_id: None,
@@ -1301,18 +1316,18 @@ mod tests {
             .expect("store second session");
 
         // Revoke single session
-        repo.revoke_session("hash_abc123")
+        repo.revoke_session(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("revoke_session");
         let revoked = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get after revoke");
         assert!(revoked.is_none());
 
         // The other session should still exist
         let still_exists = repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get other session");
         assert!(still_exists.is_some());
@@ -1328,11 +1343,11 @@ mod tests {
             .expect("revoke_all_user_sessions");
 
         let s1 = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get after revoke_all");
         let s2 = repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get after revoke_all");
         assert!(s1.is_none());

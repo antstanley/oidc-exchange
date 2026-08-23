@@ -565,7 +565,7 @@ async fn suspended_to_suspended_is_a_noop_and_does_not_re_revoke() {
     use oidc_exchange_core::ports::SessionRepository;
     let sentinel = Session {
         user_id: user_id.clone(),
-        refresh_token_hash: "sentinel-hash".to_string(),
+        refresh_token_hash: oidc_exchange_core::Secret::new("sentinel-hash".to_string()),
         provider: "mock".to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::days(1),
         device_id: None,

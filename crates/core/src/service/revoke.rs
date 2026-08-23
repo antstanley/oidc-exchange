@@ -83,12 +83,13 @@ impl AppService {
     /// whether a session was really removed — an unknown token must stay
     /// silent per RFC 7009.
     async fn revoke_refresh_token(&self, request: &RevokeRequest) -> Result<()> {
-        let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
-        // Postcondition of SHA-256 hex-encoding: always exactly 64 hex
-        // characters. Catching a malformed hash here — before it reaches the
-        // store — turns a silent lookup miss into a loud programmer error.
+        let token_hash =
+            crate::secret::Secret::new(hex::encode(Sha256::digest(request.token.as_bytes())));
+        // Postcondition of SHA-256 hex-encoding: always exactly 64 hex characters.
+        // Catching a malformed hash here — before it reaches the store — turns a silent
+        // lookup miss into a loud programmer error.
         assert_eq!(
-            token_hash.len(),
+            token_hash.expose().len(),
             TOKEN_HASH_HEX_LEN,
             "revoke: SHA-256 hex digest must be {TOKEN_HASH_HEX_LEN} characters"
         );

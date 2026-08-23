@@ -20,8 +20,11 @@ pub struct RefreshRequest {
 
 impl AppService {
     pub async fn refresh(&self, request: RefreshRequest) -> Result<TokenResponse> {
-        // 1. Hash the presented refresh token (SHA-256, hex-encoded)
-        let token_hash = hex::encode(Sha256::digest(request.refresh_token.as_bytes()));
+        // 1. Hash the presented refresh token (SHA-256, hex-encoded). The digest is the
+        // session lookup key, so it is wrapped before crossing the repository port.
+        let token_hash = crate::secret::Secret::new(hex::encode(Sha256::digest(
+            request.refresh_token.as_bytes(),
+        )));
 
         // 2. Look up session by refresh token hash
         let session = match self

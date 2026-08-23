@@ -13,6 +13,7 @@ use oidc_exchange_core::domain::{
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
+use oidc_exchange_core::Secret;
 
 pub const MIGRATIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
@@ -246,7 +247,7 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
 
     Ok(Session {
         user_id: row.get("user_id"),
-        refresh_token_hash: row.get("refresh_token_hash"),
+        refresh_token_hash: Secret::new(row.get("refresh_token_hash")),
         provider: row.get("provider"),
         expires_at,
         device_id: row.get("device_id"),
@@ -496,7 +497,8 @@ impl SessionRepository for SqliteRepository {
             "INSERT OR REPLACE INTO sessions (refresh_token_hash, user_id, provider, expires_at, device_id, user_agent, ip_address, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
-        .bind(&session.refresh_token_hash)
+        // The raw digest is needed only here, at the SQL binding boundary.
+        .bind(session.refresh_token_hash.expose())
         .bind(&session.user_id)
         .bind(&session.provider)
         .bind(&expires_at_str)
@@ -514,9 +516,12 @@ impl SessionRepository for SqliteRepository {
     }
 
     #[instrument(skip(self), fields(token_hash))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
         let row = sqlx::query("SELECT * FROM sessions WHERE refresh_token_hash = ?1")
-            .bind(token_hash)
+            .bind(token_hash.expose())
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| Error::StoreError {
@@ -529,10 +534,11 @@ impl SessionRepository for SqliteRepository {
         }
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    // Same redaction contract as the lookup path.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE refresh_token_hash = ?1")
-            .bind(token_hash)
+            .bind(token_hash.expose())
             .execute(&self.pool)
             .await
             .map_err(|e| Error::StoreError {
@@ -707,7 +713,7 @@ mod tests {
         let now = Utc::now();
         let session = Session {
             user_id: "usr_test123".to_string(),
-            refresh_token_hash: "hash_abc123".to_string(),
+            refresh_token_hash: Secret::new("hash_abc123".to_string()),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
             device_id: Some("device-1".to_string()),
@@ -723,7 +729,7 @@ mod tests {
 
         // Get
         let fetched = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get_session")
             .expect("session should exist");
@@ -732,7 +738,7 @@ mod tests {
 
         // Non-existent
         let none = repo
-            .get_session_by_refresh_token("hash_nonexistent")
+            .get_session_by_refresh_token(&Secret::new("hash_nonexistent".to_string()))
             .await
             .expect("get_session");
         assert!(none.is_none());
@@ -740,7 +746,7 @@ mod tests {
         // Store second session
         let session2 = Session {
             user_id: "usr_test123".to_string(),
-            refresh_token_hash: "hash_def456".to_string(),
+            refresh_token_hash: Secret::new("hash_def456".to_string()),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
             device_id: None,
@@ -753,16 +759,16 @@ mod tests {
             .expect("store second session");
 
         // Revoke single
-        repo.revoke_session("hash_abc123")
+        repo.revoke_session(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("revoke_session");
         assert!(repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get")
             .is_none());
         assert!(repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get")
             .is_some());
@@ -773,12 +779,12 @@ mod tests {
             .await
             .expect("revoke_all");
         assert!(repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get")
             .is_none());
         assert!(repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get")
             .is_none());

@@ -11,6 +11,7 @@ use tracing::instrument;
 use oidc_exchange_core::domain::{NewUser, Session, User, UserPatch, UserStatus};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
+use oidc_exchange_core::Secret;
 
 pub const MIGRATIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
@@ -262,9 +263,10 @@ fn row_to_session(row: &sqlx::postgres::PgRow) -> Result<Session> {
         user_id: row
             .try_get("user_id")
             .map_err(PostgresRepository::store_err)?,
-        refresh_token_hash: row
-            .try_get("refresh_token_hash")
-            .map_err(PostgresRepository::store_err)?,
+        refresh_token_hash: Secret::new(
+            row.try_get("refresh_token_hash")
+                .map_err(PostgresRepository::store_err)?,
+        ),
         provider: row
             .try_get("provider")
             .map_err(PostgresRepository::store_err)?,
@@ -504,7 +506,8 @@ impl SessionRepository for PostgresRepository {
                 ip_address = EXCLUDED.ip_address,
                 created_at = EXCLUDED.created_at",
         )
-        .bind(&session.refresh_token_hash)
+        // The raw digest is needed only here, at the SQL binding boundary.
+        .bind(session.refresh_token_hash.expose())
         .bind(&session.user_id)
         .bind(&session.provider)
         .bind(session.expires_at)
@@ -519,10 +522,15 @@ impl SessionRepository for PostgresRepository {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+    // The digest argument is skipped explicitly (not left to a name collision with the
+    // schema field) so a parameter rename cannot silently re-expose the lookup key.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
         let row = sqlx::query("SELECT * FROM sessions WHERE refresh_token_hash = $1")
-            .bind(token_hash)
+            .bind(token_hash.expose())
             .fetch_optional(&self.pool)
             .await
             .map_err(Self::store_err)?;
@@ -533,10 +541,11 @@ impl SessionRepository for PostgresRepository {
         }
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    // Same redaction contract as the lookup path.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
         sqlx::query("DELETE FROM sessions WHERE refresh_token_hash = $1")
-            .bind(token_hash)
+            .bind(token_hash.expose())
             .execute(&self.pool)
             .await
             .map_err(Self::store_err)?;

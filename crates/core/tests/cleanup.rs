@@ -1,5 +1,6 @@
 use oidc_exchange_core::domain::Session;
 use oidc_exchange_core::ports::SessionRepository;
+use oidc_exchange_core::Secret;
 
 use oidc_exchange_test_utils::MockRepository;
 
@@ -12,7 +13,7 @@ async fn cleanup_expired_sessions_removes_stale_entries() {
     // Store an expired session
     let expired_session = Session {
         user_id: "usr_1".to_string(),
-        refresh_token_hash: "hash_expired".to_string(),
+        refresh_token_hash: Secret::new("hash_expired".to_string()),
         provider: "mock".to_string(),
         expires_at: now - chrono::Duration::hours(1),
         device_id: None,
@@ -25,7 +26,7 @@ async fn cleanup_expired_sessions_removes_stale_entries() {
     // Store an active session
     let active_session = Session {
         user_id: "usr_2".to_string(),
-        refresh_token_hash: "hash_active".to_string(),
+        refresh_token_hash: Secret::new("hash_active".to_string()),
         provider: "mock".to_string(),
         expires_at: now + chrono::Duration::hours(24),
         device_id: None,
@@ -43,7 +44,10 @@ async fn cleanup_expired_sessions_removes_stale_entries() {
 
     let remaining = repo.get_all_sessions().await;
     assert_eq!(remaining.len(), 1, "should have 1 active session left");
-    assert_eq!(remaining[0].refresh_token_hash, "hash_active");
+    assert!(
+        remaining[0].refresh_token_hash == Secret::new("hash_active".to_string()),
+        "constant-time equality must hold across a round trip"
+    );
 }
 
 #[tokio::test]
@@ -53,7 +57,7 @@ async fn cleanup_no_expired_sessions_returns_zero() {
 
     let active_session = Session {
         user_id: "usr_1".to_string(),
-        refresh_token_hash: "hash_active".to_string(),
+        refresh_token_hash: Secret::new("hash_active".to_string()),
         provider: "mock".to_string(),
         expires_at: now + chrono::Duration::hours(24),
         device_id: None,

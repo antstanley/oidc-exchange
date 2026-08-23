@@ -5,6 +5,7 @@ use fred::types::ExpireOptions;
 use oidc_exchange_core::domain::Session;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::SessionRepository;
+use oidc_exchange_core::Secret;
 use tracing::instrument;
 
 /// The minimum TTL, in seconds, a session may be stored with. `store_refresh_token` computes
@@ -68,7 +69,7 @@ impl SessionRepository for ValkeySessionRepository {
         }
         debug_assert!(ttl_seconds >= SESSION_TTL_SECONDS_MIN);
 
-        let key = self.session_key(&session.refresh_token_hash);
+        let key = self.session_key(session.refresh_token_hash.expose());
         let user_sessions_key = self.user_sessions_key(&session.user_id);
         let active_sessions_key = self.active_sessions_key();
 
@@ -80,7 +81,10 @@ impl SessionRepository for ValkeySessionRepository {
 
         let fields: Vec<(&str, String)> = vec![
             ("user_id", session.user_id.clone()),
-            ("refresh_token_hash", session.refresh_token_hash.clone()),
+            (
+                "refresh_token_hash",
+                session.refresh_token_hash.expose().clone(),
+            ),
             ("provider", session.provider.clone()),
             ("expires_at", session.expires_at.to_rfc3339()),
             ("device_id", session.device_id.clone().unwrap_or_default()),
@@ -106,7 +110,7 @@ impl SessionRepository for ValkeySessionRepository {
                 detail: e.to_string(),
             })?;
         let _: () = pipeline
-            .sadd(&user_sessions_key, &session.refresh_token_hash)
+            .sadd(&user_sessions_key, session.refresh_token_hash.expose())
             .await
             .map_err(|e| Error::StoreError {
                 detail: e.to_string(),
@@ -145,8 +149,11 @@ impl SessionRepository for ValkeySessionRepository {
     // The digest is skipped explicitly (not left to a name collision with the schema
     // field), so a parameter rename cannot silently re-expose the session lookup key.
     #[instrument(skip(self, token_hash), fields(token_hash))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
-        let key = self.session_key(token_hash);
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
+        let key = self.session_key(token_hash.expose());
 
         let values: std::collections::HashMap<String, String> = self
             .client
@@ -204,7 +211,7 @@ impl SessionRepository for ValkeySessionRepository {
 
         Ok(Some(Session {
             user_id: get_field("user_id")?,
-            refresh_token_hash: get_field("refresh_token_hash")?,
+            refresh_token_hash: Secret::new(get_field("refresh_token_hash")?),
             provider: get_field("provider")?,
             expires_at: parse_dt(&expires_at_str)?,
             device_id,
@@ -218,8 +225,8 @@ impl SessionRepository for ValkeySessionRepository {
     // explicitly, and the bare `token_hash` field stays declared-but-empty for schema
     // stability.
     #[instrument(skip(self, token_hash), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
-        let key = self.session_key(token_hash);
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
+        let key = self.session_key(token_hash.expose());
 
         // Get user_id before deleting so we can clean up the user set
         let user_id: Option<String> =
@@ -259,7 +266,7 @@ impl SessionRepository for ValkeySessionRepository {
 
         if let Some(user_id) = user_id {
             self.client
-                .srem::<(), _, _>(self.user_sessions_key(&user_id), token_hash)
+                .srem::<(), _, _>(self.user_sessions_key(&user_id), token_hash.expose())
                 .await
                 .map_err(|e| Error::StoreError {
                     detail: e.to_string(),
@@ -536,7 +543,7 @@ mod tests {
         let now = Utc::now();
         Session {
             user_id: user_id.to_string(),
-            refresh_token_hash: hash.to_string(),
+            refresh_token_hash: Secret::new(hash.to_string()),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::seconds(ttl_seconds),
             device_id: Some("device-1".to_string()),
@@ -556,7 +563,7 @@ mod tests {
             .await
             .expect("store_refresh_token");
 
-        let key = repo.session_key(&session.refresh_token_hash);
+        let key = repo.session_key(session.refresh_token_hash.expose());
         let user_set_key = repo.user_sessions_key(&session.user_id);
         let counter_key = repo.active_sessions_key();
 
@@ -572,7 +579,7 @@ mod tests {
             .await
             .expect("smembers on user set");
         assert!(
-            members.contains(&session.refresh_token_hash),
+            members.contains(session.refresh_token_hash.expose()),
             "user set should contain the stored session's hash"
         );
 
@@ -660,7 +667,7 @@ mod tests {
             .expect_err("expires_at in the past should be rejected");
         assert!(matches!(err, Error::StoreError { .. }));
 
-        let key = repo.session_key(&at_now.refresh_token_hash);
+        let key = repo.session_key(at_now.refresh_token_hash.expose());
         let exists: bool = repo
             .client
             .exists(&key)
@@ -734,7 +741,7 @@ mod tests {
             "counter should drop from 1 to 0 after the session is revoked"
         );
 
-        let key = repo.session_key(&session.refresh_token_hash);
+        let key = repo.session_key(session.refresh_token_hash.expose());
         let exists: bool = repo
             .client
             .exists(&key)
@@ -898,7 +905,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
-        let key = repo.session_key(&session.refresh_token_hash);
+        let key = repo.session_key(session.refresh_token_hash.expose());
         let exists: bool = repo
             .client
             .exists(&key)
@@ -982,7 +989,7 @@ mod tests {
             .await
             .expect("smembers on user set after cleanup");
         assert!(
-            members.contains(&session.refresh_token_hash),
+            members.contains(session.refresh_token_hash.expose()),
             "the live member must be untouched by cleanup"
         );
 
@@ -1121,7 +1128,7 @@ mod tests {
         let now = Utc::now();
         Session {
             user_id: USER_ID_SENTINEL.to_string(),
-            refresh_token_hash: HASH_SENTINEL.to_string(),
+            refresh_token_hash: Secret::new(HASH_SENTINEL.to_string()),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(1),
             device_id: Some(DEVICE_SENTINEL.to_string()),
