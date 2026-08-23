@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
 
 One TOML file drives the whole service. `AppConfig` (and its nested structs) in
 `crates/core/src/config.rs` deserializes it; every section uses `#[serde(default)]`, so any
@@ -81,14 +81,18 @@ max_size_mb? }`. Absent → sessions live in the `[repository]` store.
 
 ### `[user_sync]`
 `enabled` (bool), `adapter` (`webhook`), `[user_sync.webhook] { url, secret, timeout?,
-retries? }`. The `secret` is redacted in `Debug`.
+retries? }`. The `secret` is a `Secret<String>` and cannot be formatted.
 
 ### `[telemetry]`
 `enabled` (false), `exporter` (`none` | `stdout` | `otlp` | `xray`), optional `endpoint`,
 `service_name`, `sample_rate` (default 1.0), `protocol`.
 
 ### `[internal_api]`
-`enabled` (false), `auth_method` (`shared_secret`), `shared_secret` (redacted in `Debug`).
+`enabled` (false — internal routes are not mounted unless true, regardless of `server.role`;
+a `role = "admin"` instance with the flag off serves only `/health`), `auth_method`
+(`shared_secret`), `shared_secret` (a `Secret<String>`; it cannot be formatted, must be
+non-empty when the internal API is served, and internal auth compares it in constant time via
+`subtle`).
 
 ### `[providers.<name>]`
 `adapter` (`oidc` | `apple`) plus adapter-specific fields captured via a flattened
@@ -117,8 +121,12 @@ retries? }`. The `secret` is redacted in `Debug`.
 
 - *`serde(default)` everywhere.* **Every config section has defaults.** A minimal TOML boots,
   and adding a field never breaks deserialization of existing files.
-- *Secrets redacted in Debug.* **`WebhookConfig.secret` and `InternalApiConfig.shared_secret`
-  have custom `Debug`.** Prevents secret leakage through log lines that dump config.
+- *Secrets are unprintable by type.* **Credential-bearing config values are `Secret<T>`, a
+  newtype implementing neither `Debug` nor `Display`.** `WebhookConfig.secret`,
+  `InternalApiConfig.shared_secret`, and `OidcProviderConfig.client_secret` previously relied on
+  hand-written `Debug` impls rendering `"<redacted>"`; the newtype makes a leak a compile error
+  rather than a per-type discipline — the enclosing structs' `Debug` impls still elide the
+  secret field, but forgetting the elision now fails to compile instead of leaking.
 - *Separate session repository section.* **`[session_repository]` is optional and overrides
   only session storage.** Enables split topologies (SQL users + Valkey/LMDB sessions) without
   duplicating the user-store config.

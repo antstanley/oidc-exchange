@@ -1,6 +1,6 @@
 # Telemetry and Audit
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
 
 Two independent observability systems with different purposes.
 
@@ -25,6 +25,32 @@ Current behaviour by `[telemetry].exporter`:
 
 The env filter honours `RUST_LOG`, defaulting to `info`. In Lambda these JSON lines are
 captured by CloudWatch Logs; in containers by the log driver.
+
+## Telemetry hygiene
+
+Two rules bound what the observability plane may carry, and both are enforced by types rather
+than by convention.
+
+**Credential-derived values cannot be formatted.** `Secret<T>` (`crates/core/src/secret.rs`)
+implements no `Debug`, no `Display`, and no `ToString`. `tracing` records a span field through
+one of those traits, so a `Secret<T>` reaching `tracing::info!(?x)`, `%x`, `format!`, or
+`#[instrument]`'s default argument capture is a compile error. The values it wraps are the
+session refresh-token hash, the raw refresh token at issuance, the three configured secrets
+(`user_sync.webhook.secret`, `internal_api.shared_secret`, `providers.<name>.client_secret`),
+Apple's generated client assertion, and every upstream response body read at a provider
+boundary. `expose()` unwraps deliberately and is legible in review; the type prevents accident,
+not intent.
+
+**A client-facing description is a different value from an internal diagnostic.**
+`Error::client_description()` is the only string that crosses the public HTTP boundary; the full
+`Display` is logged under the request span. See
+[04-http-api.md](04-http-api.md) → Error mapping.
+
+Adapter instrumentation states its argument capture explicitly: every `#[instrument]` on a
+session-repository method names each argument in `skip(...)`, and re-projects only
+non-sensitive values into `fields(...)`. Declaring a bare field name (`fields(token_hash)`)
+keeps the log schema stable — the name appears, the value never does — but is treated as a
+schema aid, not as the control; the control is the type.
 
 ## Audit
 

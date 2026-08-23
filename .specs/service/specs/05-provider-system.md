@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -39,8 +39,11 @@ private_key_path = "/secrets/apple.p8"
 
 Apple is mostly OIDC but requires a freshly signed **ES256 client secret JWT** for each token
 endpoint call (`ClientSecretClaims { iss: team_id, sub: client_id, aud, iat, exp }`, ~5-minute
-lifetime, signed with the `.p8` key). It reuses the shared `JwksCache` for the standard
-ID-token validation parts.
+lifetime, signed with the `.p8` key). `generate_client_secret` returns that assertion as
+`Secret<String>`, so it can be posted but not formatted. `revoke_token` sends the assertion
+alongside the token being revoked and renders any non-2xx response through
+`shared::upstream::error_detail`. It reuses the shared `JwksCache` for the standard ID-token
+validation parts.
 
 Apple's ID tokens sometimes carry `email_verified` (and `is_private_email`) as the JSON
 strings `"true"`/`"false"` rather than booleans. The Apple provider coerces bool-or-string
