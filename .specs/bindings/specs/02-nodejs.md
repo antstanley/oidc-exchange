@@ -1,6 +1,6 @@
 # Node.js Binding (`@oidc-exchange/node`)
 
-**Status:** Implemented · **Date:** 2026-06-30 · **Owner:** Ant Stanley · **Scope:** bindings/nodejs
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** bindings/nodejs
 
 A napi-rs native module wrapping [`crates/ffi`](01-ffi-core.md). Published as
 `@oidc-exchange/node` (ESM, `"type": "module"`).
@@ -74,3 +74,43 @@ exercise `/health`, `/keys`, `/.well-known/openid-configuration`, and 404 handli
 
 - A framework-agnostic `requestListener()` / `http.createServer` helper is not implemented;
   callers adapt `handleRequest` per framework today (see `examples/nodejs/*`).
+
+
+## Runtime parity update
+
+```typescript
+interface HeaderEntry { name: string; value: string }
+interface HttpRequest  {
+  method: string;
+  rawPath: string;        // still percent-encoded, no query
+  query?: string;         // still percent-encoded, no leading '?'
+  headers: HeaderEntry[]; // ordered; duplicates preserved
+  body?: Buffer;
+  pathIsRaw?: boolean;    // default true; false when the source pre-decoded the path
+}
+interface HttpResponse { status: number; headers: HeaderEntry[]; body: Buffer }
+interface OidcExchangeOptions { config?: string; configString?: string; basePath?: string }
+interface Limits { maxBodyBytes: number }
+
+class OidcExchange {
+  constructor(options: OidcExchangeOptions);
+  limits(): Limits;
+  handleRequest(request: HttpRequest): Promise<HttpResponse>;  // async
+  handleRequestSync(request: HttpRequest): HttpResponse;       // deprecated
+  shutdown(): void;                                            // no-op
+}
+```
+
+`handleRequest` is **asynchronous**: it returns a `Promise` backed by a napi async task, so
+no host thread is held while the router awaits an upstream provider. `handleRequestSync`
+preserves the previous blocking behaviour for callers with genuinely synchronous
+architectures; it logs a deprecation warning once per process and is removed one major cycle
+after this change ships. Both are total — a malformed request yields an `HttpResponse` with
+the status the native server would return, never a thrown `REQUEST_BUILD_ERROR`. `basePath`
+overrides `server.base_path` in the instance's config at construction, so the segment-aware
+strip runs in the normaliser and no path handling happens in JavaScript.
+- *Asynchronous `handleRequest`.* **The method returns a `Promise` backed by a napi async
+  task.** The previous synchronous surface `block_on`ed the whole request, so a slow
+  upstream call held a host thread — the availability cost fell on every request the host
+  was serving, not on the one that was slow. The sync variant survives, deprecated, for one
+  major cycle.

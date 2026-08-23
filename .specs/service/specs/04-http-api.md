@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -161,3 +161,42 @@ infrastructure detail is never leaked to the client.
 - Telemetry exporters `otlp`/`xray` are accepted in config but currently fall back to JSON
   logging; the tower OTEL HTTP-span layer is not yet wired. See
   [07-telemetry-and-audit.md](07-telemetry-and-audit.md).
+
+
+## Runtime parity update
+
+Applied to the router (`routes/mod.rs`), outermost first:
+
+1. **Outer catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — wraps
+   the base-path service and everything inside it, so a panic in any layer becomes
+   `500 {"error":"server_error","error_description":"internal server error"}` instead of a
+   dropped connection or an unwind into an embedding host. It is the outermost guard, not a
+   move of the inner one: moving the single guard outward would cost a caught handler panic
+   its `x-request-id`, so the stack carries two.
+2. **Base-path strip** (`middleware/base_path.rs`) — strip `server.base_path` at a
+   path-segment boundary before the routing decision. `base_path` is normalised at config
+   load, so the middleware never sees `""` or `"/"`, and no assertion runs on a request path.
+3. **Request ID** (`middleware/request_id.rs`) — reuse `X-Request-Id` or generate a UUIDv4;
+   open a per-request `info_span` carrying `request_id` so all downstream logs — including
+   the `server_error` detail log — inherit it; echo in the response header.
+4. **Request timeout** (`tower_http::timeout::TimeoutLayer`) — abort any request that runs
+   longer than `server.request_timeout` (default `30s`) and respond `408`. Sits inside the
+   request-id layer, so a timeout response still carries the request id, and outside the
+   rest of the stack, so the bound covers the remaining middleware and the handler.
+5. **Body limit** (`axum::extract::DefaultBodyLimit`) — reject a request body above
+   `server.max_request_body_bytes` with `413`. Embedded hosts enforce the same number before
+   they buffer, so one configured value bounds all five runtime shapes.
+6. **Audit context** (`middleware/audit_context.rs`) — extract `X-Forwarded-For`,
+   `User-Agent`, `X-Device-Id` into an `AuditContext` request extension, which the `/token`
+   and `/revoke` handlers pass into the core request structs so the stored session records
+   `ip_address`/`user_agent`/`device_id` and audit events record `ip_address`/`user_agent`.
+7. **Inner catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — nearest
+   the handler, so a caught handler panic still passes back out through the request-id layer
+   and its response carries `x-request-id`.
+
+Internal routes mount only when `internal_api.enabled = true` and the role is `admin` or
+`all`; with the flag false no internal routes are mounted regardless of role. When mounted,
+they additionally pass through **internal auth** (`middleware/internal_auth.rs`):
+`Authorization: Bearer <secret>` compared to `internal_api.shared_secret` in constant time
+(`subtle`); missing/wrong → `401`. A missing or empty secret is rejected at startup, never
+discovered at request time.

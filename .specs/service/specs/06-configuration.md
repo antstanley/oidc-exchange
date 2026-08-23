@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
 
 One TOML file drives the whole service. `AppConfig` (and its nested structs) in
 `crates/core/src/config.rs` deserializes it; every section uses `#[serde(default)]`, so any
@@ -126,3 +126,20 @@ retries? }`. The `secret` is redacted in `Debug`.
 ### Open questions
 
 - None.
+
+
+## Runtime parity update
+
+`host` (`0.0.0.0`), `port` (`8080`), `issuer` (the `iss` claim / discovery issuer, default
+empty), `role` (`all` | `exchange` | `admin`, default `all`), `request_timeout` (humantime
+duration string like the token TTLs, default `"30s"`) — the per-request timeout the server's
+timeout layer enforces; `base_path` (optional, default unset — a leading prefix such as
+`/prod` stripped from incoming request paths at a segment boundary before routing, honored in
+server, Lambda, and every embedded runtime); `max_request_body_bytes` (default `2097152`) —
+the request body ceiling the server's body-limit layer enforces and every binding enforces
+before it buffers.
+
+`base_path` is normalised and validated at config load: an empty string and `"/"` both
+resolve to unset, a value not starting with `/` is a startup error, and a trailing `/` is
+trimmed. Validating once at startup is what lets the per-request path be free of assertions.
+| `server.host` / `port` / `role` / `request_timeout` / `max_request_body_bytes` | `0.0.0.0` / `8080` / `all` / `"30s"` / `2097152` |

@@ -16,7 +16,9 @@ def body(fixture: dict[str, Any]) -> bytes:
     return b"x" * fixture["bodyLength"]
 
 
-def result(fixture: dict[str, Any], status: int, *, path: str, headers: list[dict[str, str]]) -> dict[str, Any]:
+def result(
+    fixture: dict[str, Any], status: int, *, path: str, headers: list[dict[str, str]]
+) -> dict[str, Any]:
     return {
         "id": fixture["id"],
         "method": fixture["method"],
@@ -43,7 +45,9 @@ async def run_asgi(app: Callable[..., Any], fixture: dict[str, Any]) -> int:
         "method": fixture["method"],
         "path": decode_path(fixture["rawPath"]),
         "query_string": (fixture.get("query") or "").encode("latin-1"),
-        "headers": [(h["name"].encode("latin-1"), h["value"].encode("latin-1")) for h in fixture["headers"]],
+        "headers": [
+            (h["name"].encode("latin-1"), h["value"].encode("latin-1")) for h in fixture["headers"]
+        ],
     }
     if fixture["pathIsRaw"]:
         scope["raw_path"] = fixture["rawPath"].encode("latin-1")
@@ -66,7 +70,9 @@ def run_wsgi(app: Callable[..., Any], fixture: dict[str, Any]) -> int:
         "CONTENT_LENGTH": content_length(fixture),
     }
     if fixture["pathIsRaw"]:
-        environ["RAW_URI"] = fixture["rawPath"] + (("?" + fixture["query"]) if fixture.get("query") else "")
+        environ["RAW_URI"] = fixture["rawPath"] + (
+            ("?" + fixture["query"]) if fixture.get("query") else ""
+        )
     if fixture.get("orderedHeadersAvailable", True):
         environ["oidc_exchange.headers"] = [(h["name"], h["value"]) for h in fixture["headers"]]
     list(app(environ, start_response))
@@ -98,7 +104,11 @@ async def main() -> None:
             path = "/"
         elif path.startswith("/auth/"):
             path = path[5:]
-        headers = fixture["headers"] if shape == "asgi" or fixture.get("orderedHeadersAvailable", True) else []
+        headers = (
+            fixture["headers"]
+            if shape == "asgi" or fixture.get("orderedHeadersAvailable", True)
+            else []
+        )
         print(json.dumps(result(fixture, status, path=path, headers=headers)), flush=True)
 
 
