@@ -9,7 +9,7 @@ use tokio::sync::Mutex as TokioMutex;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::types::{
-    AttributeValue, Delete, Put, TransactWriteItem, Update, WriteRequest,
+    AttributeValue, Delete, Put, ReturnConsumedCapacity, TransactWriteItem, Update, WriteRequest,
 };
 use chrono::Utc;
 use tracing::instrument;
@@ -833,6 +833,9 @@ impl UserRepository for DynamoRepository {
             .key("pk", AttributeValue::S(STATS_COUNTER_PK.to_string()))
             .key("sk", AttributeValue::S(STATS_COUNTER_SK.to_string()))
             .consistent_read(true)
+            // Report the single-item read's capacity so callers and tests can
+            // verify the stats path costs one GetItem, not a table scan.
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .map_err(Self::store_err)?;
@@ -890,6 +893,10 @@ impl UserRepository for DynamoRepository {
             .table_name(&self.table_name)
             .filter_expression("sk = :sk")
             .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()))
+            // Report the page's consumed read capacity so callers and tests
+            // can verify the read stayed bounded (the spec's capacity-based
+            // verification, not wall-clock timing).
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .limit(limit as i32);
         if let Some(start_key) = exclusive_start_key {
             scan = scan.set_exclusive_start_key(Some(start_key));
@@ -940,7 +947,11 @@ impl DynamoRepository {
                 .scan()
                 .table_name(&self.table_name)
                 .filter_expression("sk = :sk")
-                .expression_attribute_values(":sk", AttributeValue::S("SESSION".to_string()));
+                .expression_attribute_values(":sk", AttributeValue::S("SESSION".to_string()))
+                // Capacity reporting for the same reason as the admin reads:
+                // the cache-miss walk is bounded by nothing but the table, so
+                // its cost must stay observable.
+                .return_consumed_capacity(ReturnConsumedCapacity::Total);
 
             if let Some(ref start_key) = exclusive_start_key {
                 scan = scan.set_exclusive_start_key(Some(start_key.clone()));
@@ -1805,6 +1816,22 @@ mod tests {
             "guard item should carry the winning racer's user_id"
         );
 
+        // Counter integrity under conditional failure: the losing racer's
+        // cancelled transaction must not have moved STATS#USERS — one live
+        // user means exactly one counted user.
+        let repo_after = DynamoRepository::new(client.clone(), table_name.to_string());
+        let counts = repo_after
+            .count_by_status()
+            .await
+            .expect("count_by_status after the create race");
+        assert_eq!(
+            counts.get("active"),
+            Some(&1),
+            "the losing create's conditional failure must not double-count"
+        );
+        assert_eq!(counts.get("deleted").copied().unwrap_or(0), 0);
+        assert_eq!(counts.get("suspended").copied().unwrap_or(0), 0);
+
         // Clean up
         let _ = client.delete_table().table_name(table_name).send().await;
     }
@@ -2260,6 +2287,518 @@ mod tests {
             Error::Conflict { .. } => {}
             other => panic!("expected Error::Conflict, got {other:?}"),
         }
+
+        // Counter integrity across the whole delete/recreate cycle: one live
+        // user and one soft-deleted user must be exactly what the
+        // transactionally-maintained counter reports.
+        let counts = repo.count_by_status().await.expect("count_by_status");
+        assert_eq!(counts.get("active").copied().unwrap_or(0), 1);
+        assert_eq!(counts.get("deleted").copied().unwrap_or(0), 1);
+        assert_eq!(
+            counts.get("suspended").copied().unwrap_or(0),
+            0,
+            "no suspended users exist in this scenario"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    // -----------------------------------------------------------------
+    // Bounded admin reads, measured by consumed capacity (task 08)
+    // -----------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    /// Cache TTL used by the session-cache test, with its expiry probe set
+    /// just past it. Named constants because the TTL *is* the behaviour under
+    /// test; the minimum the builder accepts is [`MIN_STATS_CACHE_TTL`].
+    const TEST_STATS_CACHE_TTL: Duration = Duration::from_secs(1);
+    /// How long the cache test waits to observe TTL expiry (TTL plus margin).
+    const TEST_STATS_CACHE_EXPIRY_WAIT: Duration = Duration::from_millis(1100);
+
+    /// Records every request the SDK issues and every ConsumedCapacity the
+    /// responses report, so tests can assert how much an admin read cost —
+    /// the spec's capacity-based verification — instead of wall-clock time.
+    #[derive(Debug, Default)]
+    struct CapacityProbe {
+        requests: std::sync::atomic::AtomicUsize,
+        units: Mutex<Vec<f64>>,
+    }
+
+    impl CapacityProbe {
+        fn reset(&self) {
+            self.requests.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.units.lock().expect("capacity mutex").clear();
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn captured_units(&self) -> Vec<f64> {
+            self.units.lock().expect("capacity mutex").clone()
+        }
+    }
+
+    /// Shared handle registered as an SDK interceptor. The inner probe is
+    /// interior-mutable, so the handle's view of traffic matches the
+    /// interceptor's exactly.
+    #[derive(Debug, Clone)]
+    struct ProbeHandle(Arc<CapacityProbe>);
+
+    impl ProbeHandle {
+        fn reset(&self) {
+            self.0.reset();
+        }
+
+        fn request_count(&self) -> usize {
+            self.0.request_count()
+        }
+
+        fn captured_units(&self) -> Vec<f64> {
+            self.0.captured_units()
+        }
+    }
+
+    impl aws_sdk_dynamodb::config::Intercept for ProbeHandle {
+        fn name(&self) -> &'static str {
+            "capacity_probe"
+        }
+
+        fn read_before_transmit(
+            &self,
+            _context: &aws_smithy_runtime_api::client::interceptors::context::BeforeTransmitInterceptorContextRef<
+                '_,
+            >,
+            _runtime_components: &aws_sdk_dynamodb::config::RuntimeComponents,
+            _cfg: &mut aws_smithy_types::config_bag::ConfigBag,
+        ) -> std::result::Result<(), aws_smithy_runtime_api::box_error::BoxError> {
+            self.0
+                .requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn read_after_deserialization(
+            &self,
+            context: &aws_smithy_runtime_api::client::interceptors::context::AfterDeserializationInterceptorContextRef<
+                '_,
+            >,
+            _runtime_components: &aws_sdk_dynamodb::config::RuntimeComponents,
+            _cfg: &mut aws_smithy_types::config_bag::ConfigBag,
+        ) -> std::result::Result<(), aws_smithy_runtime_api::box_error::BoxError> {
+            // The deserialized output carries the response's reported
+            // ConsumedCapacity; downcast to the two admin-read operation
+            // types this adapter issues.
+            if let Ok(output) = context.output_or_error() {
+                let units = output
+                    .downcast_ref::<aws_sdk_dynamodb::operation::scan::ScanOutput>()
+                    .and_then(|out| {
+                        out.consumed_capacity
+                            .as_ref()
+                            .and_then(|c| c.capacity_units)
+                    })
+                    .or_else(|| {
+                        output
+                            .downcast_ref::<aws_sdk_dynamodb::operation::get_item::GetItemOutput>()
+                            .and_then(|out| {
+                                out.consumed_capacity
+                                    .as_ref()
+                                    .and_then(|c| c.capacity_units)
+                            })
+                    });
+                if let Some(unit) = units {
+                    self.0.units.lock().expect("capacity mutex").push(unit);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// A client wired to DynamoDB Local through a [`ProbeHandle`], returned
+    /// alongside the handle so tests can reset and read captured traffic.
+    async fn create_probed_client() -> (aws_sdk_dynamodb::Client, ProbeHandle) {
+        let probe = ProbeHandle(Arc::new(CapacityProbe::default()));
+        let config = aws_sdk_dynamodb::config::Builder::new()
+            .behavior_version(aws_sdk_dynamodb::config::BehaviorVersion::latest())
+            .endpoint_url("http://localhost:8000")
+            .region(aws_sdk_dynamodb::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_dynamodb::config::Credentials::new(
+                "fakeAccessKey",
+                "fakeSecretKey",
+                None,
+                None,
+                "test",
+            ))
+            .interceptor(probe.clone())
+            .build();
+        let client = aws_sdk_dynamodb::Client::from_conf(config);
+        (client, probe)
+    }
+
+    /// Total read capacity of one unbounded scan over every `PROFILE` item —
+    /// a live measurement of exactly the whole-table walk this task removed.
+    async fn full_profile_scan_units(client: &aws_sdk_dynamodb::Client, table: &str) -> f64 {
+        let mut total = 0.0;
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+        loop {
+            let mut scan = client
+                .scan()
+                .table_name(table)
+                .filter_expression("sk = :sk")
+                .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()))
+                .return_consumed_capacity(ReturnConsumedCapacity::Total);
+            if let Some(start_key) = exclusive_start_key.clone() {
+                scan = scan.set_exclusive_start_key(Some(start_key));
+            }
+            let result = scan.send().await.expect("baseline full scan succeeds");
+            if let Some(capacity) = result.consumed_capacity {
+                total += capacity.capacity_units.unwrap_or(0.0);
+            }
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => return total,
+            }
+        }
+    }
+
+    async fn seed_users(repo: &DynamoRepository, count: usize, tag: &str) -> Vec<String> {
+        let mut ids = Vec::with_capacity(count);
+        for i in 0..count {
+            let created = repo
+                .create_user(&NewUser {
+                    external_id: format!("google|{tag}_{i}"),
+                    provider: "google".to_string(),
+                    email: Some(format!("{tag}_{i}@example.com")),
+                    display_name: None,
+                })
+                .await
+                .expect("seed create_user");
+            ids.push(created.id);
+        }
+        ids
+    }
+
+    /// Users seeded by the bounded-list test. Sized so the whole listing's
+    /// capacity measurably exceeds one page under DynamoDB Local's
+    /// size-based accounting (0.5 RCUs per started 4KB of returned items).
+    const LIST_TEST_USERS: usize = 120;
+    /// Page size requested by the bounded-list test.
+    const LIST_TEST_PAGE_SIZE: i32 = 10;
+    /// Users seeded by the stats test, sized so a hypothetical table walk
+    /// would report at least twice a single-item read's capacity.
+    const STATS_TEST_USERS: usize = 80;
+
+    /// Consumed capacity of one scan exactly matching the adapter's first
+    /// page — same `Limit`, same filter, same start — for an equality probe:
+    /// if `list_users` ever issued more or larger reads than its declared
+    /// single bounded scan, this replication would diverge from what the
+    /// interceptor captured.
+    async fn one_bounded_scan_units(client: &aws_sdk_dynamodb::Client, table: &str) -> f64 {
+        client
+            .scan()
+            .table_name(table)
+            .filter_expression("sk = :sk")
+            .expression_attribute_values(":sk", AttributeValue::S("PROFILE".to_string()))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .limit(LIST_TEST_PAGE_SIZE)
+            .send()
+            .await
+            .expect("replicated bounded scan succeeds")
+            .consumed_capacity
+            .and_then(|c| c.capacity_units)
+            .unwrap_or(0.0)
+    }
+
+    /// The list page must be ONE bounded scan whose reported capacity matches
+    /// a replicated page-shaped scan and sits strictly below walking every
+    /// profile, and following cursors to exhaustion must be duplicate-free and
+    /// skip-free regardless of DynamoDB Local's key order.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn list_users_executes_one_bounded_scan_per_page_measured_by_consumed_capacity() {
+        let table_name = "oidc-exchange-test-capacity-list";
+        let (client, probe) = create_probed_client().await;
+        create_test_table(&client, table_name).await;
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        let seeded = seed_users(&repo, LIST_TEST_USERS, "capacity_list").await;
+        let full_scan_units = full_profile_scan_units(&client, table_name).await;
+        assert!(
+            full_scan_units >= 1.0,
+            "the baseline walk over {seeded_len} profiles must cost measurable capacity",
+            seeded_len = seeded.len()
+        );
+        let replicated_page_units = one_bounded_scan_units(&client, table_name).await;
+
+        // Page one: exactly one request, capped by Limit, reporting capacity.
+        probe.reset();
+        let page_one = repo
+            .list_users(None, LIST_TEST_PAGE_SIZE as u32)
+            .await
+            .expect("page one");
+        assert_eq!(
+            probe.request_count(),
+            1,
+            "a list page must be exactly one scan request"
+        );
+        assert!(
+            page_one.users.len() <= LIST_TEST_PAGE_SIZE as usize,
+            "the page honours the limit"
+        );
+        assert!(
+            page_one.next_cursor.is_some(),
+            "{LIST_TEST_USERS} users cannot fit inside one page"
+        );
+        let page_one_units: f64 = probe.captured_units().iter().sum();
+        assert!(
+            page_one_units > 0.0,
+            "the scan must report its consumed read capacity"
+        );
+        assert!(
+            (page_one_units - replicated_page_units).abs() < 0.01,
+            "the adapter page cost {page_one_units} RCUs against \
+             {replicated_page_units} for one replicated page-shaped scan"
+        );
+        assert!(
+            page_one_units < full_scan_units / 2.0,
+            "one page cost {page_one_units} RCUs against {full_scan_units} for the \
+             unbounded walk — bounding by page size must bound capacity"
+        );
+
+        // Walk to exhaustion through short pages too: every continuation is
+        // still exactly one request, and the union is complete and unique.
+        let mut seen: Vec<String> = page_one.users.iter().map(|u| u.id.clone()).collect();
+        let mut cursor = page_one.next_cursor;
+        let mut pages = 1usize;
+        while let Some(c) = cursor {
+            probe.reset();
+            let page = repo
+                .list_users(Some(&c), LIST_TEST_PAGE_SIZE as u32)
+                .await
+                .expect("continuation page");
+            assert_eq!(
+                probe.request_count(),
+                1,
+                "each continuation page must also be one scan request"
+            );
+            seen.extend(page.users.iter().map(|u| u.id.clone()));
+            cursor = page.next_cursor;
+            pages += 1;
+            assert!(pages <= 1000, "traversal must terminate at a null cursor");
+        }
+
+        assert_eq!(seen.len(), seeded.len(), "no duplicates across pages");
+        let mut sorted_seen = seen.clone();
+        sorted_seen.sort();
+        let mut sorted_seeded = seeded.clone();
+        sorted_seeded.sort();
+        assert_eq!(
+            sorted_seen, sorted_seeded,
+            "no user may be skipped between adjacent pages"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// The stats path must cost one strongly-consistent GetItem — measured in
+    /// consumed capacity, not wall clock — and the transactionally-maintained
+    /// counters must track create/status/delete transitions exactly.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn stats_counter_costs_one_item_read_and_tracks_status_transitions() {
+        let table_name = "oidc-exchange-test-capacity-stats";
+        let (client, probe) = create_probed_client().await;
+        create_test_table(&client, table_name).await;
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+
+        let seeded = seed_users(&repo, STATS_TEST_USERS, "capacity_stats").await;
+        let full_scan_units = full_profile_scan_units(&client, table_name).await;
+
+        probe.reset();
+        let counts = repo.count_by_status().await.expect("count_by_status");
+        assert_eq!(
+            probe.request_count(),
+            1,
+            "stats must be one GetItem request, never a table walk"
+        );
+        assert_eq!(
+            counts.get("active"),
+            Some(&(STATS_TEST_USERS as u64)),
+            "the counter reflects every seeded create"
+        );
+        let units = probe.captured_units();
+        assert_eq!(
+            units.len(),
+            1,
+            "one request must produce exactly one ConsumedCapacity entry"
+        );
+        assert!(
+            (units[0] - 1.0).abs() < 0.05,
+            "a consistent read of one sub-4KB item costs {} RCUs, expected ~1.0",
+            units[0]
+        );
+        assert!(
+            units[0] * 2.0 < full_scan_units,
+            "counter read ({}) must stay below half a full-table walk \
+             ({full_scan_units}) at this table size — a scan would cost more",
+            units[0]
+        );
+
+        // Suspend: active drains, suspended fills — atomically with the write.
+        repo.update_user(
+            &seeded[0],
+            &UserPatch {
+                email: None,
+                display_name: None,
+                metadata: None,
+                claims: None,
+                status: Some(UserStatus::Suspended),
+            },
+        )
+        .await
+        .expect("suspend first user");
+        let counts = repo.count_by_status().await.expect("counts after suspend");
+        assert_eq!(counts.get("active"), Some(&(STATS_TEST_USERS as u64 - 1)));
+        assert_eq!(counts.get("suspended"), Some(&1));
+
+        // Delete an active user: the transition into Deleted carries the
+        // counter adjustment in the same transaction as the status write.
+        repo.delete_user(&seeded[1])
+            .await
+            .expect("delete second user");
+        let counts = repo.count_by_status().await.expect("counts after delete");
+        assert_eq!(counts.get("active"), Some(&(STATS_TEST_USERS as u64 - 2)));
+        assert_eq!(counts.get("deleted"), Some(&1));
+        assert_eq!(counts.get("suspended"), Some(&1));
+
+        // A same-status patch adjusts nothing.
+        repo.update_user(
+            &seeded[2],
+            &UserPatch {
+                email: None,
+                display_name: None,
+                metadata: None,
+                claims: None,
+                status: Some(UserStatus::Active),
+            },
+        )
+        .await
+        .expect("no-op active patch on third user");
+        let counts = repo
+            .count_by_status()
+            .await
+            .expect("counts after no-op patch");
+        assert_eq!(
+            counts.get("active"),
+            Some(&(STATS_TEST_USERS as u64 - 2)),
+            "same-status patch moves nothing"
+        );
+
+        // Reactivating the suspended user restores the buckets symmetrically.
+        repo.update_user(
+            &seeded[0],
+            &UserPatch {
+                email: None,
+                display_name: None,
+                metadata: None,
+                claims: None,
+                status: Some(UserStatus::Active),
+            },
+        )
+        .await
+        .expect("reactivate first user");
+        let counts = repo
+            .count_by_status()
+            .await
+            .expect("counts after reactivate");
+        assert_eq!(counts.get("active"), Some(&(STATS_TEST_USERS as u64 - 1)));
+        assert_eq!(
+            counts.get("suspended").copied().unwrap_or(0),
+            0,
+            "the suspended bucket must be empty again"
+        );
+        assert_eq!(counts.get("deleted"), Some(&1));
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// The active-session count obeys its named TTL: one walk populates the
+    /// cache, calls inside the window are served without touching DynamoDB,
+    /// and expiry forces exactly one refresh that sees newer sessions.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn active_session_cache_serves_within_ttl_and_refreshes_after_expiry() {
+        let table_name = "oidc-exchange-test-capacity-session-cache";
+        let (client, probe) = create_probed_client().await;
+        create_test_table(&client, table_name).await;
+
+        let repo = DynamoRepository::new(client.clone(), table_name.to_string())
+            .with_stats_cache_ttl(TEST_STATS_CACHE_TTL);
+
+        let user = repo
+            .create_user(&NewUser {
+                external_id: "google|session_cache_test".to_string(),
+                provider: "google".to_string(),
+                email: Some("session_cache@example.com".to_string()),
+                display_name: None,
+            })
+            .await
+            .expect("create_user");
+        let session_for = |hash: String| Session {
+            user_id: user.id.clone(),
+            refresh_token_hash: hash,
+            provider: "google".to_string(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: Utc::now(),
+        };
+        repo.store_refresh_token(&session_for("cache_hash_a".to_string()))
+            .await
+            .expect("store session a");
+        repo.store_refresh_token(&session_for("cache_hash_b".to_string()))
+            .await
+            .expect("store session b");
+
+        // Cold cache: the walk runs once.
+        probe.reset();
+        let count = repo.count_active_sessions().await.expect("first count");
+        assert_eq!(count, 2, "both stored sessions are active");
+        assert_eq!(
+            probe.request_count(),
+            1,
+            "the cache-miss walk is a single paginated scan at this table size"
+        );
+
+        // Inside the TTL window the cached value serves and no request fires,
+        // even though the underlying truth has changed.
+        repo.store_refresh_token(&session_for("cache_hash_c".to_string()))
+            .await
+            .expect("store session c");
+        probe.reset();
+        let cached = repo.count_active_sessions().await.expect("cached count");
+        assert_eq!(cached, 2, "within the TTL the cached count serves");
+        assert_eq!(
+            probe.request_count(),
+            0,
+            "no walk may run inside the named TTL window"
+        );
+
+        // After expiry the next call refreshes and sees the newer session.
+        tokio::time::sleep(TEST_STATS_CACHE_EXPIRY_WAIT).await;
+        probe.reset();
+        let refreshed = repo.count_active_sessions().await.expect("refreshed count");
+        assert_eq!(refreshed, 3, "expiry forces the walk to see session c");
+        assert_eq!(
+            probe.request_count(),
+            1,
+            "expiry triggers exactly one refresh walk"
+        );
 
         // Clean up
         let _ = client.delete_table().table_name(table_name).send().await;
