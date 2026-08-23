@@ -15,6 +15,9 @@ A Rust service that validates ID tokens from third-party OIDC providers and exch
 curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
 ```
 
+The installer verifies the downloaded binary's checksum and, when the GitHub CLI (`gh`) is available, requires GitHub build provenance from `antstanley/oidc-exchange` and `.github/workflows/release.yml`. Without `gh`, it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
+
+
 **Docker:**
 
 ```bash

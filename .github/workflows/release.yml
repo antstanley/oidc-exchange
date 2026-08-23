@@ -529,6 +529,8 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash
             ```
 
+            The installer requires GitHub build provenance when `gh` is available; otherwise it warns that checksum verification detects corruption but does not authenticate the release.
+
             ### Docker
 
             ```bash
