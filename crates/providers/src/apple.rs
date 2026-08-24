@@ -7,6 +7,7 @@ use jsonwebtoken::{
 };
 use oidc_exchange_adapters::shared::claims::coerce_bool;
 use oidc_exchange_adapters::shared::jwks::JwksCache;
+use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
@@ -31,9 +32,9 @@ pub struct AppleProvider {
     team_id: String,
     key_id: String,
     signing_key: EncodingKey,
-    token_endpoint: String,
+    token_endpoint: HttpsUrl,
     jwks_cache: JwksCache,
-    revocation_endpoint: Option<String>,
+    revocation_endpoint: Option<HttpsUrl>,
 }
 
 impl std::fmt::Debug for AppleProvider {
@@ -130,25 +131,21 @@ impl AppleProvider {
 
         // Use well-known Apple endpoints (or discover them).
         // Apple's discovery document is stable, so we use the known values directly.
-        let token_endpoint = config
-            .get("token_endpoint")
-            .and_then(toml::Value::as_str)
-            .unwrap_or(APPLE_TOKEN_ENDPOINT)
-            .to_string();
+        let endpoint = |name: &str, default: &str| {
+            HttpsUrl::parse(
+                config
+                    .get(name)
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(default),
+            )
+            .map_err(|_| Error::ConfigError {
+                detail: format!("apple: {name} must be a non-empty HTTPS URL"),
+            })
+        };
 
-        let jwks_uri = config
-            .get("jwks_uri")
-            .and_then(toml::Value::as_str)
-            .unwrap_or(APPLE_JWKS_URI)
-            .to_string();
-
-        let revocation_endpoint = Some(
-            config
-                .get("revocation_endpoint")
-                .and_then(toml::Value::as_str)
-                .unwrap_or(APPLE_REVOCATION_ENDPOINT)
-                .to_string(),
-        );
+        let token_endpoint = endpoint("token_endpoint", APPLE_TOKEN_ENDPOINT)?;
+        let jwks_uri = endpoint("jwks_uri", APPLE_JWKS_URI)?;
+        let revocation_endpoint = Some(endpoint("revocation_endpoint", APPLE_REVOCATION_ENDPOINT)?);
 
         Ok(Self {
             client_id,
@@ -156,7 +153,7 @@ impl AppleProvider {
             key_id,
             signing_key,
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri),
+            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string()),
             revocation_endpoint,
         })
     }
@@ -168,9 +165,9 @@ impl AppleProvider {
         team_id: String,
         key_id: String,
         signing_key: EncodingKey,
-        token_endpoint: String,
-        jwks_uri: String,
-        revocation_endpoint: Option<String>,
+        token_endpoint: HttpsUrl,
+        jwks_uri: HttpsUrl,
+        revocation_endpoint: Option<HttpsUrl>,
     ) -> Self {
         Self {
             client_id,
@@ -178,7 +175,7 @@ impl AppleProvider {
             key_id,
             signing_key,
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri),
+            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string()),
             revocation_endpoint,
         }
     }
@@ -217,7 +214,7 @@ impl IdentityProvider for AppleProvider {
         let client_secret = self.generate_client_secret()?;
 
         oidc_exchange_adapters::shared::token_endpoint::exchange_code(
-            &self.token_endpoint,
+            self.token_endpoint.as_str(),
             &self.client_id,
             Some(&client_secret),
             code,
@@ -332,7 +329,7 @@ impl IdentityProvider for AppleProvider {
 
         let client = oidc_exchange_adapters::shared::http::client();
         let response = client
-            .post(endpoint)
+            .post(endpoint.as_str())
             .form(&[
                 ("token", token),
                 ("client_id", &self.client_id),
@@ -432,9 +429,12 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             key,
-            token_endpoint.into(),
-            jwks_uri.into(),
-            revocation_endpoint,
+            HttpsUrl::parse_for_test(token_endpoint).expect("test token URL"),
+            HttpsUrl::parse_for_test(jwks_uri).expect("test JWKS URL"),
+            revocation_endpoint
+                .map(HttpsUrl::parse_for_test)
+                .transpose()
+                .expect("test revocation URL"),
         )
     }
 
@@ -588,9 +588,9 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(&pem).unwrap(),
-            format!("{uri}/auth/token"),
-            format!("{uri}/auth/keys"),
-            Some(format!("{uri}/auth/revoke")),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/token")).expect("wiremock URL"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/keys")).expect("wiremock URL"),
+            Some(HttpsUrl::parse_for_test(format!("{uri}/auth/revoke")).expect("wiremock URL")),
         );
 
         // Step 1: Exchange code
@@ -644,9 +644,9 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(&pem).unwrap(),
-            format!("{uri}/auth/token"),
-            format!("{uri}/auth/keys"),
-            Some(format!("{uri}/auth/revoke")),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/token")).expect("wiremock URL"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/keys")).expect("wiremock URL"),
+            Some(HttpsUrl::parse_for_test(format!("{uri}/auth/revoke")).expect("wiremock URL")),
         );
 
         provider
@@ -667,8 +667,8 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(&pem).unwrap(),
-            "https://appleid.apple.com/auth/token".into(),
-            "https://appleid.apple.com/auth/keys".into(),
+            HttpsUrl::parse("https://appleid.apple.com/auth/token").expect("HTTPS token URL"),
+            HttpsUrl::parse("https://appleid.apple.com/auth/keys").expect("HTTPS JWKS URL"),
             None,
         );
 
@@ -703,6 +703,35 @@ mod tests {
         assert!(err.contains("team_id"), "Expected team_id error: {err}");
     }
 
+    #[tokio::test]
+    async fn from_config_rejects_http_endpoint_override() {
+        let (pem_bytes, _jwks, _kid) = generate_es256_test_keys();
+        let pem = tempfile::NamedTempFile::new().expect("temporary PEM file");
+        std::fs::write(pem.path(), pem_bytes).expect("write PEM");
+        let mut config = HashMap::from([
+            (
+                "client_id".into(),
+                toml::Value::String("com.example.app".into()),
+            ),
+            ("team_id".into(), toml::Value::String("TEAMID".into())),
+            ("key_id".into(), toml::Value::String("KEYID".into())),
+            (
+                "private_key_path".into(),
+                toml::Value::String(pem.path().display().to_string()),
+            ),
+            (
+                "token_endpoint".into(),
+                toml::Value::String("http://apple.example/token".into()),
+            ),
+        ]);
+
+        let err = AppleProvider::from_config(&config)
+            .await
+            .expect_err("HTTP Apple override must be rejected");
+        assert!(err.to_string().contains("token_endpoint"));
+        config.remove("token_endpoint");
+    }
+
     // ---------------------------------------------------------------
     // Tests 8-13: validate_id_token hardening — required claims, nbf,
     // and bool-or-string coercion of email_verified / is_private_email
@@ -731,8 +760,8 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(pem).expect("valid EC PEM"),
-            format!("{uri}/auth/token"),
-            format!("{uri}/auth/keys"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/token")).expect("wiremock URL"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/keys")).expect("wiremock URL"),
             None,
         );
 
@@ -927,8 +956,8 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
-            format!("{uri}/auth/token"),
-            format!("{uri}/auth/keys"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/token")).expect("wiremock URL"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/keys")).expect("wiremock URL"),
             None,
         );
 
@@ -979,8 +1008,8 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
-            format!("{uri}/auth/token"),
-            format!("{uri}/auth/keys"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/token")).expect("wiremock URL"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/keys")).expect("wiremock URL"),
             None,
         );
 
@@ -1075,8 +1104,8 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
-            format!("{uri}/auth/token"),
-            format!("{uri}/auth/keys"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/token")).expect("wiremock URL"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/keys")).expect("wiremock URL"),
             None,
         );
 
@@ -1113,8 +1142,8 @@ mod tests {
             "ABCDEF1234".into(),
             "apple-test-key-1".into(),
             EncodingKey::from_ec_pem(&pem).expect("valid EC PEM"),
-            "https://appleid.apple.com/auth/token".into(),
-            "https://appleid.apple.com/auth/keys".into(),
+            HttpsUrl::parse_for_test("https://appleid.apple.com/auth/token").expect("static URL"),
+            HttpsUrl::parse_for_test("https://appleid.apple.com/auth/keys").expect("static URL"),
             None,
         );
 

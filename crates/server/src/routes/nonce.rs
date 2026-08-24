@@ -22,7 +22,7 @@ pub async fn nonce_handler(
     );
 
     let minted = state.service.mint_nonce().await?;
-    debug_assert!(minted.expires_in > 0 || state.config.grants.nonce_ttl == "0s");
+    debug_assert!(minted.expires_in > 0 || state.config.grants.nonce_ttl.as_secs() == 0);
     assert!(!minted.nonce.is_empty(), "minted nonces are never empty");
 
     Ok(Json(json!({

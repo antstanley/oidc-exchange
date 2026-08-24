@@ -68,8 +68,11 @@ struct Session {
 
 The raw refresh token exists only in memory during issuance and in the response to the
 client. Only the hash is stored. `device_id`, `user_agent`, and `ip_address` are populated
-`None` by the core at issuance today (the audit-context middleware captures them at the HTTP
-edge but they are not threaded into the stored session).
+from the request context: the audit-context middleware captures them at the HTTP edge and
+the exchange flow threads them into the stored session. `refresh_token_hash` is also the
+session's identifier: it is the key every `SessionRepository` lookup and revocation takes,
+and it is the value minted access tokens carry as their `sid` claim so a presented access
+token names the session it belongs to.
 
 ### SingleUseRecord (`domain/single_use.rs`)
 
@@ -89,7 +92,9 @@ removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_ses
 - **`TokenResponse`** — the `/token` body: `access_token`, optional `refresh_token` (present
   on exchange, absent on refresh), `token_type` (always `"Bearer"`), `expires_in` seconds.
 - **`AccessTokenClaims`** — JWT payload: `sub` (internal user id), `iss`, `aud`, `iat`,
-  `exp`, plus a flattened `custom: HashMap<String, Value>` of resolved claims.
+  `exp`, `sid` (the `refresh_token_hash` of the session the token was minted for), plus a
+  flattened `custom: HashMap<String, Value>` of resolved claims. All six registered fields
+  are required on both serialization and deserialization.
 - **`ProviderTokens`** — what a provider returns from code exchange: `id_token`, optional
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
@@ -150,29 +155,40 @@ User.provider / external_id ── upstream provider subject
             ▼
         ┌────────┐  admin suspend   ┌───────────┐
         │ Active │ ───────────────► │ Suspended │
-        └───┬────┘ ◄─────────────── └───────────┘
-            │        admin reactivate
-            │ admin delete (soft)
-            ▼
-        ┌─────────┐
-        │ Deleted │  record retained, all sessions revoked
-        └─────────┘
+        └───┬────┘ ◄─────────────── └─────┬─────┘
+            │        admin reactivate     │
+            │ admin delete (soft)         │ admin delete (soft)
+            ▼                             │
+        ┌─────────┐                       │
+        │ Deleted │ ◄─────────────────────┘
+        └─────────┘  record retained, all sessions revoked
 ```
 
 - **Active** — may obtain and refresh tokens.
-- **Suspended** — exchange and refresh are rejected (`UserSuspended`); already-issued access
-  JWTs remain valid until they expire (JWTs are not individually revocable).
-- **Deleted** — soft delete via `UserPatch { status: Deleted }`; the service revokes all the
-  user's sessions on delete. The row is kept, but the identity is freed:
+- **Suspended** — exchange and refresh are rejected (`UserSuspended`); entering `Suspended`
+  revokes all the user's sessions, so reactivation does not restore existing refresh
+  tokens — the user signs in again. Already-issued access JWTs remain valid until they
+  expire (JWTs are not individually revocable).
+- **Deleted** — soft delete via `UserPatch { status: Deleted }` or `admin_delete_user`,
+  permitted from any non-`Deleted` status (`Active` or `Suspended`); the service revokes all
+  the user's sessions on delete. `Deleted` is strictly terminal: any status patch on a deleted
+  user — to any status, including `Deleted` itself — and any other transition not drawn above
+  are rejected with `InvalidRequest`. The row is kept, but the identity is freed:
   `get_user_by_external_id` no longer returns the deleted user, and a later first login
   for the same `(provider, external_id)` re-registers as a brand-new user with no claims
   or sessions carried over.
 
+A status patch equal to the user's current status is not a transition: it is accepted as a
+no-op with no side effects — in particular, a `Suspended → Suspended` patch does not
+re-trigger session revocation. The one exception is `Deleted`, which admits no status
+patch at all (see above): `Deleted → Deleted` is rejected, not a no-op.
+
 ### Session
 
 Created on token exchange with `expires_at = now + refresh_token_ttl`. Removed by explicit
-revocation (`/revoke`, delete-user, or revoke-all-user-sessions) or by expiry — DynamoDB via
-its TTL attribute, other stores via `cleanup_expired_sessions`.
+revocation (`/revoke`, revoke-all-user-sessions, or a status change to `Suspended` or
+`Deleted`) or by expiry — DynamoDB via its TTL attribute, other stores via
+`cleanup_expired_sessions`.
 
 ## Required query patterns
 
@@ -204,14 +220,12 @@ its TTL attribute, other stores via `cleanup_expired_sessions`.
   `create_user`.** Keeps ID creation next to the write that persists it; the trade-off is the
   `usr_` + lowercase-ULID convention is duplicated across three adapters rather than owned by
   the core.
-- *Suspended keeps live tokens valid.* **Suspension blocks new/refreshed tokens but not
-  outstanding access JWTs.** Access JWTs are stateless and short-lived; revoking them would
-  require introspection, which is out of scope.
+- *Suspension keeps outstanding access JWTs valid.* **Suspension revokes the user's stored
+  sessions but not outstanding access JWTs.** Access JWTs are stateless and short-lived;
+  revoking them would require introspection, which is out of scope.
 - *Claims vs metadata split.* **`claims` feeds the JWT, `metadata` feeds templates/sync.**
   Separating the injected claim set from general profile data keeps token contents explicit.
 
 ### Open questions
 
-- `Session.device_id` / `user_agent` / `ip_address` exist on the entity and in the store
-  schemas but are written as `None` at issuance; wiring the audit-context values into the
-  stored session is unresolved.
+- None.

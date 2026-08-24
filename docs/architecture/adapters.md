@@ -136,7 +136,7 @@ adapter = "kms"
 
 [key_manager.kms]
 key_id = "arn:aws:kms:us-east-1:123456789:key/abcd-1234"
-algorithm = "ECDSA_SHA_256"
+algorithm = "ES256"
 kid = "prod-key-1"
 ```
 

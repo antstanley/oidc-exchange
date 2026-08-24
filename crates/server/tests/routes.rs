@@ -11,7 +11,7 @@ use tower::ServiceExt;
 use oidc_exchange::middleware::audit_context::audit_context_layer;
 use oidc_exchange::routes::public_routes;
 use oidc_exchange::state::AppState;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -28,8 +28,10 @@ fn build_test_app() -> (Router, MockRepository) {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw_config).expect("test config should resolve");
 
     let session_repo = MockRepository::new();
 
@@ -377,6 +379,120 @@ async fn revoke_access_token_verification_failure_returns_200_no_propagation() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// 4b-ii. POST /revoke with a valid access token removes only the session the
+// token's sid names: the revoked session's refresh token stops working while
+// its same-user sibling keeps refreshing (end-to-end authority model).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoke_valid_access_token_removes_only_its_own_session() {
+    let (app, session_repo) = build_test_app();
+
+    // Two exchanges for the same user → two independent sessions.
+    let exchange_body =
+        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+    let first = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(exchange_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_json = body_to_json(first.into_body()).await;
+    let access_token = first_json["access_token"].as_str().unwrap().to_string();
+    let refresh1 = first_json["refresh_token"].as_str().unwrap().to_string();
+
+    let second_body =
+        "grant_type=authorization_code&code=other-code&redirect_uri=http://localhost/callback&provider=test";
+    let second = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(second_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_json = body_to_json(second.into_body()).await;
+    let refresh2 = second_json["refresh_token"].as_str().unwrap().to_string();
+
+    // Two sessions exist before revocation.
+    assert_eq!(session_repo.get_all_sessions().await.len(), 2);
+
+    // Revoke with the first exchange's access token.
+    let revoke_body = format!("token={access_token}&token_type_hint=access_token");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/revoke")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(revoke_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Exactly one session survives.
+    assert_eq!(
+        session_repo.get_all_sessions().await.len(),
+        1,
+        "only the sid-named session may be removed"
+    );
+
+    // The revoked session's refresh token is dead...
+    let refresh_body = format!("grant_type=refresh_token&refresh_token={}", refresh1);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(refresh_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the revoked session must no longer refresh"
+    );
+
+    // ...while its same-user sibling still refreshes fine.
+    let refresh_body = format!("grant_type=refresh_token&refresh_token={}", refresh2);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(refresh_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the sibling session must survive an access-token revocation"
+    );
 }
 
 // ---------------------------------------------------------------------------

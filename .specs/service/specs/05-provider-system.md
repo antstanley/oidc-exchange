@@ -23,8 +23,10 @@ scopes = ["openid", "email", "profile"]
 ```
 
 `from_config` discovers the `token_endpoint`, `jwks_uri`, and `revocation_endpoint` from the
-issuer's `.well-known/openid-configuration` when they are not given. Adding a Tier 1 provider
-is a new config block — no code.
+issuer's `.well-known/openid-configuration` when they are not given. Every endpoint —
+configured or discovered — is an `https` URL; the config types make any other scheme
+unrepresentable, and discovery rejects a response whose HTTP status is not a success before it
+parses the body. Adding a Tier 1 provider is a new config block — no code.
 
 **Tier 2 — OIDC with quirks (custom module).** `providers/apple::AppleProvider`:
 
@@ -48,7 +50,9 @@ values when mapping to `IdentityClaims.email_verified` and
 `IdentityClaims.is_private_email`, so the registration domain allowlist (which requires
 `email_verified == Some(true)`) works for Apple sign-ins. `is_private_email` is a
 first-class `Option<bool>` field on `IdentityClaims`, populated only by the Apple
-provider; the generic OIDC provider leaves it `None`.
+provider; the generic OIDC provider leaves it `None`. The same `https` endpoint constraint
+applies to Apple's optional `token_endpoint`, `jwks_uri`, and `revocation_endpoint` overrides,
+which take the shared `HttpsUrl` type rather than repeating the check.
 
 **Tier 3 — non-OIDC (e.g. atproto).** *Not implemented.* The `IdentityProvider` doc comment
 and several config/example files name `atproto`, but no `AtprotoProvider` exists in the

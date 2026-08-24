@@ -18,7 +18,7 @@ fn grant_types_supported(id_token_grant_enabled: bool) -> Vec<&'static str> {
 }
 
 pub async fn openid_config_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let issuer = &state.config.server.issuer;
+    let issuer = state.config.server.issuer.as_ref();
     let alg = state.service.signing_algorithm();
     let grant_types = grant_types_supported(state.config.grants.id_token);
     assert!(

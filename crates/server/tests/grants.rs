@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use chrono::Utc;
 use http_body_util::BodyExt;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::domain::IdentityClaims;
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
@@ -59,7 +59,7 @@ fn claims_with(raw: serde_json::Map<String, Value>) -> IdentityClaims {
 
 /// Build the production router over mock adapters with the given config;
 /// returns the router and the live provider handle for claim pinning.
-fn build_app(config: AppConfig) -> (Router, MockIdentityProvider) {
+fn build_app(config: Config) -> (Router, MockIdentityProvider) {
     let provider = MockIdentityProvider::new(PROVIDER_ID);
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert(PROVIDER_ID.to_string(), Box::new(provider.clone()));
@@ -127,21 +127,26 @@ async fn body_to_json(body: Body) -> Value {
     }
 }
 
-fn config_enabled() -> AppConfig {
-    let mut config = AppConfig::default();
-    config.server.issuer = ISSUER.to_string();
-    config.grants.id_token = true;
-    config
+fn base_raw_config() -> RawConfig {
+    let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default config deserializes");
+    raw.server.issuer = ISSUER.to_string();
+    raw
 }
 
-fn config_disabled() -> AppConfig {
-    let mut config = AppConfig::default();
-    config.server.issuer = ISSUER.to_string();
+fn config_enabled() -> Config {
+    let mut raw = base_raw_config();
+    raw.grants.id_token = true;
+    Config::resolve(raw).expect("enabled config resolves")
+}
+
+fn config_disabled() -> Config {
+    let raw = base_raw_config();
     assert!(
-        !config.grants.id_token,
+        !raw.grants.id_token,
         "the compiled default keeps the grant off"
     );
-    config
+    Config::resolve(raw).expect("disabled config resolves")
 }
 
 // ---------------------------------------------------------------------------
@@ -325,8 +330,10 @@ async fn disabled_discovery_omits_the_direct_grant() {
 /// serves no exchanges (`admin`), so admin-only processes gain no surface.
 #[tokio::test]
 async fn admin_role_mounts_no_nonce_route_even_when_grant_enabled() {
-    let mut config = config_enabled();
-    config.server.role = "admin".to_string();
+    let mut raw = base_raw_config();
+    raw.grants.id_token = true;
+    raw.server.role = "admin".to_string();
+    let config = Config::resolve(raw).expect("admin config resolves");
     let (router, _provider) = build_app(config);
 
     let (status, _body) = post_form(&router, "/nonce", "").await;

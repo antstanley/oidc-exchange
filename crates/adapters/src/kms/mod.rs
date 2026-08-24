@@ -3,6 +3,7 @@ use aws_sdk_kms::primitives::Blob;
 use aws_sdk_kms::types::{MessageType, SigningAlgorithmSpec};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use oidc_exchange_core::config::SigningAlgorithm;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::KeyManager;
 use rsa::pkcs8::{AssociatedOid, DecodePublicKey};
@@ -14,7 +15,7 @@ use rsa::traits::PublicKeyParts;
 pub struct KmsKeyManager {
     client: aws_sdk_kms::Client,
     key_id: String,
-    algorithm: String,
+    algorithm: SigningAlgorithm,
     kid: String,
     /// Cached public key material, fetched once from KMS `GetPublicKey`: the
     /// raw SPKI DER bytes (consumed by local `verify`, never re-fetched) and
@@ -26,7 +27,7 @@ impl KmsKeyManager {
     pub fn new(
         client: aws_sdk_kms::Client,
         key_id: String,
-        algorithm: String,
+        algorithm: SigningAlgorithm,
         kid: String,
     ) -> Self {
         Self {
@@ -40,19 +41,17 @@ impl KmsKeyManager {
 
     /// Parse the algorithm string into the AWS SDK enum.
     fn signing_algorithm(&self) -> Result<SigningAlgorithmSpec> {
-        match self.algorithm.as_str() {
-            "RS256" => Ok(SigningAlgorithmSpec::RsassaPkcs1V15Sha256),
-            "RS384" => Ok(SigningAlgorithmSpec::RsassaPkcs1V15Sha384),
-            "RS512" => Ok(SigningAlgorithmSpec::RsassaPkcs1V15Sha512),
-            "PS256" => Ok(SigningAlgorithmSpec::RsassaPssSha256),
-            "PS384" => Ok(SigningAlgorithmSpec::RsassaPssSha384),
-            "PS512" => Ok(SigningAlgorithmSpec::RsassaPssSha512),
-            "ES256" => Ok(SigningAlgorithmSpec::EcdsaSha256),
-            "ES384" => Ok(SigningAlgorithmSpec::EcdsaSha384),
-            "ES512" => Ok(SigningAlgorithmSpec::EcdsaSha512),
-            other => Err(Error::KeyError {
-                detail: format!("unsupported KMS signing algorithm: {other}"),
-            }),
+        match self.algorithm {
+            SigningAlgorithm::RS256 => Ok(SigningAlgorithmSpec::RsassaPkcs1V15Sha256),
+            SigningAlgorithm::RS384 => Ok(SigningAlgorithmSpec::RsassaPkcs1V15Sha384),
+            SigningAlgorithm::RS512 => Ok(SigningAlgorithmSpec::RsassaPkcs1V15Sha512),
+            SigningAlgorithm::PS256 => Ok(SigningAlgorithmSpec::RsassaPssSha256),
+            SigningAlgorithm::PS384 => Ok(SigningAlgorithmSpec::RsassaPssSha384),
+            SigningAlgorithm::PS512 => Ok(SigningAlgorithmSpec::RsassaPssSha512),
+            SigningAlgorithm::ES256 => Ok(SigningAlgorithmSpec::EcdsaSha256),
+            SigningAlgorithm::ES384 => Ok(SigningAlgorithmSpec::EcdsaSha384),
+            SigningAlgorithm::ES512 => Ok(SigningAlgorithmSpec::EcdsaSha512),
+            SigningAlgorithm::EdDSA => unreachable!("KMS config rejects EdDSA"),
         }
     }
 
@@ -79,7 +78,7 @@ impl KmsKeyManager {
             .as_ref()
             .to_vec();
 
-        let jwk = parse_spki_to_jwk(&public_key_der, &self.algorithm, &self.kid)?;
+        let jwk = parse_spki_to_jwk(&public_key_der, self.algorithm.as_str(), &self.kid)?;
 
         Ok((public_key_der, jwk))
     }
@@ -413,14 +412,14 @@ impl KeyManager for KmsKeyManager {
             "KMS Sign response signature must not be empty"
         );
 
-        let converted = signature_to_jws_form(&self.algorithm, signature)?;
+        let converted = signature_to_jws_form(self.algorithm.as_str(), signature)?;
 
-        if let Some(expected_len) = ecdsa_raw_signature_len(&self.algorithm) {
+        if let Some(expected_len) = ecdsa_raw_signature_len(self.algorithm.as_str()) {
             assert_eq!(
                 converted.len(),
                 expected_len,
                 "sign() must return the fixed raw r||s width for {}",
-                self.algorithm
+                self.algorithm.as_str()
             );
         }
 
@@ -437,7 +436,7 @@ impl KeyManager for KmsKeyManager {
             .get_or_try_init(|| self.fetch_public_key_material())
             .await?;
 
-        verify_locally(spki_der, &self.algorithm, payload, signature)
+        verify_locally(spki_der, self.algorithm.as_str(), payload, signature)
     }
 
     async fn public_jwk(&self) -> Result<serde_json::Value> {
@@ -448,7 +447,7 @@ impl KeyManager for KmsKeyManager {
     }
 
     fn algorithm(&self) -> &str {
-        &self.algorithm
+        self.algorithm.as_str()
     }
 
     #[allow(clippy::misnamed_getters)] // field is `kid` (JWT Key ID), method is `key_id` per trait
@@ -477,38 +476,51 @@ mod tests {
         };
 
         // Test supported algorithms
-        let test_cases = vec![
-            ("RS256", SigningAlgorithmSpec::RsassaPkcs1V15Sha256),
-            ("RS384", SigningAlgorithmSpec::RsassaPkcs1V15Sha384),
-            ("RS512", SigningAlgorithmSpec::RsassaPkcs1V15Sha512),
-            ("PS256", SigningAlgorithmSpec::RsassaPssSha256),
-            ("PS384", SigningAlgorithmSpec::RsassaPssSha384),
-            ("PS512", SigningAlgorithmSpec::RsassaPssSha512),
-            ("ES256", SigningAlgorithmSpec::EcdsaSha256),
-            ("ES384", SigningAlgorithmSpec::EcdsaSha384),
-            ("ES512", SigningAlgorithmSpec::EcdsaSha512),
+        let test_cases = [
+            (
+                SigningAlgorithm::RS256,
+                SigningAlgorithmSpec::RsassaPkcs1V15Sha256,
+            ),
+            (
+                SigningAlgorithm::RS384,
+                SigningAlgorithmSpec::RsassaPkcs1V15Sha384,
+            ),
+            (
+                SigningAlgorithm::RS512,
+                SigningAlgorithmSpec::RsassaPkcs1V15Sha512,
+            ),
+            (
+                SigningAlgorithm::PS256,
+                SigningAlgorithmSpec::RsassaPssSha256,
+            ),
+            (
+                SigningAlgorithm::PS384,
+                SigningAlgorithmSpec::RsassaPssSha384,
+            ),
+            (
+                SigningAlgorithm::PS512,
+                SigningAlgorithmSpec::RsassaPssSha512,
+            ),
+            (SigningAlgorithm::ES256, SigningAlgorithmSpec::EcdsaSha256),
+            (SigningAlgorithm::ES384, SigningAlgorithmSpec::EcdsaSha384),
+            (SigningAlgorithm::ES512, SigningAlgorithmSpec::EcdsaSha512),
         ];
 
-        for (alg_str, expected) in test_cases {
+        for (algorithm, expected) in test_cases {
             let mgr = KmsKeyManager::new(
                 client.clone(),
                 "key-id".to_string(),
-                alg_str.to_string(),
+                algorithm,
                 "kid-1".to_string(),
             );
             let result = mgr.signing_algorithm().expect("should map algorithm");
-            assert_eq!(result, expected, "algorithm mapping for {alg_str}");
+            assert_eq!(
+                result,
+                expected,
+                "algorithm mapping for {}",
+                algorithm.as_str()
+            );
         }
-
-        // Test unsupported algorithm
-        let mgr = KmsKeyManager::new(
-            client.clone(),
-            "key-id".to_string(),
-            "EdDSA".to_string(),
-            "kid-1".to_string(),
-        );
-        let result = mgr.signing_algorithm();
-        assert!(result.is_err(), "EdDSA should not be supported for KMS");
     }
 
     #[test]
@@ -525,7 +537,7 @@ mod tests {
         let mgr = KmsKeyManager::new(
             client,
             "arn:aws:kms:us-east-1:123456789012:key/test-key".to_string(),
-            "ES256".to_string(),
+            SigningAlgorithm::ES256,
             "my-kid-42".to_string(),
         );
 
@@ -1135,7 +1147,7 @@ mod tests {
         let mgr = KmsKeyManager::new(
             client,
             "alias/test-signing-key".to_string(),
-            "ES256".to_string(),
+            SigningAlgorithm::ES256,
             "test-kid".to_string(),
         );
 

@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::domain::{
     AuditEventType, AuditOutcome, AuditSeverity, IdentityClaims, Session,
 };
@@ -60,20 +60,25 @@ fn claims_for(signing_alg: &str, raw: HashMap<String, Value>) -> IdentityClaims 
     }
 }
 
-fn make_config() -> AppConfig {
-    AppConfig::default()
+fn base_raw_config() -> RawConfig {
+    toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default config deserializes")
 }
 
-fn config_with(max_assertion_lifetime: &str) -> AppConfig {
-    let mut config = make_config();
-    config.grants.max_assertion_lifetime = max_assertion_lifetime.to_string();
-    config
+fn make_config() -> Config {
+    Config::resolve(base_raw_config()).expect("default config resolves")
+}
+
+fn config_with(max_assertion_lifetime: &str) -> Config {
+    let mut raw = base_raw_config();
+    raw.grants.max_assertion_lifetime = max_assertion_lifetime.to_string();
+    Config::resolve(raw).expect("test config should resolve")
 }
 
 fn make_auditing_service(
     repo: MockRepository,
     provider: MockIdentityProvider,
-    config: AppConfig,
+    config: Config,
 ) -> (AppService, MockAuditLog, MockRepository) {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     let provider_id = provider.provider_id().to_string();
@@ -180,8 +185,9 @@ async fn direct_fixture(
 /// and lands in the store only as its SHA-256 digest under the `nonce:` key.
 #[tokio::test]
 async fn mint_nonce_stores_only_the_digest_key() {
-    let mut config = make_config();
-    config.grants.nonce_ttl = "90s".to_string();
+    let mut raw = base_raw_config();
+    raw.grants.nonce_ttl = "90s".to_string();
+    let config = Config::resolve(raw).expect("test config should resolve");
     let repo = MockRepository::new();
     let (svc, _audit, repo) =
         make_auditing_service(repo, MockIdentityProvider::new(PROVIDER_ID), config);

@@ -40,6 +40,11 @@ pub struct AccessTokenClaims {
     pub aud: String,
     pub iat: u64,
     pub exp: u64,
+    /// Session identifier: the SHA-256 hex refresh-token hash of the session
+    /// this token was minted for. Revocation acts solely on this claim, so a
+    /// payload without it cannot be revoked safely and fails to deserialize
+    /// rather than silently authorizing an account-wide revoke.
+    pub sid: String,
     /// Merged: config template claims + user.claims
     #[serde(flatten)]
     pub custom: HashMap<String, Value>,

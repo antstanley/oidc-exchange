@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 use crate::domain::{AuditEventType, AuditOutcome, AuditSeverity, IdentityClaims};
 use crate::error::{Error, Result};
 use crate::ports::SessionRepository;
-use crate::service::{create_audit_event, parse_duration_secs, AppService};
+use crate::service::{create_audit_event, AppService};
 
 /// Random bytes in one minted nonce: 256 bits, base64url-encoded for the wire.
 pub const NONCE_BYTES: usize = 32;
@@ -505,7 +505,7 @@ const SHA256_HEX_LEN: usize = 64;
 /// Parse `grants.nonce_ttl` into seconds. Kept separate so `mint_nonce` stays
 /// inside the function-size review gate and the config dependency is explicit.
 fn parse_nonce_ttl_secs(service: &AppService) -> Result<u64> {
-    let secs = parse_duration_secs(&service.config.grants.nonce_ttl)?;
+    let secs = service.config.grants.nonce_ttl.as_secs();
     assert!(
         secs <= u64::MAX / 2,
         "nonce TTL must leave headroom for arithmetic"
