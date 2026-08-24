@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
+**Status:** Implemented · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, config/
 
 One TOML file drives the whole service. `AppConfig` (and its nested structs) in
 `crates/core/src/config.rs` deserializes it; every section uses `#[serde(default)]`, so any
@@ -11,9 +11,34 @@ omitted section falls back to its defaults.
 1. `config/default.toml` — compiled-in defaults (committed; see below).
 2. `config/{OIDC_EXCHANGE_ENV}.toml` — overlay when `OIDC_EXCHANGE_ENV` is set (e.g.
    `production`, `sqlite-only`); examples ship several named environments.
-3. `OIDC_EXCHANGE__{section}__{key}` environment variables — structural overrides.
+3. `OIDC_EXCHANGE__{section}__{key}` environment overrides apply on top of the merged TOML
+   and reach every config path, including map-valued sections —
+   `OIDC_EXCHANGE__PROVIDERS__GOOGLE__CLIENT_ID` sets `providers.google.client_id`. A double
+   underscore separates path segments and each segment is lowercased; a single underscore
+   stays inside its segment (`…__MY_IDP__…` targets `providers.my_idp`), so keys whose names
+   themselves contain `__` cannot be addressed from the environment.
 4. `${VAR_NAME}` placeholders anywhere in the merged config are resolved from the environment
-   (used for secrets and per-deployment values).
+   (used for secrets and per-deployment values). A placeholder that names an unset variable is
+   a startup error — a secret never silently degrades to its literal placeholder text. `$${`
+   escapes to a literal `${` and is never resolved.
+
+## Validation at load
+
+After merging and placeholder resolution, `load_config` validates the result and refuses to
+start on failure (`ConfigError`):
+
+- `server.role` must be one of `all` | `exchange` | `admin`.
+- `server.request_timeout`, `token.access_token_ttl`, and `token.refresh_token_ttl` must parse
+  as `<integer><s|m|h|d>` without overflow; the parsed values are reused at request time, which
+  therefore cannot fail.
+- Each `registration.domain_allowlist` entry must be an exact domain (`example.com`) or a
+  `*.`-prefixed wildcard (`*.example.com`). Bare `*` and dotless prefixes (`*example.com`)
+  are rejected.
+- When the internal API will be served (`role` is `admin` or `all` and
+  `internal_api.enabled = true`), `internal_api.shared_secret` must be present and non-empty.
+
+The same validation runs for config supplied as a string through the FFI bindings
+(`bootstrap::parse_config`).
 
 ## Committed default (`config/default.toml`)
 
@@ -47,7 +72,9 @@ manager). A real deployment overlays a key manager, a repository, and at least o
 `host` (`0.0.0.0`), `port` (`8080`), `issuer` (the `iss` claim / discovery issuer, default
 empty), `role` (`all` | `exchange` | `admin`, default `all`), `request_timeout` (humantime
 duration string like the token TTLs, default `"30s"`) — the per-request timeout the
-server's timeout layer enforces.
+server's timeout layer enforces — and `base_path` (optional, default unset — a leading prefix
+such as `/prod` stripped from incoming request paths before routing; honored in both Lambda and
+server mode, though it exists chiefly for API Gateway stages and mount prefixes).
 
 ### `[registration]`
 `mode` (`open` | `existing_users_only`, default `open`), optional `domain_allowlist`
@@ -60,7 +87,9 @@ server's timeout layer enforces.
 
 ### `[audit]`
 `adapter` (`noop` | `stdout` | `sqs`, default `noop`), `blocking_threshold` (syslog severity
-name, default `warning`), optional `[audit.sqs] { queue_url, region }`.
+name, default `warning`), `emit_threshold` (syslog severity name, default `info`)
+— events with a severity strictly less severe than the threshold are not emitted at all,
+independently of the blocking decision — optional `[audit.sqs] { queue_url, region }`.
 
 ### `[key_manager]`
 `adapter` (`local` | `kms`), with `[key_manager.local] { private_key_path, algorithm, kid }`
@@ -88,7 +117,10 @@ retries? }`. The `secret` is redacted in `Debug`.
 `service_name`, `sample_rate` (default 1.0), `protocol`.
 
 ### `[internal_api]`
-`enabled` (false), `auth_method` (`shared_secret`), `shared_secret` (redacted in `Debug`).
+`enabled` (false — internal routes are not mounted unless true, regardless of `server.role`;
+a `role = "admin"` instance with the flag off serves only `/health`), `auth_method`
+(`shared_secret`), `shared_secret` (redacted in `Debug`; must be non-empty when the internal
+API is served).
 
 ### `[providers.<name>]`
 `adapter` (`oidc` | `apple`) plus adapter-specific fields captured via a flattened
@@ -101,7 +133,7 @@ retries? }`. The `secret` is redacted in `Debug`.
 | `server.host` / `port` / `role` / `request_timeout` | `0.0.0.0` / `8080` / `all` / `"30s"` |
 | `registration.mode` | `open` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
-| `audit.adapter` / `blocking_threshold` | `noop` / `warning` |
+| `audit.adapter` / `blocking_threshold` / `emit_threshold` | `noop` / `warning` / `info` |
 | `telemetry.enabled` / `exporter` / `sample_rate` | `false` / `none` / `1.0` |
 | `user_sync.enabled`, `internal_api.enabled` | `false`, `false` |
 

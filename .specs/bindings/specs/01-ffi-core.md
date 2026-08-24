@@ -1,6 +1,6 @@
 # FFI Core (`crates/ffi`)
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/ffi
+**Status:** Implemented · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Scope:** crates/ffi
 
 The shared Rust layer the language bindings consume. It wraps the server's axum router behind
 a small synchronous interface and owns the tokio runtime so a non-async host can call it.
@@ -8,7 +8,11 @@ a small synchronous interface and owns the tokio runtime so a non-async host can
 ## Responsibilities
 
 - Build an `AppService` and axum `Router` from a TOML config (re-using
-  `crates/server`'s bootstrap), and own the tokio `Runtime` that drives them.
+  `crates/server`'s bootstrap), and own the tokio `Runtime` that drives them. Config supplied
+  through `new` (inline string) or `from_file` passes the same load-time validation as the
+  server's `load_config` (role, TTLs, allowlist, internal-API secret —
+  [06-configuration.md](../../service/specs/06-configuration.md) → Validation at load);
+  invalid config is rejected as an `FfiError` at construction, never at request time.
 - Convert a primitive HTTP request into an axum request, route it, and convert the response
   back to primitives.
 - Map every error into a stable `FfiError`; never let a panic cross the FFI boundary.

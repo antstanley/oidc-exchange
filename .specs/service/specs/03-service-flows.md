@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
@@ -40,6 +40,14 @@
 7. **Respond** — `TokenResponse { access_token, refresh_token: Some(opaque), token_type:
    "Bearer", expires_in }`.
 
+`ExchangeRequest` carries the client context (`ip_address`, `user_agent`, `device_id`)
+extracted by the server's audit-context middleware; the stored session records all three,
+and every audit event in the flow records the `ip_address` and `user_agent` (the
+`AuditEvent` shape carries no `device_id`). A suspended user audits `UserSuspended` (warning,
+failure); the registration-policy denials audit `RegistrationDenied` (warning, failure); a
+created user audits `UserCreated` (notice, success); a successful exchange audits
+`TokenExchange` (info, success) after the token response is assembled.
+
 ## Token refresh (`refresh.rs`)
 
 `POST /token` with `grant_type=refresh_token`.
@@ -51,6 +59,12 @@
 5. `build_access_token(user)`.
 6. Respond with `refresh_token: None` — refresh tokens are reusable until expiry; refreshing
    does not rotate them.
+
+`RefreshRequest` carries the same client context; audit events in the flow record its
+`ip_address` and `user_agent`. A suspended user audits `UserSuspended`; a successful refresh
+audits `TokenRefresh` (info, success). Unknown or expired tokens return `InvalidToken` and
+audit `ValidationFailed` (debug, failure) — an abuse-detection signal that the default
+`[audit] emit_threshold` of `info` suppresses; lowering the threshold to `debug` enables it.
 
 ## Revocation (`revoke.rs`)
 
@@ -67,6 +81,12 @@ failures propagate).
 - hint `refresh_token`, absent, or unknown → SHA-256 hex the token and
   `revoke_session(hash)`. A missing session is `Ok` (idempotent delete, 200); a store
   error propagates, and the server maps it to 503.
+
+`RevokeRequest` carries the same client context; audit events in the flow record its
+`ip_address` and `user_agent`. The access-token path audits `AllSessionsRevoked` when
+signature verification succeeds; the refresh-token path audits `TokenRevocation` when a
+session was actually revoked. Failed verification and unknown tokens emit nothing, matching
+RFC 7009's silence.
 
 ## Build access token (`service/mod.rs::build_access_token`)
 
@@ -121,14 +141,21 @@ via `tracing` and never fail the admin call.
 |---|---|
 | `admin_create_user` | `create_user`, then `notify_user_created` |
 | `admin_get_user` | `get_user_by_id` |
-| `admin_update_user` | `update_user`, diff changed fields, `notify_user_updated` |
-| `admin_delete_user` | patch `status=Deleted`, `revoke_all_user_sessions`, `notify_user_deleted` |
-| `admin_get_claims` | return `user.claims` (missing user → `InvalidRequest`) |
+| `admin_update_user` | load the user (missing → `NotFound`), validate any status change against the [user lifecycle](01-domain-model.md) (`Deleted` is strictly terminal — any status patch on a deleted user, including `Deleted → Deleted`, is rejected; a patch to the current status is otherwise an accepted no-op; invalid transition → `InvalidRequest`), `update_user`, revoke all sessions when the patch changed the status to `Suspended` or `Deleted`, diff changed fields, `notify_user_updated` |
+| `admin_delete_user` | patch `status=Deleted` via the same validated path (valid from `Active` or `Suspended`), `revoke_all_user_sessions`, `notify_user_deleted`; unknown id → `NotFound` |
+| `admin_get_claims` | return `user.claims` (missing user → `NotFound`; `admin_set_claims` / `admin_merge_claims` / `admin_clear_claims` return the same on an unknown id) |
 | `admin_set_claims` | replace the whole claims map |
 | `admin_merge_claims` | merge new keys over existing (new wins) |
 | `admin_clear_claims` | set claims to empty |
 | `admin_stats` | `count_by_status` + `count_active_sessions` → `AdminStats` |
 | `admin_list_users` | `list_users(offset, limit)` |
+
+Admin mutations are audited: `admin_create_user` → `UserCreated`, `admin_update_user` →
+`UserUpdated` (and `UserSuspended` when the patch sets `status = Suspended`),
+`admin_delete_user` → `UserDeleted`, and the claims mutations → `UserUpdated` with the
+operation in `detail`. Read-only operations (get, list, stats, get-claims) are not audited.
+Audit failures follow `emit_audit`'s blocking rules, unlike best-effort user sync. Admin
+operations carry no client `ip_address`/`user_agent` context.
 
 ## Assumptions and open questions
 
@@ -153,5 +180,4 @@ via `tracing` and never fail the admin call.
 
 ### Open questions
 
-- Suspended-user exchange is rejected, but whether an audit `Unauthorized` vs `UserSuspended`
-  event type is emitted in every rejection branch is worth confirming against the handlers.
+- None.
