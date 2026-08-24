@@ -756,13 +756,16 @@ mod validate_access_token_tests {
         async fn take_single_use(&self, _: &str) -> Result<bool> {
             unreachable!("validate_access_token must not burn single-use markers")
         }
-        async fn get_session_by_refresh_token(&self, _: &str) -> Result<Option<Session>> {
+        async fn get_session_by_refresh_token(
+            &self,
+            _: &crate::secret::Secret<String>,
+        ) -> Result<Option<Session>> {
             unreachable!(
                 "validate_access_token must not consult the session store; \
                  signature and claims alone decide validity"
             )
         }
-        async fn revoke_session(&self, _: &str) -> Result<()> {
+        async fn revoke_session(&self, _: &crate::secret::Secret<String>) -> Result<()> {
             unreachable!("validate_access_token must never mutate session state")
         }
         async fn revoke_all_user_sessions(&self, _: &str) -> Result<()> {

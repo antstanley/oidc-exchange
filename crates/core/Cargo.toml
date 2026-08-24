@@ -16,6 +16,9 @@ sha2.workspace = true
 rand.workspace = true
 hex.workspace = true
 toml.workspace = true
+# Constant-time equality for `Secret<String>`; the server crate uses the same crate for
+# its bearer-check comparison.
+subtle = "2"
 ipnet.workspace = true
 
 [dev-dependencies]
@@ -27,3 +30,7 @@ sha2.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+# Task 07 structural proof: UI compile-fail cases asserting that `Secret<T>` refuses
+# every formatting and tracing capture path; expected rustc diagnostics are committed
+# as `.stderr` fixtures beside each case (re-bless with TRYBUILD=overwrite).
+trybuild = "1"

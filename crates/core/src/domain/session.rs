@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::secret::Secret;
+
 /// Prefix every session-family identifier carries (`fam_` + lowercase ULID).
 /// See `is_valid_family_id` for the exact accepted form.
 pub const FAMILY_ID_PREFIX: &str = "fam_";
@@ -51,11 +53,13 @@ pub fn new_family_id() -> String {
 /// response to the client; only the hash is stored. `family_id` and
 /// `created_at` identify the sign-in and survive rotation; `expires_at` is the
 /// family's absolute deadline and is copied unchanged into every replacement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub user_id: String,
-    /// SHA-256 hex of the opaque token; never the raw token itself.
-    pub refresh_token_hash: String,
+    /// SHA-256 hex of the opaque token; never the raw token itself. Wrapped
+    /// so the session lookup key cannot reach a formatter or span field;
+    /// serde transparency keeps stored records byte-identical.
+    pub refresh_token_hash: Secret<String>,
     /// `fam_<lowercase ULID>`; stable across every rotation of one sign-in.
     ///
     /// `#[serde(default)]` mirrors the SQL adapters' nullable `family_id`
@@ -93,7 +97,7 @@ pub struct Session {
 /// generation it names, and it expires at
 /// `min(retired_at + refresh_reuse_retention, family expires_at)` — after that
 /// a presented generation resolves as unknown rather than as reuse.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetiredRefreshToken {
     /// SHA-256 hex of the retired generation.
     pub refresh_token_hash: String,
@@ -231,7 +235,7 @@ mod tests {
     fn sample_session(family_id: &str, hash: &str) -> Session {
         Session {
             user_id: "usr_test".to_string(),
-            refresh_token_hash: hash.to_string(),
+            refresh_token_hash: Secret::new(hash.to_string()),
             family_id: family_id.to_string(),
             generation: 0,
             provider: "mock".to_string(),
@@ -262,7 +266,7 @@ mod tests {
 
         let parsed: Session =
             serde_json::from_value(legacy_json).expect("legacy row must deserialize");
-        assert_eq!(parsed.refresh_token_hash, live.refresh_token_hash);
+        assert!(parsed.refresh_token_hash == live.refresh_token_hash);
         assert_eq!(
             parsed.family_id, "",
             "missing family must land on the empty-string sentinel"
@@ -314,5 +318,129 @@ mod tests {
         // A zero-width window would retire and forget a generation in the
         // same instant, silently disarming reuse detection.
         RetiredRefreshToken::retention_deadline(now, 0, now + chrono::Duration::hours(1));
+    }
+}
+
+impl std::fmt::Debug for RetiredRefreshToken {
+    /// Hand-written for the same reason as [`Session`]'s: the retired and
+    /// successor hashes are session lookup keys and render as `<redacted>`
+    /// whoever formats the record.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetiredRefreshToken")
+            .field("refresh_token_hash", &"<redacted>")
+            .field("family_id", &self.family_id)
+            .field("user_id", &self.user_id)
+            .field("successor_hash", &"<redacted>")
+            .field("retired_at", &self.retired_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for Session {
+    /// Hand-written so the session lookup key renders as `<redacted>` no matter who
+    /// formats the struct: `refresh_token_hash` is a `Secret`, which has no `Debug` impl
+    /// of its own to lean on, and `derive(Debug)` here would not compile anyway. The
+    /// remaining fields pass through — they are identifiers and client-asserted
+    /// provenance, permitted in diagnostics (though never as span *values*; see the
+    /// adapters' `skip(...)` instrumentation).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("user_id", &self.user_id)
+            .field("refresh_token_hash", &"<redacted>")
+            .field("family_id", &self.family_id)
+            .field("generation", &self.generation)
+            .field("rotated_at", &self.rotated_at)
+            .field("provider", &self.provider)
+            .field("expires_at", &self.expires_at)
+            .field("device_id", &self.device_id)
+            .field("user_agent", &self.user_agent)
+            .field("ip_address", &self.ip_address)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    fn sample_session() -> Session {
+        let now = Utc::now();
+        Session {
+            user_id: "usr_debug_test".to_string(),
+            refresh_token_hash: Secret::new(
+                "deadbeefcafe0123456789abcdef7890deadbeefcafe0123456789abcdef7890".to_string(),
+            ),
+            family_id: new_family_id(),
+            generation: 0,
+            rotated_at: None,
+            provider: "google".to_string(),
+            expires_at: now + chrono::Duration::hours(1),
+            device_id: Some("device-1".to_string()),
+            user_agent: Some("ua/1".to_string()),
+            ip_address: Some("192.0.2.9".to_string()),
+            created_at: now,
+        }
+    }
+
+    const HASH_SENTINEL: &str = "deadbeefcafe0123456789abcdef7890deadbeefcafe0123456789abcdef7890";
+
+    /// The hand-written Debug redacts exactly the hash and nothing else.
+    #[test]
+    fn debug_output_redacts_only_the_refresh_token_hash() {
+        let rendered = format!("{:?}", sample_session());
+
+        assert!(
+            rendered.contains("<redacted>"),
+            "debug output must show the redaction marker"
+        );
+        assert!(
+            !rendered.contains(HASH_SENTINEL),
+            "debug output must never contain the refresh-token hash"
+        );
+        // Non-sensitive fields stay observable for operators.
+        assert!(rendered.contains("usr_debug_test"));
+        assert!(rendered.contains("google"));
+        assert!(rendered.contains("device-1"));
+    }
+
+    /// serde transparency: the stored/JSON shape is byte-identical to a plain-string
+    /// session, so every store keeps writing and reading the same 64-hex string with no
+    /// migration.
+    #[test]
+    fn json_round_trip_is_string_identical_to_a_plain_string_shape() {
+        let session = sample_session();
+
+        let serialized = serde_json::to_string(&session).expect("serialize session");
+        assert!(
+            !serialized.contains('<'),
+            "serialization must produce plain JSON strings only",
+        );
+
+        let expected = serde_json::json!({
+            "user_id": session.user_id,
+            "refresh_token_hash": HASH_SENTINEL,
+            "provider": session.provider,
+            "expires_at": session.expires_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            "device_id": session.device_id,
+            "user_agent": session.user_agent,
+            "ip_address": session.ip_address,
+            "created_at": session.created_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+        })
+        .to_string();
+        // Compare structurally rather than lexically: field order may differ, values must
+        // not. The critical property under test is that refresh_token_hash serializes as
+        // the bare hex string, which the equality below pins down.
+        let left: serde_json::Value =
+            serde_json::from_str(&serialized).expect("serialized session is valid JSON");
+        let right: serde_json::Value =
+            serde_json::from_str(&expected).expect("expected shape is valid JSON");
+        assert_eq!(left["refresh_token_hash"], right["refresh_token_hash"]);
+
+        let back: Session = serde_json::from_str(&serialized).expect("deserialize session");
+        assert_eq!(back.refresh_token_hash.expose(), &HASH_SENTINEL.to_string());
+        assert_eq!(back.user_id, session.user_id);
+        assert_eq!(back.device_id, session.device_id);
     }
 }

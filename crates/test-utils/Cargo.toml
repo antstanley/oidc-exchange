@@ -15,3 +15,8 @@ base64.workspace = true
 sha2.workspace = true
 hex.workspace = true
 ed25519-dalek = { version = "3.0.0-pre.6", features = ["rand_core"] }
+# The shared leak-corpus capture harness renders telemetry through a fmt layer whose
+# writer and span-lifecycle events the tests control. `tracing` is a direct dependency
+# because the layer signatures name `tracing`'s span/event/visit types explicitly.
+tracing.workspace = true
+tracing-subscriber = "0.3"

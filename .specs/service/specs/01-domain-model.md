@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -57,7 +57,7 @@ private claims injected into the access token, managed through the internal API.
 ```rust
 struct Session {
     user_id: String,
-    refresh_token_hash: String,       // SHA-256 hex; never the raw token
+    refresh_token_hash: Secret<String>,   // SHA-256 hex; never the raw token
     family_id: String,                // "fam_…"; stable across every rotation
     generation: u32,                  // 0 at exchange, +1 per rotation
     provider: String,
@@ -109,9 +109,15 @@ struct SingleUseRecord {
 }
 ```
 
-A presence-only record: the key is all the information there is. Nonce values and
-assertions are stored only as SHA-256 hex digests, as refresh tokens are. Records are
-removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_sessions`.
+The raw refresh token exists only in memory during issuance and in the response to the
+client. Only the hash is stored, and it is stored as `Secret<String>` — a newtype that
+implements neither `Debug` nor `Display`, so no formatter, tracing macro, or `#[instrument]`
+argument capture can render it. `Session` therefore cannot derive `Debug`; it hand-implements
+one that prints `refresh_token_hash: "<redacted>"` and passes the remaining fields through.
+The serialized form is unchanged: `Secret<T>` is transparent to `serde`, so every store writes
+and reads the same 64-character hex string it did before. `device_id`, `user_agent`, and
+`ip_address` are still populated from the request context: the audit-context middleware
+captures them at the HTTP edge and the exchange flow threads them into the stored session.
 
 ### Token types (`domain/token.rs`)
 
@@ -193,9 +199,9 @@ retains the address value, when available, and its source.
 ### OidcProviderConfig (`domain/provider.rs`)
 
 The normalized config the standard OIDC adapter consumes: `provider_id`, `issuer`,
-`client_id`, optional `client_secret`, optional `jwks_uri` / `token_endpoint` /
-`revocation_endpoint` (discovered from the issuer if absent), `scopes`, and
-`additional_params`. See [05-provider-system.md](05-provider-system.md).
+`client_id`, optional `client_secret` (a `Secret<String>` — unprintable by type), optional
+`jwks_uri` / `token_endpoint` / `revocation_endpoint` (discovered from the issuer if
+absent), `scopes`, and `additional_params`. See [05-provider-system.md](05-provider-system.md).
 
 ### AdminStats (`service/user_admin.rs`)
 

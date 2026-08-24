@@ -6,6 +6,7 @@ use crate::domain::{NewUser, RefreshResolution, Session, User, UserPatch};
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
+use crate::secret::Secret;
 
 #[async_trait]
 pub trait UserRepository: Send + Sync {
@@ -60,7 +61,14 @@ pub trait SessionRepository: Send + Sync {
     /// Return the live session stored under `token_hash`, if any. Retirement
     /// records are not sessions: a retired hash yields `None` here. Remains
     /// for `/revoke`, which needs only liveness.
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>>;
+    /// The token-hash parameter is `&Secret<String>` rather than `&str` so an
+    /// adapter that leaves it out of its span `skip(...)` fails to compile
+    /// instead of publishing the session lookup key as a span field; the raw
+    /// digest is reached through `expose()` only where a store key is built.
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>>;
 
     /// Classify `token_hash` against the family state — the live generations
     /// and the retained [`RetiredRefreshToken`] records. Strongly consistent
@@ -90,7 +98,7 @@ pub trait SessionRepository: Send + Sync {
     /// Delete one live session by hash. Idempotent: deleting an unknown or
     /// already-removed hash succeeds without effect. Does not touch retirement
     /// records.
-    async fn revoke_session(&self, token_hash: &str) -> Result<()>;
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()>;
 
     /// Remove the family's live generation and every retained retirement
     /// record for `family_id`, returning the total number removed (SR5).

@@ -136,12 +136,13 @@ impl AppService {
         client_addr: ClientAddr,
         user_agent: Option<String>,
     ) -> Result<()> {
-        let token_hash = hex::encode(Sha256::digest(request.token.as_bytes()));
+        let token_hash =
+            crate::secret::Secret::new(hex::encode(Sha256::digest(request.token.as_bytes())));
         // Postcondition of SHA-256 hex-encoding: always exactly 64 hex
         // characters. Catching a malformed hash here — before it reaches the
         // store — turns a silent lookup miss into a loud programmer error.
         assert_eq!(
-            token_hash.len(),
+            token_hash.expose().len(),
             TOKEN_HASH_HEX_LEN,
             "revoke: SHA-256 hex digest must be {TOKEN_HASH_HEX_LEN} characters"
         );
@@ -164,8 +165,8 @@ impl AppService {
                     !session.user_id.is_empty(),
                     "revoke: stored session must have a non-empty user_id"
                 );
-                assert_eq!(
-                    session.refresh_token_hash, token_hash,
+                assert!(
+                    session.refresh_token_hash == token_hash,
                     "revoke: hash-keyed lookup must return the matching session"
                 );
                 // A genuine backend failure here propagates so the server maps

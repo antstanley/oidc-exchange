@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -129,8 +129,11 @@ service retains its configured limiter separately for provider and subject enfor
 
 Applied to the router, outermost first:
 
-1. **Request ID** (`middleware/request_id.rs`) — reuses `X-Request-Id` or generates a UUIDv4,
-   opens a request span, and echoes the response header.
+1. **Request ID** (`middleware/request_id.rs`) — reuses an inbound `X-Request-Id` only when
+   it is a plausible correlation identifier: non-empty, at most 128 bytes, and drawn from
+   `[A-Za-z0-9_-]`. Anything else is discarded and a fresh UUIDv4 generated instead; the
+   request is never failed over a malformed correlation header, and the rejected value is
+   never logged. Opens a request span carrying `request_id` and echoes the response header.
 2. **Request timeout** — bounds the rest of the stack and handler at
    `server.request_timeout` (default `30s`) and returns `408`.
 3. **Audit context / client address** (`middleware/audit_context.rs`) — resolves `ClientAddr`.
@@ -244,12 +247,28 @@ beyond RFC 6749 §5.2 (`not_found`) use the same shape:
 | `ProviderTimeout` | 504 | `server_error` |
 | `StoreError`, `KeyError`, `AuditError`, `SyncError`, `ConfigError` | 500 | `server_error` |
 
+The status and `error` code are as tabulated; the `error_description` is **always**
+`Error::client_description()` — a stable `&'static str` per variant, drawn from a small fixed
+set, that never embeds caller input, library error text, provider key state, or cache
+internals. The internal `reason`/`detail` an adapter composed is never published.
+(`UnsupportedGrantType`, a route-level error with no domain counterpart, keeps its fixed
+static description — generic by construction, so the same rule holds.)
+
+Every mapped domain error — not only the `server_error` class — logs its full internal
+`Display` via `tracing::error!` (5xx) or `tracing::warn!` (4xx) inside the request span, so
+the log carries the request id and the operator loses no diagnostic power. A production
+assertion checks that no rendered description ever equals the full `Display`, and a debug
+assertion checks that it equals `err.client_description()` for every arm, generalising the
+guard that previously protected only `server_error`.
+
+The consequence for a caller is that an unknown `kid`, a bad signature, an expired token,
+and a wrong audience are indistinguishable at `/token`: each is
+`400 {"error":"invalid_grant","error_description":"the provided grant could not be validated"}`.
+RFC 6749 §5.2 makes `error_description` optional and developer-facing, so genericising it
+breaks no conformance.
 A `429` carries `Retry-After` in seconds for the remainder of the current fixed window.
 `slow_down` is RFC 8628 §3.5's token-endpoint rate-limit code.
 
-`server_error` responses (500/502/504) log the internal detail via `tracing::error!` —
-inside the request span, so the log carries the request id — and return a generic message;
-infrastructure detail is never leaked to the client.
 
 ## Assumptions and open questions
 

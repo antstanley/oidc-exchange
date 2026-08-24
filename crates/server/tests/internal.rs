@@ -768,7 +768,7 @@ async fn cleanup_endpoint_sweeps_expired_rows_and_reports_the_combined_count() {
     sessions.store_refresh_token(&gen0).await.unwrap();
     assert!(
         sessions
-            .rotate_refresh_token(&gen0.refresh_token_hash, &gen1)
+            .rotate_refresh_token(gen0.refresh_token_hash.expose(), &gen1)
             .await
             .unwrap(),
         "fixture rotation wins its CAS"

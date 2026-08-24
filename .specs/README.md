@@ -89,6 +89,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-bind_grant_type_at_token_endpoint/plan.md](plans/2026-08-05-bind_grant_type_at_token_endpoint/plan.md) | Done | [changes/2026-08-05-bind_grant_type_at_token_endpoint.md](changes/2026-08-05-bind_grant_type_at_token_endpoint.md) |
 | [plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md](plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md) | Done | [changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md) |
 | [plans/2026-08-05-audit_and_throttle_authentication_failures/plan.md](plans/2026-08-05-audit_and_throttle_authentication_failures/plan.md) | Draft | [changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md](changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md) |
+| [plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md](plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md) | Review | [changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md](changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md) |
 
 ## Conventions
 

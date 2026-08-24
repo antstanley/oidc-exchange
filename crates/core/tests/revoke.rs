@@ -141,7 +141,7 @@ async fn revoke_refresh_token_removes_session() {
 
     // Exchange to get tokens
     let response = do_exchange(&svc).await;
-    let refresh_token = response.refresh_token.expect("should have refresh token");
+    let refresh_token = response.refresh_token.expect("should have refresh token").into_inner();
 
     // Verify session exists
     let sessions = repo.get_all_sessions().await;
@@ -166,7 +166,7 @@ async fn revoke_refresh_token_removes_session() {
     // Also verify by hash lookup
     let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
     let session = repo
-        .get_session_by_refresh_token(&token_hash)
+        .get_session_by_refresh_token(&oidc_exchange_core::Secret::new(token_hash.clone()))
         .await
         .expect("lookup should not error");
     assert!(
@@ -193,13 +193,14 @@ async fn revoke_access_token_revokes_its_family_live_and_retired() {
         .expect("exchange issues a token");
     let _gen1 = svc
         .refresh(RefreshRequest {
-            refresh_token: presented1.clone(),
+            refresh_token: presented1.expose().clone(),
             ..Default::default()
         })
         .await
         .expect("rotation should succeed")
         .refresh_token
-        .expect("rotation issues a replacement");
+        .expect("rotation issues a replacement")
+        .into_inner();
     assert_eq!(repo.get_all_sessions().await.len(), 2);
     assert_eq!(repo.get_all_retired_tokens().await.len(), 1);
 
@@ -236,7 +237,7 @@ async fn revoke_access_token_revokes_its_family_live_and_retired() {
         repo.get_all_retired_tokens().await.is_empty(),
         "revocation must remove the family's retirement records too"
     );
-    let retired_hash = hex::encode(Sha256::digest(presented1.as_bytes()));
+    let retired_hash = hex::encode(Sha256::digest(presented1.expose().as_bytes()));
     let resolution = repo
         .resolve_refresh_token(&retired_hash)
         .await
@@ -251,7 +252,7 @@ async fn revoke_access_token_revokes_its_family_live_and_retired() {
 
     // The subject's other family still redeems: no user-wide revocation.
     svc.refresh(RefreshRequest {
-        refresh_token: response2.refresh_token.expect("sibling exchange token"),
+        refresh_token: response2.refresh_token.expect("sibling exchange token").into_inner(),
         ..Default::default()
     })
     .await
@@ -309,7 +310,7 @@ async fn revoke_default_hint_treats_as_refresh_token() {
 
     // Exchange to get tokens
     let response = do_exchange(&svc).await;
-    let refresh_token = response.refresh_token.expect("should have refresh token");
+    let refresh_token = response.refresh_token.expect("should have refresh token").into_inner();
 
     // Verify session exists
     let sessions = repo.get_all_sessions().await;
@@ -426,7 +427,8 @@ async fn revoke_enforce_audit_failure_is_indistinguishable_for_existing_and_unkn
     let existing_token = do_exchange(&svc)
         .await
         .refresh_token
-        .expect("exchange returns refresh token");
+        .expect("exchange returns refresh token")
+        .into_inner();
     audit_clone.set_fail_mode(true).await;
 
     let existing = svc
@@ -521,7 +523,7 @@ async fn revoke_valid_refresh_token_emits_token_revocation() {
     let svc = make_service_with_audit(repo.clone(), provider, audit);
 
     let response = do_exchange(&svc).await;
-    let refresh_token = response.refresh_token.expect("should have refresh token");
+    let refresh_token = response.refresh_token.expect("should have refresh token").into_inner();
     let user_id = repo.get_all_sessions().await[0].user_id.clone();
     // `do_exchange` itself emits UserCreated/TokenExchange events; capture
     // the baseline so the assertion below is scoped to what `revoke` adds.
@@ -932,7 +934,8 @@ async fn sid_is_invariant_across_rotation() {
         .refresh(RefreshRequest {
             refresh_token: exchange_response
                 .refresh_token
-                .expect("exchange issues a token"),
+                .expect("exchange issues a token")
+                .into_inner(),
             ..Default::default()
         })
         .await

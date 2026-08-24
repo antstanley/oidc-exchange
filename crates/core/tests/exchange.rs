@@ -401,9 +401,13 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     let sessions = repo.get_all_sessions().await;
     assert_eq!(sessions.len(), 1);
 
-    let refresh_token = response.refresh_token.unwrap();
+    let refresh_token = response.refresh_token.unwrap().into_inner();
     let expected_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
-    assert_eq!(sessions[0].refresh_token_hash, expected_hash);
+    assert_eq!(
+        sessions[0].refresh_token_hash.expose(),
+        &expected_hash,
+        "the stored digest must equal the SHA-256 of the minted refresh token"
+    );
     assert_eq!(sessions[0].user_id, users[0].id);
     assert_eq!(sessions[0].provider, "mock");
 
@@ -499,19 +503,21 @@ async fn exchange_existing_user_does_not_create_new() {
         resp1
             .refresh_token
             .expect("first exchange should return a refresh token")
+            .expose()
             .as_bytes(),
     ));
     let hash2 = hex::encode(Sha256::digest(
         resp2
             .refresh_token
             .expect("second exchange should return a refresh token")
+            .expose()
             .as_bytes(),
     ));
     let sessions = repo.get_all_sessions().await;
     let family_for = |hash: &str| {
         sessions
             .iter()
-            .find(|s| s.refresh_token_hash == hash)
+            .find(|s| s.refresh_token_hash.expose() == hash)
             .expect("session stored for hash")
             .family_id
             .clone()

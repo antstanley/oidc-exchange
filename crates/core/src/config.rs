@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::domain::AuditSeverity;
 use crate::error::Error;
+use crate::secret::Secret;
 
 /// Top-level serde boundary for configuration, matching the TOML structure.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -100,7 +101,7 @@ impl Config {
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(|s| s.as_ref())
+                .map(|s| s.expose().as_str())
                 .unwrap_or("")
                 .is_empty()
         {
@@ -996,7 +997,9 @@ pub struct RawWebhookConfig {
 #[derive(Clone)]
 pub struct WebhookConfig {
     pub url: HttpsUrl,
-    pub secret: NonEmptyString,
+    /// HMAC key for outbound webhook signatures: validated non-empty at load
+    /// and wrapped so the configured value cannot be formatted.
+    pub secret: Secret<String>,
     pub timeout: Option<std::time::Duration>,
     pub retries: Option<u32>,
 }
@@ -1005,7 +1008,11 @@ impl WebhookConfig {
     fn resolve(raw: RawWebhookConfig) -> Result<Self, Error> {
         Ok(Self {
             url: HttpsUrl::parse_field("user_sync.webhook.url", raw.url)?,
-            secret: NonEmptyString::parse_field("user_sync.webhook.secret", raw.secret)?,
+            secret: Secret::new(
+                NonEmptyString::parse_field("user_sync.webhook.secret", raw.secret)?
+                    .as_str()
+                    .to_string(),
+            ),
             timeout: raw
                 .timeout
                 .map(|timeout| parse_duration_field("user_sync.webhook.timeout", &timeout))
@@ -1097,7 +1104,9 @@ pub struct RawInternalApiConfig {
 pub struct InternalApiConfig {
     pub enabled: bool,
     pub auth_method: Option<InternalAuthMethod>,
-    pub shared_secret: Option<NonEmptyString>,
+    /// Bearer secret for the internal API: validated non-empty at load and
+    /// wrapped so the configured value cannot be formatted.
+    pub shared_secret: Option<Secret<String>>,
 }
 
 impl std::fmt::Debug for InternalApiConfig {
@@ -1127,6 +1136,7 @@ impl InternalApiConfig {
                 .shared_secret
                 .map(|shared_secret| {
                     NonEmptyString::parse_field("internal_api.shared_secret", shared_secret)
+                        .map(|secret| Secret::new(secret.as_str().to_string()))
                 })
                 .transpose()?,
         })

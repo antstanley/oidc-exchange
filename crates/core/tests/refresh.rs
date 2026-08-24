@@ -126,7 +126,10 @@ async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService
         .exchange(request)
         .await
         .expect("exchange should succeed");
-    response.refresh_token.expect("should have a refresh token")
+    response
+        .refresh_token
+        .expect("should have a refresh token")
+        .into_inner()
 }
 
 #[tokio::test]
@@ -150,9 +153,10 @@ async fn refresh_happy_path_returns_new_access_token() {
     assert_eq!(response.expires_in, 900); // 15m = 900s
     let replacement = response
         .refresh_token
-        .expect("rotation must return a replacement refresh token");
-    assert_ne!(
-        replacement, refresh_token,
+        .expect("rotation must return a replacement refresh token")
+        .into_inner();
+    assert!(
+        replacement != refresh_token,
         "the replacement must be a fresh opaque token, not the presented one"
     );
     assert!(!response.access_token.is_empty());
@@ -208,7 +212,7 @@ async fn refresh_happy_path_returns_new_access_token() {
     // is the family id, which rotation never moves, so revocation by access
     // token keeps naming this credential chain.
     let stored = repo
-        .get_session_by_refresh_token(&replacement_hash)
+        .get_session_by_refresh_token(&oidc_exchange_core::secret::Secret::new(replacement_hash.clone()))
         .await
         .expect("lookup should not error")
         .expect("the replacement generation must be live after a refresh");
@@ -232,11 +236,11 @@ async fn refresh_expired_token_returns_invalid_token() {
     let sessions = repo.get_all_sessions().await;
     let original_session = sessions
         .iter()
-        .find(|s| s.refresh_token_hash == token_hash)
+        .find(|s| s.refresh_token_hash.expose() == &token_hash)
         .expect("session should exist");
 
     // Revoke the original and store an expired copy
-    repo.revoke_session(&token_hash)
+    repo.revoke_session(&oidc_exchange_core::Secret::new(token_hash.clone()))
         .await
         .expect("revoke should succeed");
 
@@ -434,11 +438,11 @@ async fn refresh_expired_token_under_debug_threshold_emits_validation_failed_wit
     let sessions = repo.get_all_sessions().await;
     let original_session = sessions
         .iter()
-        .find(|s| s.refresh_token_hash == token_hash)
+        .find(|s| s.refresh_token_hash.expose() == &token_hash)
         .expect("session should exist");
     let user_id = original_session.user_id.clone();
 
-    repo.revoke_session(&token_hash)
+    repo.revoke_session(&oidc_exchange_core::Secret::new(token_hash.clone()))
         .await
         .expect("revoke should succeed");
     let expired_session = Session {
@@ -582,6 +586,11 @@ fn hash_of(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+/// Hash a wrapped plaintext refresh token the way the service does.
+fn hash_of_secret(token: &oidc_exchange_core::secret::Secret<String>) -> String {
+    hash_of(token.expose())
+}
+
 /// Decode an access token JWT's payload into typed claims.
 fn decode_claims(access_token: &str) -> AccessTokenClaims {
     let parts: Vec<&str> = access_token.split('.').collect();
@@ -622,14 +631,14 @@ async fn rotation_replaces_generation_and_inherits_family_metadata() {
     // rotated_at set; everything identifying the sign-in inherited unchanged
     // — above all the absolute expires_at (the regression most likely to
     // arrive with any rotation fix).
-    let replacement_hash = hash_of(
+    let replacement_hash = hash_of_secret(
         response
             .refresh_token
             .as_ref()
             .expect("rotation returns a replacement"),
-    );
-    assert_ne!(
-        replacement_hash, original.refresh_token_hash,
+        );
+    assert!(
+        replacement_hash != *original.refresh_token_hash.expose(),
         "replacement must be a new generation"
     );
 
@@ -657,7 +666,7 @@ async fn rotation_replaces_generation_and_inherits_family_metadata() {
         .expect("classify")
     {
         RefreshResolution::Superseded { live, .. } => {
-            assert_eq!(live.refresh_token_hash, replacement_hash)
+            assert!(*live.refresh_token_hash.expose() == replacement_hash)
         }
         other => panic!("presented generation must be Superseded, got {other:?}"),
     }
@@ -684,7 +693,8 @@ async fn superseded_within_grace_rotates_forward_exactly_once() {
         .expect("first rotation");
     let gen1_token = gen1_response
         .refresh_token
-        .expect("first rotation issues gen 1");
+        .expect("first rotation issues gen 1")
+        .into_inner();
 
     // Present gen 0 again immediately: inside the default 10s grace → rotates.
     let grace_response = svc
@@ -696,7 +706,8 @@ async fn superseded_within_grace_rotates_forward_exactly_once() {
         .expect("grace re-rotation should succeed once");
     let gen2_token = grace_response
         .refresh_token
-        .expect("grace rotation issues gen 2");
+        .expect("grace rotation issues gen 2")
+        .into_inner();
     assert_ne!(gen2_token, gen1_token);
 
     // No reuse alarm fired for either redemption of gen 0.
@@ -849,7 +860,8 @@ async fn reuse_revokes_only_the_offending_family() {
         .await
         .expect("victim rotation 1")
         .refresh_token
-        .expect("gen 1");
+        .expect("gen 1")
+        .into_inner();
     svc.refresh(RefreshRequest {
         refresh_token: gen1,
         ..Default::default()
@@ -871,7 +883,7 @@ async fn reuse_revokes_only_the_offending_family() {
     assert_eq!(remaining_sessions.len(), 1, "only the sibling survives");
     // …while the sibling family keeps its live generation untouched.
     let sibling = sole_live_session(&repo).await;
-    assert_eq!(sibling.refresh_token_hash, hash_of(&sibling_token));
+    assert!(*sibling.refresh_token_hash.expose() == hash_of(&sibling_token));
 
     // And the sibling token still redeems normally afterwards.
     svc.refresh(RefreshRequest {
@@ -947,7 +959,10 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
         async fn store_refresh_token(&self, session: &Session) -> Result<()> {
             self.inner.store_refresh_token(session).await
         }
-        async fn get_session_by_refresh_token(&self, hash: &str) -> Result<Option<Session>> {
+        async fn get_session_by_refresh_token(
+            &self,
+            hash: &oidc_exchange_core::secret::Secret<String>,
+        ) -> Result<Option<Session>> {
             self.inner.get_session_by_refresh_token(hash).await
         }
         async fn resolve_refresh_token(&self, hash: &str) -> Result<RefreshResolution> {
@@ -957,7 +972,7 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
             // Deterministic race loss: another redemption won the CAS.
             Ok(false)
         }
-        async fn revoke_session(&self, hash: &str) -> Result<()> {
+        async fn revoke_session(&self, hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
             self.inner.revoke_session(hash).await
         }
         async fn revoke_family(&self, family_id: &str) -> Result<u64> {
@@ -1143,7 +1158,7 @@ async fn legacy_row_first_redemption_mints_family_without_retirement_record() {
         .expect("seed legacy user");
     let legacy = Session {
         user_id: created.id.clone(),
-        refresh_token_hash: hash_of("legacy-opaque-token"),
+        refresh_token_hash: oidc_exchange_core::secret::Secret::new(hash_of("legacy-opaque-token")),
         family_id: String::new(),
         generation: 0,
         provider: "mock".to_string(),
@@ -1167,16 +1182,16 @@ async fn legacy_row_first_redemption_mints_family_without_retirement_record() {
         .expect("legacy first redemption should succeed");
 
     let replacement = sole_live_session(&repo).await;
-    assert_eq!(
-        replacement.refresh_token_hash,
-        hash_of(
+    assert!(
+        *replacement.refresh_token_hash.expose()
+            == hash_of_secret(
             response
                 .refresh_token
                 .as_ref()
-                .expect("enabled rotation returns a replacement")
-        )
+                .expect("enabled rotation returns a replacement"),
+            )
     );
-    assert_ne!(replacement.refresh_token_hash, legacy.refresh_token_hash);
+    assert!(replacement.refresh_token_hash != legacy.refresh_token_hash);
     // The caller minted the family: adapters never synthesize one.
     assert!(
         is_valid_family_id(&replacement.family_id),
@@ -1194,7 +1209,7 @@ async fn legacy_row_first_redemption_mints_family_without_retirement_record() {
 
     // The old hash is simply gone.
     let resolution = repo
-        .resolve_refresh_token(&legacy.refresh_token_hash)
+        .resolve_refresh_token(legacy.refresh_token_hash.expose())
         .await
         .expect("classify old hash");
     assert!(matches!(resolution, RefreshResolution::Unknown));
@@ -1306,7 +1321,10 @@ async fn missing_user_is_refused_before_any_write() {
         async fn store_refresh_token(&self, session: &Session) -> Result<()> {
             self.inner.store_refresh_token(session).await
         }
-        async fn get_session_by_refresh_token(&self, hash: &str) -> Result<Option<Session>> {
+        async fn get_session_by_refresh_token(
+            &self,
+            hash: &oidc_exchange_core::secret::Secret<String>,
+        ) -> Result<Option<Session>> {
             self.inner.get_session_by_refresh_token(hash).await
         }
         async fn resolve_refresh_token(&self, hash: &str) -> Result<RefreshResolution> {
@@ -1315,7 +1333,7 @@ async fn missing_user_is_refused_before_any_write() {
         async fn rotate_refresh_token(&self, live: &str, repl: &Session) -> Result<bool> {
             self.inner.rotate_refresh_token(live, repl).await
         }
-        async fn revoke_session(&self, hash: &str) -> Result<()> {
+        async fn revoke_session(&self, hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
             self.inner.revoke_session(hash).await
         }
         async fn revoke_family(&self, family_id: &str) -> Result<u64> {
@@ -1437,7 +1455,8 @@ async fn success_audit_carries_family_generation_grace_and_no_digest() {
         .await
         .expect("normal rotation")
         .refresh_token
-        .expect("gen 1");
+        .expect("gen 1")
+        .into_inner();
 
     // Grace rotation → grace: true.
     svc.refresh(RefreshRequest {

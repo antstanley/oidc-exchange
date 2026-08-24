@@ -63,6 +63,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use oidc_exchange_core::domain::{is_valid_family_id, RefreshResolution, Session};
 use oidc_exchange_core::ports::SessionRepository;
+use oidc_exchange_core::secret::Secret;
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 
@@ -139,7 +140,7 @@ pub fn generation_session(
     );
     Session {
         user_id: user_id.to_string(),
-        refresh_token_hash: token_hash,
+        refresh_token_hash: Secret::new(token_hash),
         family_id: family_id.to_string(),
         generation,
         provider: "conformance".to_string(),
@@ -253,7 +254,7 @@ pub async fn assert_resolution_classifies_all_four_shapes<S: SessionRepository +
 
     // Live: the hash is the family's current generation.
     assert_eq!(
-        repo.resolve_refresh_token(&chain.gen0.refresh_token_hash)
+        repo.resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
             .await
             .expect("resolve live generation"),
         RefreshResolution::Live(chain.gen0.clone()),
@@ -261,7 +262,7 @@ pub async fn assert_resolution_classifies_all_four_shapes<S: SessionRepository +
     );
 
     assert!(
-        repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+        repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("first rotation"),
         "the first rotation must win its CAS"
@@ -269,13 +270,13 @@ pub async fn assert_resolution_classifies_all_four_shapes<S: SessionRepository +
 
     // Superseded: gen0 is retired and its named successor is still live.
     match repo
-        .resolve_refresh_token(&chain.gen0.refresh_token_hash)
+        .resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
         .await
         .expect("resolve retired generation 0")
     {
         RefreshResolution::Superseded { live, .. } => {
-            assert_eq!(
-                live.refresh_token_hash, chain.gen1.refresh_token_hash,
+            assert!(
+                live.refresh_token_hash == chain.gen1.refresh_token_hash,
                 "Superseded must name the live successor, not the presented hash"
             );
         }
@@ -285,7 +286,7 @@ pub async fn assert_resolution_classifies_all_four_shapes<S: SessionRepository +
     }
 
     assert!(
-        repo.rotate_refresh_token(&chain.gen1.refresh_token_hash, &chain.gen2)
+        repo.rotate_refresh_token(chain.gen1.refresh_token_hash.expose(), &chain.gen2)
             .await
             .expect("second rotation"),
         "the second rotation must win its CAS"
@@ -293,7 +294,7 @@ pub async fn assert_resolution_classifies_all_four_shapes<S: SessionRepository +
 
     // Retired: gen0's successor (gen1) is no longer live — reuse, not grace.
     match repo
-        .resolve_refresh_token(&chain.gen0.refresh_token_hash)
+        .resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
         .await
         .expect("resolve two-generations-old hash")
     {
@@ -338,14 +339,14 @@ pub async fn assert_rotation_installs_successor_and_demotes_presented<
         .expect("store generation 0");
 
     assert!(
-        repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+        repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("rotation"),
         "the rotation must win its CAS"
     );
 
     assert_eq!(
-        repo.resolve_refresh_token(&chain.gen1.refresh_token_hash)
+        repo.resolve_refresh_token(chain.gen1.refresh_token_hash.expose())
             .await
             .expect("resolve successor"),
         RefreshResolution::Live(chain.gen1.clone()),
@@ -353,7 +354,7 @@ pub async fn assert_rotation_installs_successor_and_demotes_presented<
     );
     assert!(
         matches!(
-            repo.resolve_refresh_token(&chain.gen0.refresh_token_hash)
+            repo.resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
                 .await
                 .expect("resolve presented hash"),
             RefreshResolution::Superseded { .. }
@@ -389,7 +390,7 @@ pub async fn assert_failed_cas_leaves_store_byte_identical<S: SessionRepository 
         .await
         .expect("store sibling family");
     assert!(
-        repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+        repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("rotation"),
         "the setup rotation must win"
@@ -416,7 +417,7 @@ pub async fn assert_failed_cas_leaves_store_byte_identical<S: SessionRepository 
                     .expect("snapshot resolve"),
             );
             lookups.push(
-                repo.get_session_by_refresh_token(hash)
+                repo.get_session_by_refresh_token(&Secret::new(hash.to_string()))
                     .await
                     .expect("snapshot liveness lookup"),
             );
@@ -429,10 +430,10 @@ pub async fn assert_failed_cas_leaves_store_byte_identical<S: SessionRepository 
     }
 
     let hashes = [
-        chain.gen0.refresh_token_hash.as_str(),
-        chain.gen1.refresh_token_hash.as_str(),
-        sibling.gen0.refresh_token_hash.as_str(),
-        chain.gen2.refresh_token_hash.as_str(),
+        chain.gen0.refresh_token_hash.expose().as_str(),
+        chain.gen1.refresh_token_hash.expose().as_str(),
+        sibling.gen0.refresh_token_hash.expose().as_str(),
+        chain.gen2.refresh_token_hash.expose().as_str(),
         unknown_hash.as_str(),
     ];
     let before = snapshot(repo, &hashes).await;
@@ -440,7 +441,7 @@ pub async fn assert_failed_cas_leaves_store_byte_identical<S: SessionRepository 
     // Lose against a generation that already moved…
     assert!(
         !repo
-            .rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen2)
+            .rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen2)
             .await
             .expect("stale CAS must report false, not error"),
         "a CAS against a moved live generation must return false"
@@ -462,7 +463,7 @@ pub async fn assert_failed_cas_leaves_store_byte_identical<S: SessionRepository 
 
     // The loser's proposal must not exist as live, retired, or anything else.
     assert_eq!(
-        repo.resolve_refresh_token(&chain.gen2.refresh_token_hash)
+        repo.resolve_refresh_token(chain.gen2.refresh_token_hash.expose())
             .await
             .expect("resolve loser's proposal"),
         RefreshResolution::Unknown,
@@ -495,8 +496,8 @@ pub async fn assert_concurrent_rotation_yields_exactly_one_winner<S: SessionRepo
     // timeout so a wedged store fails instead of hanging the run.
     let (result_a, result_b) = timeout(RACE_JOIN_TIMEOUT, async {
         tokio::join!(
-            repo.rotate_refresh_token(&live_hash, &proposal_a),
-            repo.rotate_refresh_token(&live_hash, &proposal_b)
+            repo.rotate_refresh_token(live_hash.expose(), &proposal_a),
+            repo.rotate_refresh_token(live_hash.expose(), &proposal_b)
         )
     })
     .await
@@ -520,27 +521,27 @@ pub async fn assert_concurrent_rotation_yields_exactly_one_winner<S: SessionRepo
         &chain.gen1.refresh_token_hash
     };
     assert_eq!(
-        repo.resolve_refresh_token(&winner.refresh_token_hash)
+        repo.resolve_refresh_token(winner.refresh_token_hash.expose())
             .await
             .expect("resolve winner"),
         RefreshResolution::Live(winner.clone()),
         "the winning replacement must be the family's only live generation"
     );
     assert_eq!(
-        repo.resolve_refresh_token(loser_hash)
+        repo.resolve_refresh_token(loser_hash.expose())
             .await
             .expect("resolve loser's proposal"),
         RefreshResolution::Unknown,
         "the losing replacement must not exist in the store"
     );
     match repo
-        .resolve_refresh_token(&chain.gen0.refresh_token_hash)
+        .resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
         .await
         .expect("resolve presented hash")
     {
         RefreshResolution::Superseded { live, .. } => {
-            assert_eq!(
-                live.refresh_token_hash, winner.refresh_token_hash,
+            assert!(
+                live.refresh_token_hash == winner.refresh_token_hash,
                 "the presented hash must name the winner — and only the winner — as its successor"
             );
         }
@@ -567,7 +568,7 @@ pub async fn assert_retirement_readable_immediately_after_rotation<
         .expect("store generation 0");
 
     assert!(
-        repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+        repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("rotation"),
         "the rotation must win its CAS"
@@ -575,13 +576,13 @@ pub async fn assert_retirement_readable_immediately_after_rotation<
 
     // The first observation after the rotation must already see the record.
     match repo
-        .resolve_refresh_token(&chain.gen0.refresh_token_hash)
+        .resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
         .await
         .expect("resolve presented hash immediately after rotation")
     {
         RefreshResolution::Superseded { live, .. } => {
-            assert_eq!(
-                live.refresh_token_hash, chain.gen1.refresh_token_hash,
+            assert!(
+                live.refresh_token_hash == chain.gen1.refresh_token_hash,
                 "the immediately-readable record must name the new live generation"
             );
         }
@@ -608,20 +609,20 @@ pub async fn assert_older_generation_resolves_as_retired<S: SessionRepository + 
         .await
         .expect("store generation 0");
     assert!(
-        repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+        repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("first rotation"),
         "the first rotation must win"
     );
     assert!(
-        repo.rotate_refresh_token(&chain.gen1.refresh_token_hash, &chain.gen2)
+        repo.rotate_refresh_token(chain.gen1.refresh_token_hash.expose(), &chain.gen2)
             .await
             .expect("second rotation"),
         "the second rotation must win"
     );
 
     match repo
-        .resolve_refresh_token(&chain.gen0.refresh_token_hash)
+        .resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
         .await
         .expect("resolve older generation")
     {
@@ -659,7 +660,7 @@ pub async fn assert_family_revocation_removes_everything_and_returns_count<
         .await
         .expect("store family B");
     assert!(
-        repo.rotate_refresh_token(&family_a.gen0.refresh_token_hash, &family_a.gen1)
+        repo.rotate_refresh_token(family_a.gen0.refresh_token_hash.expose(), &family_a.gen1)
             .await
             .expect("rotate family A"),
         "family A's rotation must win"
@@ -697,14 +698,14 @@ pub async fn assert_family_revocation_removes_everything_and_returns_count<
     );
 
     assert_eq!(
-        repo.resolve_refresh_token(&family_a.gen1.refresh_token_hash)
+        repo.resolve_refresh_token(family_a.gen1.refresh_token_hash.expose())
             .await
             .expect("resolve family A's live generation"),
         RefreshResolution::Unknown,
         "the revoked family's live generation must read Unknown immediately (SR1)"
     );
     assert_eq!(
-        repo.resolve_refresh_token(&family_a.gen0.refresh_token_hash)
+        repo.resolve_refresh_token(family_a.gen0.refresh_token_hash.expose())
             .await
             .expect("resolve family A's retired generation"),
         RefreshResolution::Unknown,
@@ -713,7 +714,7 @@ pub async fn assert_family_revocation_removes_everything_and_returns_count<
 
     // The sibling family is untouched by family A's revocation.
     assert_eq!(
-        repo.resolve_refresh_token(&family_b.gen0.refresh_token_hash)
+        repo.resolve_refresh_token(family_b.gen0.refresh_token_hash.expose())
             .await
             .expect("resolve sibling"),
         RefreshResolution::Live(family_b.gen0.clone()),
@@ -753,7 +754,7 @@ pub async fn assert_resolution_unknown_immediately_after_revoke<S: SessionReposi
         .await
         .expect("store generation 0");
     assert!(
-        repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+        repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("rotation"),
         "the rotation must win"
@@ -764,7 +765,7 @@ pub async fn assert_resolution_unknown_immediately_after_revoke<S: SessionReposi
         .expect("revoke the live generation");
 
     assert_eq!(
-        repo.resolve_refresh_token(&chain.gen1.refresh_token_hash)
+        repo.resolve_refresh_token(chain.gen1.refresh_token_hash.expose())
             .await
             .expect("resolve revoked hash immediately"),
         RefreshResolution::Unknown,
@@ -780,7 +781,7 @@ pub async fn assert_resolution_unknown_immediately_after_revoke<S: SessionReposi
     // The retained record for the predecessor survives revoke_session and
     // reclassifies: its successor is no longer live.
     match repo
-        .resolve_refresh_token(&chain.gen0.refresh_token_hash)
+        .resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
         .await
         .expect("resolve predecessor after successor revocation")
     {
@@ -808,7 +809,7 @@ pub async fn assert_rotation_preserves_absolute_expiry<S: SessionRepository + ?S
         .expect("store generation 0");
 
     assert!(
-        repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+        repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("rotation"),
         "the rotation must win"

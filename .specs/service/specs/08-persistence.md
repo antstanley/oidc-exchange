@@ -1,6 +1,6 @@
 # Persistence
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
 
 How the domain entities ([01-domain-model.md](01-domain-model.md)) are stored by each
 repository adapter. The adapter-agnostic logical model is `schemas/datamodel.schema.json`; the
@@ -263,6 +263,12 @@ DynamoDB and Valkey expire records natively; Postgres, SQLite and LMDB rely on t
 evaluate `expires_at`, so an unswept record is never mistaken for a live one. Storage keeps
 only the namespaced digest key and the expiry: no raw nonce or raw assertion material is
 ever written.
+
+Every session adapter instruments its three session methods identically:
+`#[instrument(skip(self, session), fields(user_id = %session.user_id))]` on the write path and
+`#[instrument(skip(self, token_hash), fields(token_hash))]` on the lookup and revoke paths. The
+token hash and the session's client provenance (`ip_address`, `user_agent`, `device_id`) never
+become span field values on any backend.
 
 ## Logical schema (`schemas/datamodel.schema.json`)
 

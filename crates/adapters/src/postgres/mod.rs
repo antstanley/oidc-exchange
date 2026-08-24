@@ -13,6 +13,7 @@ use sqlx::{PgPool, Row};
 use tracing::instrument;
 
 use oidc_exchange_core::error::{Error, Result};
+use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
 pub const MIGRATIONS: &str = r#"
@@ -354,9 +355,10 @@ fn row_to_session(row: &sqlx::postgres::PgRow) -> Result<Session> {
         user_id: row
             .try_get("user_id")
             .map_err(PostgresRepository::store_err)?,
-        refresh_token_hash: row
-            .try_get("refresh_token_hash")
-            .map_err(PostgresRepository::store_err)?,
+        refresh_token_hash: Secret::new(
+            row.try_get("refresh_token_hash")
+                .map_err(PostgresRepository::store_err)?,
+        ),
         family_id: family_id.unwrap_or_default(),
         generation: row
             .try_get::<i64, _>("generation")
@@ -421,8 +423,8 @@ fn retirement_record(
     reuse_retention_secs: u64,
     now: DateTime<Utc>,
 ) -> RetiredRefreshToken {
-    assert_eq!(
-        live.refresh_token_hash, live_hash,
+    assert!(
+        live.refresh_token_hash.expose() == live_hash,
         "retirement record must name the presented hash"
     );
     assert!(
@@ -434,7 +436,7 @@ fn retirement_record(
         refresh_token_hash: live_hash.to_string(),
         family_id: live.family_id.clone(),
         user_id: live.user_id.clone(),
-        successor_hash: replacement.refresh_token_hash.clone(),
+        successor_hash: replacement.refresh_token_hash.expose().clone(),
         retired_at: now,
         expires_at: RetiredRefreshToken::retention_deadline(
             now,
@@ -471,7 +473,7 @@ where
         "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) {conflict_clause}"
     ))
-    .bind(&session.refresh_token_hash)
+    .bind(session.refresh_token_hash.expose())
     .bind(&session.user_id)
     .bind(&session.family_id)
     .bind(session.generation as i64)
@@ -698,10 +700,15 @@ impl SessionRepository for PostgresRepository {
         insert_session_tx(&self.pool, session, true).await
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+    // The digest argument is skipped explicitly (not left to a name collision with the
+    // schema field) so a parameter rename cannot silently re-expose the lookup key.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
         let row = sqlx::query("SELECT * FROM sessions WHERE refresh_token_hash = $1")
-            .bind(token_hash)
+            .bind(token_hash.expose())
             .fetch_optional(&self.pool)
             .await
             .map_err(Self::store_err)?;
@@ -718,13 +725,13 @@ impl SessionRepository for PostgresRepository {
     /// reflects the most recent write. A record past its retention deadline
     /// answers `Unknown` until the sweep physically deletes it — reuse
     /// detection must not fire on a window that has closed.
-    #[instrument(skip(self), fields(token_hash))]
+    #[instrument(skip(self, token_hash), fields(token_hash))]
     async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
         assert!(
             !token_hash.is_empty(),
             "resolve_refresh_token: token_hash must not be empty"
         );
-        if let Some(session) = self.get_session_by_refresh_token(token_hash).await? {
+        if let Some(session) = self.get_session_by_refresh_token(&Secret::new(token_hash.to_string())).await? {
             return Ok(RefreshResolution::Live(session));
         }
 
@@ -736,7 +743,7 @@ impl SessionRepository for PostgresRepository {
         }
 
         match self
-            .get_session_by_refresh_token(&record.successor_hash)
+            .get_session_by_refresh_token(&Secret::new(record.successor_hash.clone()))
             .await?
         {
             Some(successor_live) => Ok(RefreshResolution::Superseded {
@@ -764,10 +771,10 @@ impl SessionRepository for PostgresRepository {
     /// *without* a retirement record — there is no prior generation to detect
     /// reuse against — and the replacement carries whatever family the caller
     /// minted. The store never invents one.
-    #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
+    #[instrument(skip(self, live_hash, replacement), fields(token_hash, user_id = %replacement.user_id))]
     async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
-        assert_ne!(
-            live_hash, replacement.refresh_token_hash,
+        assert!(
+            live_hash != replacement.refresh_token_hash.expose().as_str(),
             "rotate_refresh_token: replacement must be a fresh generation"
         );
         assert!(
@@ -849,8 +856,9 @@ impl SessionRepository for PostgresRepository {
         Ok(true)
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
+        let token_hash = token_hash.expose().as_str();
         sqlx::query("DELETE FROM sessions WHERE refresh_token_hash = $1")
             .bind(token_hash)
             .execute(&self.pool)
@@ -1920,7 +1928,7 @@ mod tests {
         assert!(is_valid_family_id(&new_family));
         if let RefreshResolution::Live(legacy) = &live {
             let replacement = Session {
-                refresh_token_hash: format!("{legacy_hash}-next"),
+                refresh_token_hash: Secret::new(format!("{legacy_hash}-next")),
                 family_id: new_family.clone(),
                 generation: 0,
                 rotated_at: None,
@@ -1943,7 +1951,7 @@ mod tests {
                 "a consumed legacy row has no retained record and must read Unknown"
             );
             match repo
-                .resolve_refresh_token(&replacement.refresh_token_hash)
+                .resolve_refresh_token(replacement.refresh_token_hash.expose())
                 .await
                 .expect("resolve replacement")
             {
@@ -1991,7 +1999,7 @@ mod tests {
             .expect("store blocker");
 
         let result = repo
-            .rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            .rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await;
         assert!(
             result.is_err(),
@@ -2036,7 +2044,7 @@ mod tests {
             .await
             .expect("store gen0");
         assert!(
-            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
                 .await
                 .expect("rotate"),
             "rotation must win"
@@ -2047,7 +2055,7 @@ mod tests {
         let past = Utc::now() - chrono::Duration::hours(2);
         sqlx::query("UPDATE sessions SET expires_at = $1 WHERE refresh_token_hash = $2")
             .bind(past)
-            .bind(chain.gen1.refresh_token_hash.clone())
+            .bind(chain.gen1.refresh_token_hash.expose().clone())
             .execute(&repo.pool)
             .await
             .expect("expire live generation");
@@ -2055,7 +2063,7 @@ mod tests {
             "UPDATE retired_refresh_tokens SET expires_at = $1 WHERE refresh_token_hash = $2",
         )
         .bind(past)
-        .bind(chain.gen0.refresh_token_hash.clone())
+        .bind(chain.gen0.refresh_token_hash.expose().clone())
         .execute(&repo.pool)
         .await
         .expect("expire retirement record");
@@ -2096,13 +2104,13 @@ mod tests {
             .await
             .expect("store theirs");
         assert!(
-            repo.rotate_refresh_token(&mine.gen0.refresh_token_hash, &mine.gen1)
+            repo.rotate_refresh_token(mine.gen0.refresh_token_hash.expose(), &mine.gen1)
                 .await
                 .expect("rotate mine"),
             "my rotation must win"
         );
         assert!(
-            repo.rotate_refresh_token(&theirs.gen0.refresh_token_hash, &theirs.gen1)
+            repo.rotate_refresh_token(theirs.gen0.refresh_token_hash.expose(), &theirs.gen1)
                 .await
                 .expect("rotate theirs"),
             "their rotation must win"
@@ -2114,21 +2122,21 @@ mod tests {
             .expect("revoke all mine");
 
         assert_eq!(
-            repo.resolve_refresh_token(&mine.gen1.refresh_token_hash)
+            repo.resolve_refresh_token(mine.gen1.refresh_token_hash.expose())
                 .await
                 .expect("resolve my live"),
             RefreshResolution::Unknown,
             "my live generation must be gone"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&mine.gen0.refresh_token_hash)
+            repo.resolve_refresh_token(mine.gen0.refresh_token_hash.expose())
                 .await
                 .expect("resolve my retired"),
             RefreshResolution::Unknown,
             "my retirement record must be gone"
         );
         match repo
-            .resolve_refresh_token(&theirs.gen1.refresh_token_hash)
+            .resolve_refresh_token(theirs.gen1.refresh_token_hash.expose())
             .await
             .expect("resolve their live")
         {
@@ -2191,7 +2199,7 @@ mod tests {
         }
 
         let legacy = repo
-            .get_session_by_refresh_token("legacy-hash")
+            .get_session_by_refresh_token(&Secret::new("legacy-hash".to_string()))
             .await
             .expect("read migrated legacy row")
             .expect("migrated row must survive");
@@ -2217,7 +2225,7 @@ mod tests {
             .await
             .expect("store canonical row post-migration");
         assert_eq!(
-            repo.resolve_refresh_token(&canonical.refresh_token_hash)
+            repo.resolve_refresh_token(canonical.refresh_token_hash.expose())
                 .await
                 .expect("resolve canonical row"),
             RefreshResolution::Live(canonical),

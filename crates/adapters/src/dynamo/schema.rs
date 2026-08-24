@@ -6,6 +6,7 @@ use oidc_exchange_core::domain::{
     RetiredRefreshToken, Session, User, UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
+use oidc_exchange_core::Secret;
 
 // ---------------------------------------------------------------------------
 // User <-> DynamoDB Item
@@ -139,7 +140,7 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     // Keys
     item.insert(
         "pk".to_string(),
-        AttributeValue::S(format!("SESSION#{}", session.refresh_token_hash)),
+        AttributeValue::S(format!("SESSION#{}", session.refresh_token_hash.expose())),
     );
     item.insert("sk".to_string(), AttributeValue::S("SESSION".to_string()));
 
@@ -170,7 +171,7 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     );
     item.insert(
         "refresh_token_hash".to_string(),
-        AttributeValue::S(session.refresh_token_hash.clone()),
+        AttributeValue::S(session.refresh_token_hash.expose().clone()),
     );
     item.insert(
         "family_id".to_string(),
@@ -244,7 +245,7 @@ pub fn item_to_session(item: &HashMap<String, AttributeValue>) -> Result<Session
 
     Ok(Session {
         user_id: get_s(item, "user_id")?,
-        refresh_token_hash: get_s(item, "refresh_token_hash")?,
+        refresh_token_hash: Secret::new(get_s(item, "refresh_token_hash")?),
         family_id,
         generation: get_generation_or_default(item)?,
         provider: get_s(item, "provider")?,
@@ -640,7 +641,7 @@ mod tests {
         let now = Utc::now();
         Session {
             user_id: "usr_01abc".to_string(),
-            refresh_token_hash: "sha256_deadbeef".to_string(),
+            refresh_token_hash: Secret::new("sha256_deadbeef".to_string()),
             family_id: "fam_0000000000000000000000000a".to_string(),
             generation: 0,
             provider: "google".to_string(),
@@ -757,7 +758,10 @@ mod tests {
         let restored = item_to_session(&item).expect("should parse session from item");
 
         assert_eq!(session.user_id, restored.user_id);
-        assert_eq!(session.refresh_token_hash, restored.refresh_token_hash);
+        assert!(
+            session.refresh_token_hash == restored.refresh_token_hash,
+            "the digest must round-trip through the item unchanged"
+        );
         assert_eq!(session.provider, restored.provider);
         assert_eq!(session.device_id, restored.device_id);
         assert_eq!(session.user_agent, restored.user_agent);
@@ -820,7 +824,7 @@ mod tests {
         assert_eq!(restored.generation, 0);
         assert_eq!(restored.rotated_at, None);
         // Sanity: every other field still round-trips without the family attrs.
-        assert_eq!(restored.refresh_token_hash, "sha256_deadbeef");
+        assert!(restored.refresh_token_hash.expose() == "sha256_deadbeef");
     }
 
     /// Negative-space: a `generation` attribute present but not a DynamoDB `N`
@@ -844,7 +848,7 @@ mod tests {
         let now = Utc::now();
         let session = Session {
             user_id: "usr_01abc".to_string(),
-            refresh_token_hash: "sha256_cafe".to_string(),
+            refresh_token_hash: Secret::new("sha256_cafe".to_string()),
             family_id: "fam_0000000000000000000000000b".to_string(),
             generation: 0,
             provider: "atproto".to_string(),
@@ -920,7 +924,7 @@ mod tests {
         let item = retired_to_item(&record);
         let restored = item_to_retired(&item).expect("should parse retired from item");
 
-        assert_eq!(record.refresh_token_hash, restored.refresh_token_hash);
+        assert!(record.refresh_token_hash == *restored.refresh_token_hash);
         assert_eq!(record.family_id, restored.family_id);
         assert_eq!(record.user_id, restored.user_id);
         assert_eq!(record.successor_hash, restored.successor_hash);
@@ -997,7 +1001,7 @@ mod tests {
 
         assert_eq!(
             item.get("pk").unwrap().as_s().unwrap(),
-            &format!("SESSION#{}", session.refresh_token_hash)
+            &format!("SESSION#{}", session.refresh_token_hash.expose())
         );
         assert_eq!(item.get("sk").unwrap().as_s().unwrap(), "SESSION");
         assert_eq!(

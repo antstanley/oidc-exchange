@@ -36,28 +36,27 @@ pub async fn exchange_code(
         })?;
 
     let status = response.status();
-    let raw_body = response.text().await.map_err(|e| Error::ProviderError {
-        provider: token_endpoint.to_string(),
-        detail: e.to_string(),
-    })?;
+    // One bounded read for both outcomes: the ceiling caps what any upstream can make
+    // this process retain, whether the bytes turn out to be an error body or a success
+    // payload. The returned Secret cannot be formatted by accident.
+    let body = crate::shared::http::read_bounded(token_endpoint, response).await?;
 
     if !status.is_success() {
-        let detail = match serde_json::from_str::<serde_json::Value>(&raw_body) {
-            Ok(body) if body.get("error").is_some() => {
-                let error = body["error"].as_str().unwrap_or("unknown_error");
-                match body["error_description"].as_str() {
-                    Some(description) => format!("{error}: {description}"),
-                    None => error.to_string(),
-                }
-            }
-            _ => raw_body,
-        };
+        // The audited conversion point: upstream text becomes a plain, loggable string
+        // only inside `error_detail`, which redacts echoed credentials before anything
+        // downstream (an error variant, a log line) can see it.
+        let detail = crate::shared::upstream::error_detail(status, body);
         return Err(Error::ProviderError {
             provider: token_endpoint.to_string(),
             detail,
         });
     }
 
+    // Success payload: parsed at the protocol boundary. Unwrapping the Secret here is
+    // deliberate and reviewed — the parsed token fields are the response to the client
+    // (their deferred `Secret` wrap is out of plan scope), and nothing else retains the
+    // body text.
+    let raw_body = body.into_inner();
     let body: serde_json::Value =
         serde_json::from_str(&raw_body).map_err(|e| Error::ProviderError {
             provider: token_endpoint.to_string(),
@@ -87,6 +86,7 @@ pub async fn exchange_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::http::MAX_UPSTREAM_BODY_BYTES;
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -247,6 +247,182 @@ mod tests {
         assert!(
             message.contains("the authorization code has expired"),
             "error should include the error_description, got: {message}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Provider-boundary redaction (plan task 05): a hostile upstream that
+    // echoes the submitted form — raw or percent-encoded — must not be able
+    // to put the submitted code or client secret into the error detail.
+    // Sentinels are obviously fake; they carry no credential material.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn non_2xx_echo_of_submitted_form_is_redacted() {
+        let server = MockServer::start().await;
+
+        // The upstream echoes the exact form body back as its own error page.
+        let echo = "grant_type=authorization_code&code=SENTINEL-CODE-RAW\
+                    &redirect_uri=https%3A%2F%2Fexample.com%2Fcb&client_id=my-client\
+                    &client_secret=SENTINEL-SECRET-RAW";
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(echo))
+            .mount(&server)
+            .await;
+
+        let err = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "my-client",
+            Some("SENTINEL-SECRET-RAW"),
+            "SENTINEL-CODE-RAW",
+            "https://example.com/cb",
+        )
+        .await
+        .expect_err("a 400 echo must fail");
+
+        let message = err.to_string();
+        assert!(
+            !message.contains("SENTINEL-CODE-RAW"),
+            "echoed code must never reach the detail, got: {message}"
+        );
+        assert!(
+            !message.contains("SENTINEL-SECRET-RAW"),
+            "echoed client secret must never reach the detail, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_2xx_percent_encoded_echo_is_decoded_then_redacted() {
+        let server = MockServer::start().await;
+
+        let echo = "error=invalid_grant&code=1%2F%2FSENTINEL-CODE-ENCODED";
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(echo))
+            .mount(&server)
+            .await;
+
+        let err = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "1//SENTINEL-CODE-ENCODED",
+            "https://example.com/cb",
+        )
+        .await
+        .expect_err("a 400 echo must fail");
+
+        let message = err.to_string();
+        assert!(
+            !message.contains("SENTINEL-CODE-ENCODED"),
+            "percent-encoded echo must be decoded and then masked, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_2xx_structured_error_still_names_the_oauth_error() {
+        let server = MockServer::start().await;
+
+        // Positive control for redaction: conformant structured content survives.
+        let body = r#"{"error":"invalid_client","error_description":"rejected token=SENTINEL-TOKEN-IN-DESC"}"#;
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let err = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "some-code",
+            "https://example.com/cb",
+        )
+        .await
+        .expect_err("a 401 OAuth error must fail");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid_client"),
+            "structured OAuth error code must stay visible, got: {message}"
+        );
+        assert!(
+            !message.contains("SENTINEL-TOKEN-IN-DESC"),
+            "an echoed pair inside error_description must be masked, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_2xx_oversize_body_yields_bounded_detail() {
+        let server = MockServer::start().await;
+
+        // Far beyond MAX_UPSTREAM_BODY_BYTES, and not JSON, so the excerpt path runs.
+        let big = "x".repeat(200_000);
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(big.clone()))
+            .mount(&server)
+            .await;
+
+        let err = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "code",
+            "https://example.com/cb",
+        )
+        .await
+        .expect_err("a 500 must fail");
+
+        let message = err.to_string();
+        assert!(
+            !message.contains(&big),
+            "the oversize body must never be retained whole"
+        );
+        // The detail is the bounded fallback: status + length + <=256-char excerpt plus
+        // the Display prefix — comfortably under 512 characters end to end.
+        assert!(
+            message.chars().count() <= 512,
+            "oversize upstream body must produce a bounded detail, got {} chars",
+            message.chars().count()
+        );
+        assert!(
+            message.contains("HTTP 500"),
+            "fallback must lead with the status, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversize_success_payload_is_rejected_not_trusted() {
+        let server = MockServer::start().await;
+
+        // A >64 KiB success body is wildly non-conformant; truncation at the ceiling
+        // makes it unparseable, so the call fails closed instead of retaining
+        // attacker-chosen megabytes.
+        let payload = format!(
+            "{{\"id_token\":\"{}\"}}",
+            "y".repeat(MAX_UPSTREAM_BODY_BYTES + 10)
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(payload))
+            .mount(&server)
+            .await;
+
+        let result = exchange_code(
+            &format!("{}/oauth/token", server.uri()),
+            "client",
+            None,
+            "code",
+            "https://example.com/cb",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an over-ceiling success payload must fail closed, not parse"
         );
     }
 

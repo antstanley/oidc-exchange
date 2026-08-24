@@ -221,9 +221,11 @@ async fn enabled_direct_grant_exchanges_once_and_replays_fail() {
         "mismatched at_hash refuses"
     );
     assert_eq!(error["error"], "invalid_grant");
+    // Client-visible descriptions are fixed per error class (no validation
+    // oracle); the detailed at_hash reason stays server-side.
     assert_eq!(
         error["error_description"],
-        "at_hash does not match the accompanying access token"
+        "the provided grant could not be validated"
     );
 
     // Re-pin with the CORRECT at_hash: the same assertion now exchanges once.

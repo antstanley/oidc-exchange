@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
 
 One TOML file drives the whole service. `RawConfig` mirrors the merged TOML input; `AppConfig`
 is the resolved configuration held by the service. Every entry point that constructs a running
@@ -252,7 +252,7 @@ reaped.
 
 `enabled` (bool), `adapter` (`webhook`), and `[user_sync.webhook] { url, secret, timeout?,
 retries? }`. `url` must be `https` because the payload carries the full user record. The
-`secret` is redacted in `Debug`.
+`secret` is a `Secret<String>` and cannot be formatted.
 
 ### `[telemetry]`
 
@@ -262,8 +262,9 @@ retries? }`. `url` must be `https` because the payload carries the full user rec
 ### `[internal_api]`
 `enabled` (false — internal routes are not mounted unless true, regardless of `server.role`;
 a `role = "admin"` instance with the flag off serves only `/health`), `auth_method`
-(`shared_secret`), `shared_secret` (redacted in `Debug`; must be non-empty when the internal
-API is served).
+(`shared_secret`), `shared_secret` (a `Secret<String>`; it cannot be formatted, must be
+non-empty when the internal API is served, and internal auth compares it in constant time via
+`subtle`).
 
 ### `[providers.<name>]`
 
@@ -358,8 +359,14 @@ string through the FFI bindings (`bootstrap::parse_config`).
 - *Required non-empty issuer and audience.* **`server.issuer` and `token.audience` are closed
   non-empty domains.** The committed HTTPS values are deployment placeholders, not identities to
   use in production.
-- *Secrets redacted in Debug.* **`WebhookConfig.secret` and `InternalApiConfig.shared_secret`
-  have custom `Debug`.** Prevents secret leakage through log lines that dump config.
+- *`serde(default)` everywhere.* **Every config section has defaults.** A minimal TOML boots,
+  and adding a field never breaks deserialization of existing files.
+- *Secrets are unprintable by type.* **Credential-bearing config values are `Secret<T>`, a
+  newtype implementing neither `Debug` nor `Display`.** `WebhookConfig.secret`,
+  `InternalApiConfig.shared_secret`, and `OidcProviderConfig.client_secret` previously relied on
+  hand-written `Debug` impls rendering `"<redacted>"`; the newtype makes a leak a compile error
+  rather than a per-type discipline — the enclosing structs' `Debug` impls still elide the
+  secret field, but forgetting the elision now fails to compile instead of leaking.
 - *Separate session repository section.* **`[session_repository]` is optional and overrides
   only session storage.** Enables split topologies (SQL users + Valkey/LMDB sessions) without
   duplicating the user-store config.

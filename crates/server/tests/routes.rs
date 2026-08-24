@@ -192,7 +192,13 @@ async fn token_missing_code_returns_400() {
 
     let json = body_to_json(response.into_body()).await;
     assert_eq!(json["error"], "invalid_request");
-    assert!(json["error_description"].as_str().unwrap().contains("code"));
+    // The strict-parse contract names the offending parameter from its closed
+    // table (04-http-api.md → Token-endpoint errors); the set is fixed and
+    // never echoes caller-supplied values or internal detail.
+    assert_eq!(
+        json["error_description"],
+        "missing required parameter: code"
+    );
 }
 
 // ---------------------------------------------------------------------------

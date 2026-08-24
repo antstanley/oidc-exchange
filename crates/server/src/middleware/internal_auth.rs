@@ -27,7 +27,7 @@ pub async fn internal_auth_layer(
         .internal_api
         .shared_secret
         .as_ref()
-        .map(|s| s.as_ref())
+        .map(|s| s.expose().as_str())
     {
         Some(s) if !s.is_empty() => s,
         _ => {

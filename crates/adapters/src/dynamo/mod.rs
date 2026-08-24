@@ -17,6 +17,7 @@ use oidc_exchange_core::domain::{
 use tracing::instrument;
 
 use oidc_exchange_core::error::{Error, Result};
+use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
 use schema::{
@@ -142,8 +143,8 @@ fn retirement_record(
     reuse_retention_secs: u64,
     now: DateTime<Utc>,
 ) -> RetiredRefreshToken {
-    assert_eq!(
-        live.refresh_token_hash, live_hash,
+    assert!(
+        live.refresh_token_hash.expose() == live_hash,
         "retirement record must name the presented hash"
     );
     assert!(
@@ -155,7 +156,7 @@ fn retirement_record(
         refresh_token_hash: live_hash.to_string(),
         family_id: live.family_id.clone(),
         user_id: live.user_id.clone(),
-        successor_hash: replacement.refresh_token_hash.clone(),
+        successor_hash: replacement.refresh_token_hash.expose().clone(),
         retired_at: now,
         expires_at: RetiredRefreshToken::retention_deadline(
             now,
@@ -1129,7 +1130,7 @@ impl SessionRepository for DynamoRepository {
             session.family_id
         );
         assert!(
-            !session.refresh_token_hash.is_empty(),
+            !session.refresh_token_hash.expose().is_empty(),
             "store_refresh_token: refresh_token_hash must not be empty"
         );
 
@@ -1146,13 +1147,13 @@ impl SessionRepository for DynamoRepository {
         let mut values = HashMap::new();
         values.insert(
             ":hash".to_string(),
-            AttributeValue::Ss(vec![session.refresh_token_hash.clone()]),
+            AttributeValue::Ss(vec![session.refresh_token_hash.expose().clone()]),
         );
         values.insert(
             ":family".to_string(),
             FamilyRoster::new(
-                session.refresh_token_hash.clone(),
-                vec![session.refresh_token_hash.clone()],
+                session.refresh_token_hash.expose().clone(),
+                vec![session.refresh_token_hash.expose().clone()],
             )
             .to_attribute(),
         );
@@ -1176,8 +1177,12 @@ impl SessionRepository for DynamoRepository {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
+        let token_hash = token_hash.expose().as_str();
         assert!(
             !token_hash.is_empty(),
             "get_session_by_refresh_token: token_hash must not be empty"
@@ -1192,7 +1197,7 @@ impl SessionRepository for DynamoRepository {
     /// reuse into a silent unknown. A record past its retention deadline
     /// answers `Unknown` until TTL or sweep physically removes it — reuse
     /// detection must not fire on a window that has closed.
-    #[instrument(skip(self), fields(token_hash))]
+    #[instrument(skip(self, token_hash), fields(token_hash))]
     async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
         assert!(
             !token_hash.is_empty(),
@@ -1238,15 +1243,15 @@ impl SessionRepository for DynamoRepository {
     /// — there is no prior generation to detect reuse against — and the
     /// replacement carries whatever family the caller minted. Nothing here
     /// synthesizes one.
-    #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
+    #[instrument(skip(self, live_hash, replacement), fields(token_hash, user_id = %replacement.user_id))]
     async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
         assert!(
             is_valid_family_id(&replacement.family_id),
             "rotate_refresh_token: malformed replacement family id {:?}",
             replacement.family_id
         );
-        assert_ne!(
-            live_hash, replacement.refresh_token_hash,
+        assert!(
+            live_hash != replacement.refresh_token_hash.expose().as_str(),
             "rotate_refresh_token: replacement must be a fresh generation"
         );
 
@@ -1325,10 +1330,10 @@ impl SessionRepository for DynamoRepository {
             .cloned()
             .collect();
         assert!(
-            !new_sessions.contains(&replacement.refresh_token_hash),
+            !new_sessions.contains(replacement.refresh_token_hash.expose()),
             "rotate_refresh_token: replacement hash already present in the roster"
         );
-        new_sessions.push(replacement.refresh_token_hash.clone());
+        new_sessions.push(replacement.refresh_token_hash.expose().clone());
 
         // The `#f` placeholder binds the family id — the key inside the
         // `families` map this rotation's entry is filed under.
@@ -1343,8 +1348,8 @@ impl SessionRepository for DynamoRepository {
             values.insert(
                 ":fresh".to_string(),
                 FamilyRoster::new(
-                    replacement.refresh_token_hash.clone(),
-                    vec![replacement.refresh_token_hash.clone()],
+                    replacement.refresh_token_hash.expose().clone(),
+                    vec![replacement.refresh_token_hash.expose().clone()],
                 )
                 .to_attribute(),
             );
@@ -1355,11 +1360,11 @@ impl SessionRepository for DynamoRepository {
             // record, and the replacement joins as the live pointer's
             // namesake. One ADD carries both.
             let mut joined_members = vec![live_hash.to_string()];
-            joined_members.push(replacement.refresh_token_hash.clone());
+            joined_members.push(replacement.refresh_token_hash.expose().clone());
             values.insert(":joined".to_string(), AttributeValue::Ss(joined_members));
             values.insert(
                 ":newhash".to_string(),
-                AttributeValue::S(replacement.refresh_token_hash.clone()),
+                AttributeValue::S(replacement.refresh_token_hash.expose().clone()),
             );
             "SET #s = :sess, families.#f.live = :newhash ADD families.#f.members :joined"
                 .to_string()
@@ -1412,8 +1417,9 @@ impl SessionRepository for DynamoRepository {
     /// transaction. Idempotent: an unknown hash (or one naming a retirement
     /// record, which is not a session) succeeds without effect. Retirement
     /// records are deliberately untouched.
-    #[instrument(skip(self), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
+        let token_hash = token_hash.expose().as_str();
         assert!(
             !token_hash.is_empty(),
             "revoke_session: token_hash must not be empty"
@@ -2212,7 +2218,7 @@ mod tests {
         let now = Utc::now();
         let session = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: "hash_abc123".to_string(),
+            refresh_token_hash: Secret::new("hash_abc123".to_string()),
             family_id: "fam_0000000000000000000000000a".to_string(),
             generation: 0,
             provider: "google".to_string(),
@@ -2231,17 +2237,20 @@ mod tests {
 
         // Get session
         let fetched_session = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get_session_by_refresh_token")
             .expect("session should exist");
         assert_eq!(fetched_session.user_id, created.id);
-        assert_eq!(fetched_session.refresh_token_hash, "hash_abc123");
+        assert!(
+            fetched_session.refresh_token_hash == Secret::new("hash_abc123".to_string()),
+            "fetched digest must match the stored one"
+        );
         assert_eq!(fetched_session.device_id.as_deref(), Some("device-1"));
 
         // Get non-existent session
         let none = repo
-            .get_session_by_refresh_token("hash_nonexistent")
+            .get_session_by_refresh_token(&Secret::new("hash_nonexistent".to_string()))
             .await
             .expect("get_session_by_refresh_token");
         assert!(none.is_none());
@@ -2249,7 +2258,7 @@ mod tests {
         // Store a second session for the same user
         let session2 = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: "hash_def456".to_string(),
+            refresh_token_hash: Secret::new("hash_def456".to_string()),
             family_id: "fam_0000000000000000000000000b".to_string(),
             generation: 0,
             provider: "google".to_string(),
@@ -2265,18 +2274,18 @@ mod tests {
             .expect("store second session");
 
         // Revoke single session
-        repo.revoke_session("hash_abc123")
+        repo.revoke_session(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("revoke_session");
         let revoked = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get after revoke");
         assert!(revoked.is_none());
 
         // The other session should still exist
         let still_exists = repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get other session");
         assert!(still_exists.is_some());
@@ -2292,11 +2301,11 @@ mod tests {
             .expect("revoke_all_user_sessions");
 
         let s1 = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get after revoke_all");
         let s2 = repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get after revoke_all");
         assert!(s1.is_none());
@@ -3110,7 +3119,7 @@ mod tests {
         assert!(is_valid_family_id(&new_family));
         if let RefreshResolution::Live(legacy) = &live {
             let replacement = Session {
-                refresh_token_hash: format!("{legacy_hash}-next"),
+                refresh_token_hash: Secret::new(format!("{legacy_hash}-next")),
                 family_id: new_family.clone(),
                 generation: 0,
                 rotated_at: None,
@@ -3133,7 +3142,7 @@ mod tests {
                 "a consumed legacy row has no retained record and must read Unknown"
             );
             match repo
-                .resolve_refresh_token(&replacement.refresh_token_hash)
+                .resolve_refresh_token(replacement.refresh_token_hash.expose())
                 .await
                 .expect("resolve replacement")
             {
@@ -3174,7 +3183,7 @@ mod tests {
 
         let base = Utc::now();
         let replacement = Session {
-            refresh_token_hash: format!("{legacy_hash}-next"),
+            refresh_token_hash: Secret::new(format!("{legacy_hash}-next")),
             family_id: session_contract::fixture_family_id("dynamo-legacy:cas-fam"),
             user_id: "usr_legacy".to_string(),
             provider: "google".to_string(),
@@ -3193,7 +3202,7 @@ mod tests {
             .expect("rotation against an unknown live hash");
         assert!(!won, "a missing live generation must lose the CAS");
         assert!(
-            repo.get_session_by_refresh_token(&legacy_hash)
+            repo.get_session_by_refresh_token(&Secret::new(legacy_hash.clone()))
                 .await
                 .expect("read legacy row")
                 .is_some(),
@@ -3252,7 +3261,7 @@ mod tests {
             .expect("store blocker");
 
         let result = repo
-            .rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            .rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await;
         // The collision fails statement 1 (the replacement put), not
         // statement 0 (the live delete), so it must surface as an error —
@@ -3317,13 +3326,13 @@ mod tests {
             .await
             .expect("store theirs");
         assert!(
-            repo.rotate_refresh_token(&mine.gen0.refresh_token_hash, &mine.gen1)
+            repo.rotate_refresh_token(mine.gen0.refresh_token_hash.expose(), &mine.gen1)
                 .await
                 .expect("rotate mine"),
             "my rotation must win"
         );
         assert!(
-            repo.rotate_refresh_token(&theirs.gen0.refresh_token_hash, &theirs.gen1)
+            repo.rotate_refresh_token(theirs.gen0.refresh_token_hash.expose(), &theirs.gen1)
                 .await
                 .expect("rotate theirs"),
             "their rotation must win"
@@ -3339,21 +3348,21 @@ mod tests {
             .expect("revoke all mine");
 
         assert_eq!(
-            repo.resolve_refresh_token(&mine.gen1.refresh_token_hash)
+            repo.resolve_refresh_token(mine.gen1.refresh_token_hash.expose())
                 .await
                 .expect("resolve my live"),
             RefreshResolution::Unknown,
             "my live generation must be gone"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&mine.gen0.refresh_token_hash)
+            repo.resolve_refresh_token(mine.gen0.refresh_token_hash.expose())
                 .await
                 .expect("resolve my retired"),
             RefreshResolution::Unknown,
             "my retirement record must be gone"
         );
         match repo
-            .resolve_refresh_token(&theirs.gen1.refresh_token_hash)
+            .resolve_refresh_token(theirs.gen1.refresh_token_hash.expose())
             .await
             .expect("resolve their live")
         {
@@ -3402,7 +3411,7 @@ mod tests {
             .await
             .expect("store gen0");
         assert!(
-            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
                 .await
                 .expect("rotate"),
             "the rotation must win"
@@ -3421,14 +3430,14 @@ mod tests {
             "revocation must count exactly the roster-named entries despite the GSI window"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&chain.gen1.refresh_token_hash)
+            repo.resolve_refresh_token(chain.gen1.refresh_token_hash.expose())
                 .await
                 .expect("resolve revoked live"),
             RefreshResolution::Unknown,
             "a just-written generation must not survive an immediate family revocation"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&chain.gen0.refresh_token_hash)
+            repo.resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
                 .await
                 .expect("resolve revoked retired"),
             RefreshResolution::Unknown,
@@ -3440,7 +3449,7 @@ mod tests {
             .await
             .expect("revoke all immediately after write");
         assert_eq!(
-            repo.resolve_refresh_token(&sibling.gen0.refresh_token_hash)
+            repo.resolve_refresh_token(sibling.gen0.refresh_token_hash.expose())
                 .await
                 .expect("resolve sibling after revoke-all"),
             RefreshResolution::Unknown,
@@ -3482,7 +3491,7 @@ mod tests {
             "usr_phantom",
             &chain.family_id,
             0,
-            format!("{}-phantom", chain.gen0.refresh_token_hash),
+            format!("{}-phantom", chain.gen0.refresh_token_hash.expose()),
             chain.gen0.expires_at,
             chain.gen0.created_at,
             None,
@@ -3511,17 +3520,17 @@ mod tests {
             .get_user_roster("usr_roster")
             .await
             .expect("read roster after store");
-        assert_eq!(roster.sessions, vec![chain.gen0.refresh_token_hash.clone()]);
+        assert_eq!(roster.sessions, vec![chain.gen0.refresh_token_hash.expose().clone()]);
         let family = roster
             .families
             .get(&chain.family_id)
             .expect("store must create the family entry");
-        assert_eq!(family.live, chain.gen0.refresh_token_hash);
-        assert_eq!(family.members, vec![chain.gen0.refresh_token_hash.clone()]);
+        assert!(family.live == *chain.gen0.refresh_token_hash.expose());
+        assert_eq!(family.members, vec![chain.gen0.refresh_token_hash.expose().clone()]);
 
         // Rotate → the roster swaps live to gen1 and remembers gen0.
         assert!(
-            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
                 .await
                 .expect("rotate"),
             "the rotation must win"
@@ -3530,15 +3539,15 @@ mod tests {
             .get_user_roster("usr_roster")
             .await
             .expect("read roster after rotation");
-        assert_eq!(roster.sessions, vec![chain.gen1.refresh_token_hash.clone()]);
+        assert_eq!(roster.sessions, vec![chain.gen1.refresh_token_hash.expose().clone()]);
         let family = roster
             .families
             .get(&chain.family_id)
             .expect("rotation keeps the family entry");
-        assert_eq!(family.live, chain.gen1.refresh_token_hash);
+        assert!(family.live == *chain.gen1.refresh_token_hash.expose());
         assert_eq!(family.members.len(), 2, "gen0 joins the remembered members");
         assert!(
-            family.members.contains(&chain.gen0.refresh_token_hash),
+            family.members.contains(chain.gen0.refresh_token_hash.expose()),
             "the retired generation must join the family's member set"
         );
         assert!(

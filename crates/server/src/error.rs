@@ -96,76 +96,89 @@ fn oauth_error_response(status: StatusCode, body: ErrorResponse, error_code: &st
 fn map_domain_error(err: &Error) -> (StatusCode, String, String) {
     let (status, error_code, description) = map_domain_error_inner(err);
 
-    // The server_error class covers upstream/provider/store/infra failures; every other
-    // arm maps to a 4xx/409/404 client fault and must never take this branch.
-    if error_code == "server_error" {
-        // Assert: every arm that sets error_code to "server_error" maps to a 5xx status —
-        // catches a future arm that mislabels a client fault as server_error (and would
-        // otherwise silently skip the detail log below).
-        assert!(
-            status.is_server_error(),
-            "map_domain_error: server_error class must map to a 5xx status, got {status}"
-        );
-        // Assert: the client-facing description never repeats the internal `Display` detail
-        // — the log line below carries the detail server-side, so the body must stay generic
-        // or the detail leaks to the caller through the response instead.
-        assert_ne!(
-            description,
-            err.to_string(),
-            "map_domain_error: server_error description must stay generic, not the internal detail"
-        );
-        // Logged inside the request span (see middleware/request_id.rs), so this event
-        // carries `request_id` for correlation; the client only ever sees `description`.
-        tracing::error!(error = %err, status = %status, "internal error mapped to server_error response");
+    // Every mapped class — not only server errors — logs its full internal Display
+    // under the request span (see middleware/request_id.rs), so genericising the client
+    // body costs the operator nothing: the log carries request_id for correlation and
+    // the adapter-composed reason/detail. The client only ever sees `description`.
+    if status.is_server_error() {
+        tracing::error!(error = %err, status = %status, "internal error mapped to error response");
+    } else {
+        tracing::warn!(error = %err, status = %status, "client fault mapped to error response");
     }
+
+    // Assert: the published text must never repeat the internal `Display` detail — for
+    // any class. The log line above carries the detail server-side; a body that equals
+    // the Display would leak the diagnostic to the caller instead.
+    assert_ne!(
+        description,
+        err.to_string(),
+        "map_domain_error: client description must stay generic, not the internal detail"
+    );
+    // Debug-assert the stronger structural invariant: every arm publishes exactly
+    // `err.client_description()`, generalising the guard that previously covered only
+    // the server_error class. The one deliberate exception is `InvalidRequest`, whose
+    // description is the curated parse-boundary reason naming the offending parameter
+    // (a closed set — see the arm's comment); everything else stays on the fixed set.
+    debug_assert!(
+        matches!(err, Error::InvalidRequest { .. }) || description == err.client_description(),
+        "map_domain_error: every arm must return err.client_description()"
+    );
 
     (status, error_code, description)
 }
 
 fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
+    let description_for = |err: &Error| err.client_description().to_string();
     match err {
-        Error::InvalidGrant { reason } => (
+        Error::InvalidGrant { .. } => (
             StatusCode::BAD_REQUEST,
             "invalid_grant".to_string(),
-            reason.clone(),
+            description_for(err),
         ),
-        Error::InvalidToken { reason } => (
+        Error::InvalidToken { .. } => (
             StatusCode::UNAUTHORIZED,
             "invalid_token".to_string(),
-            reason.clone(),
+            description_for(err),
         ),
+        // `InvalidRequest` reasons are curated at the parse boundary from a
+        // closed table of parameter names ("missing required parameter: X",
+        // "X is not a parameter of the Y grant") — they never embed caller
+        // values or upstream detail, so naming the offending parameter is
+        // safe and required by the strict-parse contract (04-http-api.md).
         Error::InvalidRequest { reason } => (
             StatusCode::BAD_REQUEST,
             "invalid_request".to_string(),
             reason.clone(),
         ),
-        Error::UnknownProvider { provider } => (
+        Error::UnknownProvider { .. } => (
             StatusCode::BAD_REQUEST,
             "invalid_request".to_string(),
-            format!("unknown provider: {}", provider),
+            description_for(err),
         ),
-        Error::AccessDenied { reason } => (
+        Error::AccessDenied { .. } => (
             StatusCode::FORBIDDEN,
             "access_denied".to_string(),
-            reason.clone(),
+            description_for(err),
         ),
         Error::UserSuspended { user_id: _ } => (
             StatusCode::FORBIDDEN,
             "access_denied".to_string(),
-            "user account is suspended".to_string(),
+            description_for(err),
         ),
-        Error::Unauthorized { reason } => (
+        Error::Unauthorized { .. } => (
             StatusCode::UNAUTHORIZED,
             "unauthorized".to_string(),
-            reason.clone(),
+            description_for(err),
         ),
-        Error::Conflict { detail } => {
-            (StatusCode::CONFLICT, "conflict".to_string(), detail.clone())
-        }
-        Error::NotFound { detail } => (
+        Error::Conflict { .. } => (
+            StatusCode::CONFLICT,
+            "conflict".to_string(),
+            description_for(err),
+        ),
+        Error::NotFound { .. } => (
             StatusCode::NOT_FOUND,
             "not_found".to_string(),
-            detail.clone(),
+            description_for(err),
         ),
         Error::TooManyRequests {
             retry_after_secs: _,
@@ -177,12 +190,12 @@ fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
         Error::ProviderError { .. } => (
             StatusCode::BAD_GATEWAY,
             "server_error".to_string(),
-            "upstream provider error".to_string(),
+            description_for(err),
         ),
         Error::ProviderTimeout { .. } => (
             StatusCode::GATEWAY_TIMEOUT,
             "server_error".to_string(),
-            "upstream provider timeout".to_string(),
+            description_for(err),
         ),
         Error::StoreError { .. }
         | Error::KeyError { .. }
@@ -192,7 +205,7 @@ fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
         | Error::ConfigError { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error".to_string(),
-            "internal server error".to_string(),
+            description_for(err),
         ),
     }
 }
@@ -254,8 +267,9 @@ mod tests {
     }
 
     /// Runs `map_domain_error` under a subscriber that captures every emitted event, and
-    /// returns `(status, error_code, description, error_level_events)` so a test can assert
-    /// on both the response mapping and the log side effect in one place.
+    /// returns `(status, error_code, description, all_captured_events)` so a test can
+    /// assert on both the response mapping and the log side effect — at any level — in
+    /// one place. Callers filter by level: 5xx mappings log at `error`, 4xx at `warn`.
     fn map_domain_error_capturing(err: &Error) -> (StatusCode, String, String, Vec<CapturedEvent>) {
         let events: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let capture = EventCaptureLayer {
@@ -266,14 +280,29 @@ mod tests {
         let (status, error_code, description) =
             tracing::subscriber::with_default(subscriber, || map_domain_error(err));
 
-        let error_events = events
+        let captured = events
             .lock()
             .expect("capture mutex must not be poisoned")
             .drain(..)
-            .filter(|e| e.level == tracing::Level::ERROR)
             .collect();
 
-        (status, error_code, description, error_events)
+        (status, error_code, description, captured)
+    }
+
+    /// Keep only the error-level events from a captured set.
+    fn error_level(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|e| e.level == tracing::Level::ERROR)
+            .collect()
+    }
+
+    /// Keep only the warn-level events from a captured set.
+    fn warn_level(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect()
     }
 
     #[test]
@@ -283,7 +312,8 @@ mod tests {
             detail: "connection reset by upstream".to_string(),
         };
 
-        let (status, error_code, description, error_events) = map_domain_error_capturing(&err);
+        let (status, error_code, description, events) = map_domain_error_capturing(&err);
+        let error_events = error_level(&events);
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(error_code, "server_error");
@@ -317,7 +347,8 @@ mod tests {
             provider: "microsoft".to_string(),
         };
 
-        let (status, error_code, description, error_events) = map_domain_error_capturing(&err);
+        let (status, error_code, description, events) = map_domain_error_capturing(&err);
+        let error_events = error_level(&events);
 
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(error_code, "server_error");
@@ -346,7 +377,8 @@ mod tests {
             detail: "sqlite: database is locked".to_string(),
         };
 
-        let (status, error_code, description, error_events) = map_domain_error_capturing(&err);
+        let (status, error_code, description, events) = map_domain_error_capturing(&err);
+        let error_events = error_level(&events);
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(error_code, "server_error");
@@ -375,22 +407,192 @@ mod tests {
     }
 
     #[test]
-    fn invalid_grant_emits_no_server_error_detail_log() {
+    fn invalid_grant_returns_generic_body_and_logs_reason_at_warn() {
         let err = Error::InvalidGrant {
             reason: "code already used".to_string(),
         };
 
-        let (status, error_code, description, error_events) = map_domain_error_capturing(&err);
+        let (status, error_code, description, events) = map_domain_error_capturing(&err);
+        let error_events = error_level(&events);
+        let warn_events = warn_level(&events);
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error_code, "invalid_grant");
-        assert_eq!(description, "code already used");
-        // Negative-space: a client-fault error must never trigger the server_error detail
-        // log — only the server_error class does.
+        // The body is now the fixed client description — never the internal reason.
+        assert_eq!(
+            description,
+            err.client_description(),
+            "the published description must be the variant's static text"
+        );
+        assert!(
+            !description.contains("code already used"),
+            "client body must not leak the internal validation step, got {description:?}"
+        );
+
+        // Negative space retained from the old contract: a client fault must never
+        // trigger an error-level log.
         assert!(
             error_events.is_empty(),
             "InvalidGrant must not emit an error-level log, got {} event(s)",
             error_events.len()
+        );
+        // ...but the operator keeps the diagnostic at warn level.
+        assert_eq!(
+            warn_events.len(),
+            1,
+            "InvalidGrant must log its internal detail exactly once at warn, got {}",
+            warn_events.len()
+        );
+        let logged = warn_events[0]
+            .fields
+            .get("error")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            logged.contains("code already used"),
+            "captured warn log must carry the full internal reason, got {logged:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_kid_is_not_echoed_but_is_logged() {
+        let kid_sentinel = "SENTINEL-UNKNOWN-KID";
+        let err = Error::InvalidGrant {
+            reason: format!("No matching key for kid: {kid_sentinel} (after forced refetch)"),
+        };
+
+        let (status, error_code, description, events) = map_domain_error_capturing(&err);
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_code, "invalid_grant");
+        // Negative space: the caller-supplied `kid` must not be echoed to the response.
+        assert!(
+            !description.contains(kid_sentinel),
+            "unknown kid must never be echoed to the client, got {description:?}"
+        );
+        // Positive: the operator still sees it in the warn-level diagnostic.
+        let warn_events = warn_level(&events);
+        assert_eq!(warn_events.len(), 1, "expected one warn event");
+        let logged = warn_events[0]
+            .fields
+            .get("error")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            logged.contains(kid_sentinel),
+            "the warn log must retain the kid for operators, got {logged:?}"
+        );
+    }
+
+    /// A bad signature, an expired token, and a wrong audience are indistinguishable in
+    /// the mapped response — same status, same code, same generic description — while
+    /// each keeps its distinct internal Display for the log.
+    #[test]
+    fn grant_validation_failures_are_indistinguishable_in_responses() {
+        let cases = [
+            "JWT validation failed: InvalidSignature",
+            "JWT validation failed: ExpiredSignature",
+            "JWT validation failed: InvalidAudience",
+        ];
+        let mappings = cases.map(|reason| {
+            let err = Error::InvalidGrant {
+                reason: reason.to_string(),
+            };
+            let (status, error_code, description, events) = map_domain_error_capturing(&err);
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(error_code, "invalid_grant");
+            assert!(!description.contains(reason));
+            assert_eq!(warn_level(&events).len(), 1);
+            (status, error_code, description)
+        });
+        assert!(
+            mappings.windows(2).all(|w| w[0] == w[1]),
+            "signature/expiry/audience failures must be indistinguishable, got {mappings:?}"
+        );
+    }
+
+    /// The 4xx warn is emitted inside whatever span is active when the mapping runs —
+    /// in production that is the per-request span opened by `request_id_layer`, so the
+    /// operator event carries the request id for correlation with the generic body.
+    #[test]
+    fn warn_log_inherits_the_active_request_span() {
+        use tracing_subscriber::registry::LookupSpan;
+
+        /// Fields declared on a span, captured at creation so events can be correlated.
+        #[derive(Default)]
+        struct SpanFields(HashMap<String, String>);
+
+        struct FieldVisitor<'a>(&'a mut HashMap<String, String>);
+
+        impl tracing::field::Visit for FieldVisitor<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+        }
+
+        struct RequestIdCaptureLayer {
+            captured: Arc<Mutex<Option<String>>>,
+        }
+
+        impl<S> Layer<S> for RequestIdCaptureLayer
+        where
+            S: tracing::Subscriber + for<'span> LookupSpan<'span>,
+        {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                id: &tracing::span::Id,
+                ctx: Context<'_, S>,
+            ) {
+                let span = ctx
+                    .span(id)
+                    .expect("span must exist immediately after creation");
+                let mut fields = SpanFields::default();
+                attrs.record(&mut FieldVisitor(&mut fields.0));
+                span.extensions_mut().insert(fields);
+            }
+
+            fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+                let Some(scope) = ctx.event_scope(event) else {
+                    return;
+                };
+                for span in scope.from_root() {
+                    let extensions = span.extensions();
+                    if let Some(fields) = extensions.get::<SpanFields>() {
+                        if let Some(request_id) = fields.0.get("request_id") {
+                            *self.captured.lock().expect("mutex must not be poisoned") =
+                                Some(request_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let subscriber = tracing_subscriber::registry().with(RequestIdCaptureLayer {
+            captured: captured.clone(),
+        });
+
+        let err = Error::InvalidRequest {
+            reason: "missing required parameter: provider".to_string(),
+        };
+        let correlation_id = "corr-id-123";
+
+        tracing::subscriber::with_default(subscriber, || {
+            let request_span = tracing::info_span!("request", request_id = %correlation_id);
+            let _entered = request_span.enter();
+            let _mapped = map_domain_error(&err);
+        });
+
+        assert_eq!(
+            captured.lock().expect("mutex must not be poisoned").clone(),
+            Some(correlation_id.to_string()),
+            "the warn event must carry the enclosing request span's id"
         );
     }
 
@@ -411,9 +613,20 @@ mod tests {
 
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"], "conflict");
+        // The body carries the fixed description only — never the internal detail.
         assert_eq!(
             body["error_description"],
-            "user already registered for (google, sub-123)"
+            Error::Conflict {
+                detail: String::new()
+            }
+            .client_description()
+        );
+        assert!(
+            !body["error_description"]
+                .as_str()
+                .unwrap()
+                .contains("sub-123"),
+            "conflict body must not leak the internal detail"
         );
     }
 
@@ -427,7 +640,21 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"], "not_found");
-        assert_eq!(body["error_description"], "user abc-123 not found");
+        // The body carries the fixed description only — never the internal detail.
+        assert_eq!(
+            body["error_description"],
+            Error::NotFound {
+                detail: String::new()
+            }
+            .client_description()
+        );
+        assert!(
+            !body["error_description"]
+                .as_str()
+                .unwrap()
+                .contains("abc-123"),
+            "not-found body must not echo the caller-supplied identifier"
+        );
         // Negative-space: NotFound must not be swallowed by the 5xx catch-all.
         assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }

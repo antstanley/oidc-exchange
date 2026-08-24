@@ -943,7 +943,7 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
             Ok(Box::new(
                 oidc_exchange_adapters::webhook::WebhookUserSync::new(
                     wh_cfg.url.clone(),
-                    wh_cfg.secret.as_ref().to_string(),
+                    wh_cfg.secret.expose().to_string(),
                     timeout,
                     retries,
                 ),
@@ -1033,7 +1033,7 @@ fn provider_config_to_oidc(
         provider_id: name.to_string(),
         issuer,
         client_id,
-        client_secret: get_str("client_secret"),
+        client_secret: get_str("client_secret").map(oidc_exchange_core::secret::Secret::new),
         jwks_uri: config.jwks_uri.clone(),
         token_endpoint: config.token_endpoint.clone(),
         revocation_endpoint: config.revocation_endpoint.clone(),
@@ -1361,7 +1361,7 @@ mod load_config_tests {
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(AsRef::as_ref),
+                .map(|s| s.expose().as_str()),
             Some("super-secret-value")
         );
         assert_ne!(
@@ -1369,7 +1369,7 @@ mod load_config_tests {
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(AsRef::as_ref),
+                .map(|s| s.expose().as_str()),
             Some("${INTERNAL_API_SECRET}"),
             "the literal placeholder must never survive resolution"
         );
@@ -1422,7 +1422,7 @@ mod load_config_tests {
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(AsRef::as_ref),
+                .map(|s| s.expose().as_str()),
             Some("${LITERAL_NOT_A_VAR}")
         );
         assert_ne!(
@@ -1430,7 +1430,7 @@ mod load_config_tests {
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(AsRef::as_ref),
+                .map(|s| s.expose().as_str()),
             Some("$${LITERAL_NOT_A_VAR}"),
             "the escape's leading '$$' must be collapsed to a single '$'"
         );
@@ -1527,7 +1527,7 @@ mod load_config_tests {
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(AsRef::as_ref),
+                .map(|s| s.expose().as_str()),
             Some("resolved-value")
         );
         assert_eq!(
@@ -1752,7 +1752,7 @@ mod load_config_tests {
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(|secret| secret.as_str()),
+                .map(|secret| secret.expose().as_str()),
             Some("ffi-secret")
         );
     }
@@ -2122,6 +2122,7 @@ mod postgres_bootstrap_tests {
     use super::*;
     use chrono::{Duration, Utc};
     use oidc_exchange_core::domain::{NewUser, Session};
+    use oidc_exchange_core::Secret;
     use uuid::Uuid;
 
     /// An `AppConfig` whose user repository (and, since `session_repository.adapter` is
@@ -2201,7 +2202,7 @@ mod postgres_bootstrap_tests {
         let refresh_token_hash = format!("bootstrap-test-hash-{}", Uuid::new_v4());
         let session = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: refresh_token_hash.clone(),
+            refresh_token_hash: Secret::new(refresh_token_hash.clone()),
             family_id: oidc_exchange_core::domain::new_family_id(),
             generation: 0,
             provider: "bootstrap-test".to_string(),
@@ -2216,7 +2217,7 @@ mod postgres_bootstrap_tests {
             "store_refresh_token must succeed once bootstrap has migrated the session pool",
         );
         let fetched_session = session_repo
-            .get_session_by_refresh_token(&refresh_token_hash)
+            .get_session_by_refresh_token(&Secret::new(refresh_token_hash.clone()))
             .await
             .expect("get_session_by_refresh_token")
             .expect(
@@ -2227,8 +2228,8 @@ mod postgres_bootstrap_tests {
             fetched_session.user_id, created.id,
             "round-tripped session user_id must match"
         );
-        assert_eq!(
-            fetched_session.refresh_token_hash, refresh_token_hash,
+        assert!(
+            fetched_session.refresh_token_hash == Secret::new(refresh_token_hash),
             "round-tripped session refresh_token_hash must match"
         );
     }

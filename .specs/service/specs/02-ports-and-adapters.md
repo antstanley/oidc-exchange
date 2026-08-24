@@ -1,6 +1,6 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
@@ -38,10 +38,10 @@ nothing for that identity and `create_user` succeeds as a new user.
 
 ```rust
 async fn store_refresh_token(&self, session: &Session) -> Result<()>;
-async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>>;
+async fn get_session_by_refresh_token(&self, token_hash: &Secret<String>) -> Result<Option<Session>>;
+async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()>;
 async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution>;
 async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool>;
-async fn revoke_session(&self, token_hash: &str) -> Result<()>;
 async fn revoke_family(&self, family_id: &str) -> Result<u64>;
 async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
 async fn count_active_sessions(&self) -> Result<u64>;
@@ -82,6 +82,11 @@ either meets them or it does not ship.
 
 `store_refresh_token` writes the generation-0 row of a new family. `get_session_by_refresh_token`
 remains for `/revoke`, which needs only liveness.
+
+The token-hash parameters are `&Secret<String>` rather than `&str`, so an adapter that leaves
+them out of its span `skip(...)` fails to compile instead of publishing the session lookup
+key as a span field. An adapter reaches the raw digest through `expose()` at the point it
+builds a store key.
 
 User and session storage are separate traits so a deployment can back sessions with a fast
 embedded or in-memory store while keeping users in a durable SQL/DynamoDB table. A single
@@ -246,17 +251,42 @@ timeout retries up to `retries` with exponential backoff; 4xx is not retried.
 
 ## Shared OIDC utilities (`adapters/shared`)
 
-Reused by the OIDC and Apple providers:
+Reused by the OIDC and Apple providers. All outbound HTTP goes through a single shared
+`reqwest::Client` per process with a 5s connect timeout, a 10s total request timeout
+(compile-time constants, not configuration), and redirects disabled; a hung or slow provider
+fails the request rather than stalling `/token`. On the token-endpoint and revocation paths a
+non-2xx response is an error whose body reaches nothing but `upstream::error_detail`; success
+payloads are parsed only from 2xx bodies.
 
 - `jwks::JwksCache` — fetches and caches a remote JWKS behind a read/write lock with a TTL
-  (default 1h); `with_ttl` overrides.
+  (default 1h); `with_ttl` overrides. A non-2xx JWKS response is a `ProviderError` and is
+  never cached. When a token's `kid` is not in the cached set, the cache refetches once
+  (rate-limited by a 30s minimum refresh interval) before the provider rejects the token, so
+  upstream key rotation takes effect immediately instead of at TTL expiry.
 - `discovery::discover(issuer)` — fetches and parses `.well-known/openid-configuration` into
   `DiscoveryDocument { issuer, token_endpoint, jwks_uri, revocation_endpoint }`. A non-success
   HTTP status is rejected before the body is read (`ProviderError` naming the issuer and status),
   matching `JwksCache`'s handling of the same failure; the parsed `issuer` must then equal the
   configured issuer per RFC 8414 §3.3.
 - `token_endpoint::exchange_code(endpoint, client_id, client_secret, code, redirect_uri)` —
-  the standard form-encoded `grant_type=authorization_code` POST.
+  the standard form-encoded `grant_type=authorization_code` POST. Both outcomes read the body
+  through `http::read_bounded`; a non-2xx response becomes a `ProviderError` detail via
+  `upstream::error_detail`, and an over-ceiling 2xx payload fails closed rather than parsing
+  truncated JSON. A 2xx response without an `id_token` is an error, not an empty string.
+- `http::read_bounded(provider, response)` — reads a response body to at most
+  `MAX_UPSTREAM_BODY_BYTES` (64 KiB) and returns it as `Secret<String>`, so an upstream cannot
+  choose how many bytes the service retains and the body cannot be formatted by accident.
+  Reaching the ceiling truncates (with a structured, body-free warning naming the provider);
+  non-UTF-8 bytes convert lossily; stream failures yield a `ProviderError` carrying only
+  transport text.
+- `upstream::error_detail(status, body)` — the only way to build a `ProviderError` detail
+  from upstream bytes. It prefers the structured RFC 6749 error object (`error`, optionally
+  `error_description`); failing that it returns the status, the body's byte length, and a
+  bounded excerpt (256 characters) produced by a redacting function that percent-decodes first
+  and then masks the values of `token`, `refresh_token`, `client_secret`, `code`, and any bare
+  compact JWS. Every field it emits passes the same redact-and-clamp pipeline. It consumes
+  the `Secret<String>` and returns a plain `String`, so it is the single audited point at
+  which upstream text becomes loggable.
 
 ## Mock adapters (`crates/test-utils`)
 

@@ -249,15 +249,15 @@ impl AppService {
     /// adapters never synthesize families, the caller does.
     fn mint_replacement(&self, live: &Session) -> Result<(String, Session)> {
         assert!(
-            !live.refresh_token_hash.is_empty(),
+            !live.refresh_token_hash.expose().is_empty(),
             "mint_replacement: live generation must carry a hash"
         );
 
         let raw_token = URL_SAFE_NO_PAD.encode(rand::random::<[u8; REFRESH_TOKEN_BYTES]>());
         let token_hash = hex::encode(Sha256::digest(raw_token.as_bytes()));
         assert_eq!(token_hash.len(), REFRESH_HASH_HEX_LEN);
-        assert_ne!(
-            token_hash, live.refresh_token_hash,
+        assert!(
+            token_hash != *live.refresh_token_hash.expose(),
             "a fresh 256-bit generation colliding with the presented hash is a programmer error"
         );
 
@@ -275,7 +275,7 @@ impl AppService {
 
         let replacement = Session {
             user_id: live.user_id.clone(),
-            refresh_token_hash: token_hash,
+            refresh_token_hash: crate::secret::Secret::new(token_hash),
             family_id,
             generation: live.generation + 1,
             provider: live.provider.clone(),
@@ -314,7 +314,7 @@ impl AppService {
         request: &RefreshRequest,
     ) -> Result<TokenResponse> {
         assert!(
-            !live.refresh_token_hash.is_empty(),
+            !live.refresh_token_hash.expose().is_empty(),
             "rotate_and_respond: live generation must carry a hash"
         );
 
@@ -368,7 +368,7 @@ impl AppService {
         // loser's retry lands on the grace path.
         let won = self
             .session_repo
-            .rotate_refresh_token(&live.refresh_token_hash, &replacement)
+            .rotate_refresh_token(live.refresh_token_hash.expose(), &replacement)
             .await?;
         if !won {
             return self
@@ -396,7 +396,7 @@ impl AppService {
 
         Ok(TokenResponse {
             access_token,
-            refresh_token: Some(raw_token),
+            refresh_token: Some(crate::secret::Secret::new(raw_token)),
             token_type: "Bearer".to_string(),
             expires_in,
         })
@@ -424,7 +424,7 @@ impl AppService {
         };
 
         assert!(
-            !session.refresh_token_hash.is_empty(),
+            !session.refresh_token_hash.expose().is_empty(),
             "refresh_without_rotation: stored session must carry a hash"
         );
 

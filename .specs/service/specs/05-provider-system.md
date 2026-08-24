@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -41,8 +41,11 @@ private_key_path = "/secrets/apple.p8"
 
 Apple is mostly OIDC but requires a freshly signed **ES256 client secret JWT** for each token
 endpoint call (`ClientSecretClaims { iss: team_id, sub: client_id, aud, iat, exp }`, ~5-minute
-lifetime, signed with the `.p8` key). It reuses the shared `JwksCache` for the standard
-ID-token validation parts.
+lifetime, signed with the `.p8` key). `generate_client_secret` returns that assertion as
+`Secret<String>`, so it can be posted but not formatted. `revoke_token` sends the assertion
+alongside the token being revoked and renders any non-2xx response through
+`shared::upstream::error_detail`. It reuses the shared `JwksCache` for the standard ID-token
+validation parts.
 
 Apple's ID tokens sometimes carry `email_verified` (and `is_private_email`) as the JSON
 strings `"true"`/`"false"` rather than booleans. The Apple provider coerces bool-or-string
@@ -61,7 +64,8 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
 ## OidcProvider behaviour (`adapters/oidc`)
 
 - `exchange_code` delegates to `shared::token_endpoint::exchange_code` (form-encoded
-  `authorization_code` POST with client credentials).
+  `authorization_code` POST with client credentials). A non-2xx upstream response yields a
+  detail built by `shared::upstream::error_detail`, never the raw body.
 - `validate_id_token` decodes the JWT header, fetches the issuer's JWKS through the cached
   `JwksCache`, and validates the signature using the **algorithm from the JWK** (not the
   untrusted header), returning `IdentityClaims`. Validation requires the `exp`, `iss`,
@@ -75,7 +79,10 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
 - When the matched JWK carries no `alg`, the algorithm is inferred from the key type:
   `kty: EC` by `crv` (P-256 → ES256, P-384 → ES384), `kty: OKP` → EdDSA, `kty: RSA` →
   RS256. Any other alg-less key is rejected. (Azure-AD-style JWKS omit `alg`.)
-- `revoke_token` POSTs to the discovered revocation endpoint with client credentials.
+- `revoke_token` POSTs to the discovered revocation endpoint with the client id. A non-2xx
+  response is read with `shared::http::read_bounded` and rendered through
+  `shared::upstream::error_detail`, so an intermediary that echoes the submitted form cannot
+  put the token being revoked into the error log.
 
 ## Provider registry
 

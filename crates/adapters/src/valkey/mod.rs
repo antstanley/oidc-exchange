@@ -6,6 +6,7 @@ use oidc_exchange_core::domain::{
     is_valid_family_id, RefreshResolution, RetiredRefreshToken, Session,
 };
 use oidc_exchange_core::error::{Error, Result};
+use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::SessionRepository;
 use tracing::instrument;
 
@@ -240,7 +241,11 @@ impl ValkeySessionRepository {
 
 #[async_trait]
 impl SessionRepository for ValkeySessionRepository {
-    #[instrument(skip(self))]
+    // The whole `Session` carries the lookup-key digest and client provenance
+    // (`ip_address`, `user_agent`, `device_id`), so it must be skipped wholesale rather
+    // than left to `#[instrument]`'s default argument recording; only the permitted
+    // `user_id` is captured, by value-shaping reference before any skip applies.
+    #[instrument(skip(self, session), fields(user_id = %session.user_id))]
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
         // Compute TTL from expires_at first and reject before issuing any write: a session
         // whose expires_at is not strictly in the future would otherwise leave a TTL-less (or
@@ -255,7 +260,7 @@ impl SessionRepository for ValkeySessionRepository {
         }
         debug_assert!(ttl_seconds >= SESSION_TTL_SECONDS_MIN);
 
-        let key = self.session_key(&session.refresh_token_hash);
+        let key = self.session_key(session.refresh_token_hash.expose());
         let user_sessions_key = self.user_sessions_key(&session.user_id);
         let active_sessions_key = self.active_sessions_key();
 
@@ -272,7 +277,10 @@ impl SessionRepository for ValkeySessionRepository {
 
         let fields: Vec<(&str, String)> = vec![
             ("user_id", session.user_id.clone()),
-            ("refresh_token_hash", session.refresh_token_hash.clone()),
+            (
+                "refresh_token_hash",
+                session.refresh_token_hash.expose().clone(),
+            ),
             ("family_id", session.family_id.clone()),
             ("generation", session.generation.to_string()),
             ("provider", session.provider.clone()),
@@ -307,7 +315,7 @@ impl SessionRepository for ValkeySessionRepository {
                 detail: e.to_string(),
             })?;
         let _: () = pipeline
-            .sadd(&user_sessions_key, &session.refresh_token_hash)
+            .sadd(&user_sessions_key, session.refresh_token_hash.expose())
             .await
             .map_err(|e| Error::StoreError {
                 detail: e.to_string(),
@@ -344,7 +352,7 @@ impl SessionRepository for ValkeySessionRepository {
         if !session.family_id.is_empty() {
             let family_key = self.family_key(&session.family_id);
             let _: () = pipeline
-                .sadd(&family_key, &session.refresh_token_hash)
+                .sadd(&family_key, session.refresh_token_hash.expose())
                 .await
                 .map_err(|e| Error::StoreError {
                     detail: e.to_string(),
@@ -370,9 +378,14 @@ impl SessionRepository for ValkeySessionRepository {
         Ok(())
     }
 
-    #[instrument(skip(self))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
-        let key = self.session_key(token_hash);
+    // The digest is skipped explicitly (not left to a name collision with the schema
+    // field), so a parameter rename cannot silently re-expose the session lookup key.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
+        let key = self.session_key(token_hash.expose());
 
         let values: std::collections::HashMap<String, String> = self
             .client
@@ -456,7 +469,7 @@ impl SessionRepository for ValkeySessionRepository {
 
         Ok(Some(Session {
             user_id: get_field("user_id")?,
-            refresh_token_hash: get_field("refresh_token_hash")?,
+            refresh_token_hash: Secret::new(get_field("refresh_token_hash")?),
             family_id: legacy_family_id,
             generation: legacy_generation,
             provider: get_field("provider")?,
@@ -474,13 +487,13 @@ impl SessionRepository for ValkeySessionRepository {
     /// record past its retention deadline answers `Unknown` until its key
     /// expires natively or the sweep prunes it — reuse detection must not
     /// fire on a window that has closed.
-    #[instrument(skip(self), fields(token_hash))]
+    #[instrument(skip(self, token_hash), fields(token_hash))]
     async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
         assert!(
             !token_hash.is_empty(),
             "resolve_refresh_token: token_hash must not be empty"
         );
-        if let Some(session) = self.get_session_by_refresh_token(token_hash).await? {
+        if let Some(session) = self.get_session_by_refresh_token(&Secret::new(token_hash.to_string())).await? {
             return Ok(RefreshResolution::Live(session));
         }
 
@@ -492,7 +505,7 @@ impl SessionRepository for ValkeySessionRepository {
         }
 
         match self
-            .get_session_by_refresh_token(&record.successor_hash)
+            .get_session_by_refresh_token(&Secret::new(record.successor_hash.clone()))
             .await?
         {
             Some(successor_live) => Ok(RefreshResolution::Superseded {
@@ -514,15 +527,15 @@ impl SessionRepository for ValkeySessionRepository {
     /// redemption that moved it first makes the script answer `0` and this
     /// returns `false` with no partial swap. See [`ROTATION_SCRIPT`] for the
     /// legacy-row rule and why the counter is deliberately untouched.
-    #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
+    #[instrument(skip(self, live_hash, replacement), fields(token_hash, user_id = %replacement.user_id))]
     async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
         assert!(
             is_valid_family_id(&replacement.family_id),
             "rotate_refresh_token: malformed replacement family id {:?}",
             replacement.family_id
         );
-        assert_ne!(
-            live_hash, replacement.refresh_token_hash,
+        assert!(
+            live_hash != replacement.refresh_token_hash.expose().as_str(),
             "rotate_refresh_token: replacement must be a fresh generation"
         );
 
@@ -551,7 +564,7 @@ impl SessionRepository for ValkeySessionRepository {
             .max(SESSION_TTL_SECONDS_MIN);
 
         let mut args: Vec<String> = vec![
-            /* ARGV[1] */ replacement.refresh_token_hash.clone(),
+            /* ARGV[1] */ replacement.refresh_token_hash.expose().clone(),
             /* ARGV[2] */ live_hash.to_string(),
             /* ARGV[3] */ replacement.user_id.clone(),
             /* ARGV[4] */ ttl_seconds.to_string(),
@@ -565,7 +578,7 @@ impl SessionRepository for ValkeySessionRepository {
         args.push("user_id".to_string());
         args.push(replacement.user_id.clone());
         args.push("refresh_token_hash".to_string());
-        args.push(replacement.refresh_token_hash.clone());
+        args.push(replacement.refresh_token_hash.expose().clone());
         args.push("family_id".to_string());
         args.push(replacement.family_id.clone());
         args.push("generation".to_string());
@@ -593,7 +606,7 @@ impl SessionRepository for ValkeySessionRepository {
         let keys: Vec<String> = vec![
             self.session_key(live_hash),
             self.retired_key(live_hash),
-            self.session_key(&replacement.refresh_token_hash),
+            self.session_key(replacement.refresh_token_hash.expose()),
             self.family_key(&replacement.family_id),
             self.user_sessions_key(&replacement.user_id),
         ];
@@ -617,8 +630,9 @@ impl SessionRepository for ValkeySessionRepository {
         }
     }
 
-    #[instrument(skip(self))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
+        let token_hash = token_hash.expose().as_str();
         let key = self.session_key(token_hash);
 
         // Get user_id before deleting so we can clean up the user set
@@ -1199,7 +1213,13 @@ impl SessionRepository for ValkeySessionRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
 
     /// Reuse-retention window used by every test repository: one hour — short
     /// enough that deadline arithmetic stays inside a test's lifetime, and
@@ -1236,7 +1256,7 @@ mod tests {
         let now = Utc::now();
         Session {
             user_id: user_id.to_string(),
-            refresh_token_hash: hash.to_string(),
+            refresh_token_hash: Secret::new(hash.to_string()),
             family_id: "fam_0000000000000000000000000a".to_string(),
             generation: 0,
             provider: "google".to_string(),
@@ -1259,7 +1279,7 @@ mod tests {
             .await
             .expect("store_refresh_token");
 
-        let key = repo.session_key(&session.refresh_token_hash);
+        let key = repo.session_key(session.refresh_token_hash.expose());
         let user_set_key = repo.user_sessions_key(&session.user_id);
         let counter_key = repo.active_sessions_key();
 
@@ -1275,7 +1295,7 @@ mod tests {
             .await
             .expect("smembers on user set");
         assert!(
-            members.contains(&session.refresh_token_hash),
+            members.contains(session.refresh_token_hash.expose()),
             "user set should contain the stored session's hash"
         );
 
@@ -1363,7 +1383,7 @@ mod tests {
             .expect_err("expires_at in the past should be rejected");
         assert!(matches!(err, Error::StoreError { .. }));
 
-        let key = repo.session_key(&at_now.refresh_token_hash);
+        let key = repo.session_key(at_now.refresh_token_hash.expose());
         let exists: bool = repo
             .client
             .exists(&key)
@@ -1437,7 +1457,7 @@ mod tests {
             "counter should drop from 1 to 0 after the session is revoked"
         );
 
-        let key = repo.session_key(&session.refresh_token_hash);
+        let key = repo.session_key(session.refresh_token_hash.expose());
         let exists: bool = repo
             .client
             .exists(&key)
@@ -1601,7 +1621,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
 
-        let key = repo.session_key(&session.refresh_token_hash);
+        let key = repo.session_key(session.refresh_token_hash.expose());
         let exists: bool = repo
             .client
             .exists(&key)
@@ -1685,7 +1705,7 @@ mod tests {
             .await
             .expect("smembers on user set after cleanup");
         assert!(
-            members.contains(&session.refresh_token_hash),
+            members.contains(session.refresh_token_hash.expose()),
             "the live member must be untouched by cleanup"
         );
 
@@ -1765,7 +1785,7 @@ mod tests {
         let new_family = fixture_family_id("valkey-legacy:new-fam");
         assert!(is_valid_family_id(&new_family));
         let replacement = Session {
-            refresh_token_hash: format!("{legacy_hash}-next"),
+            refresh_token_hash: Secret::new(format!("{legacy_hash}-next")),
             family_id: new_family.clone(),
             ..legacy.clone()
         };
@@ -1784,7 +1804,7 @@ mod tests {
             "a consumed legacy row has no retained record and must read Unknown"
         );
         match repo
-            .resolve_refresh_token(&replacement.refresh_token_hash)
+            .resolve_refresh_token(replacement.refresh_token_hash.expose())
             .await
             .expect("resolve replacement")
         {
@@ -1835,7 +1855,7 @@ mod tests {
             .expect("store legacy row");
 
         let replacement = Session {
-            refresh_token_hash: format!("{legacy_hash}-next"),
+            refresh_token_hash: Secret::new(format!("{legacy_hash}-next")),
             family_id: fixture_family_id("valkey-legacy:cas-fam"),
             ..legacy.clone()
         };
@@ -1853,7 +1873,7 @@ mod tests {
             "the legacy row must survive the lost race"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&replacement.refresh_token_hash)
+            repo.resolve_refresh_token(replacement.refresh_token_hash.expose())
                 .await
                 .expect("resolve loser's proposal"),
             RefreshResolution::Unknown,
@@ -1876,28 +1896,28 @@ mod tests {
             .expect("store gen0");
 
         let won = repo
-            .rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            .rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
             .await
             .expect("rotate");
         assert!(won, "uncontended rotation must win");
 
         // Retirement record readable immediately (SR4) with the right shape.
         match repo
-            .resolve_refresh_token(&chain.gen0.refresh_token_hash)
+            .resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
             .await
             .expect("resolve presented hash")
         {
             RefreshResolution::Superseded { live, .. } => {
-                assert_eq!(live.refresh_token_hash, chain.gen1.refresh_token_hash);
+                assert!(live.refresh_token_hash == chain.gen1.refresh_token_hash);
             }
             other => panic!("presented hash must resolve Superseded, got {other:?}"),
         }
         let record = repo
-            .get_retired_record(&chain.gen0.refresh_token_hash)
+            .get_retired_record(chain.gen0.refresh_token_hash.expose())
             .await
             .expect("read retired record")
             .expect("retirement record must exist");
-        assert_eq!(record.successor_hash, chain.gen1.refresh_token_hash);
+        assert!(record.successor_hash == *chain.gen1.refresh_token_hash.expose());
         assert_eq!(record.family_id, chain.family_id);
         assert_eq!(record.user_id, "usr_rotate_effects");
         assert!(
@@ -1915,8 +1935,8 @@ mod tests {
             .smembers(repo.family_key(&chain.family_id))
             .await
             .expect("smembers family set");
-        assert!(family_members.contains(&chain.gen0.refresh_token_hash));
-        assert!(family_members.contains(&chain.gen1.refresh_token_hash));
+        assert!(family_members.contains(chain.gen0.refresh_token_hash.expose()));
+        assert!(family_members.contains(chain.gen1.refresh_token_hash.expose()));
 
         // Counter untouched by the net-zero swap.
         assert_eq!(
@@ -1942,14 +1962,14 @@ mod tests {
             .await
             .expect("store gen0");
         assert!(
-            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
                 .await
                 .expect("rotate"),
             "rotation must win"
         );
         let long_ttl: i64 = repo
             .client
-            .ttl(repo.retired_key(&chain.gen0.refresh_token_hash))
+            .ttl(repo.retired_key(chain.gen0.refresh_token_hash.expose()))
             .await
             .expect("ttl of retired key");
         assert!(
@@ -1968,14 +1988,14 @@ mod tests {
         let mut successor = short_chain.gen1.clone();
         successor.expires_at = dying.expires_at;
         assert!(
-            repo.rotate_refresh_token(&dying.refresh_token_hash, &successor)
+            repo.rotate_refresh_token(dying.refresh_token_hash.expose(), &successor)
                 .await
                 .expect("rotate dying family"),
             "rotation must win"
         );
         let short_ttl: i64 = repo
             .client
-            .ttl(repo.retired_key(&dying.refresh_token_hash))
+            .ttl(repo.retired_key(dying.refresh_token_hash.expose()))
             .await
             .expect("ttl of capped retired key");
         assert!(
@@ -2066,13 +2086,13 @@ mod tests {
             .await
             .expect("store sibling");
         assert!(
-            repo.rotate_refresh_token(&target.gen0.refresh_token_hash, &target.gen1)
+            repo.rotate_refresh_token(target.gen0.refresh_token_hash.expose(), &target.gen1)
                 .await
                 .expect("rotate target"),
             "target rotation must win"
         );
         assert!(
-            repo.rotate_refresh_token(&sibling.gen0.refresh_token_hash, &sibling.gen1)
+            repo.rotate_refresh_token(sibling.gen0.refresh_token_hash.expose(), &sibling.gen1)
                 .await
                 .expect("rotate sibling"),
             "sibling rotation must win"
@@ -2087,14 +2107,14 @@ mod tests {
             "one live generation plus one retirement record must be removed"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&target.gen1.refresh_token_hash)
+            repo.resolve_refresh_token(target.gen1.refresh_token_hash.expose())
                 .await
                 .expect("resolve revoked live"),
             RefreshResolution::Unknown,
             "the revoked live generation must read Unknown"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&target.gen0.refresh_token_hash)
+            repo.resolve_refresh_token(target.gen0.refresh_token_hash.expose())
                 .await
                 .expect("resolve revoked record"),
             RefreshResolution::Unknown,
@@ -2108,7 +2128,7 @@ mod tests {
             "an already-empty family reports zero removals"
         );
         match repo
-            .resolve_refresh_token(&sibling.gen1.refresh_token_hash)
+            .resolve_refresh_token(sibling.gen1.refresh_token_hash.expose())
             .await
             .expect("resolve sibling")
         {
@@ -2134,13 +2154,13 @@ mod tests {
             .await
             .expect("store theirs");
         assert!(
-            repo.rotate_refresh_token(&mine.gen0.refresh_token_hash, &mine.gen1)
+            repo.rotate_refresh_token(mine.gen0.refresh_token_hash.expose(), &mine.gen1)
                 .await
                 .expect("rotate mine"),
             "my rotation must win"
         );
         assert!(
-            repo.rotate_refresh_token(&theirs.gen0.refresh_token_hash, &theirs.gen1)
+            repo.rotate_refresh_token(theirs.gen0.refresh_token_hash.expose(), &theirs.gen1)
                 .await
                 .expect("rotate theirs"),
             "their rotation must win"
@@ -2151,21 +2171,21 @@ mod tests {
             .expect("revoke all mine");
 
         assert_eq!(
-            repo.resolve_refresh_token(&mine.gen1.refresh_token_hash)
+            repo.resolve_refresh_token(mine.gen1.refresh_token_hash.expose())
                 .await
                 .expect("resolve my live"),
             RefreshResolution::Unknown,
             "my live generation must be gone"
         );
         assert_eq!(
-            repo.resolve_refresh_token(&mine.gen0.refresh_token_hash)
+            repo.resolve_refresh_token(mine.gen0.refresh_token_hash.expose())
                 .await
                 .expect("resolve my retired"),
             RefreshResolution::Unknown,
             "my retirement record must be gone"
         );
         match repo
-            .resolve_refresh_token(&theirs.gen1.refresh_token_hash)
+            .resolve_refresh_token(theirs.gen1.refresh_token_hash.expose())
             .await
             .expect("resolve their live")
         {
@@ -2173,7 +2193,7 @@ mod tests {
             other => panic!("another user's family must survive my revocation, got {other:?}"),
         }
         let their_record = repo
-            .get_retired_record(&theirs.gen0.refresh_token_hash)
+            .get_retired_record(theirs.gen0.refresh_token_hash.expose())
             .await
             .expect("read their record");
         assert!(
@@ -2196,7 +2216,7 @@ mod tests {
             .await
             .expect("store gen0");
         assert!(
-            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+            repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
                 .await
                 .expect("rotate"),
             "rotation must win"
@@ -2210,9 +2230,9 @@ mod tests {
         let deleted: u64 = repo
             .client
             .del(vec![
-                repo.session_key(&chain.gen0.refresh_token_hash),
-                repo.retired_key(&chain.gen0.refresh_token_hash),
-                repo.session_key(&chain.gen1.refresh_token_hash),
+                repo.session_key(chain.gen0.refresh_token_hash.expose()),
+                repo.retired_key(chain.gen0.refresh_token_hash.expose()),
+                repo.session_key(chain.gen1.refresh_token_hash.expose()),
             ])
             .await
             .expect("delete both generations");
@@ -2319,5 +2339,237 @@ mod tests {
         let key = repo.single_use_key("nonce:past");
         let exists: bool = repo.client.exists(&key).await.expect("exists probe");
         assert!(!exists, "a refused put must not leave any key behind");
+    }
+
+    // ---------------------------------------------------------------
+    // Span-redaction regression tests (same capture technique as LMDB's)
+    // ---------------------------------------------------------------
+
+    /// Distinctive marker strings planted in a session's sensitive fields; none of them may
+    /// ever surface in captured span output.
+    const HASH_SENTINEL: &str = "feedface0123456789abcdefcafebabefeedface0123456789abcdef0987";
+    const DEVICE_SENTINEL: &str = "valkey-span-device-sentinel";
+    const USER_AGENT_SENTINEL: &str = "valkey-span-user-agent/1.0";
+    const IP_SENTINEL: &str = "198.51.100.7";
+    const USER_ID_SENTINEL: &str = "usr_valkey_span_redaction";
+
+    /// All client-provenance values carried by a session; no span may record any of them,
+    /// nor the hash.
+    const PROVENANCE_SENTINELS: [&str; 3] = [DEVICE_SENTINEL, USER_AGENT_SENTINEL, IP_SENTINEL];
+
+    /// A clonable in-memory writer the fmt subscriber renders into, so tests can assert on
+    /// exactly what was produced rather than scraping stdout.
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records the *declared* field schema `(span name, field name)` of every span created
+    /// while installed. The fmt formatter renders only fields that actually received a
+    /// value — an empty-but-declared schema field like `token_hash` never appears in the
+    /// text stream — so schema observability can only be proven against the metadata.
+    struct DeclaredFieldsLayer {
+        declared: Arc<Mutex<HashSet<(String, String)>>>,
+    }
+
+    impl<S> Layer<S> for DeclaredFieldsLayer
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            let span_name = attrs.metadata().name().to_string();
+            let mut declared = self
+                .declared
+                .lock()
+                .expect("capture mutex must not be poisoned");
+            for field in attrs.metadata().fields() {
+                declared.insert((span_name.clone(), field.name().to_string()));
+            }
+            assert!(
+                !declared.is_empty(),
+                "every instrumented span must declare its field schema"
+            );
+        }
+    }
+
+    /// The capture bundle a span-leak test needs: hold `_guard` for the whole test body,
+    /// read rendered telemetry from `buffer`, and assert declared schema via `declared`.
+    struct SpanCapture {
+        _gate: std::sync::MutexGuard<'static, ()>,
+        _guard: tracing::subscriber::DefaultGuard,
+        buffer: SharedBuffer,
+        declared: Arc<Mutex<HashSet<(String, String)>>>,
+    }
+
+    /// Install a fmt subscriber writing into `buffer` with explicit span-open/close events
+    /// enabled, alongside the schema-capture layer. Without `FmtSpan::CLOSE` the stock
+    /// subscriber would never render span teardown, letting a broken skip look clean
+    /// because nothing was asserted against.
+    ///
+    /// Keep the returned handle alive for the whole test body: dropping it uninstalls the
+    /// thread-local subscriber.
+    fn install_span_capture(buffer: SharedBuffer) -> SpanCapture {
+        let declared = Arc::new(Mutex::new(HashSet::new()));
+        // The writer closure owns a clone; the test keeps the original for assertions.
+        let writer_buffer = buffer.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(move || writer_buffer.clone())
+                    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                    .with_ansi(false),
+            )
+            .with(DeclaredFieldsLayer {
+                declared: declared.clone(),
+            });
+        // Serialize capture tests process-wide (concurrent thread-local
+        // subscriber installs race tracing's callsite interest cache), then
+        // rebuild the cache under the installed subscriber.
+        let gate = oidc_exchange_test_utils::telemetry::CAPTURE_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        SpanCapture {
+            _gate: gate,
+            _guard: guard,
+            buffer,
+            declared,
+        }
+    }
+
+    /// Asserts a span declared exactly one of its expected schema fields, so the log-schema
+    /// contract survives even though the formatter prints nothing for empty fields.
+    fn assert_declares(
+        declared: &Mutex<HashSet<(String, String)>>,
+        span_name: &str,
+        field_name: &str,
+    ) {
+        let key = (span_name.to_string(), field_name.to_string());
+        assert!(
+            declared
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .contains(&key),
+            "span {span_name} must keep declaring the {field_name} schema field"
+        );
+    }
+
+    fn sentinel_session() -> Session {
+        let now = Utc::now();
+        Session {
+            user_id: USER_ID_SENTINEL.to_string(),
+            refresh_token_hash: Secret::new(HASH_SENTINEL.to_string()),
+            family_id: oidc_exchange_core::domain::new_family_id(),
+            generation: 0,
+            rotated_at: None,
+            provider: "google".to_string(),
+            expires_at: now + chrono::Duration::hours(1),
+            device_id: Some(DEVICE_SENTINEL.to_string()),
+            user_agent: Some(USER_AGENT_SENTINEL.to_string()),
+            ip_address: Some(IP_SENTINEL.to_string()),
+            created_at: now,
+        }
+    }
+
+    fn rendered_output(buffer: &SharedBuffer) -> String {
+        let bytes = buffer
+            .0
+            .lock()
+            .expect("capture mutex must not be poisoned")
+            .clone();
+        String::from_utf8(bytes).expect("captured telemetry is utf-8")
+    }
+
+    /// Regression for the Valkey whole-session span exposure: across write, lookup, and
+    /// revoke, neither the refresh-token hash nor the client provenance recorded on the
+    /// session may render, while `user_id` and the declared-but-empty `token_hash` schema
+    /// field stay observable. Requires a live Valkey like its sibling integration tests.
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn session_spans_exclude_hash_and_provenance_but_keep_permitted_fields() {
+        let buffer = SharedBuffer::default();
+        // Single-threaded `#[tokio::test]`: every poll happens on this thread, so the
+        // thread-local default subscriber sees every span open and close below.
+        let capture = install_span_capture(buffer);
+        let repo = create_test_repo().await;
+        let session = sentinel_session();
+
+        repo.store_refresh_token(&session)
+            .await
+            .expect("store_refresh_token");
+        let fetched = repo
+            .get_session_by_refresh_token(&session.refresh_token_hash)
+            .await
+            .expect("get_session_by_refresh_token")
+            .expect("stored session must be retrievable");
+        assert_eq!(fetched.user_id, session.user_id, "lookup must find the row");
+        repo.revoke_session(&session.refresh_token_hash)
+            .await
+            .expect("revoke_session");
+
+        let rendered = rendered_output(&capture.buffer);
+
+        // Non-vacuousness: all three instrumented spans must have both opened and closed
+        // inside this capture before any absence claim means anything.
+        for span_name in [
+            "store_refresh_token",
+            "get_session_by_refresh_token",
+            "revoke_session",
+        ] {
+            let mentions = rendered.matches(span_name).count();
+            assert!(
+                mentions >= 2,
+                "span {span_name} must appear at both open and close, found {mentions}"
+            );
+        }
+        assert_eq!(
+            rendered.matches("close").count(),
+            3,
+            "exactly the three driven spans must have closed in this capture"
+        );
+
+        // Permitted observability survives: the write span records `user_id`, and the
+        // lookup/revoke spans keep their (value-less) `token_hash` log-schema field.
+        assert!(
+            rendered.contains(&format!("user_id={USER_ID_SENTINEL}")),
+            "the write span must still record user_id"
+        );
+        assert_declares(&capture.declared, "store_refresh_token", "user_id");
+        assert_declares(
+            &capture.declared,
+            "get_session_by_refresh_token",
+            "token_hash",
+        );
+        assert_declares(&capture.declared, "revoke_session", "token_hash");
+
+        // Negative space: no sensitive value anywhere in the rendered telemetry.
+        assert!(
+            !rendered.contains(HASH_SENTINEL),
+            "refresh-token hash must never reach span output"
+        );
+        for provenance in PROVENANCE_SENTINELS {
+            assert!(
+                !rendered.contains(provenance),
+                "client provenance value ({provenance}) must never reach span output"
+            );
+        }
     }
 }

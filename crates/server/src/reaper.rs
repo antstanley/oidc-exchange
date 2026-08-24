@@ -356,7 +356,7 @@ mod tests {
             .await
             .expect("store rotting gen0");
         let rotated = store
-            .rotate_refresh_token(&rotting_gen0.refresh_token_hash, &rotting_gen1)
+            .rotate_refresh_token(rotting_gen0.refresh_token_hash.expose(), &rotting_gen1)
             .await
             .expect("rotate");
         assert!(
@@ -365,8 +365,8 @@ mod tests {
         );
 
         (
-            live.refresh_token_hash.clone(),
-            rotting_gen0.refresh_token_hash.clone(),
+            live.refresh_token_hash.expose().clone(),
+            rotting_gen0.refresh_token_hash.expose().clone(),
         )
     }
 
@@ -394,8 +394,8 @@ mod tests {
             1,
             "exactly one generation may survive the sweep"
         );
-        assert_eq!(
-            remaining[0].refresh_token_hash, live_hash,
+        assert!(
+            *remaining[0].refresh_token_hash.expose() == live_hash,
             "the survivor must be the live generation, not whichever row iterated first"
         );
         assert!(
@@ -447,7 +447,10 @@ mod tests {
                 detail: "failing fixture store".into(),
             })
         }
-        async fn get_session_by_refresh_token(&self, _token_hash: &str) -> Result<Option<Session>> {
+        async fn get_session_by_refresh_token(
+            &self,
+            _token_hash: &oidc_exchange_core::secret::Secret<String>,
+        ) -> Result<Option<Session>> {
             Err(Error::StoreError {
                 detail: "failing fixture store".into(),
             })
@@ -466,7 +469,7 @@ mod tests {
                 detail: "failing fixture store".into(),
             })
         }
-        async fn revoke_session(&self, _token_hash: &str) -> Result<()> {
+        async fn revoke_session(&self, _token_hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
             Err(Error::StoreError {
                 detail: "failing fixture store".into(),
             })

@@ -837,7 +837,10 @@ impl SessionRepository for SingleUseFailRepo {
         self.inner.store_refresh_token(session).await
     }
 
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
+    async fn get_session_by_refresh_token(
+            &self,
+            token_hash: &oidc_exchange_core::secret::Secret<String>,
+        ) -> Result<Option<Session>> {
         self.inner.get_session_by_refresh_token(token_hash).await
     }
 
@@ -856,7 +859,7 @@ impl SessionRepository for SingleUseFailRepo {
         self.inner.revoke_family(family_id).await
     }
 
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
+    async fn revoke_session(&self, token_hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
         self.inner.revoke_session(token_hash).await
     }
 

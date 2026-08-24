@@ -26,10 +26,10 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
-use crate::domain::{AuditEventType, AuditFailure, AuditOutcome, AuditSeverity, ClientAddr, IdentityClaims};
+use crate::domain::IdentityClaims;
 use crate::error::{Error, Result};
 use crate::ports::SessionRepository;
-use crate::service::{create_audit_event, AppService};
+use crate::service::AppService;
 
 /// Random bytes in one minted nonce: 256 bits, base64url-encoded for the wire.
 pub const NONCE_BYTES: usize = 32;
