@@ -1,34 +1,28 @@
 use std::collections::HashMap;
 
-use oidc_exchange_core::config::{
-    AppConfig, AuditConfig, RegistrationConfig, ServerConfig, TokenConfig,
-};
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::domain::{
     AuditEventType, AuditFailure, AuditOutcome, NewUser, RateLimitDecision, RateLimitKey,
     UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
     MockUserSync,
 };
 
-fn config() -> AppConfig {
-    AppConfig {
-        server: ServerConfig {
-            issuer: "https://auth.test".into(),
-            ..Default::default()
-        },
-        token: TokenConfig {
-            access_token_ttl: "15m".into(),
-            refresh_token_ttl: "30d".into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+fn base_raw() -> RawConfig {
+    let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default config deserializes");
+    raw.server.issuer = "https://auth.test".to_string();
+    raw
+}
+
+fn config() -> Config {
+    Config::resolve(base_raw()).expect("test config resolves")
 }
 
 fn service(
@@ -36,7 +30,7 @@ fn service(
     provider: MockIdentityProvider,
     audit: MockAuditLog,
     limiter: MockRateLimiter,
-    config: AppConfig,
+    config: Config,
 ) -> AppService {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert(provider.provider_id().to_owned(), Box::new(provider));
@@ -54,15 +48,23 @@ fn service(
 
 fn request() -> ExchangeRequest {
     ExchangeRequest {
-        code: Some("code".into()),
-        redirect_uri: Some("https://app.test/callback".into()),
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".into(),
+            redirect_uri: "https://app.test/callback".into(),
+        },
         provider: "mock".into(),
-        ..Default::default()
+        provider_access_token: None,
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     }
 }
 
 #[tokio::test]
 async fn terminal_outcome_space_emits_exactly_one_safe_event() {
+    // An incoherent grant/field combination is unrepresentable in the typed
+    // `ExchangeCredential`, so the second reachable AuthenticationFailed shape
+    // here is a provider-rejected credential (`invalid_grant`).
     let cases = [
         (
             "unknown provider",
@@ -70,7 +72,7 @@ async fn terminal_outcome_space_emits_exactly_one_safe_event() {
             AuditEventType::ValidationFailed,
         ),
         (
-            "malformed request",
+            "rejected credential",
             "mock",
             AuditEventType::ValidationFailed,
         ),
@@ -79,14 +81,14 @@ async fn terminal_outcome_space_emits_exactly_one_safe_event() {
     for (name, provider_name, expected) in cases {
         let repo = MockRepository::new();
         let provider = MockIdentityProvider::new("mock");
+        if name == "rejected credential" {
+            provider.set_exchange_error("invalid_grant").await;
+        }
         let audit = MockAuditLog::new();
         let audit_view = audit.clone();
         let svc = service(repo, provider, audit, MockRateLimiter::new(), config());
         let mut exchange_request = request();
         exchange_request.provider = provider_name.into();
-        if name == "malformed request" {
-            exchange_request.code = None;
-        }
         svc.exchange(exchange_request).await.expect_err(name);
         let events = audit_view.events().await;
         assert_eq!(events.len(), 1, "{name} must have one terminal event");
@@ -101,12 +103,10 @@ async fn emergency_threshold_cannot_suppress_terminal_security_event() {
     let provider = MockIdentityProvider::new("mock");
     let audit = MockAuditLog::new();
     let audit_view = audit.clone();
-    let config = AppConfig {
-        audit: AuditConfig {
-            emit_threshold: "emergency".into(),
-            ..Default::default()
-        },
-        ..config()
+    let config = {
+        let mut raw = base_raw();
+        raw.audit.emit_threshold = "emergency".to_string();
+        Config::resolve(raw).expect("test config resolves")
     };
     let svc = service(repo, provider, audit, MockRateLimiter::new(), config);
     let mut exchange_request = request();
@@ -281,13 +281,9 @@ async fn mandatory_failure_paths_emit_exactly_one_expected_event() {
             }
         };
         let cfg = if matches!(case, Case::RegistrationDenial) {
-            AppConfig {
-                registration: RegistrationConfig {
-                    mode: "existing_users_only".into(),
-                    ..Default::default()
-                },
-                ..config()
-            }
+            let mut raw = base_raw();
+            raw.registration.mode = "existing_users_only".to_string();
+            Config::resolve(raw).expect("test config resolves")
         } else {
             config()
         };
@@ -319,12 +315,10 @@ async fn enforce_failure_removes_session_while_observe_failure_remains_visible()
         let provider = MockIdentityProvider::new("mock");
         let audit = MockAuditLog::new();
         audit.set_fail_mode(true).await;
-        let cfg = AppConfig {
-            audit: AuditConfig {
-                durability: durability.into(),
-                ..Default::default()
-            },
-            ..config()
+        let cfg = {
+            let mut raw = base_raw();
+            raw.audit.durability = durability.to_string();
+            Config::resolve(raw).expect("test config resolves")
         };
         let svc = service(repo.clone(), provider, audit, MockRateLimiter::new(), cfg);
         let result = svc.exchange(request()).await;

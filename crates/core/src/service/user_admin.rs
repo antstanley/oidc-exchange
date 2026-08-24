@@ -315,7 +315,7 @@ impl AppService {
             Err(error) => {
                 crate::service::record_mandatory_audit_failure();
                 self.log_audit_fallback(&event);
-                if self.config.audit.durability.eq_ignore_ascii_case("enforce") {
+                if self.config.audit.durability.is_enforce() {
                     Err(Error::SecurityAuditDurability {
                         detail: error.to_string(),
                     })

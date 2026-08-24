@@ -19,7 +19,7 @@ use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
 use oidc_exchange::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets, TestClock};
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::domain::{AuditEventType, RateLimitDecision, RateLimitKey};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
@@ -30,15 +30,28 @@ use oidc_exchange_test_utils::{
 
 const TEST_SECRET: &str = "test-internal-secret-e2e";
 
+fn test_config(registration_mode: &str) -> Config {
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    raw_config.registration.mode = registration_mode.to_string();
+    raw_config.internal_api.enabled = true;
+    raw_config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    Config::resolve(raw_config).expect("test config should resolve")
+}
+
+
+fn base_raw() -> RawConfig {
+    toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid")
+}
+
 fn build_e2e_app() -> Router {
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    let config = test_config("open");
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -47,6 +60,35 @@ fn build_e2e_app() -> Router {
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
         Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+
+    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
+    let state = AppState {
+        service: Arc::new(service),
+        config: Arc::new(config),
+        rate_limiter,
+    };
+
+    public_routes()
+        .merge(internal_routes(state.clone()))
+        .layer(from_fn(ffi_audit_context_layer))
+        .with_state(state)
+}
+
+fn build_e2e_app_with_config(config: Config) -> Router {
+    let provider = MockIdentityProvider::new("test");
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config.clone(),
     );
@@ -79,11 +121,12 @@ fn build_production_audit_router(
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.role = "exchange".to_string();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.server.trusted_proxies = vec!["10.0.0.0/8".to_string()];
-    config.server.trusted_proxy_hops = 1;
+    let mut raw = base_raw();
+    raw.server.role = "exchange".to_string();
+    raw.server.issuer = "https://auth.example.com".to_string();
+    raw.server.trusted_proxies = vec!["10.0.0.0/8".to_string()];
+    raw.server.trusted_proxy_hops = 1;
+    let config = Config::resolve(raw).expect("test config resolves");
     let service = AppService::new(
         Box::new(MockRepository::new()),
         Box::new(MockRepository::new()),
@@ -114,13 +157,14 @@ fn build_production_audit_router(
 }
 
 fn build_throttled_router(
-    mut config: AppConfig,
+    mut raw: RawConfig,
     provider: MockIdentityProvider,
     service_limiter: MockRateLimiter,
     public_limiter: MockRateLimiter,
 ) -> Router {
-    config.server.role = "exchange".to_string();
-    config.server.issuer = "https://auth.example.com".to_string();
+    raw.server.role = "exchange".to_string();
+    raw.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw).expect("test config resolves");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
     let service = AppService::new(
@@ -321,9 +365,17 @@ async fn e2e_full_auth_flow() {
     let new_access_token = refresh_json["access_token"].as_str().unwrap();
     assert!(!new_access_token.is_empty());
     assert_eq!(refresh_json["token_type"], "Bearer");
+    // Rotation is on by default: the refresh grant returns a replacement, and
+    // the presented token is now retired (grace-superseded).
+    let rotated_refresh_token = refresh_json["refresh_token"].as_str().unwrap();
+    assert!(!rotated_refresh_token.is_empty());
+    assert_ne!(rotated_refresh_token, refresh_token);
 
-    // Step 3: POST /revoke with the refresh token → 200
-    let revoke_body = format!("token={}&token_type_hint=refresh_token", refresh_token);
+    // Step 3: POST /revoke with the *current* generation → 200
+    let revoke_body = format!(
+        "token={}&token_type_hint=refresh_token",
+        rotated_refresh_token
+    );
 
     let response = app
         .clone()
@@ -340,14 +392,17 @@ async fn e2e_full_auth_flow() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Step 4: POST /token with grant_type=refresh_token (same token) → should fail
+    // Step 4: POST /token with grant_type=refresh_token (the revoked current
+    // generation) → should fail as unknown: the revocation removed it.
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/token")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(refresh_body))
+                .body(Body::from(format!(
+                    "grant_type=refresh_token&refresh_token={rotated_refresh_token}"
+                )))
                 .unwrap(),
         )
         .await
@@ -439,12 +494,14 @@ async fn e2e_internal_api_custom_claims() {
 
 #[tokio::test]
 async fn production_router_enforce_audit_failure_cleans_up_token_session() {
-    let mut config = AppConfig::default();
-    config.server.role = "exchange".to_string();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.audit.durability = "enforce".to_string();
-    config.audit.emit_threshold = "emergency".to_string();
-    config.rate_limit.enabled = false;
+    let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw.server.role = "exchange".to_string();
+    raw.server.issuer = "https://auth.example.com".to_string();
+    raw.audit.durability = "enforce".to_string();
+    raw.audit.emit_threshold = "emergency".to_string();
+    raw.rate_limit.enabled = false;
+    let config = Config::resolve(raw).expect("enforce config resolves");
 
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -483,11 +540,13 @@ async fn production_router_enforce_audit_failure_cleans_up_token_session() {
 
 #[tokio::test]
 async fn production_router_enforce_revoke_audit_failure_is_status_indistinguishable() {
-    let mut config = AppConfig::default();
-    config.server.role = "exchange".to_string();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.audit.durability = "enforce".to_string();
-    config.rate_limit.enabled = false;
+    let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw.server.role = "exchange".to_string();
+    raw.server.issuer = "https://auth.example.com".to_string();
+    raw.audit.durability = "enforce".to_string();
+    raw.rate_limit.enabled = false;
+    let config = Config::resolve(raw).expect("enforce config resolves");
 
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -569,11 +628,12 @@ async fn production_router_enforce_revoke_audit_failure_is_status_indistinguisha
 
 #[tokio::test]
 async fn public_router_emits_one_mandatory_authentication_failure_at_emergency_threshold() {
-    let mut config = AppConfig::default();
-    config.server.role = "exchange".to_string();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.audit.emit_threshold = "emergency".to_string();
-    config.rate_limit.enabled = false;
+    let mut raw = base_raw();
+    raw.server.role = "exchange".to_string();
+    raw.server.issuer = "https://auth.example.com".to_string();
+    raw.audit.emit_threshold = "emergency".to_string();
+    raw.rate_limit.enabled = false;
+    let config = Config::resolve(raw).expect("test config resolves");
 
     let provider = MockIdentityProvider::new("test");
     provider.set_invalid_grant().await;
@@ -615,15 +675,16 @@ async fn public_router_emits_one_mandatory_authentication_failure_at_emergency_t
 
 #[tokio::test]
 async fn public_router_uses_real_fixed_window_limiter_at_budget_and_after_rollover() {
-    let mut config = AppConfig::default();
-    config.server.role = "exchange".to_string();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.rate_limit.enabled = true;
-    config.rate_limit.per_ip = 2;
-    config.rate_limit.per_ip_failures = 0;
-    config.rate_limit.per_provider = 0;
-    config.rate_limit.per_subject = 0;
-    config.rate_limit.max_entries = 16;
+    let mut raw = base_raw();
+    raw.server.role = "exchange".to_string();
+    raw.server.issuer = "https://auth.example.com".to_string();
+    raw.rate_limit.enabled = true;
+    raw.rate_limit.per_ip = 2;
+    raw.rate_limit.per_ip_failures = 0;
+    raw.rate_limit.per_provider = 0;
+    raw.rate_limit.per_subject = 0;
+    raw.rate_limit.max_entries = 16;
+    let config = Config::resolve(raw).expect("test config resolves");
 
     let provider = MockIdentityProvider::new("test");
     let provider_view = provider.clone();
@@ -690,14 +751,15 @@ async fn public_router_uses_real_fixed_window_limiter_at_budget_and_after_rollov
 
 #[tokio::test]
 async fn router_denies_sixty_first_request_before_provider_work_and_sets_retry_after() {
-    let mut config = AppConfig::default();
-    config.rate_limit.enabled = true;
-    config.rate_limit.per_ip = 60;
-    config.rate_limit.per_ip_failures = 0;
-    config.rate_limit.per_provider = 0;
-    config.rate_limit.per_subject = 0;
-    config.rate_limit.max_entries = 1024;
-    config.audit.durability = "best_effort".to_string();
+    let mut raw = base_raw();
+    raw.rate_limit.enabled = true;
+    raw.rate_limit.per_ip = 60;
+    raw.rate_limit.per_ip_failures = 0;
+    raw.rate_limit.per_provider = 0;
+    raw.rate_limit.per_subject = 0;
+    raw.rate_limit.max_entries = 1024;
+    raw.audit.durability = "observe".to_string();
+    let config = Config::resolve(raw).expect("test config resolves");
     let provider = MockIdentityProvider::new("test");
     let audit = MockAuditLog::new();
     let public_limiter = MockRateLimiter::new();
@@ -747,18 +809,18 @@ async fn router_denies_sixty_first_request_before_provider_work_and_sets_retry_a
 
 #[tokio::test]
 async fn router_counts_invalid_grant_failures_but_not_malformed_requests() {
-    let mut config = AppConfig::default();
-    config.rate_limit.enabled = true;
-    config.rate_limit.per_ip = 0;
-    config.rate_limit.per_ip_failures = 1;
-    config.rate_limit.per_provider = 0;
-    config.rate_limit.per_subject = 0;
-    config.audit.durability = "best_effort".to_string();
+    let mut raw = base_raw();
+    raw.rate_limit.enabled = true;
+    raw.rate_limit.per_ip = 0;
+    raw.rate_limit.per_ip_failures = 1;
+    raw.rate_limit.per_provider = 0;
+    raw.rate_limit.per_subject = 0;
+    raw.audit.durability = "observe".to_string();
     let provider = MockIdentityProvider::new("test");
     provider.set_invalid_grant().await;
     let public_limiter = MockRateLimiter::new();
     let app = build_throttled_router(
-        config,
+        raw,
         provider,
         MockRateLimiter::new(),
         public_limiter.clone(),
@@ -791,4 +853,75 @@ async fn router_counts_invalid_grant_failures_but_not_malformed_requests() {
         1,
         "invalid_grant consumes exactly one failure-IP budget while malformed input does not"
     );
+}
+
+#[tokio::test]
+async fn e2e_registration_policy_existing_users_only() {
+    let app = build_e2e_app_with_config(test_config("existing_users_only"));
+
+    // Step 1: POST /token → 403 access_denied (user doesn't exist)
+    let exchange_body =
+        "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(exchange_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let error_json = body_to_json(response.into_body()).await;
+    assert_eq!(error_json["error"], "access_denied");
+
+    // Step 2: POST /internal/users → create user with matching external_id
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/users")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::from(
+                    json!({
+                        "external_id": "test-subject",
+                        "provider": "test",
+                        "email": "test@example.com"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Step 3: POST /token → 200 success (user now exists)
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(exchange_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let token_json = body_to_json(response.into_body()).await;
+    assert!(token_json.get("access_token").is_some());
+    assert!(token_json.get("refresh_token").is_some());
+    assert_eq!(token_json["token_type"], "Bearer");
 }

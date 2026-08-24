@@ -61,6 +61,10 @@ pub enum AuditEventType {
     ProviderError,
     Unauthorized,
     ThrottleExceeded,
+    /// A retired refresh-token generation was presented outside its grace
+    /// window: the credential chain leaked, its family was revoked. Emitted at
+    /// `AuditSeverity::Warning` so it survives the default emit threshold.
+    RefreshTokenReuse,
 }
 
 /// The server's confidence in the address recorded on an audit event.
@@ -310,6 +314,10 @@ pub enum AuditFailure {
     PrincipalSuspended,
     ProviderRejected,
     ThrottleExceeded,
+    /// A retired refresh-token generation was presented outside its grace
+    /// window: the credential chain leaked, its family was revoked. Emitted at
+    /// `AuditSeverity::Warning` so it survives the default emit threshold.
+    RefreshTokenReuse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

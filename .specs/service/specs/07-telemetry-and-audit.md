@@ -1,6 +1,6 @@
 # Telemetry and Audit
 
-**Status:** Implemented · **Date:** 2026-08-17 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
 
 Two independent observability systems with different purposes.
 
@@ -38,10 +38,13 @@ configured threshold filters it: sink failures are governed by `audit.durability
 Severity remains on both channels because sinks and SIEMs route and alert on it; on the
 mandatory channel it never determines whether a security event exists.
 
-Adapters: `stdout_audit` writes JSON lines and `Auto` routes error-and-above to stderr; a
-write error is returned as `AuditError` rather than panicking. `sqs_audit` sends one JSON
-message per event with a `severity` attribute and detects FIFO queues from the `.fifo` suffix.
-`noop` drops events. `stdout` is the committed default.
+Adapters: `stdout_audit` writes JSON lines with locked handles, and `Auto` routes
+error-and-above to stderr; a write failure (e.g. EPIPE from a restarted log collector)
+returns `AuditError` rather than panicking. `sqs_audit` sends one JSON message per event
+with a `severity` attribute and detects FIFO queues from the `.fifo` suffix; on FIFO queues
+it sets `message_group_id` to the event id — each event is its own group, so FIFO ordering
+never serializes throughput — with the event's ULID as the deduplication id. `noop` drops
+events. `stdout` is the committed default.
 
 A single request can produce both a telemetry trace and an audit event; they correlate
 through the request id but are otherwise independent.

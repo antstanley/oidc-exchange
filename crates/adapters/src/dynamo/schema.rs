@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use chrono::{DateTime, Utc};
-use oidc_exchange_core::domain::{Session, User, UserStatus, INITIAL_USER_VERSION};
+use oidc_exchange_core::domain::{
+    RetiredRefreshToken, Session, User, UserStatus, INITIAL_USER_VERSION,
+};
 use oidc_exchange_core::error::{Error, Result};
 
 // ---------------------------------------------------------------------------
@@ -141,14 +143,24 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     );
     item.insert("sk".to_string(), AttributeValue::S("SESSION".to_string()));
 
-    // GSI1 — list sessions by user
+    // GSI1 — admin listing of a user's sessions by family. The `FAM#…` form
+    // groups every generation of one sign-in under its stable family id, so
+    // the listing survives rotation (the presented hash no longer identifies
+    // anything after one). Revocation paths deliberately do NOT enumerate
+    // through this index — it is eventually consistent and can omit a
+    // session written moments earlier; they read the authoritative user-item
+    // roster instead.
     item.insert(
         "GSI1pk".to_string(),
         AttributeValue::S(format!("USER#{}", session.user_id)),
     );
     item.insert(
         "GSI1sk".to_string(),
-        AttributeValue::S(format!("SESSION#{}", session.created_at.to_rfc3339())),
+        AttributeValue::S(format!(
+            "FAM#{}#SESSION#{}",
+            session.family_id,
+            session.created_at.to_rfc3339()
+        )),
     );
 
     // Data attributes
@@ -159,6 +171,14 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
     item.insert(
         "refresh_token_hash".to_string(),
         AttributeValue::S(session.refresh_token_hash.clone()),
+    );
+    item.insert(
+        "family_id".to_string(),
+        AttributeValue::S(session.family_id.clone()),
+    );
+    item.insert(
+        "generation".to_string(),
+        AttributeValue::N(session.generation.to_string()),
     );
     item.insert(
         "provider".to_string(),
@@ -172,6 +192,13 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
         "created_at".to_string(),
         AttributeValue::S(session.created_at.to_rfc3339()),
     );
+
+    if let Some(ref rotated_at) = session.rotated_at {
+        item.insert(
+            "rotated_at".to_string(),
+            AttributeValue::S(rotated_at.to_rfc3339()),
+        );
+    }
 
     if let Some(ref device_id) = session.device_id {
         item.insert(
@@ -202,15 +229,166 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
 }
 
 pub fn item_to_session(item: &HashMap<String, AttributeValue>) -> Result<Session> {
+    // A session item written before rotation shipped has no family attributes.
+    // They read back with the same sentinel values the SQL adapters use for a
+    // NULL `family_id` column — an empty string that deliberately fails
+    // `is_valid_family_id`, so downstream family operations visibly fail
+    // rather than silently matching a family that does not exist. The
+    // `generation` default mirrors `get_version_or_default`'s migration
+    // handling of the pre-`version` user items.
+    let family_id = get_s_opt(item, "family_id").unwrap_or_default();
+    let rotated_at = match get_s_opt(item, "rotated_at") {
+        Some(s) => Some(parse_datetime(&s)?),
+        None => None,
+    };
+
     Ok(Session {
         user_id: get_s(item, "user_id")?,
         refresh_token_hash: get_s(item, "refresh_token_hash")?,
+        family_id,
+        generation: get_generation_or_default(item)?,
         provider: get_s(item, "provider")?,
         expires_at: parse_datetime(&get_s(item, "expires_at")?)?,
+        rotated_at,
         device_id: get_s_opt(item, "device_id"),
         user_agent: get_s_opt(item, "user_agent"),
         ip_address: get_s_opt(item, "ip_address"),
         created_at: parse_datetime(&get_s(item, "created_at")?)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Retired refresh token <-> DynamoDB Item
+// ---------------------------------------------------------------------------
+
+/// Sort key value for every retired-refresh-token item.
+pub const RETIRED_SK: &str = "RETIRED";
+
+/// Builds the retirement-record item: `pk = RETIRED#<hash>`, `sk = RETIRED`,
+/// GSI1 filed under the owning user with a family-grouped sort key, and the
+/// same numeric `ttl` attribute sessions carry so DynamoDB reaps records
+/// natively when their retention deadline passes.
+pub fn retired_to_item(record: &RetiredRefreshToken) -> HashMap<String, AttributeValue> {
+    let mut item = HashMap::new();
+
+    item.insert(
+        "pk".to_string(),
+        AttributeValue::S(format!("RETIRED#{}", record.refresh_token_hash)),
+    );
+    item.insert("sk".to_string(), AttributeValue::S(RETIRED_SK.to_string()));
+
+    item.insert(
+        "GSI1pk".to_string(),
+        AttributeValue::S(format!("USER#{}", record.user_id)),
+    );
+    item.insert(
+        "GSI1sk".to_string(),
+        AttributeValue::S(format!(
+            "FAM#{}#RETIRED#{}",
+            record.family_id,
+            record.retired_at.to_rfc3339()
+        )),
+    );
+
+    item.insert(
+        "refresh_token_hash".to_string(),
+        AttributeValue::S(record.refresh_token_hash.clone()),
+    );
+    item.insert(
+        "family_id".to_string(),
+        AttributeValue::S(record.family_id.clone()),
+    );
+    item.insert(
+        "user_id".to_string(),
+        AttributeValue::S(record.user_id.clone()),
+    );
+    item.insert(
+        "successor_hash".to_string(),
+        AttributeValue::S(record.successor_hash.clone()),
+    );
+    item.insert(
+        "retired_at".to_string(),
+        AttributeValue::S(record.retired_at.to_rfc3339()),
+    );
+    item.insert(
+        "expires_at".to_string(),
+        AttributeValue::S(record.expires_at.to_rfc3339()),
+    );
+    // TTL for DynamoDB automatic expiration (epoch seconds).
+    item.insert(
+        "ttl".to_string(),
+        AttributeValue::N(record.expires_at.timestamp().to_string()),
+    );
+
+    item
+}
+
+/// Parses a retirement-record item. Every attribute is written by
+/// [`retired_to_item`], so a missing or mistyped one is corruption at the
+/// store-read boundary and surfaces as a store error rather than a
+/// half-record that could silently disarm reuse detection.
+pub fn item_to_retired(item: &HashMap<String, AttributeValue>) -> Result<RetiredRefreshToken> {
+    Ok(RetiredRefreshToken {
+        refresh_token_hash: get_s(item, "refresh_token_hash")?,
+        family_id: get_s(item, "family_id")?,
+        user_id: get_s(item, "user_id")?,
+        successor_hash: get_s(item, "successor_hash")?,
+        retired_at: parse_datetime(&get_s(item, "retired_at")?)?,
+        expires_at: parse_datetime(&get_s(item, "expires_at")?)?,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Single-use record <-> DynamoDB Item
+// ---------------------------------------------------------------------------
+
+/// Sort key value for every single-use-record item (see [`single_use_to_item`]).
+pub const SINGLE_USE_SK: &str = "SINGLEUSE";
+
+/// Partition key for a single-use-record item: `SINGLEUSE#<namespaced digest>`. The key
+/// is the whole state — there is nothing else to store but its expiry.
+pub fn single_use_pk(key: &str) -> String {
+    format!("SINGLEUSE#{key}")
+}
+
+/// Builds the single-use-record item: `pk = SINGLEUSE#<key>`, `sk = SINGLEUSE`, with
+/// `expires_at` as epoch seconds (what the claim condition compares) and the duplicate
+/// numeric `ttl` attribute so DynamoDB's native expiry reaps the item. Storage holds
+/// only the namespaced digest and the expiry — never raw nonce/assertion material.
+pub fn single_use_to_item(key: &str, expires_at: DateTime<Utc>) -> HashMap<String, AttributeValue> {
+    let mut item = HashMap::new();
+    item.insert("pk".to_string(), AttributeValue::S(single_use_pk(key)));
+    item.insert(
+        "sk".to_string(),
+        AttributeValue::S(SINGLE_USE_SK.to_string()),
+    );
+    item.insert(
+        "expires_at".to_string(),
+        AttributeValue::N(expires_at.timestamp().to_string()),
+    );
+    item.insert(
+        "ttl".to_string(),
+        AttributeValue::N(expires_at.timestamp().to_string()),
+    );
+    item
+}
+
+/// Reads back the numeric `expires_at` (epoch seconds) from a returned single-use item,
+/// re-validating stored data rather than trusting it (dev-guidelines §Store read).
+pub fn item_single_use_expiry(item: &HashMap<String, AttributeValue>) -> Result<DateTime<Utc>> {
+    let epoch = item
+        .get("expires_at")
+        .and_then(|v| v.as_n().ok())
+        .ok_or_else(|| Error::StoreError {
+            detail: "missing or invalid attribute: expires_at".to_string(),
+        })?
+        .parse::<i64>()
+        .map_err(|e| Error::StoreError {
+            detail: format!("invalid expires_at epoch seconds: {e}"),
+        })?;
+
+    DateTime::from_timestamp(epoch, 0).ok_or_else(|| Error::StoreError {
+        detail: format!("expires_at epoch seconds out of range: {epoch}"),
     })
 }
 
@@ -250,6 +428,25 @@ fn get_version_or_default(item: &HashMap<String, AttributeValue>) -> Result<u64>
     }
 }
 
+/// Reads the session item's `generation` attribute, treating a missing
+/// attribute (an item written before rotation shipped) as generation 0 — the
+/// migration default for pre-rotation rows. A present-but-non-numeric value is
+/// a distinct corruption failure and is rejected, not defaulted.
+fn get_generation_or_default(item: &HashMap<String, AttributeValue>) -> Result<u32> {
+    match item.get("generation") {
+        Some(v) => v
+            .as_n()
+            .map_err(|_| Error::StoreError {
+                detail: "invalid attribute: generation".to_string(),
+            })?
+            .parse::<u32>()
+            .map_err(|e| Error::StoreError {
+                detail: format!("invalid generation: {e}"),
+            }),
+        None => Ok(0),
+    }
+}
+
 fn get_json_map(
     item: &HashMap<String, AttributeValue>,
     key: &str,
@@ -259,6 +456,120 @@ fn get_json_map(
             detail: format!("invalid JSON in {key}: {e}"),
         }),
         None => Ok(HashMap::new()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The authoritative per-user session roster
+// ---------------------------------------------------------------------------
+
+/// One family's entry in the user item's authoritative `families` map:
+/// which generation is currently live and every generation hash (live plus
+/// retired, until revocation) the family has ever held. This is what makes
+/// `revoke_family` complete without trusting an eventually consistent index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilyRoster {
+    /// The live generation's hash, or an empty string when the family
+    /// currently has none (fully revoked or not yet rotated into existence).
+    pub live: String,
+    /// Every generation hash of this family still remembered: the live one
+    /// plus each retained retirement record.
+    pub members: Vec<String>,
+}
+
+impl FamilyRoster {
+    pub fn new(live: String, members: Vec<String>) -> Self {
+        Self { live, members }
+    }
+
+    /// Serialize to the nested map attribute stored under `families.<id>`.
+    pub fn to_attribute(&self) -> AttributeValue {
+        AttributeValue::M(HashMap::from([
+            ("live".to_string(), AttributeValue::S(self.live.clone())),
+            (
+                "members".to_string(),
+                AttributeValue::Ss(self.members.clone()),
+            ),
+        ]))
+    }
+
+    /// Parse one `families.<id>` entry; a malformed entry is roster
+    /// corruption and must surface rather than silently truncate the
+    /// revocation set.
+    pub fn from_attribute(value: &AttributeValue) -> Result<Self> {
+        let map = value.as_m().map_err(|_| Error::StoreError {
+            detail: "roster families entry is not a map".to_string(),
+        })?;
+        let live = map
+            .get("live")
+            .and_then(|v| v.as_s().ok())
+            .ok_or_else(|| Error::StoreError {
+                detail: "roster families entry is missing its live pointer".to_string(),
+            })?
+            .clone();
+        let members = map
+            .get("members")
+            .and_then(|v| v.as_ss().ok())
+            .ok_or_else(|| Error::StoreError {
+                detail: "roster families entry is missing its member set".to_string(),
+            })?
+            .clone();
+        Ok(Self { live, members })
+    }
+}
+
+/// The session-revocation roster carried by the dedicated user item
+/// (`pk = USER#<id>`, `sk = USER` — created alongside the `PROFILE` item and
+/// distinct from it): the `sessions` string set naming every live generation,
+/// and the `families` map grouping each family's generations. Every session
+/// write maintains both inside the same `TransactWriteItems` as the session
+/// items themselves, so a strongly consistent read of this struct is a
+/// complete picture of a user's credential state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserRoster {
+    pub sessions: Vec<String>,
+    /// Keyed by family id.
+    pub families: HashMap<String, FamilyRoster>,
+}
+
+impl UserRoster {
+    /// Extract the roster from a user item. Both attributes are absent on
+    /// users with no sessions yet (and on pre-rotation user items), which
+    /// reads as an empty roster, not an error.
+    pub fn from_item(item: &HashMap<String, AttributeValue>) -> Result<Self> {
+        let sessions = match item.get("sessions") {
+            Some(v) => v
+                .as_ss()
+                .map_err(|_| Error::StoreError {
+                    detail: "user item attribute sessions is not a string set".to_string(),
+                })?
+                .clone(),
+            None => Vec::new(),
+        };
+
+        let mut families = HashMap::new();
+        if let Some(value) = item.get("families") {
+            let map = value.as_m().map_err(|_| Error::StoreError {
+                detail: "user item attribute families is not a map".to_string(),
+            })?;
+            for (family_id, entry) in map {
+                families.insert(family_id.clone(), FamilyRoster::from_attribute(entry)?);
+            }
+        }
+
+        debug_assert!(
+            families
+                .values()
+                .all(|f| f.members.iter().all(|m| !m.is_empty())),
+            "roster family members may not be empty strings"
+        );
+
+        Ok(Self { sessions, families })
+    }
+
+    /// Look up which family owns `hash` as its live generation.
+    pub fn live_family_of(&self, hash: &str) -> Option<&FamilyRoster> {
+        self.families.values().find(|family| family.live == hash)
     }
 }
 
@@ -330,8 +641,11 @@ mod tests {
         Session {
             user_id: "usr_01abc".to_string(),
             refresh_token_hash: "sha256_deadbeef".to_string(),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: Some("device_1".to_string()),
             user_agent: Some("Mozilla/5.0".to_string()),
             ip_address: Some("127.0.0.1".to_string()),
@@ -458,14 +772,84 @@ mod tests {
         );
     }
 
+    /// The session round trip must preserve the family identity rotation is
+    /// built on: `family_id`, `generation`, and `rotated_at` survive the item
+    /// mapping unchanged.
+    #[test]
+    fn session_round_trip_preserves_family_fields() {
+        let mut session = sample_session();
+        session.generation = 7;
+        session.rotated_at = Some(Utc::now());
+
+        let item = session_to_item(&session);
+        let restored = item_to_session(&item).expect("should parse session from item");
+
+        assert_eq!(session.family_id, restored.family_id);
+        assert_eq!(session.generation, restored.generation);
+        assert_eq!(
+            session.rotated_at.map(|ts| ts.timestamp_millis()),
+            restored.rotated_at.map(|ts| ts.timestamp_millis())
+        );
+    }
+
+    /// A session item written before rotation shipped (no family attributes)
+    /// must read back with the migration defaults — empty-string family,
+    /// generation 0, no rotation timestamp — mirroring
+    /// `item_to_user_missing_version_defaults_to_initial_version`.
+    #[test]
+    fn item_to_session_missing_family_attributes_defaults_to_legacy_shape() {
+        // Build from a fully-populated session (rotated_at set) so every
+        // family attribute is present in the item, then strip all three to
+        // simulate the pre-rotation record.
+        let mut rotated = sample_session();
+        rotated.generation = 3;
+        rotated.rotated_at = Some(Utc::now());
+        let mut item = session_to_item(&rotated);
+        assert!(item.remove("family_id").is_some());
+        assert!(item.remove("generation").is_some());
+        assert!(item.remove("rotated_at").is_some());
+
+        let restored = item_to_session(&item).expect("legacy session item must parse");
+        assert_eq!(
+            restored.family_id, "",
+            "missing family must land on the empty-string sentinel"
+        );
+        assert!(!oidc_exchange_core::domain::is_valid_family_id(
+            &restored.family_id
+        ));
+        assert_eq!(restored.generation, 0);
+        assert_eq!(restored.rotated_at, None);
+        // Sanity: every other field still round-trips without the family attrs.
+        assert_eq!(restored.refresh_token_hash, "sha256_deadbeef");
+    }
+
+    /// Negative-space: a `generation` attribute present but not a DynamoDB `N`
+    /// is a distinct corruption failure and must be rejected, not silently
+    /// defaulted to 0.
+    #[test]
+    fn item_to_session_non_numeric_generation_returns_error() {
+        let mut item = session_to_item(&sample_session());
+        item.insert(
+            "generation".to_string(),
+            AttributeValue::S("not-a-number".to_string()),
+        );
+
+        let result = item_to_session(&item);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("generation"));
+    }
+
     #[test]
     fn session_round_trip_no_optional_fields() {
         let now = Utc::now();
         let session = Session {
             user_id: "usr_01abc".to_string(),
             refresh_token_hash: "sha256_cafe".to_string(),
+            family_id: "fam_0000000000000000000000000b".to_string(),
+            generation: 0,
             provider: "atproto".to_string(),
             expires_at: now + chrono::Duration::hours(1),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,
@@ -515,6 +899,97 @@ mod tests {
         );
     }
 
+    fn sample_retired() -> RetiredRefreshToken {
+        let now = Utc::now();
+        RetiredRefreshToken {
+            refresh_token_hash: "sha256_retired_gen0".to_string(),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            user_id: "usr_01abc".to_string(),
+            successor_hash: "sha256_live_gen1".to_string(),
+            retired_at: now,
+            expires_at: now + chrono::Duration::hours(24),
+        }
+    }
+
+    /// The retirement record round trip must preserve every field reuse
+    /// detection reads: the presented hash, its family/owner, the successor
+    /// pointer, and both timestamps.
+    #[test]
+    fn retired_round_trip_preserves_all_fields() {
+        let record = sample_retired();
+        let item = retired_to_item(&record);
+        let restored = item_to_retired(&item).expect("should parse retired from item");
+
+        assert_eq!(record.refresh_token_hash, restored.refresh_token_hash);
+        assert_eq!(record.family_id, restored.family_id);
+        assert_eq!(record.user_id, restored.user_id);
+        assert_eq!(record.successor_hash, restored.successor_hash);
+        assert_eq!(
+            record.retired_at.timestamp_millis(),
+            restored.retired_at.timestamp_millis()
+        );
+        assert_eq!(
+            record.expires_at.timestamp_millis(),
+            restored.expires_at.timestamp_millis()
+        );
+    }
+
+    /// Retirement items are keyed `RETIRED#<hash>` / `RETIRED`, filed under
+    /// the owner's GSI1 partition with a family-grouped sort key, and carry
+    /// the numeric `ttl` attribute DynamoDB reaps on.
+    #[test]
+    fn retired_item_has_correct_keys_and_ttl() {
+        let record = sample_retired();
+        let item = retired_to_item(&record);
+
+        assert_eq!(
+            item.get("pk").unwrap().as_s().unwrap(),
+            &format!("RETIRED#{}", record.refresh_token_hash)
+        );
+        assert_eq!(item.get("sk").unwrap().as_s().unwrap(), "RETIRED");
+        assert_eq!(
+            item.get("GSI1pk").unwrap().as_s().unwrap(),
+            &format!("USER#{}", record.user_id)
+        );
+        assert_eq!(
+            item.get("GSI1sk").unwrap().as_s().unwrap(),
+            &format!(
+                "FAM#{}#RETIRED#{}",
+                record.family_id,
+                record.retired_at.to_rfc3339()
+            )
+        );
+
+        let ttl_val: i64 = item
+            .get("ttl")
+            .expect("retired item should have ttl")
+            .as_n()
+            .expect("ttl should be N")
+            .parse()
+            .expect("ttl should be valid i64");
+        assert_eq!(ttl_val, record.expires_at.timestamp());
+    }
+
+    /// Negative-space: a retirement item missing any attribute reuse
+    /// detection needs is corruption at the store-read boundary and must be
+    /// rejected rather than parsed as a half-record.
+    #[test]
+    fn item_to_retired_missing_field_returns_error() {
+        for field in [
+            "refresh_token_hash",
+            "family_id",
+            "user_id",
+            "successor_hash",
+            "retired_at",
+            "expires_at",
+        ] {
+            let mut item = retired_to_item(&sample_retired());
+            assert!(item.remove(field).is_some(), "field {field} should exist");
+            let result = item_to_retired(&item);
+            assert!(result.is_err(), "removing {field} must fail the parse");
+        }
+    }
+
     #[test]
     fn session_item_has_correct_keys() {
         let session = sample_session();
@@ -529,12 +1004,13 @@ mod tests {
             item.get("GSI1pk").unwrap().as_s().unwrap(),
             &format!("USER#{}", session.user_id)
         );
-        assert!(item
-            .get("GSI1sk")
-            .unwrap()
-            .as_s()
-            .unwrap()
-            .starts_with("SESSION#"));
+        // The family-grouped sort key keeps every generation of one sign-in
+        // under `FAM#<family_id>#…`, so the admin listing survives rotation.
+        let gsi1sk = item.get("GSI1sk").unwrap().as_s().unwrap();
+        assert!(
+            gsi1sk.starts_with(&format!("FAM#{}#SESSION#", session.family_id)),
+            "GSI1sk must be family-grouped, got {gsi1sk}"
+        );
     }
 
     #[test]
@@ -549,5 +1025,188 @@ mod tests {
         let item = HashMap::new();
         let result = item_to_session(&item);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // UserRoster parsing (the authoritative revocation roster)
+    // -----------------------------------------------------------------------
+
+    fn roster_item(
+        sessions: Vec<&str>,
+        families: Vec<(&str, FamilyRoster)>,
+    ) -> HashMap<String, AttributeValue> {
+        let mut item = HashMap::new();
+        if !sessions.is_empty() {
+            item.insert(
+                "sessions".to_string(),
+                AttributeValue::Ss(sessions.iter().map(|s| s.to_string()).collect()),
+            );
+        }
+        if !families.is_empty() {
+            item.insert(
+                "families".to_string(),
+                AttributeValue::M(
+                    families
+                        .into_iter()
+                        .map(|(id, family)| (id.to_string(), family.to_attribute()))
+                        .collect(),
+                ),
+            );
+        }
+        item
+    }
+
+    /// A user item with neither roster attribute — a user with no sessions
+    /// yet, or one written before rosters existed — parses as an empty
+    /// roster rather than erroring.
+    #[test]
+    fn user_roster_missing_attributes_read_as_empty() {
+        let empty = UserRoster::from_item(&HashMap::new()).expect("empty item must parse");
+        assert!(empty.sessions.is_empty());
+        assert!(empty.families.is_empty());
+
+        let bare_profile = roster_item(vec![], vec![]);
+        let bare = UserRoster::from_item(&bare_profile).expect("bare profile must parse");
+        assert!(bare.sessions.is_empty());
+        assert!(bare.families.is_empty());
+    }
+
+    /// A populated user item round trips: the session set and every family
+    /// entry (live pointer + member set) survive the mapping unchanged.
+    #[test]
+    fn user_roster_round_trips_sessions_and_families() {
+        let family = FamilyRoster::new(
+            "hash-gen1".to_string(),
+            vec!["hash-gen0".to_string(), "hash-gen1".to_string()],
+        );
+        let item = roster_item(
+            vec!["hash-gen1"],
+            vec![("fam_0000000000000000000000000a", family.clone())],
+        );
+
+        let roster = UserRoster::from_item(&item).expect("populated roster must parse");
+        assert_eq!(roster.sessions, vec!["hash-gen1".to_string()]);
+        assert_eq!(
+            roster.families.get("fam_0000000000000000000000000a"),
+            Some(&family)
+        );
+        // The live-family lookup finds the owner of the live hash.
+        assert_eq!(
+            roster.live_family_of("hash-gen1").map(|f| f.live.as_str()),
+            Some("hash-gen1")
+        );
+        assert!(roster.live_family_of("hash-gen0").is_none());
+    }
+
+    /// Negative-space: a `sessions` attribute that is not a string set is
+    /// roster corruption and must surface as an error, not truncate the
+    /// revocation set.
+    #[test]
+    fn user_roster_non_set_sessions_returns_error() {
+        let mut item = HashMap::new();
+        item.insert(
+            "sessions".to_string(),
+            AttributeValue::S("not-a-set".to_string()),
+        );
+        let result = UserRoster::from_item(&item);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("sessions"));
+    }
+
+    /// Negative-space: a malformed family entry (missing its member set) is
+    /// rejected rather than silently shrinking what a revocation deletes.
+    #[test]
+    fn user_roster_malformed_family_entry_returns_error() {
+        let mut families = HashMap::new();
+        families.insert(
+            "live".to_string(),
+            AttributeValue::S("hash-gen1".to_string()),
+        );
+        let mut item = HashMap::new();
+        item.insert(
+            "sessions".to_string(),
+            AttributeValue::Ss(vec!["hash-gen1".to_string()]),
+        );
+        item.insert(
+            "families".to_string(),
+            AttributeValue::M(HashMap::from([(
+                "fam_0000000000000000000000000a".to_string(),
+                AttributeValue::M(families),
+            )])),
+        );
+
+        let result = UserRoster::from_item(&item);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("member set"));
+    }
+
+    #[test]
+    fn single_use_item_round_trips_expiry_and_keys_on_the_digest() {
+        let expires_at = Utc::now() + chrono::Duration::minutes(10);
+        let key = "nonce:deadbeef01";
+
+        let item = single_use_to_item(key, expires_at);
+
+        assert_eq!(
+            item.get("pk").unwrap().as_s().unwrap(),
+            &format!("SINGLEUSE#{key}"),
+            "the digest key is embedded in the partition key"
+        );
+        assert_eq!(item.get("sk").unwrap().as_s().unwrap(), SINGLE_USE_SK);
+
+        let restored = item_single_use_expiry(&item).expect("expiry parses back");
+        assert_eq!(
+            restored.timestamp(),
+            expires_at.timestamp(),
+            "the stored expiry must round-trip at epoch-second precision"
+        );
+
+        // The ttl attribute (DynamoDB native expiry) carries the same instant.
+        let ttl: i64 = item
+            .get("ttl")
+            .unwrap()
+            .as_n()
+            .unwrap()
+            .parse()
+            .expect("ttl is numeric");
+        assert_eq!(ttl, expires_at.timestamp());
+    }
+
+    /// Negative-space: a missing or malformed `expires_at` must be a typed StoreError,
+    /// not a silently-defaulted instant — a take that misread expiry could admit a replay.
+    #[test]
+    fn item_single_use_expiry_rejects_missing_and_malformed_values() {
+        let empty = HashMap::new();
+        assert!(item_single_use_expiry(&empty).is_err());
+
+        let mut bad = HashMap::new();
+        bad.insert(
+            "expires_at".to_string(),
+            AttributeValue::S("not-a-number".to_string()),
+        );
+        assert!(item_single_use_expiry(&bad).is_err());
+
+        // A well-formed number that is not a representable timestamp is rejected too,
+        // rather than silently saturating into some far-future "live" record.
+        let mut out_of_range = HashMap::new();
+        out_of_range.insert(
+            "expires_at".to_string(),
+            AttributeValue::N(i64::MAX.to_string()),
+        );
+        assert!(
+            item_single_use_expiry(&out_of_range).is_err(),
+            "an unrepresentable epoch value must be rejected, not defaulted"
+        );
+
+        let mut negative = HashMap::new();
+        negative.insert(
+            "expires_at".to_string(),
+            AttributeValue::N("-1".to_string()),
+        );
+        let parsed = item_single_use_expiry(&negative).expect("negative epoch is representable");
+        assert!(
+            parsed < Utc::now(),
+            "a pre-1970-plus-one-second timestamp parses as firmly expired"
+        );
     }
 }

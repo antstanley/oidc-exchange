@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::FromRef;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::Config as AppConfig;
 use oidc_exchange_core::ports::RateLimiter;
 use oidc_exchange_core::service::AppService;
 

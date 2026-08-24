@@ -2,33 +2,64 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
 use oidc_exchange_core::domain::{AuditEventType, NewUser, UserPatch, UserStatus};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync, UserSyncCall,
 };
 
-fn make_config() -> AppConfig {
-    AppConfig {
-        server: ServerConfig {
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
             issuer: "https://auth.test.com".to_string(),
-            ..Default::default()
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
+            ..RawServerConfig::default()
         },
-        token: TokenConfig {
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
             access_token_ttl: "15m".to_string(),
             refresh_token_ttl: "30d".to_string(),
-            audience: Some("https://api.test.com".to_string()),
-            ..Default::default()
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
+            ..RawTokenConfig::default()
         },
-        ..Default::default()
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+            ..RawAuditConfig::default()
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
     }
 }
 
+fn make_config() -> Config {
+    Config::resolve(base_raw_config()).expect("test config should resolve")
+}
 fn make_service_with_mocks(
     repo: MockRepository,
     user_sync: MockUserSync,
@@ -82,7 +113,7 @@ fn make_service_with_audit(
     repo: MockRepository,
     user_sync: MockUserSync,
     audit: MockAuditLog,
-    config: AppConfig,
+    config: Config,
 ) -> AppService {
     let provider = MockIdentityProvider::new("mock");
     let provider_id = provider.provider_id().to_string();
@@ -376,11 +407,15 @@ async fn admin_delete_user_revokes_sessions() {
 
     // Exchange to create a user + session
     let request = ExchangeRequest {
-        code: Some("auth-code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let response = svc
         .exchange(request)
@@ -445,11 +480,15 @@ async fn service_with_active_session() -> (AppService, String, MockRepository, M
     let svc = make_service_with_provider(repo, user_sync, provider);
 
     let request = ExchangeRequest {
-        code: Some("auth-code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let response = svc
         .exchange(request)
@@ -569,8 +608,11 @@ async fn suspended_to_suspended_is_a_noop_and_does_not_re_revoke() {
     let sentinel = Session {
         user_id: user_id.clone(),
         refresh_token_hash: "sentinel-hash".to_string(),
+        family_id: "fam_0000000000000000000000000d".to_string(),
+        generation: 0,
         provider: "mock".to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        rotated_at: None,
         device_id: None,
         user_agent: None,
         ip_address: None,
@@ -929,17 +971,19 @@ async fn admin_reads_emit_no_audit_events() {
 /// its mandatory audit sink is configured to enforce durability.
 #[tokio::test]
 async fn admin_create_user_enforced_audit_failure_propagates_durability_error_and_skips_sync() {
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
             durability: "enforce".to_string(),
             // This intentionally excludes Notice from threshold-filtered
             // best-effort emission; admin auditing must still be attempted.
             emit_threshold: "warning".to_string(),
             blocking_threshold: "emergency".to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let user_sync = MockUserSync::new();

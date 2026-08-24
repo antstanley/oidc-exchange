@@ -1,6 +1,9 @@
 [server]
 host = "0.0.0.0"
 port = 8080
+issuer = "https://auth.example.com"
+role = "all"
+request_timeout = "30s"
 trusted_proxies = []
 trusted_proxy_hops = 1
 
@@ -10,6 +13,21 @@ mode = "open"
 [token]
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
+audience = "https://api.example.com"
+refresh_rotation = true
+refresh_rotation_grace = "10s"
+refresh_reuse_retention = "24h"
+
+[key_manager]
+# Deliberate raw default for a minimal config; deployment overlays select a key adapter.
+adapter = "oidc"
+
+[repository]
+# Deliberate raw default for a minimal config; deployment overlays select a repository adapter.
+adapter = "oidc"
+
+[session_repository]
+cleanup_interval = "1h"
 
 [audit]
 adapter = "stdout"

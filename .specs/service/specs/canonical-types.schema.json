@@ -148,48 +148,46 @@
     },
     "Session": {
       "type": "object",
-      "required": [
-        "user_id",
-        "refresh_token_hash",
-        "provider",
-        "expires_at",
-        "created_at"
-      ],
+      "description": "One generation of a refresh-token family.",
+      "required": ["user_id", "refresh_token_hash", "family_id", "generation", "provider", "expires_at", "created_at"],
       "properties": {
-        "user_id": {
-          "$ref": "../../canonical-types.schema.json#/$defs/Id"
-        },
-        "refresh_token_hash": {
+        "user_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
+        "refresh_token_hash": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "SHA-256 hex of the opaque refresh token." },
+        "family_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id", "description": "fam_<lowercase ulid>; stable across every rotation of one sign-in." },
+        "generation": { "type": "integer", "minimum": 0, "description": "0 at exchange, incremented once per rotation." },
+        "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "Absolute family deadline; set at exchange and never moved by rotation." },
+        "rotated_at": { "type": ["string", "null"], "format": "date-time", "description": "When this generation was issued; null at generation 0." },
+        "device_id": { "type": ["string", "null"] },
+        "user_agent": { "type": ["string", "null"] },
+        "ip_address": { "type": ["string", "null"] },
+        "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "When the family was created." }
+      }
+    },
+    "RetiredRefreshToken": {
+      "type": "object",
+      "description": "A retired refresh-token generation, retained so that its re-presentation is detectable as reuse.",
+      "required": ["refresh_token_hash", "family_id", "user_id", "successor_hash", "retired_at", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "refresh_token_hash": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+        "family_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
+        "user_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
+        "successor_hash": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "The generation that replaced this one. Grace applies only while this is still the family's live generation." },
+        "retired_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "min(retired_at + token.refresh_reuse_retention, family expires_at)." }
+      }
+    },
+    "SingleUseRecord": {
+      "type": "object",
+      "required": ["key", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
           "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
-          "description": "SHA-256 hex of the opaque refresh token."
+          "description": "Namespaced digest: 'nonce:<sha256hex>' or 'assertion:<provider>:[d:]<sha256hex>'. Never a raw nonce or assertion."
         },
-        "provider": {
-          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString"
-        },
-        "expires_at": {
-          "$ref": "../../canonical-types.schema.json#/$defs/Timestamp"
-        },
-        "device_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "user_agent": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "ip_address": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "created_at": {
-          "$ref": "../../canonical-types.schema.json#/$defs/Timestamp"
-        }
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
       }
     },
     "TokenResponse": {
@@ -208,7 +206,7 @@
             "string",
             "null"
           ],
-          "description": "Present on exchange, absent on refresh."
+          "description": "Present on exchange and on refresh; null on refresh only when token.refresh_rotation is false."
         },
         "token_type": {
           "type": "string",
@@ -229,25 +227,28 @@
         "iss",
         "aud",
         "iat",
-        "exp"
+        "exp",
+        "sid"
       ],
       "properties": {
-        "sub": {
-          "$ref": "../../canonical-types.schema.json#/$defs/Id"
-        },
+        "sub": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
         "iss": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "description": "server.issuer; required non-empty at config load, so an empty iss is unrepresentable."
         },
         "aud": {
           "type": "string",
-          "description": "Single audience string (no array)."
+          "minLength": 1,
+          "description": "Single audience string (no array). token.audience; required non-empty at config load."
         },
-        "iat": {
-          "type": "integer"
+        "sid": {
+          "type": "string",
+          "pattern": "^fam_[0-9a-z]{26}$",
+          "description": "Session identifier: the family_id of the session this access token was minted for. Stable across refresh-token rotation; names the only session (token family) the token may revoke."
         },
-        "exp": {
-          "type": "integer"
-        }
+        "iat": { "type": "integer" },
+        "exp": { "type": "integer" }
       },
       "additionalProperties": true
     },
@@ -278,6 +279,7 @@
       "type": "object",
       "required": [
         "subject",
+        "signing_alg",
         "raw_claims"
       ],
       "properties": {
@@ -311,10 +313,50 @@
           ],
           "description": "Apple private-relay flag, coerced bool-or-string like email_verified; null for non-Apple providers."
         },
-        "raw_claims": {
+        "signing_alg": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+          "description": "JWS algorithm the resolved JWK verified the ID token with (never the untrusted header's). Selects the at_hash digest."
+        },
+        "raw_claims": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "ExchangeCredential": {
+      "description": "The typed form of the declared grant_type on POST /token. Exactly one variant; each owns its grant's required parameters.",
+      "oneOf": [
+        {
           "type": "object",
-          "additionalProperties": true
+          "title": "AuthorizationCode",
+          "required": ["grant_type", "code", "redirect_uri"],
+          "additionalProperties": false,
+          "properties": {
+            "grant_type": { "const": "authorization_code" },
+            "code": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+            "redirect_uri": { "$ref": "../../canonical-types.schema.json#/$defs/Url" }
+          }
+        },
+        {
+          "type": "object",
+          "title": "IdTokenAssertion",
+          "required": ["grant_type", "id_token"],
+          "additionalProperties": false,
+          "properties": {
+            "grant_type": { "const": "id_token" },
+            "id_token": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" }
+          }
         }
+      ]
+    },
+    "ExchangeRequest": {
+      "type": "object",
+      "description": "Input to AppService::exchange. No default construction: credential and provider are always present.",
+      "required": ["credential", "provider"],
+      "additionalProperties": false,
+      "properties": {
+        "credential": { "$ref": "#/$defs/ExchangeCredential" },
+        "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+        "ip_address": { "type": ["string", "null"] },
+        "user_agent": { "type": ["string", "null"] },
+        "device_id": { "type": ["string", "null"] }
       }
     },
     "AuditSeverity": {
@@ -347,7 +389,8 @@
         "registration_denied",
         "provider_error",
         "unauthorized",
-        "throttle_exceeded"
+        "throttle_exceeded",
+        "refresh_token_reuse"
       ]
     },
     "AuditOutcome": {

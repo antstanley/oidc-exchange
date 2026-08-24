@@ -110,13 +110,8 @@ pub async fn audit_context_layer(
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(address)| *address)
     });
-    let trusted = state
-        .config
-        .server
-        .trusted_proxies
-        .iter()
-        .filter_map(|cidr| cidr.parse::<IpNet>().ok())
-        .collect::<Vec<_>>();
+    // Parsed CIDRs are a load-time product of the typed config; borrow them.
+    let trusted = state.config.server.trusted_proxies.clone();
     if request.extensions().get::<AuditContext>().is_none() {
         let context = audit_context_from_request(
             &request,
