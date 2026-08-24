@@ -1,6 +1,6 @@
 # OIDC Exchange Service — Overview
 
-**Status:** Implemented · **Date:** 2026-08-15 · **Owner:** Ant Stanley · **Scope:** crates/*
+**Status:** Implemented · **Date:** 2026-08-21 · **Owner:** Ant Stanley · **Scope:** crates/*
 
 The Rust service at the heart of `oidc-exchange`. It validates ID tokens from third-party
 OIDC providers and exchanges them for self-issued, short-lived access tokens and long-lived
@@ -109,11 +109,14 @@ operator ──Bearer secret──► /internal/* (user CRUD, claims, stats)  �
 
 ### Decisions
 
-- *Two grant inputs, one of them opt-in.* **`/token` accepts a provider `code` always, and a
-  raw `id_token` only when `grants.id_token = true`.** The direct grant lets browser SDKs
-  post a credential they already hold, but an ID token is a transferable bearer assertion
-  with no back-channel redemption behind it, so it is bound to a service-issued nonce, made
-  single-use, and served only where an operator asks for it.
+- *Two grant inputs, each explicitly declared, one of them opt-in.* **`/token` accepts a
+  provider `code` always, and a raw `id_token` only when `grants.id_token = true`; the
+  declared `grant_type` selects which grant runs.** The direct grant lets browser SDKs
+  (Google Identity Services) post a credential they already hold, but an ID token is a
+  transferable bearer assertion with no back-channel redemption behind it, so it is bound
+  to a service-issued nonce, made single-use, and served only where an operator asks for
+  it — and which grant runs stays something the caller declares rather than something
+  inferred from the fields they happened to send.
 - *Opaque, hashed, reusable refresh tokens.* **256-bit random, stored as a SHA-256 hash,
   valid until expiry or revocation.** Revocable and leak-resistant, and reusable refresh
   matches what client libraries expect.

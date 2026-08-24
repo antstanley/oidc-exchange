@@ -47,7 +47,8 @@ gains no new public surface.
 
 ### POST /token request
 
-`application/x-www-form-urlencoded`. `grant_type` selects the flow:
+`application/x-www-form-urlencoded`. `grant_type` is required and **binding**: it alone
+selects the flow, and a request may carry only the parameters its declared grant defines.
 
 ```
 # code exchange:  grant_type=authorization_code & code=… & redirect_uri=… & provider=google
@@ -56,8 +57,19 @@ gains no new public surface.
 # refresh:        grant_type=refresh_token & refresh_token=…
 ```
 
-The client names the provider (`provider=google`), not a raw issuer URL. Unknown
-`grant_type` → `unsupported_grant_type`. Response body is `TokenResponse`
+| `grant_type` | Required parameters | Rejected if present |
+|---|---|---|
+| `authorization_code` | `provider`, `code`, `redirect_uri` | `id_token`, `refresh_token` |
+| `id_token` | `provider`, `id_token` | `code`, `redirect_uri`, `refresh_token` |
+| `refresh_token` | `refresh_token` | `provider`, `code`, `redirect_uri`, `id_token` |
+
+A parameter this server knows but that belongs to another grant is **rejected**, not ignored
+— RFC 6749 §3.2's "MUST ignore unrecognized request parameters" covers parameters the server
+does not recognise, which these are not. Parameters outside this set entirely are ignored.
+
+The client names the provider (`provider=google`), not a raw issuer URL. The handler parses
+the form into a `TokenGrant` before calling the service, so a request whose fields do not
+match its declared grant never reaches `AppService`. Response body is `TokenResponse`
 ([01-domain-model.md](01-domain-model.md)).
 
 The direct grant requires the ID token to carry a `nonce` claim whose value came from this
@@ -67,6 +79,32 @@ request and does not resend it here — the service reads it from the verified a
 the ID token, so the `at_hash` binding can be verified. When `grants.id_token = false` an
 `id_token` field is rejected with `unsupported_grant_type` whatever `grant_type` declares,
 so the switch cannot be evaded by the field-presence branch selection.
+
+Token-endpoint errors, in the RFC 6749 §5.2 envelope:
+
+| Condition | HTTP | `error` | `error_description` |
+|---|---|---|---|
+| `grant_type` absent | 400 | `invalid_request` | `missing required parameter: grant_type` |
+| `grant_type` present but not one of the three (including empty) | 400 | `unsupported_grant_type` | `The grant_type parameter is not supported` |
+| an `id_token` field present while `grants.id_token = false` | 400 | `unsupported_grant_type` | `The grant_type parameter is not supported` |
+| a required parameter of the declared grant absent | 400 | `invalid_request` | `missing required parameter: <name>` |
+| a parameter of another grant present | 400 | `invalid_request` | `<name> is not a parameter of the <grant_type> grant` |
+
+Every `/token` response — success and error alike — carries `Cache-Control: no-store` and
+`Pragma: no-cache` (RFC 6749 §5.1 and §5.2; OpenID Connect Core §3.1.3.3). The body of a
+successful response *is* the credential — the signed access token and, on exchange, the
+plaintext refresh token, whose only copy in flight is that response — and the header is
+the origin's sole mechanism for marking it non-storable: a `200` to a `POST` is
+heuristically cacheable under RFC 9111 §3, so without the directive a conforming shared
+cache is *permitted to store* the credential even though it may never reuse it. The
+directives are applied by a route-scoped layer (`middleware/cache_control.rs`) on the
+credential-bearing route group — `/token` and `/revoke` — not per handler, so the next
+credential-returning route inherits them by being mounted in the group. `/revoke`'s
+responses carry no token and RFC 7009 imposes no cache requirement; it is in the group
+because its *requests* carry credentials and because a group-level property survives the
+refactors that a per-handler memory does not. `/keys` and
+`/.well-known/openid-configuration` sit outside the group and keep their own (cacheable)
+policy.
 
 ### GET /.well-known/openid-configuration
 
@@ -98,6 +136,11 @@ Applied to the router (`routes/mod.rs`), outermost first:
    `ip_address`/`user_agent`/`device_id` and audit events record `ip_address`/`user_agent`.
 4. **Catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — a panic becomes
    `500 {"error":"server_error","error_description":"internal server error"}`.
+
+One layer is route-scoped rather than router-wide: **cache control**
+(`middleware/cache_control.rs`) is mounted on the merged credential group (`/token`,
+`/revoke` inside `public_routes`) and stamps `Cache-Control: no-store` / `Pragma: no-cache`
+onto every response that group produces — see the `POST /token request` section.
 
 Internal routes mount only when `internal_api.enabled = true` and the role is `admin` or
 `all`; with the flag false no internal routes are mounted regardless of role, so an

@@ -20,7 +20,7 @@ use oidc_exchange_core::domain::{
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, SessionRepository, UserRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::{assertion, AppService};
 use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
@@ -115,19 +115,29 @@ fn nonce_key(nonce: &str) -> String {
 /// The direct-grant request shape: an id_token field, no code.
 fn direct_request() -> ExchangeRequest {
     ExchangeRequest {
-        id_token: Some("header.assertion.signature".to_string()),
+        credential: ExchangeCredential::IdTokenAssertion {
+            id_token: "header.assertion.signature".to_string(),
+        },
         provider: PROVIDER_ID.to_string(),
-        ..Default::default()
+        provider_access_token: None,
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     }
 }
 
 /// The code-grant request shape.
 fn code_request() -> ExchangeRequest {
     ExchangeRequest {
-        code: Some("auth-code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: PROVIDER_ID.to_string(),
-        ..Default::default()
+        provider_access_token: None,
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     }
 }
 

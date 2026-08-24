@@ -102,6 +102,29 @@ removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_ses
   for other providers), `signing_alg` (the algorithm the resolved JWK verified with, e.g.
   `"ES256"`), and `raw_claims`.
 
+### Exchange request types (`service/exchange.rs`)
+
+```rust
+enum ExchangeCredential {
+    AuthorizationCode { code: String, redirect_uri: String },
+    IdTokenAssertion { id_token: String },
+}
+
+struct ExchangeRequest {
+    credential: ExchangeCredential,
+    provider: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    device_id: Option<String>,
+}
+```
+
+`ExchangeCredential` is the typed form of the declared `grant_type`: one variant per exchange
+grant, each owning that grant's required parameters as non-optional fields. The refresh grant
+has its own input type, `RefreshRequest`. `ExchangeRequest` derives no `Default` — a request
+with no credential is not constructible. The three trailing fields are client context captured
+by the audit-context middleware, not grant parameters.
+
 ### AuditEvent (`domain/audit.rs`)
 
 ```rust

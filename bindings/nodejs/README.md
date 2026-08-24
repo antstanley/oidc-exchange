@@ -37,8 +37,15 @@ const oidc = new OidcExchange({ config: "./config.toml" });
 const res = oidc.handleRequest({
   method: "POST",
   path: "/token",
-  headers: [{ name: "content-type", value: "application/json" }],
-  body: Buffer.from(JSON.stringify({ grant_type: "authorization_code", code, provider: "google" })),
+  headers: [{ name: "content-type", value: "application/x-www-form-urlencoded" }],
+  body: Buffer.from(
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: "https://app.example.com/callback",
+      provider: "google",
+    }).toString(),
+  ),
 });
 
 console.log(res.status); // e.g. 200

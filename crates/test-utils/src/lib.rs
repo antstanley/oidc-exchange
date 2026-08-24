@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -550,7 +551,8 @@ impl UserSync for MockUserSync {
 ///
 /// `Clone` shares one underlying state (`Arc`), so a test can hold a handle,
 /// move a clone into the service under test, and still re-pin claims or
-/// exchange responses afterwards.
+/// exchange responses afterwards — and the shared per-method call counters
+/// make the clone work as an observation handle.
 #[derive(Clone)]
 pub struct MockIdentityProvider {
     provider_id: String,
@@ -559,6 +561,20 @@ pub struct MockIdentityProvider {
     client_id: String,
     exchange_response: Arc<Mutex<Option<ProviderTokens>>>,
     claims_response: Arc<Mutex<Option<IdentityClaims>>>,
+    /// Monotonic counters, one per port method, so tests can prove a request
+    /// path never reached the provider (e.g. grant-confusion rejections must
+    /// die at the HTTP boundary before either exchange operation runs).
+    exchange_code_calls: Arc<AtomicU32>,
+    validate_id_token_calls: Arc<AtomicU32>,
+    revoke_token_calls: Arc<AtomicU32>,
+}
+
+/// Snapshot of [`MockIdentityProvider`] call counters at read time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MockIdentityProviderCallCounts {
+    pub exchange_code: u32,
+    pub validate_id_token: u32,
+    pub revoke_token: u32,
 }
 
 /// Default `client_id()` the mock reports; matches the audience used across the
@@ -586,6 +602,19 @@ impl MockIdentityProvider {
             // then builds fresh defaults per call (unique `jti`, live `exp`)
             // instead of replaying one frozen template forever.
             claims_response: Arc::new(Mutex::new(None)),
+            exchange_code_calls: Arc::new(AtomicU32::new(0)),
+            validate_id_token_calls: Arc::new(AtomicU32::new(0)),
+            revoke_token_calls: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    /// Point-in-time copy of the per-method call counters. Counters are shared
+    /// through `Arc`, so clones observe the same totals.
+    pub fn call_counts(&self) -> MockIdentityProviderCallCounts {
+        MockIdentityProviderCallCounts {
+            exchange_code: self.exchange_code_calls.load(Ordering::SeqCst),
+            validate_id_token: self.validate_id_token_calls.load(Ordering::SeqCst),
+            revoke_token: self.revoke_token_calls.load(Ordering::SeqCst),
         }
     }
 
@@ -646,22 +675,38 @@ impl MockIdentityProvider {
 #[async_trait]
 impl IdentityProvider for MockIdentityProvider {
     async fn exchange_code(&self, _code: &str, _redirect_uri: &str) -> Result<ProviderTokens> {
+        self.exchange_code_calls.fetch_add(1, Ordering::SeqCst);
         let response = self.exchange_response.lock().await;
-        Ok(response.clone().unwrap_or(ProviderTokens {
+        // Port-contract postcondition on the double itself: an empty id_token
+        // here would silently invalidate every downstream assertion about
+        // what the flow validated.
+        let tokens = response.clone().unwrap_or(ProviderTokens {
             id_token: "mock-id-token".to_string(),
             refresh_token: None,
             access_token: None,
-        }))
+        });
+        assert!(
+            !tokens.id_token.is_empty(),
+            "MockIdentityProvider::exchange_code must never produce an empty id_token"
+        );
+        Ok(tokens)
     }
 
     async fn validate_id_token(&self, _id_token: &str) -> Result<IdentityClaims> {
+        self.validate_id_token_calls.fetch_add(1, Ordering::SeqCst);
         let response = self.claims_response.lock().await;
-        Ok(response
+        let claims = response
             .clone()
-            .unwrap_or_else(MockIdentityProvider::default_claims))
+            .unwrap_or_else(MockIdentityProvider::default_claims);
+        assert!(
+            !claims.subject.is_empty(),
+            "MockIdentityProvider::validate_id_token must never produce an empty subject"
+        );
+        Ok(claims)
     }
 
     async fn revoke_token(&self, _token: &str) -> Result<()> {
+        self.revoke_token_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

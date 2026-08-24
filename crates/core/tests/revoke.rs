@@ -11,7 +11,7 @@ use oidc_exchange_core::config::{
 use oidc_exchange_core::domain::{AccessTokenClaims, AuditEventType, AuditOutcome};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, KeyManager, SessionRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::revoke::RevokeRequest;
 use oidc_exchange_core::service::AppService;
 
@@ -101,11 +101,15 @@ fn make_service_with_audit(
 /// Helper: perform an exchange and return the full token response.
 async fn do_exchange(svc: &AppService) -> oidc_exchange_core::domain::TokenResponse {
     let request = ExchangeRequest {
-        code: Some("auth-code".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     svc.exchange(request)
         .await

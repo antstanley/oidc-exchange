@@ -136,6 +136,45 @@
         "raw_claims": { "type": "object", "additionalProperties": true }
       }
     },
+    "ExchangeCredential": {
+      "description": "The typed form of the declared grant_type on POST /token. Exactly one variant; each owns its grant's required parameters.",
+      "oneOf": [
+        {
+          "type": "object",
+          "title": "AuthorizationCode",
+          "required": ["grant_type", "code", "redirect_uri"],
+          "additionalProperties": false,
+          "properties": {
+            "grant_type": { "const": "authorization_code" },
+            "code": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+            "redirect_uri": { "$ref": "../../canonical-types.schema.json#/$defs/Url" }
+          }
+        },
+        {
+          "type": "object",
+          "title": "IdTokenAssertion",
+          "required": ["grant_type", "id_token"],
+          "additionalProperties": false,
+          "properties": {
+            "grant_type": { "const": "id_token" },
+            "id_token": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" }
+          }
+        }
+      ]
+    },
+    "ExchangeRequest": {
+      "type": "object",
+      "description": "Input to AppService::exchange. No default construction: credential and provider are always present.",
+      "required": ["credential", "provider"],
+      "additionalProperties": false,
+      "properties": {
+        "credential": { "$ref": "#/$defs/ExchangeCredential" },
+        "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+        "ip_address": { "type": ["string", "null"] },
+        "user_agent": { "type": ["string", "null"] },
+        "device_id": { "type": ["string", "null"] }
+      }
+    },
     "AuditSeverity": {
       "type": "string",
       "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"],

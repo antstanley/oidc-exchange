@@ -9,15 +9,22 @@
 
 ## Token exchange (`exchange.rs`)
 
-`POST /token` with `grant_type=authorization_code` or `grant_type=id_token`.
+`POST /token` with `grant_type=authorization_code` or `grant_type=id_token`. The handler has
+already parsed the form into a `TokenGrant`, so `AppService::exchange` receives an
+`ExchangeRequest` whose `credential` names the grant that was declared
+([04-http-api.md](04-http-api.md)).
 
 1. **Resolve provider** — look up `request.provider` in the `providers` map; missing →
    `UnknownProvider`.
-2. **Obtain verified claims**
-   - If an `id_token` was supplied directly → `provider.validate_id_token(id_token)`.
-   - Otherwise require `code` and `redirect_uri` (else `InvalidRequest`),
-     `provider.exchange_code` to get `ProviderTokens`, then `validate_id_token` on the
-     returned `id_token`.
+2. **Obtain verified claims** — match on `request.credential`:
+   - `ExchangeCredential::AuthorizationCode { code, redirect_uri }` → `provider.exchange_code`
+     to get `ProviderTokens`, then `validate_id_token` on the returned `id_token`.
+   - `ExchangeCredential::IdTokenAssertion { id_token }` → `provider.validate_id_token`.
+
+   Both fields of the authorization-code variant are non-optional, so the `redirect_uri`
+   binding is a property of the type rather than a runtime check: there is no field
+   combination that reaches this step carrying a credential for one grant while executing
+   another.
 3. **Bind the assertion** — every accepted ID token, on both grant paths, passes
    `service::assertion::bind`, which runs in this order and rejects with `InvalidGrant` at
    the first failure (each rejection audited as `ValidationFailed`/`Warning` with a
@@ -269,6 +276,11 @@ operations carry no client `ip_address`/`user_agent` context.
 
 ### Decisions
 
+- *The declared grant is the flow selector.* **`ExchangeRequest` carries an
+  `ExchangeCredential` enum parsed at the HTTP boundary; the service matches on it and never
+  inspects field presence.** An incoherent grant/field combination fails to parse at the edge
+  instead of choosing a branch, so a later refactor cannot re-flatten the decision without
+  deleting the type.
 - *Binding lives in the core, not the providers.* **`nonce`, `azp`, `at_hash` and
   single-use are enforced once in `AppService::exchange`, reading `IdentityClaims.raw_claims`.**
   The same four controls were omitted twice in two independent validators; a control that

@@ -14,7 +14,7 @@ use oidc_exchange_core::domain::{
 };
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, SessionRepository, UserRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::refresh::RefreshRequest;
 use oidc_exchange_core::service::AppService;
 
@@ -106,11 +106,15 @@ fn make_service_with_audit(
 /// with the service and repo for further testing.
 async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService) -> String {
     let request = ExchangeRequest {
-        code: Some("auth-code-123".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-123".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let response = svc
         .exchange(request)
