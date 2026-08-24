@@ -14,7 +14,7 @@ adapter = "kms"
 
 [key_manager.kms]
 key_id = "${KMS_KEY_ID}"
-algorithm = "ECDSA_SHA_256"
+algorithm = "ES256"
 kid = "example-key-1"
 
 [repository]

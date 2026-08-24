@@ -22,3 +22,4 @@ toml.workspace = true
 oidc-exchange-test-utils.workspace = true
 wiremock = "0.6"
 rand.workspace = true
+tempfile = "3"

@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
 
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::domain::{
     AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
 };
@@ -26,7 +26,7 @@ pub struct AppService {
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
     pub(crate) providers: HashMap<String, Box<dyn IdentityProvider>>,
-    pub(crate) config: AppConfig,
+    pub(crate) config: Config,
 }
 
 impl AppService {
@@ -37,7 +37,7 @@ impl AppService {
         audit: Box<dyn AuditLog>,
         user_sync: Box<dyn UserSync>,
         providers: HashMap<String, Box<dyn IdentityProvider>>,
-        config: AppConfig,
+        config: Config,
     ) -> Self {
         Self {
             user_repo,
@@ -65,12 +65,12 @@ impl AppService {
     /// Returns `(jwt_string, expires_in_seconds)`.
     pub(crate) async fn build_access_token(&self, user: &User) -> Result<(String, u64)> {
         let now = Utc::now();
-        let access_ttl_secs = parse_duration_secs(&self.config.token.access_token_ttl)?;
+        let access_ttl_secs = self.config.token.access_token_ttl.as_secs();
 
         let access_claims = AccessTokenClaims {
             sub: user.id.clone(),
-            iss: self.config.server.issuer.clone(),
-            aud: self.config.token.audience.clone().unwrap_or_default(),
+            iss: self.config.server.issuer.as_ref().to_string(),
+            aud: self.config.token.audience.as_ref().to_string(),
             iat: now.timestamp() as u64,
             exp: (now.timestamp() as u64) + access_ttl_secs,
             custom: claims::resolve_custom_claims(&self.config.token.custom_claims, user),
@@ -103,8 +103,7 @@ impl AppService {
         // Pre-dispatch emit-threshold filter: events strictly less severe
         // than `[audit] emit_threshold` are dropped before any adapter ever
         // sees them, independently of the blocking-threshold decision below.
-        let emit_threshold =
-            parse_severity(&self.config.audit.emit_threshold).unwrap_or(AuditSeverity::Info);
+        let emit_threshold = self.config.audit.emit_threshold;
         if event.severity as u8 > emit_threshold as u8 {
             return Ok(());
         }
@@ -123,8 +122,7 @@ impl AppService {
                 }
 
                 // Parse blocking threshold from config
-                let threshold = parse_severity(&self.config.audit.blocking_threshold)
-                    .unwrap_or(AuditSeverity::Warning);
+                let threshold = self.config.audit.blocking_threshold;
 
                 if event.severity as u8 <= threshold as u8 {
                     // Severity meets blocking threshold — fail the operation

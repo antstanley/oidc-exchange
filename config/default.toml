@@ -1,6 +1,9 @@
 [server]
 host = "0.0.0.0"
 port = 8080
+issuer = "https://auth.example.com"
+role = "all"
+request_timeout = "30s"
 
 [registration]
 mode = "open"
@@ -8,6 +11,15 @@ mode = "open"
 [token]
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
+audience = "https://api.example.com"
+
+[key_manager]
+# Deliberate raw default for a minimal config; deployment overlays select a key adapter.
+adapter = "oidc"
+
+[repository]
+# Deliberate raw default for a minimal config; deployment overlays select a repository adapter.
+adapter = "oidc"
 
 [audit]
 adapter = "noop"

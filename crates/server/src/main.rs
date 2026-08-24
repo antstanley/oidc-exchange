@@ -97,8 +97,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn run_config_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) != Some("check") {
         return Err(
-            "usage: oidc-exchange config check [--dir <config-dir>] [--file <path>]".into(),
+            "usage: oidc-exchange config check [<path>] [--dir <config-dir>] [--file <path>]"
+                .into(),
         );
+    }
+
+    // `config check <path>` (no flag) checks that single fully-materialized
+    // file against the committed defaults without consulting the environment;
+    // `--dir`/`--file` run the environment-aware server and FFI layerings.
+    if let [path] = &args[1..] {
+        if !path.starts_with("--") {
+            let config = bootstrap::check_config_file(path)?;
+            println!("{}", bootstrap::render_checked_config(&config));
+            return Ok(());
+        }
     }
 
     let mut dir: Option<&str> = None;
@@ -128,6 +140,6 @@ fn run_config_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         (None, None) => bootstrap::load_config()?,
         (Some(_), Some(_)) => unreachable!("validated mutually exclusive options"),
     };
-    println!("{config:?}");
+    println!("{}", bootstrap::render_checked_config(&config));
     Ok(())
 }
