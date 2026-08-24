@@ -11,9 +11,10 @@ a small synchronous interface and owns the tokio runtime so a non-async host can
   bootstrap), and own the tokio `Runtime` that drives them. Config supplied through `new`
   (inline string) or `from_file` passes the server's shared resolve —
   `OIDC_EXCHANGE__{section}__{key}` overrides, fail-closed `${VAR}` placeholder resolution,
-  then validation ([06-configuration.md](../../service/specs/06-configuration.md) → Loading
-  order). An unresolvable placeholder or an invalid value is an `FfiError` at construction; a
-  literal `${…}` never reaches a running router.
+  then the same load-time validation as the server's `load_config` (role, TTLs, allowlist,
+  internal-API secret — [06-configuration.md](../../service/specs/06-configuration.md) →
+  Loading order). An unresolvable placeholder or an invalid value is an `FfiError` at
+  construction, never at request time; a literal `${…}` never reaches a running router.
 - Convert a primitive HTTP request into an axum request, route it, and convert the response
   back to primitives.
 - Map every error into a stable `FfiError`; never let a panic cross the FFI boundary.

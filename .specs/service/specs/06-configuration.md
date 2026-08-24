@@ -130,7 +130,9 @@ manager). A real deployment overlays a key manager, a repository, and at least o
 `host` (`0.0.0.0`), `port` (`8080`), `issuer` (the `iss` claim / discovery issuer, default
 empty), `role` (`all` | `exchange` | `admin`, default `all`), `request_timeout` (humantime
 duration string like the token TTLs, default `"30s"`) — the per-request timeout the
-server's timeout layer enforces.
+server's timeout layer enforces — and `base_path` (optional, default unset — a leading prefix
+such as `/prod` stripped from incoming request paths before routing; honored in both Lambda and
+server mode, though it exists chiefly for API Gateway stages and mount prefixes).
 
 ### `[registration]`
 `mode` (`open` | `existing_users_only`, default `open`), optional `domain_allowlist`
@@ -143,7 +145,9 @@ server's timeout layer enforces.
 
 ### `[audit]`
 `adapter` (`noop` | `stdout` | `sqs`, default `noop`), `blocking_threshold` (syslog severity
-name, default `warning`), optional `[audit.sqs] { queue_url, region }`.
+name, default `warning`), `emit_threshold` (syslog severity name, default `info`)
+— events with a severity strictly less severe than the threshold are not emitted at all,
+independently of the blocking decision — optional `[audit.sqs] { queue_url, region }`.
 
 ### `[key_manager]`
 `adapter` (`local` | `kms`), with `[key_manager.local] { private_key_path, algorithm, kid }`
@@ -171,7 +175,10 @@ retries? }`. The `secret` is redacted in `Debug`.
 `service_name`, `sample_rate` (default 1.0), `protocol`.
 
 ### `[internal_api]`
-`enabled` (false), `auth_method` (`shared_secret`), `shared_secret` (redacted in `Debug`).
+`enabled` (false — internal routes are not mounted unless true, regardless of `server.role`;
+a `role = "admin"` instance with the flag off serves only `/health`), `auth_method`
+(`shared_secret`), `shared_secret` (redacted in `Debug`; must be non-empty when the internal
+API is served).
 
 ### `[providers.<name>]`
 `adapter` (`oidc` | `apple`) plus adapter-specific fields captured via a flattened
@@ -198,7 +205,7 @@ string through the FFI bindings (`bootstrap::parse_config`).
 | `server.host` / `port` / `role` / `request_timeout` | `0.0.0.0` / `8080` / `all` / `"30s"` |
 | `registration.mode` | `open` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
-| `audit.adapter` / `blocking_threshold` | `noop` / `warning` |
+| `audit.adapter` / `blocking_threshold` / `emit_threshold` | `noop` / `warning` / `info` |
 | `telemetry.enabled` / `exporter` / `sample_rate` | `false` / `none` / `1.0` |
 | `user_sync.enabled`, `internal_api.enabled` | `false`, `false` |
 

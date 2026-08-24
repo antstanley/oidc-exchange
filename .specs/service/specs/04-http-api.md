@@ -17,7 +17,11 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 | GET | `/keys` | `keys` | JWKS: `{"keys":[<jwk>]}` from `KeyManager::public_jwk` |
 | GET | `/.well-known/openid-configuration` | `openid_config` | discovery document |
 
-### Internal (mounted for roles `admin` and `all`, behind Bearer auth)
+### Internal (mounted for roles `admin` and `all` only when `internal_api.enabled = true`, behind Bearer auth)
+
+These routes are mounted only when `internal_api.enabled = true` and `server.role` is
+`admin` or `all`; with the flag false (the default) no internal routes exist regardless of
+role. When mounted they sit behind Bearer auth (see Middleware stack).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -25,12 +29,12 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 | GET | `/internal/users` | list users, query `offset`/`limit` |
 | POST | `/internal/users` | create user (`NewUser`) → 201 |
 | GET | `/internal/users/{id}` | get user (404 if absent) |
-| PATCH | `/internal/users/{id}` | update user (`UserPatch`) |
-| DELETE | `/internal/users/{id}` | soft-delete user |
-| GET | `/internal/users/{id}/claims` | read claims |
-| PUT | `/internal/users/{id}/claims` | replace claims |
-| PATCH | `/internal/users/{id}/claims` | merge claims |
-| DELETE | `/internal/users/{id}/claims` | clear claims |
+| PATCH | `/internal/users/{id}` | update user (`UserPatch`; 404 if absent) |
+| DELETE | `/internal/users/{id}` | soft-delete user (404 if absent) |
+| GET | `/internal/users/{id}/claims` | read claims (404 if absent) |
+| PUT | `/internal/users/{id}/claims` | replace claims (404 if absent) |
+| PATCH | `/internal/users/{id}/claims` | merge claims (404 if absent) |
+| DELETE | `/internal/users/{id}/claims` | clear claims (404 if absent) |
 
 ### POST /token request
 
@@ -70,13 +74,19 @@ Applied to the router (`routes/mod.rs`), outermost first:
    request-id layer, so a timeout response still carries the request id, and outside the
    rest of the stack, so the bound covers the remaining middleware and the handler.
 3. **Audit context** (`middleware/audit_context.rs`) — extract `X-Forwarded-For`,
-   `User-Agent`, `X-Device-Id` into an `AuditContext` request extension.
+   `User-Agent`, `X-Device-Id` into an `AuditContext` request extension, which the `/token`
+   and `/revoke` handlers pass into the core request structs so the stored session records
+   `ip_address`/`user_agent`/`device_id` and audit events record `ip_address`/`user_agent`.
 4. **Catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — a panic becomes
    `500 {"error":"server_error","error_description":"internal server error"}`.
 
-Internal routes additionally pass through **internal auth** (`middleware/internal_auth.rs`):
+Internal routes mount only when `internal_api.enabled = true` and the role is `admin` or
+`all`; with the flag false no internal routes are mounted regardless of role, so an
+`admin`-role instance serves only `/health`. When mounted, they additionally pass through
+**internal auth** (`middleware/internal_auth.rs`):
 `Authorization: Bearer <secret>` compared to `internal_api.shared_secret` in constant time
-(`subtle`); missing/wrong/unconfigured → `401`.
+(`subtle`); missing/wrong → `401`. A missing or empty secret is rejected at startup, never
+discovered at request time.
 
 ## Service roles
 
@@ -86,8 +96,8 @@ adapters the bootstrap builds:
 | Role | Routes | Adapters built |
 |---|---|---|
 | `exchange` | public + `/health` | user repo, session repo, key manager, providers, audit; user-sync → noop |
-| `admin` | `/internal/*` + `/health` | user repo, session repo, audit, user-sync; key manager → noop, no providers |
-| `all` | all of the above | all |
+| `admin` | `/internal/*` (only when `internal_api.enabled = true`) + `/health` | user repo, session repo, audit, user-sync; key manager → noop, no providers |
+| `all` | all of the above (`/internal/*` only when `internal_api.enabled = true`) | all |
 
 This lets the latency-sensitive public exchange path and the low-traffic admin path scale and
 be network-isolated independently from one binary.
@@ -101,17 +111,22 @@ be network-isolated independently from one binary.
 2. `bootstrap::load_config` — layer `config/default.toml`, the
    `config/{OIDC_EXCHANGE_ENV}.toml` overlay if set, and `OIDC_EXCHANGE__{section}__{key}` env
    overrides, then run the shared resolve: fail-closed `${VAR}` placeholder resolution followed
-   by validation ([06-configuration.md](06-configuration.md)).
+   by validation (role, TTLs, allowlist, internal-API secret —
+   [06-configuration.md](06-configuration.md)).
 3. `telemetry::init_telemetry` — install the tracing subscriber first so all later spans are
    captured ([07-telemetry-and-audit.md](07-telemetry-and-audit.md)).
 4. `bootstrap::build_service` — construct adapters by role and assemble `AppService`.
 5. `bootstrap::build_router` — build the axum router for the role with middleware and state.
-6. Detect runtime: `AWS_LAMBDA_RUNTIME_API` present → Lambda mode; otherwise bind
-   `server.host:server.port` and serve over hyper with graceful shutdown — SIGTERM or
-   ctrl-c stops accepting connections and drains in-flight requests for up to a 10 s hard
-   deadline, after which stragglers are aborted and the process exits. The middleware
-   stack's request-timeout layer bounds slow clients at `server.request_timeout`
-   (default 30 s).
+6. Detect runtime: `AWS_LAMBDA_RUNTIME_API` present → the router is served through
+   `lambda_http::run` as a tower service, accepting API Gateway REST/HTTP-API, Function URL,
+   and ALB events; otherwise bind `server.host:server.port` and serve over hyper with graceful
+   shutdown — SIGTERM or ctrl-c stops accepting connections and drains in-flight requests for
+   up to a 10 s hard deadline, after which stragglers are aborted and the process exits. The
+   middleware stack's request-timeout layer bounds slow clients at `server.request_timeout`
+   (default 30 s). Both paths run the identical router, middleware stack, and `AppState`, and
+   both strip a configured `server.base_path` prefix from incoming request paths before routing
+   ([06-configuration.md](06-configuration.md)) — covering API Gateway stages and mount
+   prefixes.
 
 `crates/ffi` layers its own sources into the same resolve and then calls the same
 `build_service` / `build_router` path, so in-process bindings get identical configuration
@@ -120,11 +135,13 @@ semantics, routing, and middleware.
 ## Error mapping (`error.rs`)
 
 `ApiError` wraps the domain `Error` (plus `UnsupportedGrantType`) and renders
-`{"error": <code>, "error_description": <detail>}` (RFC 6749 §5.2):
+`{"error": <code>, "error_description": <detail>}` — an OAuth-style error envelope; codes
+beyond RFC 6749 §5.2 (`not_found`) use the same shape:
 
 | Domain error | HTTP | `error` |
 |---|---|---|
 | `InvalidGrant` | 400 | `invalid_grant` |
+| `NotFound` | 404 | `not_found` |
 | `InvalidToken` | 401 | `invalid_token` |
 | `InvalidRequest`, `UnknownProvider` | 400 | `invalid_request` |
 | `AccessDenied`, `UserSuspended` | 403 | `access_denied` |
