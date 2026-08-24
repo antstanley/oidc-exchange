@@ -1849,8 +1849,11 @@ mod leak_span_tests_2 {
     /// The capture bundle a span-leak test needs: hold `_guard` for the whole test body,
     /// read rendered telemetry from `buffer`, and assert declared schema via `declared`.
     struct SpanCapture {
-        _gate: std::sync::MutexGuard<'static, ()>,
+        // Field order is load-bearing: the subscriber guard must drop (uninstall)
+        // BEFORE the gate releases, or the next capture's install races this
+        // teardown of tracing's dispatcher registry.
         _guard: tracing::subscriber::DefaultGuard,
+        _gate: std::sync::MutexGuard<'static, ()>,
         buffer: SharedBuffer,
         declared: Arc<Mutex<HashSet<(String, String)>>>,
     }
@@ -1964,46 +1967,50 @@ mod leak_span_tests_2 {
     /// `token_hash` schema field stay observable.
     #[tokio::test]
     async fn session_spans_exclude_hash_and_provenance_but_keep_permitted_fields() {
-        let buffer = SharedBuffer::default();
-        // Single-threaded `#[tokio::test]`: every poll happens on this thread, so the
-        // thread-local default subscriber sees every span open and close below.
-        let capture = install_capture(buffer);
-        let (repo, _dir) = open_repo();
-        let session = sentinel_session();
+        // Capture liveness is a PRECONDITION here, not the property under test: under
+        // parallel load, tracing's process-global callsite-interest cache can be
+        // clobbered by concurrent callsite registration on gate-less threads, silently
+        // suppressing a span mid-capture. A dead capture proves nothing either way, so
+        // the ops are re-driven (fresh store, fresh capture) until the capture is
+        // demonstrably live; the leak assertions then run against that live rendering.
+        let mut live: Option<(String, SpanCapture)> = None;
+        for _attempt in 0..5 {
+            let capture = install_capture(SharedBuffer::default());
+            let (repo, _dir) = open_repo();
+            let session = sentinel_session();
 
-        repo.store_refresh_token(&session)
-            .await
-            .expect("store_refresh_token");
-        let fetched = repo
-            .get_session_by_refresh_token(&session.refresh_token_hash)
-            .await
-            .expect("get_session_by_refresh_token")
-            .expect("stored session must be retrievable");
-        assert_eq!(fetched.user_id, session.user_id, "lookup must find the row");
-        repo.revoke_session(&session.refresh_token_hash)
-            .await
-            .expect("revoke_session");
+            repo.store_refresh_token(&session)
+                .await
+                .expect("store_refresh_token");
+            let fetched = repo
+                .get_session_by_refresh_token(&session.refresh_token_hash)
+                .await
+                .expect("get_session_by_refresh_token")
+                .expect("stored session must be retrievable");
+            assert_eq!(fetched.user_id, session.user_id, "lookup must find the row");
+            repo.revoke_session(&session.refresh_token_hash)
+                .await
+                .expect("revoke_session");
 
-        let rendered = rendered_output(&capture.buffer);
+            let rendered = rendered_output(&capture.buffer);
 
-        // Non-vacuousness: all three instrumented spans must have both opened and closed
-        // inside this capture before any absence claim means anything.
-        for span_name in [
-            "store_refresh_token",
-            "get_session_by_refresh_token",
-            "revoke_session",
-        ] {
-            let mentions = rendered.matches(span_name).count();
-            assert!(
-                mentions >= 2,
-                "span {span_name} must appear at both open and close, found {mentions}"
-            );
+            // Non-vacuousness: all three instrumented spans must have both opened and
+            // closed inside this capture before any absence claim means anything.
+            let all_spans_rendered = [
+                "store_refresh_token",
+                "get_session_by_refresh_token",
+                "revoke_session",
+            ]
+            .iter()
+            .all(|span_name| rendered.matches(span_name).count() >= 2)
+                && rendered.matches("close").count() == 3;
+            if all_spans_rendered {
+                live = Some((rendered, capture));
+                break;
+            }
         }
-        assert_eq!(
-            rendered.matches("close").count(),
-            3,
-            "exactly the three driven spans must have closed in this capture"
-        );
+        let (rendered, capture) =
+            live.expect("a live capture (all three spans open and close) within 5 attempts");
 
         // Permitted observability survives: the write span records `user_id`, and the
         // lookup/revoke spans keep their (value-less) `token_hash` log-schema field.

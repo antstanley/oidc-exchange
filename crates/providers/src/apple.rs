@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use jsonwebtoken::{
-    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
-};
+use jsonwebtoken::{decode, decode_header, encode, Algorithm, EncodingKey, Header, Validation};
 use oidc_exchange_adapters::shared::claims::coerce_bool;
 use oidc_exchange_adapters::shared::jwks::JwksCache;
+use oidc_exchange_adapters::shared::origins::{
+    origin_of, parse_https_origin, EndpointOrigins, MAX_ENDPOINT_ORIGINS,
+    MAX_ENDPOINT_ORIGIN_LEN_BYTES,
+};
 use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
@@ -21,6 +23,13 @@ const APPLE_REVOCATION_ENDPOINT: &str = "https://appleid.apple.com/auth/revoke";
 
 /// Client secret JWT lifetime: 5 minutes.
 const CLIENT_SECRET_LIFETIME_SECS: u64 = 300;
+
+/// The algorithms Apple's validator admits for ID-token signatures: the two
+/// algorithms Apple's own tokens have always used. Deliberately a named
+/// per-provider policy, narrower than the generic adapter's nine — consolidating
+/// the selector must not widen Apple to the OIDC union (task 04a of the
+/// outbound-boundary plan).
+pub const APPLE_ADMITTED_ALGORITHMS: &[Algorithm] = &[Algorithm::RS256, Algorithm::ES256];
 
 /// Apple Sign-In identity provider.
 ///
@@ -61,22 +70,52 @@ struct ClientSecretClaims {
     exp: u64,
 }
 
-/// Find the JWK matching `kid` inside a JWKS response's `keys` array.
+/// Extract and validate the optional `endpoint_origins` array from Apple's raw
+/// TOML config map.
 ///
-/// Returns `Ok(None)` on a genuine `kid` miss (the caller decides whether that is terminal
-/// or should trigger a forced refetch); errors if the response does not carry a `keys`
-/// array at all (a malformed JWKS body, distinct from a miss).
-fn find_jwk(jwks: &serde_json::Value, kid: &str) -> Result<Option<serde_json::Value>> {
-    let keys = jwks["keys"]
-        .as_array()
-        .ok_or_else(|| Error::ProviderError {
-            provider: "apple".into(),
-            detail: "JWKS response missing 'keys' array".into(),
-        })?;
-    Ok(keys
+/// Every entry must be a bare `https` origin — the same strict rule the config
+/// layer applies to Tier 1 providers — because these entries declare what a
+/// discovery document (or a future Apple endpoint relocation) may name.
+fn parse_declared_endpoint_origins(config: &HashMap<String, toml::Value>) -> Result<Vec<String>> {
+    let Some(raw) = config.get("endpoint_origins") else {
+        return Ok(Vec::new());
+    };
+
+    let Some(entries) = raw.as_array() else {
+        return Err(Error::ConfigError {
+            detail: "apple: 'endpoint_origins' must be an array of https origins".into(),
+        });
+    };
+
+    assert!(
+        entries.len() <= MAX_ENDPOINT_ORIGINS,
+        "endpoint_origins exceeds MAX_ENDPOINT_ORIGINS"
+    );
+
+    entries
         .iter()
-        .find(|k| k["kid"].as_str() == Some(kid))
-        .cloned())
+        .enumerate()
+        .map(|(index, value)| {
+            let Some(entry) = value.as_str() else {
+                return Err(Error::ConfigError {
+                    detail: format!("apple: endpoint_origins[{index}] must be a string"),
+                });
+            };
+            if entry.len() > MAX_ENDPOINT_ORIGIN_LEN_BYTES {
+                // Rejected before any parse so an oversized entry can never
+                // become log or error text; the message names only the index.
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "apple: endpoint_origins[{index}] exceeds \
+                         {MAX_ENDPOINT_ORIGIN_LEN_BYTES} bytes"
+                    ),
+                });
+            }
+            parse_https_origin(entry).map_err(|e| Error::ConfigError {
+                detail: format!("apple: invalid endpoint_origins[{index}]: {e}"),
+            })
+        })
+        .collect()
 }
 
 impl AppleProvider {
@@ -148,13 +187,49 @@ impl AppleProvider {
         let jwks_uri = endpoint("jwks_uri", APPLE_JWKS_URI)?;
         let revocation_endpoint = Some(endpoint("revocation_endpoint", APPLE_REVOCATION_ENDPOINT)?);
 
+        // Endpoint-origin pinning, same shape as a Tier 1 provider: the pinned
+        // set is the issuer's own origin (the `appleid.apple.com` constant),
+        // the origins of any explicitly configured overrides, and every
+        // declared `endpoint_origins` entry. The overrides are operator input
+        // here, so each one must at minimum parse as an absolute URL — an
+        // override that pins no origin would otherwise silently escape the
+        // set. Apple performs no runtime discovery, so the set is a
+        // construction-time invariant rather than a per-fetch check; it is
+        // asserted below instead of being skipped.
+        let declared_extras = parse_declared_endpoint_origins(config)?;
+
+        let overrides: Vec<&str> = [
+            Some(token_endpoint.as_str()),
+            Some(jwks_uri.as_str()),
+            revocation_endpoint.as_ref().map(HttpsUrl::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for endpoint in &overrides {
+            if origin_of(endpoint).is_none() {
+                return Err(Error::ConfigError {
+                    detail: "apple: endpoint override is not an absolute URL".into(),
+                });
+            }
+        }
+
+        let pinned_origins =
+            EndpointOrigins::from_parts(APPLE_ISSUER, &overrides, &declared_extras);
+        for endpoint in &overrides {
+            debug_assert!(
+                pinned_origins.admits(endpoint),
+                "an explicitly configured endpoint's own origin is always admitted"
+            );
+        }
+
         Ok(Self {
             client_id,
             team_id,
             key_id,
             signing_key,
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string()),
+            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string(), APPLE_ADMITTED_ALGORITHMS),
             revocation_endpoint,
         })
     }
@@ -179,7 +254,7 @@ impl AppleProvider {
             key_id,
             signing_key,
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string()),
+            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string(), APPLE_ADMITTED_ALGORITHMS),
             revocation_endpoint,
         }
     }
@@ -244,65 +319,30 @@ impl IdentityProvider for AppleProvider {
             reason: "JWT missing kid header".into(),
         })?;
 
-        // 2. Fetch JWKS (cached)
-        let jwks = self.jwks_cache.get_keys().await?;
-
-        // 3. Find matching key by kid. On a miss, force one rate-limited refetch (task 02's
-        // `JwksCache::refresh` API, bounded by `MIN_REFRESH_INTERVAL`) and re-search the
-        // refetched set before rejecting, so a rotated Apple signing key is picked up
-        // immediately instead of waiting out the (much longer) cache TTL.
-        let jwk = match find_jwk(&jwks, kid)? {
-            Some(jwk) => jwk,
-            None => {
-                self.jwks_cache.refresh().await?;
-                let refreshed = self.jwks_cache.get_keys().await?;
-                // Provider responses are adversarial (dev-guidelines §Defensive coding):
-                // find_jwk fails closed with a ProviderError if `refreshed` is not a
-                // `keys` array, so we validate rather than assert/panic on a 2xx body.
-                find_jwk(&refreshed, kid)?.ok_or_else(|| Error::InvalidGrant {
-                    reason: format!("No matching key for kid: {kid} (after forced refetch)"),
-                })?
-            }
-        };
-        assert_eq!(
-            jwk["kid"].as_str(),
-            Some(kid),
-            "resolved JWK's kid must equal the header kid"
+        // 2. Resolve the kid through the cached key set (shared `VerificationKeySet`,
+        // built with Apple's admitted-algorithm set). The cache owns the miss path:
+        // one rate-limited refetch, then fail closed — a rotated Apple signing key is
+        // picked up immediately instead of waiting out the TTL.
+        let verification_key = self.jwks_cache.get_key(kid).await?;
+        debug_assert_eq!(
+            verification_key.kid(),
+            kid,
+            "the resolved key is the one published under the requested kid"
         );
 
-        // 4. Build decoding key from JWK
-        let jwk_value: jsonwebtoken::jwk::Jwk =
-            serde_json::from_value(jwk.clone()).map_err(|e| Error::InvalidGrant {
-                reason: format!("Invalid JWK: {e}"),
-            })?;
-
-        let decoding_key = DecodingKey::from_jwk(&jwk_value).map_err(|e| Error::InvalidGrant {
-            reason: format!("Cannot build decoding key from JWK: {e}"),
-        })?;
-
-        // 5. Configure validation — derive algorithm from the trusted JWK, not the untrusted JWT header
-        let jwk_alg = jwk
-            .get("alg")
-            .and_then(|a| a.as_str())
-            .and_then(|a| match a {
-                "RS256" => Some(Algorithm::RS256),
-                "ES256" => Some(Algorithm::ES256),
-                _ => None,
-            })
-            .ok_or_else(|| Error::InvalidGrant {
-                reason: "Apple JWK has unsupported or missing algorithm".into(),
-            })?;
-        let mut validation = Validation::new(jwk_alg);
+        // 3. Configure validation from the KEY SET, not from the token header.
+        let mut validation = Validation::new(verification_key.algorithm());
         validation.set_issuer(&[APPLE_ISSUER]);
         validation.set_audience(&[&self.client_id]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         validation.validate_nbf = true;
 
-        // 6. Decode and validate
-        let token_data = decode::<serde_json::Value>(id_token, &decoding_key, &validation)
-            .map_err(|e| Error::InvalidGrant {
-                reason: format!("JWT validation failed: {e}"),
-            })?;
+        // 4. Decode and validate
+        let token_data =
+            decode::<serde_json::Value>(id_token, verification_key.decoding_key(), &validation)
+                .map_err(|e| Error::InvalidGrant {
+                    reason: format!("JWT validation failed: {e}"),
+                })?;
 
         let claims = &token_data.claims;
 
@@ -320,9 +360,13 @@ impl IdentityProvider for AppleProvider {
             email_verified: coerce_bool(&claims["email_verified"]),
             name: claims["name"].as_str().map(String::from),
             is_private_email: coerce_bool(&claims["is_private_email"]),
-            // The algorithm this token actually verified with, taken from the trusted
-            // Apple JWK (Apple pins ES256 today; the JWK decides, not the header).
-            signing_alg: oidc_exchange_adapters::shared::jwks::jws_alg_name(jwk_alg).to_string(),
+            // The algorithm this token actually verified with, carried by the
+            // resolved key-set entry (Apple pins ES256 today; the key decides,
+            // not the header).
+            signing_alg: oidc_exchange_adapters::shared::jwks::jws_alg_name(
+                verification_key.algorithm(),
+            )
+            .to_string(),
             raw_claims: claims
                 .as_object()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -338,38 +382,23 @@ impl IdentityProvider for AppleProvider {
 
         let client_secret = self.generate_client_secret()?;
 
-        let client = oidc_exchange_adapters::shared::http::client();
-        let response = client
-            .post(endpoint.as_str())
-            .form(&[
-                ("token", token),
-                ("client_id", self.client_id.as_str()),
-                // The assertion is revealed only inside the outbound form body.
-                ("client_secret", client_secret.expose().as_str()),
-                ("token_type_hint", "access_token"),
-            ])
-            .send()
-            .await
-            .map_err(|e| Error::ProviderError {
-                provider: "apple".into(),
-                detail: format!("Revocation request failed: {e}"),
-            })?;
+        let params = vec![
+            ("token".to_string(), token.to_string()),
+            ("client_id".to_string(), self.client_id.clone()),
+            // The assertion is revealed only inside the outbound form body.
+            ("client_secret".to_string(), client_secret.expose().clone()),
+            ("token_type_hint".to_string(), "access_token".to_string()),
+        ];
 
-        if !response.status().is_success() {
-            // Bounded read + the one redacting constructor: neither the token being
-            // revoked nor a hostile echo of it (nor the posted assertion) can reach the
-            // detail — and from there an error log.
-            let status = response.status();
-            let body =
-                oidc_exchange_adapters::shared::http::read_bounded("apple", response).await?;
-            let detail = format!(
-                "revocation: {}",
-                oidc_exchange_adapters::shared::upstream::error_detail(status, body),
-            );
-            return Err(Error::ProviderError {
-                provider: "apple".into(),
-                detail,
-            });
+        // The revocation POST goes through the shared transport: status before
+        // body, bounded body, and the one redacting error-detail constructor —
+        // neither the token being revoked, nor a hostile echo of it, nor the
+        // posted assertion can reach the detail (and from there an error log).
+        let upstream = oidc_exchange_adapters::shared::transport::ProviderTransport
+            .post_form("apple", endpoint.as_str(), &params)
+            .await?;
+        if !upstream.is_success() {
+            return Err(upstream.error_into("apple"));
         }
 
         Ok(())
@@ -387,7 +416,9 @@ impl IdentityProvider for AppleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{encode as jwt_encode, Header as JwtHeader};
+    use jsonwebtoken::{
+        decode as jwt_decode, encode as jwt_encode, DecodingKey, Header as JwtHeader,
+    };
     use p256::ecdsa::SigningKey;
     use p256::pkcs8::EncodePrivateKey;
     use serde_json::json;
@@ -532,7 +563,7 @@ mod tests {
         validation.set_audience(&["https://appleid.apple.com"]);
         validation.set_issuer(&["ABCDEF1234"]);
 
-        let token_data = decode::<ClientSecretClaims>(&secret, &decoding_key, &validation)
+        let token_data = jwt_decode::<ClientSecretClaims>(&secret, &decoding_key, &validation)
             .expect("signature should verify");
 
         assert_eq!(token_data.claims.sub, "com.example.app");

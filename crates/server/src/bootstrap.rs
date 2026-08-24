@@ -996,10 +996,19 @@ async fn build_single_provider(
 
 /// Convert the generic `ProviderConfig` (with its `extra` map) into the typed
 /// `OidcProviderConfig` expected by the OIDC adapter.
+///
+/// `endpoint_origins` is validated here, at the config boundary: each entry
+/// must be a bare `https` origin (`scheme://host[:port]`, no path, query, or
+/// fragment), the list is capped, and entries are length-bounded before any
+/// parse so hostile config text never reaches an error message. The adapter
+/// re-validates defensively at construction.
 fn provider_config_to_oidc(
     name: &str,
     config: &ProviderConfig,
 ) -> Result<oidc_exchange_core::domain::provider::OidcProviderConfig, Error> {
+    use oidc_exchange_adapters::shared::origins::{
+        parse_https_origin, MAX_ENDPOINT_ORIGINS, MAX_ENDPOINT_ORIGIN_LEN_BYTES,
+    };
     use oidc_exchange_core::domain::provider::OidcProviderConfig;
 
     let get_str = |key: &str| -> Option<String> {
@@ -1029,6 +1038,54 @@ fn provider_config_to_oidc(
         })
         .unwrap_or_else(|| vec!["openid".to_string()]);
 
+    // Absent means empty: a provider without `endpoint_origins` is pinned to
+    // its issuer's origin plus its explicitly configured endpoints.
+    let endpoint_origins = match config.extra.get("endpoint_origins") {
+        None => Vec::new(),
+        Some(raw) => {
+            let entries = raw.as_array().ok_or_else(|| Error::ConfigError {
+                detail: format!(
+                    "provider '{name}': 'endpoint_origins' must be an array of https origins"
+                ),
+            })?;
+            if entries.len() > MAX_ENDPOINT_ORIGINS {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "provider '{name}': more than {MAX_ENDPOINT_ORIGINS} endpoint_origins"
+                    ),
+                });
+            }
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let Some(entry) = value.as_str() else {
+                        return Err(Error::ConfigError {
+                            detail: format!(
+                                "provider '{name}': endpoint_origins[{index}] must be a string"
+                            ),
+                        });
+                    };
+                    if entry.len() > MAX_ENDPOINT_ORIGIN_LEN_BYTES {
+                        // Rejected before any parse: the message names only the
+                        // index, so the oversized entry never becomes log text.
+                        return Err(Error::ConfigError {
+                            detail: format!(
+                                "provider '{name}': endpoint_origins[{index}] exceeds \
+                                 {MAX_ENDPOINT_ORIGIN_LEN_BYTES} bytes"
+                            ),
+                        });
+                    }
+                    parse_https_origin(entry).map_err(|e| Error::ConfigError {
+                        detail: format!(
+                            "provider '{name}': invalid endpoint_origins[{index}]: {e}"
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?
+        }
+    };
+
     Ok(OidcProviderConfig {
         provider_id: name.to_string(),
         issuer,
@@ -1037,9 +1094,204 @@ fn provider_config_to_oidc(
         jwks_uri: config.jwks_uri.clone(),
         token_endpoint: config.token_endpoint.clone(),
         revocation_endpoint: config.revocation_endpoint.clone(),
+        endpoint_origins,
         scopes,
         additional_params: HashMap::new(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// provider_config_to_oidc: endpoint_origins lifting and validation tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod provider_config_to_oidc_tests {
+    use super::*;
+    use oidc_exchange_core::config::{HttpsUrl, ProviderAdapter};
+
+    /// Build a minimal valid OIDC `ProviderConfig`, with optional extra keys
+    /// merged in (e.g. an `endpoint_origins` array).
+    fn oidc_provider_config(extra: Vec<(&str, toml::Value)>) -> ProviderConfig {
+        let mut map: HashMap<String, toml::Value> = HashMap::from([
+            (
+                "issuer".into(),
+                toml::Value::from("https://accounts.google.com"),
+            ),
+            ("client_id".into(), toml::Value::from("client-id")),
+            (
+                "scopes".into(),
+                toml::Value::Array(vec![toml::Value::from("openid")]),
+            ),
+        ]);
+        for (key, value) in extra {
+            map.insert(key.to_string(), value);
+        }
+        ProviderConfig {
+            provider_id: "google".to_string(),
+            adapter: ProviderAdapter::Oidc,
+            issuer: Some(
+                HttpsUrl::parse("https://accounts.google.com").expect("fixture issuer"),
+            ),
+            jwks_uri: None,
+            token_endpoint: None,
+            revocation_endpoint: None,
+            extra: map,
+        }
+    }
+
+    #[test]
+    fn absent_endpoint_origins_lifts_as_empty_and_pins_nothing_extra() {
+        let converted = provider_config_to_oidc("google", &oidc_provider_config(vec![]))
+            .expect("a minimal provider config must convert");
+
+        assert!(
+            converted.endpoint_origins.is_empty(),
+            "no declared origins must lift as an empty set, got {:?}",
+            converted.endpoint_origins
+        );
+        // The other required fields still lift.
+        assert_eq!(converted.issuer.as_str(), "https://accounts.google.com");
+        assert_eq!(converted.client_id, "client-id");
+    }
+
+    #[test]
+    fn declared_https_origins_lift_into_the_typed_config_normalized() {
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "endpoint_origins",
+                toml::Value::Array(vec![
+                    toml::Value::from("https://oauth2.googleapis.com"),
+                    toml::Value::from("https://www.googleapis.com:443"),
+                ]),
+            )]),
+        )
+        .expect("declared https origins must convert");
+
+        assert_eq!(
+            converted.endpoint_origins,
+            vec![
+                "https://oauth2.googleapis.com".to_string(),
+                // The explicit default port normalizes away during validation,
+                // so the pinned string is canonical before it reaches adapters.
+                "https://www.googleapis.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_endpoint_origin_entries_are_rejected_with_indexed_config_errors() {
+        let cases: Vec<(&str, toml::Value)> = vec![
+            (
+                "plain http scheme",
+                toml::Value::Array(vec![toml::Value::from("http://insecure.example")]),
+            ),
+            (
+                "path carried",
+                toml::Value::Array(vec![toml::Value::from("https://example.com/token")]),
+            ),
+            (
+                "query carried",
+                toml::Value::Array(vec![toml::Value::from("https://example.com/?x=1")]),
+            ),
+            (
+                "not a URL",
+                toml::Value::Array(vec![toml::Value::from("garbage")]),
+            ),
+            (
+                "non-string entry",
+                toml::Value::Array(vec![toml::Value::Integer(42)]),
+            ),
+            (
+                "over-length entry rejected before parse",
+                toml::Value::Array(vec![toml::Value::from(format!(
+                    "https://{}.example",
+                    "x".repeat(300)
+                ))]),
+            ),
+        ];
+
+        for (label, value) in cases {
+            let err = provider_config_to_oidc(
+                "google",
+                &oidc_provider_config(vec![("endpoint_origins", value)]),
+            )
+            .expect_err(&format!("{label} must be rejected at the config boundary"));
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains("endpoint_origins"),
+                        "{label}: the error names the offending field: {detail}"
+                    );
+                    assert!(
+                        detail.contains("google"),
+                        "{label}: the error names the provider: {detail}"
+                    );
+                }
+                other => panic!("{label}: expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_array_endpoint_origins_value_is_rejected() {
+        let err = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "endpoint_origins",
+                toml::Value::from("https://not-an-array.example"),
+            )]),
+        )
+        .expect_err("a scalar endpoint_origins value must be rejected");
+
+        assert!(
+            matches!(err, Error::ConfigError { .. }),
+            "expected ConfigError, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn more_than_the_cap_of_declared_origins_is_rejected() {
+        use oidc_exchange_adapters::shared::origins::MAX_ENDPOINT_ORIGINS;
+
+        let entries: Vec<toml::Value> = (0..=MAX_ENDPOINT_ORIGINS)
+            .map(|i| toml::Value::from(format!("https://host{i}.example")))
+            .collect();
+
+        let err = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![("endpoint_origins", toml::Value::Array(entries))]),
+        )
+        .expect_err("declared origins beyond MAX_ENDPOINT_ORIGINS must be rejected");
+
+        let detail = match err {
+            Error::ConfigError { detail } => detail,
+            other => panic!("expected ConfigError, got {other:?}"),
+        };
+        assert!(
+            detail.contains(&MAX_ENDPOINT_ORIGINS.to_string()),
+            "the rejection names the cap: {detail}"
+        );
+    }
+
+    #[test]
+    fn exactly_at_the_cap_is_accepted() {
+        use oidc_exchange_adapters::shared::origins::MAX_ENDPOINT_ORIGINS;
+
+        // Boundary: AT the cap is valid; only above it is a config error.
+        let entries: Vec<toml::Value> = (0..MAX_ENDPOINT_ORIGINS)
+            .map(|i| toml::Value::from(format!("https://host{i}.example")))
+            .collect();
+
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![("endpoint_origins", toml::Value::Array(entries))]),
+        )
+        .expect("exactly MAX_ENDPOINT_ORIGINS entries must be accepted");
+
+        assert_eq!(converted.endpoint_origins.len(), MAX_ENDPOINT_ORIGINS);
+    }
 }
 
 // ---------------------------------------------------------------------------

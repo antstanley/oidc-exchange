@@ -57,6 +57,7 @@ async fn oidc_provider(
         jwks_uri: Some(HttpsUrl::parse("https://issuer.example.com/jwks.json").expect("valid url")),
         token_endpoint: Some(HttpsUrl::parse("https://issuer.example.com/token").expect("valid url")),
         revocation_endpoint,
+        endpoint_origins: Vec::new(),
         scopes: Vec::new(),
         additional_params: HashMap::new(),
     };
@@ -170,6 +171,7 @@ async fn exchange_non_2xx_leaks_no_code_or_secret() {
         jwks_uri: Some(HttpsUrl::parse("https://issuer.example.com/jwks.json").expect("valid url")),
         token_endpoint: Some(HttpsUrl::parse_for_test(format!("{}/token", server.uri())).expect("wiremock url")),
         revocation_endpoint: None,
+        endpoint_origins: Vec::new(),
         scopes: Vec::new(),
         additional_params: HashMap::new(),
     };

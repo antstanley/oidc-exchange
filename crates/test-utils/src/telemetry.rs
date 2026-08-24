@@ -78,11 +78,14 @@ where
 /// rendered telemetry via [`rendered_output`], and assert declared schema via
 /// `declared`.
 pub struct SpanCapture {
+    /// Keeps the thread-local subscriber installed for the whole test body; dropping it
+    /// uninstalls the subscriber. Declared BEFORE the gate: struct fields drop in
+    /// declaration order, so the subscriber must uninstall while the gate is still
+    /// held — releasing the gate first would let the next capture's install race this
+    /// capture's teardown of tracing's dispatcher registry.
+    _guard: tracing::subscriber::DefaultGuard,
     /// Serializes capture tests process-wide; held for the capture's lifetime.
     _gate: std::sync::MutexGuard<'static, ()>,
-    /// Keeps the thread-local subscriber installed for the whole test body; dropping it
-    /// uninstalls the subscriber.
-    _guard: tracing::subscriber::DefaultGuard,
     buffer: SharedBuffer,
     declared: DeclaredFields,
 }

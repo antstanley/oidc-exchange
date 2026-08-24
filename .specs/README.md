@@ -90,6 +90,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md](plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md) | Done | [changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md) |
 | [plans/2026-08-05-audit_and_throttle_authentication_failures/plan.md](plans/2026-08-05-audit_and_throttle_authentication_failures/plan.md) | Draft | [changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md](changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md) |
 | [plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md](plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md) | Review | [changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md](changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md) |
+| [plans/2026-08-05-own_outbound_http_boundary/plan.md](plans/2026-08-05-own_outbound_http_boundary/plan.md) | Review | [changes/2026-08-05-own_outbound_http_boundary.md](changes/2026-08-05-own_outbound_http_boundary.md) |
 
 ## Conventions
 

@@ -603,6 +603,7 @@ async fn hostile_upstream_echo_yields_generic_body_and_redacted_log() {
         jwks_uri: Some(HttpsUrl::parse_for_test(format!("{}/jwks.json", server.uri())).expect("wiremock url")),
         token_endpoint: Some(HttpsUrl::parse_for_test(format!("{}/token", server.uri())).expect("wiremock url")),
         revocation_endpoint: None,
+        endpoint_origins: Vec::new(),
         scopes: Vec::new(),
         additional_params: HashMap::new(),
     };

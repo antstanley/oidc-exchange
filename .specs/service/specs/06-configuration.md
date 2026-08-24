@@ -270,8 +270,16 @@ non-empty when the internal API is served, and internal auth compares it in cons
 
 `adapter` (`oidc` | `apple`) plus adapter-specific fields captured via a flattened
 `extra: HashMap<String, toml::Value>`. Every endpoint field (`issuer`, `jwks_uri`,
-`token_endpoint`, `revocation_endpoint`) must be `https`. See
-[05-provider-system.md](05-provider-system.md).
+`token_endpoint`, `revocation_endpoint`) must be `https`. `endpoint_origins` is an optional
+array of `scheme "://" host [":" port]` origins that a discovery document is permitted to
+name in addition to the issuer's own origin and the origins of any explicitly configured
+endpoint; each entry must parse as an `https` origin with no path, query, or fragment (the
+typed lift and strict per-entry validation run in the server's `provider_config_to_oidc`).
+It defaults to empty, which pins a provider to its issuer's origin. While the
+endpoint-origin check runs in its shipped warning mode, an undeclared origin logs a
+structured warning naming the endpoint and the permitted set and the deployment is served
+unchanged; rejecting undeclared origins is a separate future release-owner decision after
+one release of that telemetry. See [05-provider-system.md](05-provider-system.md).
 
 ## Validation at load
 
@@ -370,6 +378,12 @@ string through the FFI bindings (`bootstrap::parse_config`).
 - *Separate session repository section.* **`[session_repository]` is optional and overrides
   only session storage.** Enables split topologies (SQL users + Valkey/LMDB sessions) without
   duplicating the user-store config.
+- *Endpoint origins are declared, not derived.* **`endpoint_origins` lists the extra origins
+  a provider's discovery document may name.** Deriving the permitted set from the issuer
+  alone would reject Google, whose `token_endpoint`, `jwks_uri`, and `revocation_endpoint`
+  are on two origins that are neither the issuer nor each other; deriving it from the
+  discovery document is what the constraint exists to prevent. Declaring it makes the
+  trusted set reviewable in the same file that names the provider.
 
 ### Open questions
 

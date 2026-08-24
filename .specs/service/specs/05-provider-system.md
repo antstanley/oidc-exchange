@@ -20,13 +20,27 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
 
 `from_config` discovers the `token_endpoint`, `jwks_uri`, and `revocation_endpoint` from the
 issuer's `.well-known/openid-configuration` when they are not given. Every endpoint —
 configured or discovered — is an `https` URL; the config types make any other scheme
-unrepresentable, and discovery rejects a response whose HTTP status is not a success before it
-parses the body. Adding a Tier 1 provider is a new config block — no code.
+unrepresentable, and discovery rejects a response whose HTTP status is not a success before
+it parses the body. Every endpoint a discovery document supplies must also have an origin in
+the provider's **pinned endpoint-origin set**: the issuer's own origin, plus the origin of
+any endpoint the operator configured explicitly, plus every origin listed in
+`endpoint_origins`. The set is fixed at config load, so a discovery document may confirm
+which origins this service talks to but can never widen them — a compromised or hostile
+document cannot relocate the verification-key source or the destination the client secret is
+posted to. Cross-origin endpoints are ordinary, not exceptional: Google publishes its
+`token_endpoint` and `revocation_endpoint` on `oauth2.googleapis.com` and its `jwks_uri` on
+`www.googleapis.com`, none of which is the issuer's origin, which is why the set is declared
+rather than derived. The check ships in warning mode for one release — an undeclared origin
+logs a structured warning and the deployment is served unchanged — and rejecting undeclared
+origins (`Warn` → `Enforce`) is a separate future release-owner decision made after that
+warning window, not part of this change. Adding a Tier 1 provider is a config block — no
+code.
 
 **Tier 2 — OIDC with quirks (custom module).** `providers/apple::AppleProvider`:
 
@@ -43,9 +57,15 @@ Apple is mostly OIDC but requires a freshly signed **ES256 client secret JWT** f
 endpoint call (`ClientSecretClaims { iss: team_id, sub: client_id, aud, iat, exp }`, ~5-minute
 lifetime, signed with the `.p8` key). `generate_client_secret` returns that assertion as
 `Secret<String>`, so it can be posted but not formatted. `revoke_token` sends the assertion
-alongside the token being revoked and renders any non-2xx response through
-`shared::upstream::error_detail`. It reuses the shared `JwksCache` for the standard ID-token
-validation parts.
+alongside the token being revoked through the shared transport and renders any non-2xx
+response through `shared::upstream::error_detail`. It reuses the shared `JwksCache` and the
+shared `VerificationKeySet` for the standard ID-token validation parts, constructing the key
+set with the admitted-algorithm set `{RS256, ES256}` — the two algorithms Apple's own
+validator has always accepted. Its optional `token_endpoint`, `jwks_uri`, and
+`revocation_endpoint` overrides are pinned the same way as a Tier 1 provider's: the defaults
+are all on `appleid.apple.com`, so an override onto another origin must be declared in
+`endpoint_origins`. The issuer stays pinned to the `https://appleid.apple.com` constant
+regardless.
 
 Apple's ID tokens sometimes carry `email_verified` (and `is_private_email`) as the JSON
 strings `"true"`/`"false"` rather than booleans. The Apple provider coerces bool-or-string
@@ -66,21 +86,32 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
 - `exchange_code` delegates to `shared::token_endpoint::exchange_code` (form-encoded
   `authorization_code` POST with client credentials). A non-2xx upstream response yields a
   detail built by `shared::upstream::error_detail`, never the raw body.
-- `validate_id_token` decodes the JWT header, fetches the issuer's JWKS through the cached
-  `JwksCache`, and validates the signature using the **algorithm from the JWK** (not the
-  untrusted header), returning `IdentityClaims`. Validation requires the `exp`, `iss`,
-  and `aud` claims to be **present** (`set_required_spec_claims`) and to match the
-  configured issuer and `client_id`; `nbf` is validated when present. A token missing
-  `iss` or `aud` — e.g. a provider access token presented as an ID token — is rejected.
-  The returned `IdentityClaims` carries `signing_alg` — the algorithm the JWK actually
-  verified with, not the header's — so the core's `at_hash` check can select the matching
-  digest without re-deciding the algorithm. Both validators report it; neither performs
-  any replay or binding check itself.
-- When the matched JWK carries no `alg`, the algorithm is inferred from the key type:
-  `kty: EC` by `crv` (P-256 → ES256, P-384 → ES384), `kty: OKP` → EdDSA, `kty: RSA` →
-  RS256. Any other alg-less key is rejected. (Azure-AD-style JWKS omit `alg`.)
-- `revoke_token` POSTs to the discovered revocation endpoint with the client id. A non-2xx
-  response is read with `shared::http::read_bounded` and rendered through
+- `validate_id_token` decodes the JWT header for its `kid`, obtains the provider's
+  `VerificationKeySet` through the cached `JwksCache`, and looks the `kid` up in it. The
+  resolved `VerificationKey` carries the algorithm it will verify with, so the validation is
+  configured from the **key set** rather than from a per-provider `alg` match and never from
+  the untrusted header. A `kid` that matches only an ineligible entry is a miss: it takes the
+  forced-refetch branch and then fails closed. Validation requires the `exp`, `iss`, and
+  `aud` claims to be **present** (`set_required_spec_claims`) and to match the configured
+  issuer and `client_id`; `nbf` is validated when present. A token missing `iss` or `aud` —
+  e.g. a provider access token presented as an ID token — is rejected. The returned
+  `IdentityClaims` carries `signing_alg` — the algorithm the resolved key actually verified
+  with, not the header's — so the core's `at_hash` check can select the matching digest
+  without re-deciding the algorithm. Both validators report it; neither performs any replay
+  or binding check itself.
+- Eligibility and algorithm are decided together, in the key set's constructor. An entry
+  whose `use` is present and is not `"sig"`, or whose `key_ops` is present and omits
+  `"verify"`, is not a candidate. An entry declaring an `alg` outside the provider's
+  admitted set is dropped rather than falling through to inference, so a key published as
+  `alg: "RSA-OAEP"` is rejected instead of being resolved to `RS256` from its key type.
+  Inference applies only when `alg` is genuinely absent (Azure-AD-style JWKS omit it) and is
+  restricted to the key shapes it can decide: `kty: RSA` → RS256, `kty: EC` by `crv`
+  (P-256 → ES256, P-384 → ES384), `kty: OKP` with `crv: Ed25519` → EdDSA. Any other alg-less
+  key is rejected, so an OKP key on a curve that is not a signature curve has no arm to land
+  in. A resolved algorithm must agree with the entry's `kty`/`crv` before a decoding key is
+  built.
+- `revoke_token` POSTs to the discovered revocation endpoint with the client id, through the
+  shared transport. A non-2xx response is read under the shared ceiling and rendered through
   `shared::upstream::error_detail`, so an intermediary that echoes the submitted form cannot
   put the token being revoked into the error log.
 
@@ -104,21 +135,27 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
 
 - Provider issuers expose a standard `.well-known/openid-configuration`; where they do not,
   the endpoint fields must be set explicitly in config.
+- A provider's endpoint origins are known when it is configured. Providers do publish
+  endpoints off the issuer's origin — Google is the shipped example — so the origins are
+  declared in config rather than inferred from the issuer, and a provider that relocates an
+  endpoint to a new origin needs a config change before discovery will accept it.
 - The JWKS cache TTL (default 1h) is short enough to pick up upstream key rotation without
-  manual intervention.
+  manual intervention, and a key set served past its TTL while a refill is in flight is
+  stale rather than untrusted.
 
 ### Decisions
 
-- *Algorithm from the JWK.* **ID-token validation uses the signing algorithm declared by the
-  matched JWK, not the token header.** Closes the `alg`-confusion class of attacks.
+- *Algorithm from the JWK, carried as data.* **ID-token validation uses the algorithm the
+  resolved `VerificationKey` carries, decided in the key set's constructor, not the token
+  header and not a per-provider match at the call site.** Closes the `alg`-confusion class,
+  and removes the possibility of two providers deciding the same question differently.
 - *Replay binding is above the provider boundary.* **No `IdentityProvider` implementation
   checks `nonce`, `azp`, `at_hash` or one-time use; `AppService::exchange` does, for all of
   them.** Two independent validators omitted the same four controls; adding them twice
-  would leave a third implementation free to omit them again. This is consistent with the
-  direction in `hardening/proposals/provider-response-boundary.md`: whether the two
-  validators later consolidate behind a shared `ProviderTransport`/`VerificationKeySet` or
-  collapse into one profile-driven validator, the binding does not move. `signing_alg` is
-  the same algorithm-as-data that a `VerificationKeySet` would carry, surfaced early.
+  would leave a third implementation free to omit them again. The two validators now share
+  the `ProviderTransport`/`VerificationKeySet` seam, and the binding still does not move.
+  `signing_alg` is the algorithm-as-data the `VerificationKeySet` carries, surfaced to the
+  core.
 - *Apple as a separate crate.* **The Apple provider lives in `crates/providers`, not
   `crates/adapters`.** Provider-specific protocol logic (per-request client JWT) is kept apart
   from infrastructure adapters.
@@ -128,6 +165,26 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
 - *Required spec claims.* **ID-token validation requires `exp`, `iss`, and `aud` to be
   present, not merely correct-when-present.** Closes the cross-token-type confusion class
   (e.g. Keycloak realm access tokens omit `aud`).
+- *Key purpose is binding when declared, permissive when absent.* **`use` must be `"sig"`
+  and `key_ops` must contain `"verify"` when either member is present; a JWK carrying
+  neither is eligible.** RFC 7517 §4.2–4.3 make both optional and many identity providers
+  omit them, so rejecting alg-less, use-less keys would break working deployments; treating
+  a declared purpose as decoration is what let an encryption key verify an identity
+  assertion.
+- *One selector, per-provider admitted algorithms.* **Both providers use the same
+  `VerificationKeySet`; the set of algorithms each admits is a parameter.** The generic
+  adapter admits the nine JWS algorithms it always has and Apple admits `{RS256, ES256}`, so
+  consolidating the selector neither widens Apple nor narrows the generic path. Whether the
+  two validators are otherwise equivalent is threat-model contradiction C12, and it is
+  answered by the cross-provider corpus rather than assumed by the merge.
+- *Discovery may confirm origins, never widen them.* **A provider's endpoint-origin set is
+  fixed at config load; a discovery-supplied endpoint outside it is rejected.** The RFC 8414
+  issuer self-consistency check is a string comparison and constrains nothing about the
+  endpoints the document goes on to name (threat-model contradiction C4). Pinning the set in
+  config keeps the operator's declared intent authoritative over the provider's runtime
+  assertion; enforcement follows a one-release warning window by explicit release-owner
+  decision, so deployments relying on an undeclared cross-origin endpoint learn about it
+  from a log line before it becomes an outage.
 
 ### Open questions
 

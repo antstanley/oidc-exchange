@@ -85,7 +85,11 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Origins Google's discovery document may name beyond the issuer's origin:
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
+
+`endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered (see [Identity Providers](/guides/providers/)).
 
 Bind to `127.0.0.1` and put a reverse proxy (nginx, Caddy) in front for TLS termination.
 

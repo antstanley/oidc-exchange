@@ -19,9 +19,12 @@ use oidc_exchange_core::ports::{
     UserSync,
 };
 
+pub mod corpus;
+
 pub mod telemetry;
 
 pub mod session_contract;
+
 
 // ---------------------------------------------------------------------------
 // MockRepository

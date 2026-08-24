@@ -2412,8 +2412,11 @@ mod tests {
     /// The capture bundle a span-leak test needs: hold `_guard` for the whole test body,
     /// read rendered telemetry from `buffer`, and assert declared schema via `declared`.
     struct SpanCapture {
-        _gate: std::sync::MutexGuard<'static, ()>,
+        // Field order is load-bearing: the subscriber guard must drop (uninstall)
+        // BEFORE the gate releases, or the next capture's install races this
+        // teardown of tracing's dispatcher registry.
         _guard: tracing::subscriber::DefaultGuard,
+        _gate: std::sync::MutexGuard<'static, ()>,
         buffer: SharedBuffer,
         declared: Arc<Mutex<HashSet<(String, String)>>>,
     }

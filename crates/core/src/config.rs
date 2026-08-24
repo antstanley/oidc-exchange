@@ -1666,6 +1666,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_endpoint_origins_survive_resolve_as_a_string_array_in_extra() {
+        // The declared endpoint origins survive resolution as a string array in
+        // `extra` (the typed lift and strict per-entry validation happen in the
+        // server's `provider_config_to_oidc`).
+        let mut raw = default_raw_config();
+        let google: RawProviderConfig = toml::from_str(
+            r#"
+adapter = "oidc"
+issuer = "https://accounts.google.com"
+client_id = "google-client-id"
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
+"#,
+        )
+        .expect("provider fixture deserializes");
+        raw.providers.insert("google".to_string(), google);
+
+        let config = Config::resolve(raw).expect("config with endpoint_origins resolves");
+        let origins = config.providers["google"]
+            .extra
+            .get("endpoint_origins")
+            .and_then(|v| v.as_array())
+            .expect("endpoint_origins must parse as an array");
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[0].as_str(), Some("https://oauth2.googleapis.com"));
+        assert_eq!(origins[1].as_str(), Some("https://www.googleapis.com"));
+    }
+
+    #[test]
     fn resolve_accepts_representative_closed_config_values() {
         let cases = [
             ("server.role", "admin"),

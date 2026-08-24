@@ -167,7 +167,11 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Origins Google's discovery document may name beyond the issuer's origin:
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
+
+`endpoint_origins` pins, per provider, which origins a discovery document is allowed to name — Google serves its token and revocation endpoints from `oauth2.googleapis.com` and its JWKS URI from `www.googleapis.com`, neither of which is the issuer's origin. Each entry must be a bare `https://host[:port]`; an origin that is not pinned logs a warning when discovered.
 
 ### Run
 

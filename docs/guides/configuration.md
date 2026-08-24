@@ -165,6 +165,10 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Extra origins Google's discovery document may name beyond accounts.google.com:
+# token/revocation endpoints on oauth2.googleapis.com, JWKS on www.googleapis.com.
+# Each entry is a bare https origin; defaults to empty (issuer's origin only).
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 
 [providers.apple]
 adapter = "apple"
@@ -228,6 +232,7 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 | `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
 | `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `audit.blocking_threshold` | `warning` |
+| `providers.<name>.endpoint_origins` | none — the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
 | `internal_api` | disabled |
 
