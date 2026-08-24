@@ -1,6 +1,6 @@
 # Development Guidelines
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** Repo-wide
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** Repo-wide
 
 The rules of the road for everyone — humans and agents — writing code in `oidc-exchange`.
 This page is canonical: a guideline here is a rule the repo adopts. It covers the toolchain,
