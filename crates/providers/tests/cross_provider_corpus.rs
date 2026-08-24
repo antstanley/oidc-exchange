@@ -30,6 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use jsonwebtoken::{encode as jwt_encode, Algorithm, EncodingKey, Header};
 use oidc_exchange_adapters::oidc::OidcProvider;
+use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::domain::{IdentityClaims, OidcProviderConfig};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::IdentityProvider;
@@ -191,11 +192,11 @@ async fn serve_jwks(jwks: &serde_json::Value) -> String {
 fn oidc_config(server_uri: &str) -> OidcProviderConfig {
     OidcProviderConfig {
         provider_id: "corpus-oidc".into(),
-        issuer: server_uri.to_string(),
+        issuer: HttpsUrl::parse_for_test(server_uri).expect("wiremock url"),
         client_id: OIDC_CLIENT_ID.into(),
         client_secret: None,
-        jwks_uri: Some(format!("{server_uri}/jwks.json")),
-        token_endpoint: Some(format!("{server_uri}/token")),
+        jwks_uri: Some(HttpsUrl::parse_for_test(format!("{server_uri}/jwks.json")).expect("wiremock url")),
+        token_endpoint: Some(HttpsUrl::parse_for_test(format!("{server_uri}/token")).expect("wiremock url")),
         revocation_endpoint: None,
         endpoint_origins: Vec::new(),
         scopes: vec!["openid".into()],
@@ -203,44 +204,23 @@ fn oidc_config(server_uri: &str) -> OidcProviderConfig {
     }
 }
 
-/// Build the Apple provider against a mock JWKS origin. `AppleProvider` takes
-/// its private key as a filesystem path, so the corpus PEM goes through a temp
-/// file whose guard outlives the provider under test.
-async fn apple_provider(server_uri: &str) -> (AppleProvider, tempfile::TempPath) {
-    let pem_file = tempfile::NamedTempFile::new().expect("temp file for corpus PEM");
-    std::fs::write(pem_file.path(), corpus::EC_PRIVATE_PEM).expect("PEM write");
-    let pem_guard = pem_file.into_temp_path();
+/// Build the Apple provider against a mock JWKS origin, through the hidden
+/// test seam: the strict `from_config` HTTPS validation rightly refuses
+/// wiremock's plain-HTTP endpoints, so the corpus constructs the provider
+/// directly from the corpus PEM.
+async fn apple_provider(server_uri: &str) -> AppleProvider {
+    let signing_key = jsonwebtoken::EncodingKey::from_ec_pem(corpus::EC_PRIVATE_PEM.as_bytes())
+        .expect("corpus EC PEM parses");
 
-    let mut raw = HashMap::new();
-    raw.insert(
-        "client_id".to_string(),
-        toml::Value::String(APPLE_CLIENT_ID.into()),
-    );
-    raw.insert(
-        "team_id".to_string(),
-        toml::Value::String("CORPUSTEAM".into()),
-    );
-    raw.insert(
-        "key_id".to_string(),
-        toml::Value::String("corpus-key".into()),
-    );
-    raw.insert(
-        "private_key_path".to_string(),
-        toml::Value::String(pem_guard.display().to_string()),
-    );
-    raw.insert(
-        "token_endpoint".to_string(),
-        toml::Value::String(format!("{server_uri}/token")),
-    );
-    raw.insert(
-        "jwks_uri".to_string(),
-        toml::Value::String(format!("{server_uri}/jwks.json")),
-    );
-
-    let provider = AppleProvider::from_config(&raw)
-        .await
-        .expect("Apple provider builds against the mock JWKS");
-    (provider, pem_guard)
+    AppleProvider::new_for_test(
+        APPLE_CLIENT_ID.into(),
+        "CORPUSTEAM".into(),
+        "corpus-key".into(),
+        signing_key,
+        HttpsUrl::parse_for_test(format!("{server_uri}/token")).expect("wiremock url"),
+        HttpsUrl::parse_for_test(format!("{server_uri}/jwks.json")).expect("wiremock url"),
+        None,
+    )
 }
 
 /// The kid a validator must look up for a case.
@@ -281,7 +261,7 @@ async fn oidc_disposition(case: Case) -> Disposition {
 async fn apple_disposition(case: Case) -> Disposition {
     let jwks = corpus::jwks_for_case(case);
     let server_uri = serve_jwks(&jwks).await;
-    let (provider, _pem_guard) = apple_provider(&server_uri).await;
+    let provider = apple_provider(&server_uri).await;
 
     let token = unsigned_token(kid_for_case(case), APPLE_ISSUER, APPLE_CLIENT_ID);
     classify(provider.validate_id_token(&token).await)
@@ -348,7 +328,7 @@ async fn rsa_sig_key_verifies_on_the_oidc_path() {
 async fn ec_sig_key_verifies_on_the_apple_path() {
     let jwks = json!({ "keys": [corpus::ec_sig_entry(corpus::EC_KID)] });
     let server_uri = serve_jwks(&jwks).await;
-    let (provider, _pem_guard) = apple_provider(&server_uri).await;
+    let provider = apple_provider(&server_uri).await;
 
     let token = signed_token(
         corpus::EC_PRIVATE_PEM.as_bytes(),
@@ -372,7 +352,7 @@ async fn ec_sig_key_verifies_on_the_apple_path() {
 async fn rsa_sig_key_verifies_on_the_apple_path() {
     let jwks = json!({ "keys": [corpus::rsa_sig_entry(corpus::RSA_KID)] });
     let server_uri = serve_jwks(&jwks).await;
-    let (provider, _pem_guard) = apple_provider(&server_uri).await;
+    let provider = apple_provider(&server_uri).await;
 
     let token = signed_token(
         corpus::RSA_PRIVATE_PEM.as_bytes(),

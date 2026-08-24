@@ -12,7 +12,7 @@ A Rust service that validates ID tokens from third-party OIDC providers and exch
 **One-line install script** (Linux/macOS, downloads the latest release binary):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
 **Docker:**
@@ -225,9 +225,15 @@ Config is loaded in order:
 1. `config/default.toml`
 2. `config/{OIDC_EXCHANGE_ENV}.toml` (if set)
 3. Environment variable overrides: `OIDC_EXCHANGE__{section}__{key}`
-4. `${VAR_NAME}` placeholder resolution from environment
+4. `${VAR_NAME}` placeholder resolution from environment (an unset placeholder fails closed)
+5. closed-domain resolution into the typed runtime configuration
 
-See `config/default.toml` for the minimal default configuration.
+`config/default.toml` carries valid HTTPS deployment placeholders for issuer and audience;
+replace them with your own non-empty identity values before production. Validate a file before
+starting the service with `oidc-exchange config check path/to/config.toml`; it uses the
+side-effect-free resolver, redacts secrets, and distinguishes unresolved placeholders from
+invalid configuration values. It intentionally ignores environment variables and overlays, so
+pass a fully materialized deployment file.
 
 ## Testing
 

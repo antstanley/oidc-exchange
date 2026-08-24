@@ -177,6 +177,29 @@ fn test_valid_config_constructs_successfully() {
     let (_exchange, _tmp) = setup();
 }
 
+/// File-backed construction uses the same resolver as string-backed
+/// construction, so the same valid fixture is accepted by both entry points.
+#[test]
+fn test_valid_config_constructs_via_from_file() {
+    let tmp = tempfile::tempdir().expect("failed to create temp dir");
+    let key_path = tmp.path().join("test-key.pem");
+    let db_path = tmp.path().join("test.db");
+    let config_path = tmp.path().join("valid-config.toml");
+    setup_test_key(&key_path);
+    std::fs::write(
+        &config_path,
+        minimal_config(
+            key_path.to_str().expect("UTF-8 key path"),
+            db_path.to_str().expect("UTF-8 database path"),
+        ),
+    )
+    .expect("failed to write config file");
+
+    let exchange = OidcExchange::from_file(config_path.to_str().expect("UTF-8 config path"));
+
+    assert!(exchange.is_ok(), "valid file config must construct");
+}
+
 #[test]
 fn test_invalid_method() {
     let (exchange, _tmp) = setup();

@@ -7,3 +7,6 @@ pub mod origins;
 pub mod token_endpoint;
 pub mod transport;
 pub mod upstream;
+
+pub use http::read_bounded;
+pub use upstream::error_detail;

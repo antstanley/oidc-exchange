@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -24,20 +24,23 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 ```
 
 `from_config` discovers the `token_endpoint`, `jwks_uri`, and `revocation_endpoint` from the
-issuer's `.well-known/openid-configuration` when they are not given. Every endpoint a
-discovery document supplies must have an origin in the provider's **pinned endpoint-origin
-set**: the issuer's own origin, plus the origin of any endpoint the operator configured
-explicitly, plus every origin listed in `endpoint_origins`. The set is fixed at config load,
-so a discovery document may confirm which origins this service talks to but can never widen
-them — a compromised or hostile document cannot relocate the verification-key source or the
-destination the client secret is posted to. Cross-origin endpoints are ordinary, not
-exceptional: Google publishes its `token_endpoint` and `revocation_endpoint` on
-`oauth2.googleapis.com` and its `jwks_uri` on `www.googleapis.com`, none of which is the
-issuer's origin, which is why the set is declared rather than derived. The check ships in
-warning mode for one release — an undeclared origin logs a structured warning and the
-deployment is served unchanged — and rejecting undeclared origins (`Warn` → `Enforce`) is a
-separate future release-owner decision made after that warning window, not part of this
-change. Adding a Tier 1 provider is a config block — no code.
+issuer's `.well-known/openid-configuration` when they are not given. Every endpoint —
+configured or discovered — is an `https` URL; the config types make any other scheme
+unrepresentable, and discovery rejects a response whose HTTP status is not a success before
+it parses the body. Every endpoint a discovery document supplies must also have an origin in
+the provider's **pinned endpoint-origin set**: the issuer's own origin, plus the origin of
+any endpoint the operator configured explicitly, plus every origin listed in
+`endpoint_origins`. The set is fixed at config load, so a discovery document may confirm
+which origins this service talks to but can never widen them — a compromised or hostile
+document cannot relocate the verification-key source or the destination the client secret is
+posted to. Cross-origin endpoints are ordinary, not exceptional: Google publishes its
+`token_endpoint` and `revocation_endpoint` on `oauth2.googleapis.com` and its `jwks_uri` on
+`www.googleapis.com`, none of which is the issuer's origin, which is why the set is declared
+rather than derived. The check ships in warning mode for one release — an undeclared origin
+logs a structured warning and the deployment is served unchanged — and rejecting undeclared
+origins (`Warn` → `Enforce`) is a separate future release-owner decision made after that
+warning window, not part of this change. Adding a Tier 1 provider is a config block — no
+code.
 
 **Tier 2 — OIDC with quirks (custom module).** `providers/apple::AppleProvider`:
 
@@ -52,12 +55,15 @@ private_key_path = "/secrets/apple.p8"
 
 Apple is mostly OIDC but requires a freshly signed **ES256 client secret JWT** for each token
 endpoint call (`ClientSecretClaims { iss: team_id, sub: client_id, aud, iat, exp }`, ~5-minute
-lifetime, signed with the `.p8` key). It reuses the shared `JwksCache` and the shared
-`VerificationKeySet` for the standard ID-token validation parts, constructing the key set with
-the admitted-algorithm set `{RS256, ES256}` — the two algorithms Apple's own validator has
-always accepted. Its optional `token_endpoint`, `jwks_uri`, and `revocation_endpoint`
-overrides are pinned the same way as a Tier 1 provider's: the defaults are all on
-`appleid.apple.com`, so an override onto another origin must be declared in
+lifetime, signed with the `.p8` key). `generate_client_secret` returns that assertion as
+`Secret<String>`, so it can be posted but not formatted. `revoke_token` sends the assertion
+alongside the token being revoked through the shared transport and renders any non-2xx
+response through `shared::upstream::error_detail`. It reuses the shared `JwksCache` and the
+shared `VerificationKeySet` for the standard ID-token validation parts, constructing the key
+set with the admitted-algorithm set `{RS256, ES256}` — the two algorithms Apple's own
+validator has always accepted. Its optional `token_endpoint`, `jwks_uri`, and
+`revocation_endpoint` overrides are pinned the same way as a Tier 1 provider's: the defaults
+are all on `appleid.apple.com`, so an override onto another origin must be declared in
 `endpoint_origins`. The issuer stays pinned to the `https://appleid.apple.com` constant
 regardless.
 
@@ -67,7 +73,9 @@ values when mapping to `IdentityClaims.email_verified` and
 `IdentityClaims.is_private_email`, so the registration domain allowlist (which requires
 `email_verified == Some(true)`) works for Apple sign-ins. `is_private_email` is a
 first-class `Option<bool>` field on `IdentityClaims`, populated only by the Apple
-provider; the generic OIDC provider leaves it `None`.
+provider; the generic OIDC provider leaves it `None`. The same `https` endpoint constraint
+applies to Apple's optional `token_endpoint`, `jwks_uri`, and `revocation_endpoint` overrides,
+which take the shared `HttpsUrl` type rather than repeating the check.
 
 **Tier 3 — non-OIDC (e.g. atproto).** *Not implemented.* The `IdentityProvider` doc comment
 and several config/example files name `atproto`, but no `AtprotoProvider` exists in the
@@ -76,7 +84,8 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
 ## OidcProvider behaviour (`adapters/oidc`)
 
 - `exchange_code` delegates to `shared::token_endpoint::exchange_code` (form-encoded
-  `authorization_code` POST with client credentials).
+  `authorization_code` POST with client credentials). A non-2xx upstream response yields a
+  detail built by `shared::upstream::error_detail`, never the raw body.
 - `validate_id_token` decodes the JWT header for its `kid`, obtains the provider's
   `VerificationKeySet` through the cached `JwksCache`, and looks the `kid` up in it. The
   resolved `VerificationKey` carries the algorithm it will verify with, so the validation is
@@ -85,7 +94,11 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   forced-refetch branch and then fails closed. Validation requires the `exp`, `iss`, and
   `aud` claims to be **present** (`set_required_spec_claims`) and to match the configured
   issuer and `client_id`; `nbf` is validated when present. A token missing `iss` or `aud` —
-  e.g. a provider access token presented as an ID token — is rejected.
+  e.g. a provider access token presented as an ID token — is rejected. The returned
+  `IdentityClaims` carries `signing_alg` — the algorithm the resolved key actually verified
+  with, not the header's — so the core's `at_hash` check can select the matching digest
+  without re-deciding the algorithm. Both validators report it; neither performs any replay
+  or binding check itself.
 - Eligibility and algorithm are decided together, in the key set's constructor. An entry
   whose `use` is present and is not `"sig"`, or whose `key_ops` is present and omits
   `"verify"`, is not a candidate. An entry declaring an `alg` outside the provider's
@@ -97,7 +110,10 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   key is rejected, so an OKP key on a curve that is not a signature curve has no arm to land
   in. A resolved algorithm must agree with the entry's `kty`/`crv` before a decoding key is
   built.
-- `revoke_token` POSTs to the discovered revocation endpoint with client credentials.
+- `revoke_token` POSTs to the discovered revocation endpoint with the client id, through the
+  shared transport. A non-2xx response is read under the shared ceiling and rendered through
+  `shared::upstream::error_detail`, so an intermediary that echoes the submitted form cannot
+  put the token being revoked into the error log.
 
 ## Provider registry
 
@@ -133,6 +149,13 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
   resolved `VerificationKey` carries, decided in the key set's constructor, not the token
   header and not a per-provider match at the call site.** Closes the `alg`-confusion class,
   and removes the possibility of two providers deciding the same question differently.
+- *Replay binding is above the provider boundary.* **No `IdentityProvider` implementation
+  checks `nonce`, `azp`, `at_hash` or one-time use; `AppService::exchange` does, for all of
+  them.** Two independent validators omitted the same four controls; adding them twice
+  would leave a third implementation free to omit them again. The two validators now share
+  the `ProviderTransport`/`VerificationKeySet` seam, and the binding still does not move.
+  `signing_alg` is the algorithm-as-data the `VerificationKeySet` carries, surfaced to the
+  core.
 - *Apple as a separate crate.* **The Apple provider lives in `crates/providers`, not
   `crates/adapters`.** Provider-specific protocol logic (per-request client JWT) is kept apart
   from infrastructure adapters.

@@ -1,14 +1,20 @@
 # FFI Core (`crates/ffi`)
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/ffi
+**Status:** Implemented · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Scope:** crates/ffi
 
 The shared Rust layer the language bindings consume. It wraps the server's axum router behind
 a small synchronous interface and owns the tokio runtime so a non-async host can call it.
 
 ## Responsibilities
 
-- Build an `AppService` and axum `Router` from a TOML config (re-using
-  `crates/server`'s bootstrap), and own the tokio `Runtime` that drives them.
+- Build an `AppService` and axum `Router` from a TOML config (re-using `crates/server`'s
+  bootstrap), and own the tokio `Runtime` that drives them. Config supplied through `new`
+  (inline string) or `from_file` passes the server's shared resolve —
+  `OIDC_EXCHANGE__{section}__{key}` overrides, fail-closed `${VAR}` placeholder resolution,
+  then the same load-time validation as the server's `load_config` (role, TTLs, allowlist,
+  internal-API secret — [06-configuration.md](../../service/specs/06-configuration.md) →
+  Loading order). An unresolvable placeholder or an invalid value is an `FfiError` at
+  construction, never at request time; a literal `${…}` never reaches a running router.
 - Convert a primitive HTTP request into an axum request, route it, and convert the response
   back to primitives.
 - Map every error into a stable `FfiError`; never let a panic cross the FFI boundary.
@@ -63,6 +69,10 @@ Depends on `crates/server` (router construction), `crates/core`, and `tokio`/`ax
   is responsible for moving the call off the host's event-loop thread.
 - *Errors as `{code, message}`.* **All Rust errors collapse to `FfiError`.** A flat, stable
   shape every language can surface without knowing the domain `Error` enum.
+- *One resolve, differing sources.* **FFI config passes through the server's resolve; only the
+  source set differs — the supplied document plus `OIDC_EXCHANGE__…` overrides, with no
+  `OIDC_EXCHANGE_ENV` file overlay.** A second config pipeline is exactly how the published
+  Node, Python, and Lambda packages came to load documented secret placeholders as literal text.
 
 ### Open questions
 

@@ -10,7 +10,9 @@ serde_json.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tokio.workspace = true
-reqwest = { version = "0.13", features = ["json", "form"] }
+# "stream" backs http::read_bounded, which caps upstream bodies at MAX_UPSTREAM_BODY_BYTES
+# by consuming response.bytes_stream() instead of an unbounded text().
+reqwest = { version = "0.13", features = ["json", "form", "stream"] }
 ed25519-dalek = { version = "3.0.0-pre.6", features = ["rand_core", "pkcs8", "pem"] }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 base64.workspace = true
@@ -28,7 +30,7 @@ heed = "0.22"
 hex.workspace = true
 ulid.workspace = true
 chrono.workspace = true
-fred = { version = "10", features = ["serde-json"] }
+fred = { version = "10", features = ["serde-json", "i-scripts"] }
 futures = "0.3"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "json"] }
 
@@ -39,3 +41,6 @@ tempfile = "3"
 rand.workspace = true
 rsa = { version = "0.10.0-rc.1", features = ["sha2"] }
 tokio = { workspace = true, features = ["test-util"] }
+# Span-leak regression tests need a fmt subscriber whose writer they control and whose
+# span lifecycle events (FmtSpan::CLOSE) they can enable explicitly.
+tracing-subscriber = "0.3"

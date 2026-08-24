@@ -320,6 +320,32 @@ impl JwksCache {
     }
 }
 
+/// The JWS `alg` name (e.g. `"RS256"`, `"EdDSA"`) for a resolved
+/// [`jsonwebtoken::Algorithm`].
+///
+/// `jsonwebtoken` 10 exposes no `Display` for `Algorithm`, and the validators must
+/// report the algorithm they verified with as data (`IdentityClaims.signing_alg`), so
+/// the mapping lives here once instead of being re-derived from the untrusted header
+/// or re-matched ad hoc at each call site.
+pub fn jws_alg_name(alg: jsonwebtoken::Algorithm) -> &'static str {
+    use jsonwebtoken::Algorithm as A;
+
+    match alg {
+        A::HS256 => "HS256",
+        A::HS384 => "HS384",
+        A::HS512 => "HS512",
+        A::ES256 => "ES256",
+        A::ES384 => "ES384",
+        A::RS256 => "RS256",
+        A::RS384 => "RS384",
+        A::RS512 => "RS512",
+        A::PS256 => "PS256",
+        A::PS384 => "PS384",
+        A::PS512 => "PS512",
+        A::EdDSA => "EdDSA",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1014,5 +1040,35 @@ mod tests {
             "mean cache hit must stay under 1ms, measured {mean_micros:.1}µs"
         );
         println!("large-key-set mean cache-hit time: {mean_micros:.1}µs over {HIT_COUNT} hits");
+    }
+
+    /// The JWS name mapping is the data `IdentityClaims.signing_alg` carries, so it must
+    /// round-trip with `Algorithm::from_str` for every algorithm the validators accept,
+    /// and stay stable for the digest families the core's `at_hash` check selects on.
+    #[test]
+    fn jws_alg_name_round_trips_with_from_str() {
+        use std::str::FromStr;
+
+        for name in [
+            "HS256", "HS384", "HS512", "ES256", "ES384", "RS256", "RS384", "RS512", "PS256",
+            "PS384", "PS512", "EdDSA",
+        ] {
+            let alg = jsonwebtoken::Algorithm::from_str(name).expect("supported algorithm");
+            assert_eq!(
+                jws_alg_name(alg),
+                name,
+                "mapping must invert from_str for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn jws_alg_name_names_the_digest_families_the_core_selects_on() {
+        assert_eq!(jws_alg_name(jsonwebtoken::Algorithm::RS256), "RS256");
+        assert_eq!(jws_alg_name(jsonwebtoken::Algorithm::ES256), "ES256");
+        assert_eq!(jws_alg_name(jsonwebtoken::Algorithm::ES384), "ES384");
+        // EdDSA has no at_hash digest (OIDC Core defines none); the name must still be
+        // reported faithfully so the core can reject an at_hash on such assertions.
+        assert_eq!(jws_alg_name(jsonwebtoken::Algorithm::EdDSA), "EdDSA");
     }
 }

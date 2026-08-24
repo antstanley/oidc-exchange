@@ -16,4 +16,9 @@ pub trait IdentityProvider: Send + Sync {
 
     /// Provider identifier (e.g., "google", "apple", "atproto")
     fn provider_id(&self) -> &str;
+
+    /// The audience this provider pins ID tokens to — the `client_id` from its
+    /// configuration. Core reads it for the `azp` binding check so the check
+    /// never has to reach into `[providers.<name>]` config itself.
+    fn client_id(&self) -> &str;
 }

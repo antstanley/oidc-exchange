@@ -6,26 +6,30 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
-use aws_sdk_dynamodb::types::{AttributeValue, Delete, Put, TransactWriteItem, WriteRequest};
-use chrono::Utc;
+use aws_sdk_dynamodb::types::{
+    AttributeValue, Delete, DeleteRequest, Put, TransactWriteItem, Update, WriteRequest,
+};
+use chrono::{DateTime, Utc};
+use oidc_exchange_core::domain::{
+    is_valid_family_id, NewUser, RefreshResolution, RetiredRefreshToken, Session, User, UserPatch,
+    UserStatus, INITIAL_USER_VERSION,
+};
 use tracing::instrument;
 
-use oidc_exchange_core::domain::{
-    NewUser, Session, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
-};
 use oidc_exchange_core::error::{Error, Result};
+use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
 use schema::{
-    guard_pk, guard_to_item, item_to_session, item_to_user, session_to_item, user_to_item, GUARD_SK,
+    guard_pk, guard_to_item, item_single_use_expiry, item_to_retired, item_to_session,
+    item_to_user, retired_to_item, session_to_item, single_use_pk, single_use_to_item,
+    user_to_item, FamilyRoster, UserRoster, GUARD_SK, RETIRED_SK,
 };
 
 /// DynamoDB cancellation-reason code reported for a failed `attribute_not_exists(pk)`
 /// condition inside a `TransactWriteItems` call — the signal that a `create_user` lost a
 /// uniqueness race, mapped to `Error::Conflict` rather than `Error::StoreError`.
 const CONDITIONAL_CHECK_FAILED_CODE: &str = "ConditionalCheckFailed";
-
-const GSI1_NAME: &str = "GSI1";
 
 /// Maximum number of read-modify-write attempts `update_user` makes against its
 /// version-conditional `PutItem` (`version = :read_version OR attribute_not_exists(version)`)
@@ -66,6 +70,16 @@ where
 /// allowed while draining a batch's `unprocessed_items` before the retry budget is exhausted
 /// and the call errors instead of silently leaving items undeleted.
 const BATCH_WRITE_MAX_ATTEMPTS: u32 = 8;
+
+/// Maximum number of items in one `BatchWriteItem` request — the service's
+/// hard limit. Every delete fan-out chunks its key list by this constant.
+const BATCH_WRITE_MAX_ITEMS: usize = 25;
+
+/// Maximum number of read-delete-confirm attempts a roster-driven revocation
+/// (`revoke_family`) makes when its confirming re-read shows the roster
+/// changed mid-flight (a concurrent transactional mutation landed). Bounded
+/// so a relentlessly contested family errors instead of looping forever.
+const REVOCATION_MAX_ATTEMPTS: u32 = 5;
 
 /// Base delay, in milliseconds, for the capped exponential backoff between `BatchWriteItem`
 /// retry attempts: attempt `n` (n >= 2) sleeps `BATCH_WRITE_BACKOFF_BASE_MS * 2^(n-2)` ms
@@ -111,19 +125,212 @@ where
     })
 }
 
+/// Whether two roster member lists name the same hash set, order-insensitively
+/// (string sets in DynamoDB are unordered, so list order carries no meaning).
+fn same_members(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && a.iter().all(|hash| b.contains(hash))
+}
+
+/// Build the retirement record a winning rotation writes for `live`. The
+/// successor inherits the family identity; the deadline is
+/// `min(now + reuse_retention, family expires_at)` so no record outlives its
+/// family. Legacy rows must never reach this helper — there is no prior
+/// generation for them to be detected against.
+fn retirement_record(
+    live_hash: &str,
+    live: &Session,
+    replacement: &Session,
+    reuse_retention_secs: u64,
+    now: DateTime<Utc>,
+) -> RetiredRefreshToken {
+    assert!(
+        live.refresh_token_hash.expose() == live_hash,
+        "retirement record must name the presented hash"
+    );
+    assert!(
+        is_valid_family_id(&live.family_id),
+        "a legacy row must not produce a retirement record: {:?}",
+        live.family_id
+    );
+    RetiredRefreshToken {
+        refresh_token_hash: live_hash.to_string(),
+        family_id: live.family_id.clone(),
+        user_id: live.user_id.clone(),
+        successor_hash: replacement.refresh_token_hash.expose().clone(),
+        retired_at: now,
+        expires_at: RetiredRefreshToken::retention_deadline(
+            now,
+            reuse_retention_secs,
+            replacement.expires_at,
+        ),
+    }
+}
+
 pub struct DynamoRepository {
     client: aws_sdk_dynamodb::Client,
     table_name: String,
+    /// How long a retirement record stays readable after its rotation:
+    /// `retired_at + reuse_retention_secs`, capped per record at the family's
+    /// absolute `expires_at` by [`RetiredRefreshToken::retention_deadline`].
+    /// Resolved from `[token] refresh_reuse_retention` at bootstrap; injected
+    /// here because the store, not the caller, stamps every record's deadline.
+    reuse_retention_secs: u64,
 }
 
 impl DynamoRepository {
-    pub fn new(client: aws_sdk_dynamodb::Client, table_name: String) -> Self {
-        Self { client, table_name }
+    pub fn new(
+        client: aws_sdk_dynamodb::Client,
+        table_name: String,
+        reuse_retention_secs: u64,
+    ) -> Self {
+        assert!(
+            reuse_retention_secs > 0,
+            "reuse retention must be greater than zero"
+        );
+        Self {
+            client,
+            table_name,
+            reuse_retention_secs,
+        }
     }
 
-    fn store_err(e: impl std::fmt::Display) -> Error {
-        Error::StoreError {
-            detail: e.to_string(),
+    /// Map any AWS SDK error onto [`Error::StoreError`], extracting the
+    /// service's own message where one exists — a bare `SdkError` Display is
+    /// just "service error", which tells an operator nothing about which
+    /// request failed or why.
+    fn store_err(e: impl std::fmt::Debug + std::fmt::Display) -> Error {
+        let detail = format!("{e:#?}");
+        Error::StoreError { detail }
+    }
+
+    fn session_pk(token_hash: &str) -> AttributeValue {
+        AttributeValue::S(format!("SESSION#{token_hash}"))
+    }
+
+    fn retired_pk(token_hash: &str) -> AttributeValue {
+        AttributeValue::S(format!("RETIRED#{token_hash}"))
+    }
+
+    fn user_sk() -> AttributeValue {
+        AttributeValue::S("USER".to_string())
+    }
+
+    fn session_sk() -> AttributeValue {
+        AttributeValue::S("SESSION".to_string())
+    }
+
+    /// Strongly consistent fetch of one live-session item. Both answers this
+    /// read feeds are security decisions — `/revoke`'s liveness check and
+    /// rotation's identity capture — and an eventually consistent read would
+    /// let a revoked token mint an access token for the width of the
+    /// replication window (`g3-dynamo-session-read-eventual-consistency`).
+    async fn get_session_item(&self, token_hash: &str) -> Result<Option<Session>> {
+        let result = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .key("pk", Self::session_pk(token_hash))
+            .key("sk", Self::session_sk())
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(Self::store_err)?;
+
+        match result.item {
+            Some(item) => Ok(Some(item_to_session(&item)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Strongly consistent fetch of one retirement record. An eventually
+    /// consistent answer would report reuse as an unknown token — refused,
+    /// but with no alarm raised (SR1's retired half).
+    async fn get_retired_record(&self, token_hash: &str) -> Result<Option<RetiredRefreshToken>> {
+        let result = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .key("pk", Self::retired_pk(token_hash))
+            .key("sk", AttributeValue::S(RETIRED_SK.to_string()))
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(Self::store_err)?;
+
+        match result.item {
+            Some(item) => Ok(Some(item_to_retired(&item)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Strongly consistent read of the user item's authoritative roster. This
+    /// is what revocation enumerates instead of GSI1
+    /// (`g3-dynamo-revoke-all-gsi-incompleteness`): an index can omit a
+    /// session written moments earlier and strand a live credential with
+    /// nothing left to find it; the roster cannot disagree with the items
+    /// because every session write maintains it transactionally.
+    async fn get_user_roster(&self, user_id: &str) -> Result<UserRoster> {
+        let result = self
+            .client
+            .get_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(format!("USER#{user_id}")))
+            .key("sk", Self::user_sk())
+            .consistent_read(true)
+            .send()
+            .await
+            .map_err(Self::store_err)?;
+
+        match result.item {
+            Some(item) => UserRoster::from_item(&item),
+            None => Ok(UserRoster::default()),
+        }
+    }
+
+    /// Build the roster-maintenance `Update` statement targeting
+    /// `USER#<user_id> / USER`. Every session-writing transaction routes its
+    /// roster arm through here so the item key, the mutual-consistency
+    /// condition, and the expression wiring cannot drift between call sites.
+    fn roster_update(
+        &self,
+        user_id: &str,
+        condition: &str,
+        expression: &str,
+        names: &[(&str, &str)],
+        values: HashMap<String, AttributeValue>,
+    ) -> Result<TransactWriteItem> {
+        let mut update = Update::builder()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(format!("USER#{user_id}")))
+            .key("sk", Self::user_sk())
+            .update_expression(expression)
+            .condition_expression(condition);
+        for (placeholder, attribute) in names {
+            update = update.expression_attribute_names(*placeholder, *attribute);
+        }
+        let update = update
+            .set_expression_attribute_values(Some(values))
+            .build()
+            .map_err(Self::store_err)?;
+
+        Ok(TransactWriteItem::builder().update(update).build())
+    }
+
+    /// Whether a cancelled `TransactWriteItems` call failed specifically on
+    /// statement `statement_index`'s condition — and only such a failure is a
+    /// compare-and-swap loss. A cancellation whose reasons are absent or name
+    /// any other statement (a colliding replacement, a vanished user item) is
+    /// a caller bug or corruption, not a lost race.
+    fn lost_race_reason(
+        err: &aws_sdk_dynamodb::error::SdkError<TransactWriteItemsError>,
+        statement_index: usize,
+    ) -> bool {
+        match err.as_service_error() {
+            Some(TransactWriteItemsError::TransactionCanceledException(tce)) => tce
+                .cancellation_reasons()
+                .get(statement_index)
+                .is_some_and(|reason| reason.code() == Some(CONDITIONAL_CHECK_FAILED_CODE)),
+            _ => false,
         }
     }
 
@@ -199,6 +406,89 @@ impl DynamoRepository {
         Ok(written)
     }
 
+    /// One-off migration step: creates the authoritative session-roster item
+    /// (`pk = USER#<id>`, `sk = USER`, empty `families`) for every user whose
+    /// profile predates rosters, so the nested roster writes in
+    /// `store_refresh_token` and the rotation path are valid for them. New
+    /// users get the item from `create_user`.
+    ///
+    /// Idempotent and safe to re-run after a partial failure: each write is
+    /// conditioned on `attribute_not_exists(pk)`, so a user that already has a
+    /// roster item (backfilled by an earlier run, or created after rosters
+    /// existed) is left untouched and not counted. Returns the number of
+    /// roster items actually written.
+    pub async fn backfill_session_rosters(&self) -> Result<u64> {
+        let mut written: u64 = 0;
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .filter_expression("sk = :profile")
+                .expression_attribute_values(":profile", AttributeValue::S("PROFILE".to_string()));
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+
+            for item in result.items.unwrap_or_default() {
+                let Some(pk) = item.get("pk") else {
+                    return Err(Error::StoreError {
+                        detail: "profile item is missing its pk while backfilling rosters"
+                            .to_string(),
+                    });
+                };
+                assert!(
+                    pk.as_s().is_ok_and(|value| value.starts_with("USER#")),
+                    "backfill_session_rosters: profile scan returned a non-user pk"
+                );
+
+                let outcome = self
+                    .client
+                    .put_item()
+                    .table_name(&self.table_name)
+                    .set_item(Some(HashMap::from([
+                        ("pk".to_string(), pk.clone()),
+                        ("sk".to_string(), DynamoRepository::user_sk()),
+                        ("families".to_string(), AttributeValue::M(HashMap::new())),
+                    ])))
+                    .condition_expression("attribute_not_exists(pk)")
+                    .send()
+                    .await;
+
+                match outcome {
+                    Ok(_) => written += 1,
+                    Err(err) => {
+                        // A conditional-check failure here means a concurrent
+                        // writer (another backfill run, or create_user)
+                        // already created this roster item — success from
+                        // this step's point of view.
+                        let already_exists = matches!(
+                            err.as_service_error(),
+                            Some(
+                                aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(_)
+                            )
+                        );
+                        if !already_exists {
+                            return Err(Self::store_err(err));
+                        }
+                    }
+                }
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        Ok(written)
+    }
+
     /// Submit up to 25 `WriteRequest`s via `BatchWriteItem` on this repository's table,
     /// draining any `unprocessed_items` DynamoDB reports back (see [`drain_unprocessed`]).
     /// Returns the number of items actually deleted.
@@ -223,6 +513,173 @@ impl DynamoRepository {
         })
         .await
     }
+
+    /// Discover the candidate owner ids of `family_id` by scanning the *base
+    /// table* under strong consistency for any session or retirement item
+    /// carrying the family. This is deliberately not a GSI1 query: the query
+    /// would need the owner id it is trying to discover, and an index read
+    /// could not be made consistent even if it could. A base-table
+    /// `Scan`/`Filter` pair answers from the same committed state the
+    /// strongly consistent `GetItem`s read, so a family written moments ago
+    /// is discoverable now — the GSI-staleness window that strands
+    /// credentials cannot hide an owner from this path.
+    async fn user_ids_for_family(&self, family_id: &str) -> Result<Vec<String>> {
+        assert!(
+            !family_id.is_empty(),
+            "user_ids_for_family: family_id must not be empty"
+        );
+
+        let mut user_ids: Vec<String> = Vec::new();
+        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+
+        loop {
+            let mut scan = self
+                .client
+                .scan()
+                .table_name(&self.table_name)
+                .consistent_read(true)
+                .filter_expression("family_id = :fid")
+                .expression_attribute_values(":fid", AttributeValue::S(family_id.to_string()))
+                .projection_expression("user_id");
+
+            if let Some(ref start_key) = exclusive_start_key {
+                scan = scan.set_exclusive_start_key(Some(start_key.clone()));
+            }
+
+            let result = scan.send().await.map_err(Self::store_err)?;
+
+            for item in result.items.unwrap_or_default() {
+                let user_id = item
+                    .get("user_id")
+                    .and_then(|v| v.as_s().ok())
+                    .ok_or_else(|| Error::StoreError {
+                        detail: format!(
+                            "item carrying family {family_id} is missing its user_id attribute"
+                        ),
+                    })?
+                    .clone();
+                assert!(
+                    !user_id.is_empty(),
+                    "user_ids_for_family: discovered an empty owner id for family {family_id}"
+                );
+                if !user_ids.contains(&user_id) {
+                    user_ids.push(user_id);
+                }
+            }
+
+            match result.last_evaluated_key {
+                Some(key) => exclusive_start_key = Some(key),
+                None => break,
+            }
+        }
+
+        Ok(user_ids)
+    }
+
+    /// One user's share of [`SessionRepository::revoke_family`]: the
+    /// converging read-delete-confirm-apply protocol described there, plus
+    /// the exact-removal count for the entries this user's roster named.
+    async fn revoke_family_for_user(&self, family_id: &str, user_id: &str) -> Result<u64> {
+        // Entries whose deletion has already been counted across attempts, so
+        // a retry that re-names them cannot double-report the removal.
+        let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for _attempt in 1..=REVOCATION_MAX_ATTEMPTS {
+            let roster = self.get_user_roster(user_id).await?;
+            let Some(family) = roster.families.get(family_id) else {
+                // Nothing left under this family for this user: earlier
+                // attempts (or another writer) already cleared it.
+                return Ok(counted.len() as u64);
+            };
+            assert!(
+                family.live.is_empty() || roster.sessions.contains(&family.live),
+                "roster corruption: family {family_id}'s live pointer must name a live session"
+            );
+
+            // The deletion set is exactly what the roster names: the live
+            // generation's session item, and a retirement record for every
+            // remembered member that is not the live one. Each entry gets a
+            // stable name ("SESSION#<hash>" / "RETIRED#<hash>") used both for
+            // the delete request and the de-duplicated count.
+            let mut entries: Vec<(String, AttributeValue, AttributeValue)> = Vec::new();
+            if !family.live.is_empty() {
+                entries.push((
+                    format!("SESSION#{}", family.live),
+                    Self::session_pk(&family.live),
+                    Self::session_sk(),
+                ));
+            }
+            for hash in &family.members {
+                if *hash != family.live {
+                    entries.push((
+                        format!("RETIRED#{hash}"),
+                        Self::retired_pk(hash),
+                        AttributeValue::S(RETIRED_SK.to_string()),
+                    ));
+                }
+            }
+            for (name, _, _) in &entries {
+                counted.insert(name.clone());
+            }
+
+            for chunk in entries.chunks(BATCH_WRITE_MAX_ITEMS) {
+                let requests = chunk
+                    .iter()
+                    .map(|(_, pk, sk)| {
+                        WriteRequest::builder()
+                            .delete_request(
+                                DeleteRequest::builder()
+                                    .key("pk", pk.clone())
+                                    .key("sk", sk.clone())
+                                    .build()
+                                    .expect("valid delete request"),
+                            )
+                            .build()
+                    })
+                    .collect();
+                self.batch_write_with_retry(requests).await?;
+            }
+
+            // Confirm the roster still names exactly what was deleted before
+            // clearing the family's entry. A mismatch means a transactional
+            // mutation committed between the read and the deletes; retrying
+            // absorbs its effects into the next attempt.
+            let fresh = self.get_user_roster(user_id).await?;
+            let unchanged = match fresh.families.get(family_id) {
+                Some(f) => f.live == family.live && same_members(&f.members, &family.members),
+                None => false,
+            };
+            if !unchanged {
+                continue;
+            }
+
+            // Remove the family's roster entry and its live hash from the
+            // session set — only the confirmed-stale entries, never anything
+            // a concurrent writer may have added.
+            self.client
+                .update_item()
+                .table_name(&self.table_name)
+                .key("pk", AttributeValue::S(format!("USER#{user_id}")))
+                .key("sk", Self::user_sk())
+                .update_expression("DELETE #s :live REMOVE families.#f")
+                .expression_attribute_names("#s", "sessions")
+                .expression_attribute_names("#f", family_id)
+                .expression_attribute_values(":live", AttributeValue::Ss(vec![family.live.clone()]))
+                .condition_expression("attribute_exists(pk)")
+                .send()
+                .await
+                .map_err(Self::store_err)?;
+
+            return Ok(counted.len() as u64);
+        }
+
+        Err(Error::StoreError {
+            detail: format!(
+                "revoke_family for {family_id} exhausted its retry budget \
+                 ({REVOCATION_MAX_ATTEMPTS} attempts) racing concurrent session mutations"
+            ),
+        })
+    }
 }
 
 #[async_trait]
@@ -235,6 +692,7 @@ impl UserRepository for DynamoRepository {
             .table_name(&self.table_name)
             .key("pk", AttributeValue::S(format!("USER#{user_id}")))
             .key("sk", AttributeValue::S("PROFILE".to_string()))
+            .consistent_read(true)
             .send()
             .await
             .map_err(Self::store_err)?;
@@ -323,6 +781,27 @@ impl UserRepository for DynamoRepository {
 
         let user_item = user_to_item(&full_user);
         let guard_item = guard_to_item(&full_user.provider, &full_user.external_id, &full_user.id);
+        // The authoritative session roster lives on a dedicated item
+        // (`pk = USER#<id>`, `sk = USER`), distinct from the `PROFILE` item.
+        // Creating it here — in the same transaction as the profile and the
+        // uniqueness guard, with an empty `families` map — is what lets every
+        // later roster write succeed: `store_refresh_token` files a family
+        // entry at the nested path `families.#fid`, and DynamoDB refuses a
+        // nested SET whose root attribute is absent. Users predating rosters
+        // are covered by `backfill_session_rosters`.
+        let roster_seed = Put::builder()
+            .table_name(&self.table_name)
+            .set_item(Some(HashMap::from([
+                (
+                    "pk".to_string(),
+                    AttributeValue::S(format!("USER#{}", full_user.id)),
+                ),
+                ("sk".to_string(), Self::user_sk()),
+                ("families".to_string(), AttributeValue::M(HashMap::new())),
+            ])))
+            .condition_expression("attribute_not_exists(pk)")
+            .build()
+            .map_err(Self::store_err)?;
 
         let user_put = Put::builder()
             .table_name(&self.table_name)
@@ -342,6 +821,7 @@ impl UserRepository for DynamoRepository {
             .transact_write_items()
             .transact_items(TransactWriteItem::builder().put(user_put).build())
             .transact_items(TransactWriteItem::builder().put(guard_put).build())
+            .transact_items(TransactWriteItem::builder().put(roster_seed).build())
             .send()
             .await
             .map_err(|err| {
@@ -635,51 +1115,414 @@ impl UserRepository for DynamoRepository {
 
 #[async_trait]
 impl SessionRepository for DynamoRepository {
+    /// Write one generation-0 row as a single transaction with its roster
+    /// maintenance: the session item (conditional on being fresh) plus the
+    /// user item gaining the hash in `sessions` and a fresh `families` entry.
+    /// The conditional user-item update is what keeps the authoritative
+    /// roster trustworthy — storing a credential for a user whose profile
+    /// item does not exist is a caller bug, mirroring the SQL adapters'
+    /// foreign-key discipline.
     #[instrument(skip(self, session), fields(user_id = %session.user_id))]
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
-        let item = session_to_item(session);
+        assert!(
+            is_valid_family_id(&session.family_id),
+            "store_refresh_token: malformed family id {:?}",
+            session.family_id
+        );
+        assert!(
+            !session.refresh_token_hash.expose().is_empty(),
+            "store_refresh_token: refresh_token_hash must not be empty"
+        );
+
+        let session_put = Put::builder()
+            .table_name(&self.table_name)
+            .set_item(Some(session_to_item(session)))
+            .condition_expression("attribute_not_exists(pk)")
+            .build()
+            .map_err(Self::store_err)?;
+
+        // Roster arm: `sessions` gains the fresh generation and its family
+        // entry is created wholesale. Set-typed attribute operands take
+        // string-set values even for a single member.
+        let mut values = HashMap::new();
+        values.insert(
+            ":hash".to_string(),
+            AttributeValue::Ss(vec![session.refresh_token_hash.expose().clone()]),
+        );
+        values.insert(
+            ":family".to_string(),
+            FamilyRoster::new(
+                session.refresh_token_hash.expose().clone(),
+                vec![session.refresh_token_hash.expose().clone()],
+            )
+            .to_attribute(),
+        );
+        let roster_arm = self.roster_update(
+            &session.user_id,
+            "attribute_exists(pk)",
+            "ADD sessions :hash SET families.#f = :family",
+            // The placeholder binds the *family id* — the key inside the
+            // `families` map under which this session's entry is filed.
+            &[("#f", session.family_id.as_str())],
+            values,
+        )?;
 
         self.client
-            .put_item()
-            .table_name(&self.table_name)
-            .set_item(Some(item))
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().put(session_put).build())
+            .transact_items(roster_arm)
             .send()
             .await
             .map_err(Self::store_err)?;
-
         Ok(())
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn get_session_by_refresh_token(&self, token_hash: &str) -> Result<Option<Session>> {
-        let result = self
-            .client
-            .get_item()
-            .table_name(&self.table_name)
-            .key("pk", AttributeValue::S(format!("SESSION#{token_hash}")))
-            .key("sk", AttributeValue::S("SESSION".to_string()))
-            .send()
-            .await
-            .map_err(Self::store_err)?;
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn get_session_by_refresh_token(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> Result<Option<Session>> {
+        let token_hash = token_hash.expose().as_str();
+        assert!(
+            !token_hash.is_empty(),
+            "get_session_by_refresh_token: token_hash must not be empty"
+        );
+        self.get_session_item(token_hash).await
+    }
 
-        match result.item {
-            Some(item) => Ok(Some(item_to_session(&item)?)),
-            None => Ok(None),
+    /// Classify against live generations and retained retirement records,
+    /// every read strongly consistent (SR1): an eventually consistent
+    /// `SESSION#` answer could keep a revoked token alive for the width of
+    /// replication, and an eventually consistent `RETIRED#` answer would turn
+    /// reuse into a silent unknown. A record past its retention deadline
+    /// answers `Unknown` until TTL or sweep physically removes it — reuse
+    /// detection must not fire on a window that has closed.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
+        assert!(
+            !token_hash.is_empty(),
+            "resolve_refresh_token: token_hash must not be empty"
+        );
+
+        if let Some(session) = self.get_session_item(token_hash).await? {
+            return Ok(RefreshResolution::Live(session));
+        }
+
+        let Some(record) = self.get_retired_record(token_hash).await? else {
+            return Ok(RefreshResolution::Unknown);
+        };
+        if record.expires_at <= Utc::now() {
+            return Ok(RefreshResolution::Unknown);
+        }
+
+        match self.get_session_item(&record.successor_hash).await? {
+            Some(successor_live) => Ok(RefreshResolution::Superseded {
+                live: successor_live,
+                retired_at: record.retired_at,
+            }),
+            None => Ok(RefreshResolution::Retired {
+                family_id: record.family_id,
+                user_id: record.user_id,
+                retired_at: record.retired_at,
+            }),
         }
     }
 
-    #[instrument(skip(self), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &str) -> Result<()> {
-        self.client
-            .delete_item()
+    /// One `TransactWriteItems` performing the whole swap — delete the live
+    /// item (conditioned on still existing: THE compare-and-swap), write the
+    /// retirement item, install the replacement, and move both roster entries
+    /// — so item storage and the authoritative roster can never disagree
+    /// about a rotation. Only the live-generation condition cancelling maps
+    /// to `false`; every other failure surfaces as a store error.
+    ///
+    /// The live row is read first (strongly consistent) to capture its family
+    /// identity; a concurrent rotation that moves it between that read and
+    /// the transaction still loses cleanly through the delete's condition. A
+    /// live row carrying the empty-family sentinel is a pre-rotation legacy
+    /// row: its first redemption swaps without writing any retirement record
+    /// — there is no prior generation to detect reuse against — and the
+    /// replacement carries whatever family the caller minted. Nothing here
+    /// synthesizes one.
+    #[instrument(skip(self, live_hash, replacement), fields(token_hash, user_id = %replacement.user_id))]
+    async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
+        assert!(
+            is_valid_family_id(&replacement.family_id),
+            "rotate_refresh_token: malformed replacement family id {:?}",
+            replacement.family_id
+        );
+        assert!(
+            live_hash != replacement.refresh_token_hash.expose().as_str(),
+            "rotate_refresh_token: replacement must be a fresh generation"
+        );
+
+        // Identity capture for the retirement record and the roster arm. If
+        // the row vanishes before the transaction, the delete's condition
+        // fails and this returns false — the read only shapes the statements,
+        // never the race.
+        let Some(live) = self.get_session_item(live_hash).await? else {
+            // CAS condition failed: a concurrent redemption moved (or
+            // removed) the live generation first. Nothing has been written.
+            return Ok(false);
+        };
+        let legacy_row = live.family_id.is_empty();
+        if !legacy_row {
+            assert_eq!(
+                live.family_id, replacement.family_id,
+                "rotate_refresh_token: family mismatch between live and replacement"
+            );
+        }
+        assert_eq!(
+            live.user_id, replacement.user_id,
+            "rotate_refresh_token: user mismatch between live and replacement"
+        );
+
+        let now = Utc::now();
+        let retired_record = (!legacy_row).then(|| {
+            retirement_record(
+                live_hash,
+                &live,
+                replacement,
+                self.reuse_retention_secs,
+                now,
+            )
+        });
+
+        let live_delete = Delete::builder()
             .table_name(&self.table_name)
-            .key("pk", AttributeValue::S(format!("SESSION#{token_hash}")))
-            .key("sk", AttributeValue::S("SESSION".to_string()))
+            .key("pk", Self::session_pk(live_hash))
+            .key("sk", Self::session_sk())
+            .condition_expression("attribute_exists(pk)")
+            .build()
+            .map_err(Self::store_err)?;
+
+        let replacement_put = Put::builder()
+            .table_name(&self.table_name)
+            .set_item(Some(session_to_item(replacement)))
+            .condition_expression("attribute_not_exists(pk)")
+            .build()
+            .map_err(Self::store_err)?;
+
+        // Roster: the presented hash leaves `sessions`, the replacement joins
+        // it, and — for a well-formed family — the presented hash becomes a
+        // remembered member while `live` moves to the replacement.
+        //
+        // `sessions` may only be touched by ONE clause per expression (a
+        // DELETE and an ADD on the same path are rejected as overlapping), so
+        // the new set is computed here from a strongly consistent roster read
+        // and installed with a single SET. That read is safe to build from:
+        // TransactWriteItems takes an exclusive lock on the user item, so a
+        // concurrent session mutation for the same user cannot interleave —
+        // it either committed before this read (then the read sees it) or
+        // conflicts with this transaction outright. For a legacy row, whose
+        // hash predates rosters and may be absent from the set, filtering is
+        // simply a no-op.
+        let roster = self.get_user_roster(&replacement.user_id).await?;
+        if !legacy_row {
+            assert!(
+                roster.sessions.contains(&live_hash.to_string()),
+                "rotate_refresh_token: roster must name the live generation it rotates"
+            );
+        }
+        let mut new_sessions: Vec<String> = roster
+            .sessions
+            .iter()
+            .filter(|hash| *hash != live_hash)
+            .cloned()
+            .collect();
+        assert!(
+            !new_sessions.contains(replacement.refresh_token_hash.expose()),
+            "rotate_refresh_token: replacement hash already present in the roster"
+        );
+        new_sessions.push(replacement.refresh_token_hash.expose().clone());
+
+        // The `#f` placeholder binds the family id — the key inside the
+        // `families` map this rotation's entry is filed under.
+        let names: Vec<(&str, &str)> =
+            vec![("#f", replacement.family_id.as_str()), ("#s", "sessions")];
+        let mut values = HashMap::new();
+        values.insert(
+            ":sess".to_string(),
+            AttributeValue::Ss(new_sessions.clone()),
+        );
+        let expression: String = if legacy_row {
+            values.insert(
+                ":fresh".to_string(),
+                FamilyRoster::new(
+                    replacement.refresh_token_hash.expose().clone(),
+                    vec![replacement.refresh_token_hash.expose().clone()],
+                )
+                .to_attribute(),
+            );
+            "SET #s = :sess, families.#f = :fresh".to_string()
+        } else {
+            // The family's member set remembers every generation the family
+            // has held — the presented one now joins it as a retirement
+            // record, and the replacement joins as the live pointer's
+            // namesake. One ADD carries both.
+            let mut joined_members = vec![live_hash.to_string()];
+            joined_members.push(replacement.refresh_token_hash.expose().clone());
+            values.insert(":joined".to_string(), AttributeValue::Ss(joined_members));
+            values.insert(
+                ":newhash".to_string(),
+                AttributeValue::S(replacement.refresh_token_hash.expose().clone()),
+            );
+            "SET #s = :sess, families.#f.live = :newhash ADD families.#f.members :joined"
+                .to_string()
+        };
+
+        let mut items = vec![
+            TransactWriteItem::builder().delete(live_delete).build(),
+            TransactWriteItem::builder().put(replacement_put).build(),
+        ];
+        if let Some(record) = &retired_record {
+            let retired_put = Put::builder()
+                .table_name(&self.table_name)
+                .set_item(Some(retired_to_item(record)))
+                .condition_expression("attribute_not_exists(pk)")
+                .build()
+                .map_err(Self::store_err)?;
+            items.push(TransactWriteItem::builder().put(retired_put).build());
+        }
+        items.push(self.roster_update(
+            &replacement.user_id,
+            "attribute_exists(pk)",
+            &expression,
+            &names,
+            values,
+        )?);
+
+        // Only the live-generation condition (statement 0) cancelling maps to
+        // a CAS loss; a failed condition anywhere else is a caller bug or
+        // corruption and remains a store error.
+        match self
+            .client
+            .transact_write_items()
+            .set_transact_items(Some(items))
+            .send()
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                if Self::lost_race_reason(&err, 0) {
+                    return Ok(false);
+                }
+                return Err(Self::store_err(err));
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Delete one live session by hash, keeping the roster in the same
+    /// transaction. Idempotent: an unknown hash (or one naming a retirement
+    /// record, which is not a session) succeeds without effect. Retirement
+    /// records are deliberately untouched.
+    #[instrument(skip(self, token_hash), fields(token_hash))]
+    async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()> {
+        let token_hash = token_hash.expose().as_str();
+        assert!(
+            !token_hash.is_empty(),
+            "revoke_session: token_hash must not be empty"
+        );
+
+        let Some(session) = self.get_session_item(token_hash).await? else {
+            return Ok(());
+        };
+        assert!(
+            session.family_id.is_empty() || is_valid_family_id(&session.family_id),
+            "stored session carries a malformed family id {:?}",
+            session.family_id
+        );
+
+        let session_delete = Delete::builder()
+            .table_name(&self.table_name)
+            .key("pk", Self::session_pk(token_hash))
+            .key("sk", Self::session_sk())
+            .condition_expression("attribute_exists(pk)")
+            .build()
+            .map_err(Self::store_err)?;
+
+        // Mutual consistency in one unit: if the revoked hash was the
+        // family's live pointer, the roster must stop naming it. The pointer
+        // is set to the empty sentinel rather than removed — a family whose
+        // live generation fell while retirement records remain still has
+        // members to remember, and a live-less entry would fail the roster's
+        // own parse (every entry always carries its live pointer, empty or
+        // not).
+        let (expression, names, values) = if session.family_id.is_empty() {
+            (
+                "DELETE sessions :old",
+                vec![],
+                HashMap::from([(
+                    ":old".to_string(),
+                    AttributeValue::Ss(vec![token_hash.to_string()]),
+                )]),
+            )
+        } else {
+            (
+                "DELETE sessions :old SET families.#f.live = :none",
+                vec![("#f", session.family_id.as_str())],
+                HashMap::from([
+                    (
+                        ":old".to_string(),
+                        AttributeValue::Ss(vec![token_hash.to_string()]),
+                    ),
+                    (":none".to_string(), AttributeValue::S(String::new())),
+                ]),
+            )
+        };
+
+        self.client
+            .transact_write_items()
+            .transact_items(TransactWriteItem::builder().delete(session_delete).build())
+            .transact_items(self.roster_update(
+                &session.user_id,
+                "attribute_exists(pk)",
+                expression,
+                &names,
+                values,
+            )?)
             .send()
             .await
             .map_err(Self::store_err)?;
 
         Ok(())
+    }
+
+    /// Remove the family's live generation and every retained retirement
+    /// record (SR5), enumerating the authoritative user-item roster under a
+    /// strongly consistent read rather than the eventually consistent GSI —
+    /// an index can omit a session written moments earlier and strand a live
+    /// credential with nothing left to find it. Idempotent: an unknown (but
+    /// well-formed) family id removes nothing and returns `Ok(0)`.
+    ///
+    /// Each attempt reads the family's roster entry, deletes exactly the
+    /// items it names, then re-reads the roster: only when the entry still
+    /// names exactly what was deleted is the family's roster state removed.
+    /// A roster that changed underneath the deletes means a transactional
+    /// mutation (rotation, store, revoke) landed mid-flight, so the attempt
+    /// retries against the fresh roster — bounded by
+    /// [`REVOCATION_MAX_ATTEMPTS`], erroring rather than reporting partial
+    /// success. Once the live item is deleted, any concurrent rotation loses
+    /// its own CAS (its delete condition needs that item), so the confirming
+    /// re-read plus roster removal cannot be overtaken: the window the
+    /// protocol closes is the one where the mutation committed *before* the
+    /// deletes, and the re-read sees exactly that.
+    #[instrument(skip(self), fields(family_id))]
+    async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        assert!(
+            is_valid_family_id(family_id),
+            "revoke_family: malformed family id {family_id:?}"
+        );
+
+        let user_ids = self.user_ids_for_family(family_id).await?;
+
+        let mut removed: u64 = 0;
+        for user_id in user_ids {
+            removed += self.revoke_family_for_user(family_id, &user_id).await?;
+        }
+
+        Ok(removed)
     }
 
     #[instrument(skip(self))]
@@ -784,72 +1627,178 @@ impl SessionRepository for DynamoRepository {
         Ok(deleted)
     }
 
+    /// Revoke every family the user holds (SR5 across all of them),
+    /// enumerating the authoritative user-item roster under a strongly
+    /// consistent read rather than the eventually consistent GSI — an index
+    /// can omit a session written moments earlier and strand that credential
+    /// forever (`g3-dynamo-revoke-all-gsi-incompleteness`).
+    ///
+    /// The same converging protocol as `revoke_family`, scoped to the whole
+    /// roster: read, delete exactly what is named, confirm the roster did not
+    /// change mid-flight, then clear it — retrying bounded times when a
+    /// transactional mutation landed between the reads, erroring once the
+    /// budget is exhausted rather than reporting incomplete success.
     #[instrument(skip(self), fields(user_id))]
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
-        // Query GSI1 for all sessions belonging to this user
-        let mut exclusive_start_key: Option<HashMap<String, AttributeValue>> = None;
+        assert!(
+            !user_id.is_empty(),
+            "revoke_all_user_sessions: user_id must not be empty"
+        );
 
-        loop {
-            let mut query = self
-                .client
-                .query()
-                .table_name(&self.table_name)
-                .index_name(GSI1_NAME)
-                .key_condition_expression("GSI1pk = :pk AND begins_with(GSI1sk, :sk_prefix)")
-                .expression_attribute_values(":pk", AttributeValue::S(format!("USER#{user_id}")))
-                .expression_attribute_values(
-                    ":sk_prefix",
-                    AttributeValue::S("SESSION#".to_string()),
-                )
-                // Only need the primary key attributes to delete
-                .projection_expression("pk, sk");
-
-            if let Some(ref start_key) = exclusive_start_key {
-                query = query.set_exclusive_start_key(Some(start_key.clone()));
+        for _attempt in 1..=REVOCATION_MAX_ATTEMPTS {
+            let roster = self.get_user_roster(user_id).await?;
+            if roster.sessions.is_empty() && roster.families.is_empty() {
+                // Nothing to revoke; also the post-clear steady state, so a
+                // repeated call is a cheap no-op.
+                return Ok(());
             }
 
-            let result = query.send().await.map_err(Self::store_err)?;
-
-            let items = result.items.unwrap_or_default();
-
-            if !items.is_empty() {
-                // BatchWriteItem supports up to 25 items per call
-                for chunk in items.chunks(25) {
-                    let delete_requests: Vec<_> = chunk
-                        .iter()
-                        .map(|item| {
-                            let pk = item
-                                .get("pk")
-                                .cloned()
-                                .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
-                            let sk = item
-                                .get("sk")
-                                .cloned()
-                                .unwrap_or_else(|| AttributeValue::S("UNKNOWN".to_string()));
-
-                            aws_sdk_dynamodb::types::WriteRequest::builder()
-                                .delete_request(
-                                    aws_sdk_dynamodb::types::DeleteRequest::builder()
-                                        .key("pk", pk)
-                                        .key("sk", sk)
-                                        .build()
-                                        .expect("valid delete request"),
-                                )
-                                .build()
-                        })
-                        .collect();
-
-                    self.batch_write_with_retry(delete_requests).await?;
+            // Every live generation the roster names, plus a retirement record
+            // for every remembered member that is not some family's live hash.
+            let live_hashes: std::collections::HashSet<&String> =
+                roster.families.values().map(|f| &f.live).collect();
+            let mut delete_keys: Vec<(AttributeValue, AttributeValue)> = Vec::new();
+            for hash in &roster.sessions {
+                delete_keys.push((Self::session_pk(hash), Self::session_sk()));
+            }
+            for family in roster.families.values() {
+                for hash in &family.members {
+                    if !live_hashes.contains(hash) {
+                        delete_keys.push((
+                            Self::retired_pk(hash),
+                            AttributeValue::S(RETIRED_SK.to_string()),
+                        ));
+                    }
                 }
             }
+            assert!(
+                !delete_keys.is_empty(),
+                "non-empty roster must name at least one deletable entry"
+            );
 
-            match result.last_evaluated_key {
-                Some(key) => exclusive_start_key = Some(key),
-                None => break,
+            for chunk in delete_keys.chunks(BATCH_WRITE_MAX_ITEMS) {
+                let requests = chunk
+                    .iter()
+                    .map(|(pk, sk)| {
+                        WriteRequest::builder()
+                            .delete_request(
+                                DeleteRequest::builder()
+                                    .key("pk", pk.clone())
+                                    .key("sk", sk.clone())
+                                    .build()
+                                    .expect("valid delete request"),
+                            )
+                            .build()
+                    })
+                    .collect();
+                self.batch_write_with_retry(requests).await?;
             }
+
+            // Confirm-then-clear, mirroring revoke_family: only clear the
+            // roster once it still names exactly what was deleted.
+            let fresh = self.get_user_roster(user_id).await?;
+            let unchanged = fresh.sessions.len() == roster.sessions.len()
+                && fresh
+                    .sessions
+                    .iter()
+                    .all(|hash| roster.sessions.contains(hash))
+                && fresh.families.len() == roster.families.len()
+                && roster.families.iter().all(|(id, family)| {
+                    fresh.families.get(id).is_some_and(|f| {
+                        f.live == family.live && same_members(&f.members, &family.members)
+                    })
+                });
+            if !unchanged {
+                continue;
+            }
+
+            self.client
+                .update_item()
+                .table_name(&self.table_name)
+                .key("pk", AttributeValue::S(format!("USER#{user_id}")))
+                .key("sk", Self::user_sk())
+                .update_expression("REMOVE #s, families")
+                .expression_attribute_names("#s", "sessions")
+                .condition_expression("attribute_exists(pk)")
+                .send()
+                .await
+                .map_err(Self::store_err)?;
+
+            return Ok(());
         }
 
-        Ok(())
+        Err(Error::StoreError {
+            detail: format!(
+                "revoke_all_user_sessions for {user_id} exhausted its retry budget \
+                 ({REVOCATION_MAX_ATTEMPTS} attempts) racing concurrent session mutations"
+            ),
+        })
+    }
+
+    #[instrument(skip(self, key))]
+    async fn put_single_use(&self, key: &str, expires_at: chrono::DateTime<Utc>) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        let now = Utc::now();
+        let outcome = self
+            .client
+            .put_item()
+            .table_name(&self.table_name)
+            .set_item(Some(single_use_to_item(key, expires_at)))
+            // One conditional PutItem is the whole claim: it succeeds only when no item
+            // exists at the key, or the one that does has already expired — so exactly
+            // one of N racing claims can win, and an expired marker's key stays
+            // reusable without any sweep having run.
+            .condition_expression("attribute_not_exists(pk) OR expires_at < :now")
+            .expression_attribute_values(":now", AttributeValue::N(now.timestamp().to_string()))
+            .send()
+            .await;
+
+        match outcome {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                let lost_race = matches!(
+                    err.as_service_error(),
+                    Some(aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(_))
+                );
+                if lost_race {
+                    Ok(false)
+                } else {
+                    Err(Self::store_err(err))
+                }
+            }
+        }
+    }
+
+    #[instrument(skip(self, key))]
+    async fn take_single_use(&self, key: &str) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        // Delete-and-inspect in one atomic call: ALL_OLD returns the deleted item, so
+        // liveness of what this call removed is decided from its stored `expires_at`.
+        // An absent key returns no attributes; an expired one (TTL not yet fired)
+        // returns attributes whose expiry has passed — both report false.
+        let result = self
+            .client
+            .delete_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(single_use_pk(key)))
+            .key("sk", AttributeValue::S(schema::SINGLE_USE_SK.to_string()))
+            .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
+            .send()
+            .await
+            .map_err(Self::store_err)?;
+
+        match result.attributes {
+            Some(item) => {
+                // Re-validate the stored expiry (store reads never trust stored data),
+                // then report liveness: an item whose expiry has passed but which TTL
+                // has not yet reaped counts as absent.
+                let expires_at = item_single_use_expiry(&item)?;
+                Ok(expires_at > Utc::now())
+            }
+            None => Ok(false),
+        }
     }
 }
 
@@ -1054,6 +2003,17 @@ mod tests {
         ProjectionType, ProvisionedThroughput, ScalarAttributeType,
     };
 
+    /// Reuse-retention window used by every test repository: one hour — short
+    /// enough that deadline arithmetic stays inside a test's lifetime, and
+    /// positive per the constructor's precondition.
+    const TEST_REUSE_RETENTION_SECS: u64 = 3600;
+
+    /// Name of the global secondary index the test tables create. Revocation
+    /// paths deliberately do not read it (they enumerate the user-item
+    /// roster), but session/retirement items file GSI1 keys under it for the
+    /// admin listing paths.
+    const GSI1_NAME: &str = "GSI1";
+
     async fn create_test_client() -> aws_sdk_dynamodb::Client {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .endpoint_url("http://localhost:8000")
@@ -1171,7 +2131,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         // --- User CRUD ---
 
@@ -1254,9 +2218,12 @@ mod tests {
         let now = Utc::now();
         let session = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: "hash_abc123".to_string(),
+            refresh_token_hash: Secret::new("hash_abc123".to_string()),
+            family_id: "fam_0000000000000000000000000a".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: Some("device-1".to_string()),
             user_agent: Some("test-agent".to_string()),
             ip_address: Some("10.0.0.1".to_string()),
@@ -1270,17 +2237,20 @@ mod tests {
 
         // Get session
         let fetched_session = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get_session_by_refresh_token")
             .expect("session should exist");
         assert_eq!(fetched_session.user_id, created.id);
-        assert_eq!(fetched_session.refresh_token_hash, "hash_abc123");
+        assert!(
+            fetched_session.refresh_token_hash == Secret::new("hash_abc123".to_string()),
+            "fetched digest must match the stored one"
+        );
         assert_eq!(fetched_session.device_id.as_deref(), Some("device-1"));
 
         // Get non-existent session
         let none = repo
-            .get_session_by_refresh_token("hash_nonexistent")
+            .get_session_by_refresh_token(&Secret::new("hash_nonexistent".to_string()))
             .await
             .expect("get_session_by_refresh_token");
         assert!(none.is_none());
@@ -1288,9 +2258,12 @@ mod tests {
         // Store a second session for the same user
         let session2 = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: "hash_def456".to_string(),
+            refresh_token_hash: Secret::new("hash_def456".to_string()),
+            family_id: "fam_0000000000000000000000000b".to_string(),
+            generation: 0,
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::hours(24),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,
@@ -1301,18 +2274,18 @@ mod tests {
             .expect("store second session");
 
         // Revoke single session
-        repo.revoke_session("hash_abc123")
+        repo.revoke_session(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("revoke_session");
         let revoked = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get after revoke");
         assert!(revoked.is_none());
 
         // The other session should still exist
         let still_exists = repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get other session");
         assert!(still_exists.is_some());
@@ -1328,11 +2301,11 @@ mod tests {
             .expect("revoke_all_user_sessions");
 
         let s1 = repo
-            .get_session_by_refresh_token("hash_abc123")
+            .get_session_by_refresh_token(&Secret::new("hash_abc123".to_string()))
             .await
             .expect("get after revoke_all");
         let s2 = repo
-            .get_session_by_refresh_token("hash_def456")
+            .get_session_by_refresh_token(&Secret::new("hash_def456".to_string()))
             .await
             .expect("get after revoke_all");
         assert!(s1.is_none());
@@ -1349,7 +2322,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         let new_user = NewUser {
             external_id: "google|guard_write_test".to_string(),
@@ -1414,8 +2391,16 @@ mod tests {
             display_name: None,
         };
 
-        let repo_a = DynamoRepository::new(client.clone(), table_name.to_string());
-        let repo_b = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo_a = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+        let repo_b = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
         let user_a = new_user.clone();
         let user_b = new_user.clone();
 
@@ -1486,7 +2471,11 @@ mod tests {
         // fails with `ResourceNotFoundException` — a transaction failure that is not a
         // conditional-check cancellation — and must map to `StoreError`, not `Conflict`.
         let client = create_test_client().await;
-        let repo = DynamoRepository::new(client, "oidc-exchange-test-nonexistent".to_string());
+        let repo = DynamoRepository::new(
+            client,
+            "oidc-exchange-test-nonexistent".to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         let new_user = NewUser {
             external_id: "google|guard_store_error_test".to_string(),
@@ -1515,7 +2504,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         // Simulate a user written before the guard existed: a profile item written
         // directly, bypassing `create_user`'s transactional guard write.
@@ -1622,7 +2615,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         // Create via the normal transactional path (task 06), which writes both the
         // profile item and the uniqueness-guard item in one transaction.
@@ -1660,7 +2657,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         // Create an unrelated user so the table is non-empty, but never a guard for the
         // identity being looked up.
@@ -1695,7 +2696,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         let created = repo
             .create_user(&NewUser {
@@ -1708,8 +2713,16 @@ mod tests {
             .expect("create_user");
         assert_eq!(created.version, INITIAL_USER_VERSION);
 
-        let repo_a = DynamoRepository::new(client.clone(), table_name.to_string());
-        let repo_b = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo_a = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+        let repo_b = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
         let user_id_a = created.id.clone();
         let user_id_b = created.id.clone();
 
@@ -1774,7 +2787,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         let new_user = NewUser {
             external_id: "google|delete_frees_test".to_string(),
@@ -1878,7 +2895,11 @@ mod tests {
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
 
-        let repo = DynamoRepository::new(client.clone(), table_name.to_string());
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
 
         let new_user = NewUser {
             external_id: "google|retried_delete_test".to_string(),
@@ -1933,5 +2954,669 @@ mod tests {
 
         // Clean up
         let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Refresh-token rotation and reuse detection (task 06)
+    // -----------------------------------------------------------------------
+
+    use oidc_exchange_test_utils::session_contract;
+
+    /// The roster-maintenance conditions require the fixture users the shared
+    /// suite writes sessions for to exist first. Seeds their profile items
+    /// directly (their ids are fixed by the harness, while `create_user`
+    /// mints its own) — the same pattern `seed_fixture_users` uses on
+    /// Postgres.
+    async fn seed_fixture_users(client: &aws_sdk_dynamodb::Client, table: &str, user_ids: &[&str]) {
+        for user_id in user_ids {
+            let user = User {
+                id: user_id.to_string(),
+                external_id: format!("external|{user_id}"),
+                provider: "conformance".to_string(),
+                email: None,
+                display_name: None,
+                metadata: HashMap::new(),
+                claims: HashMap::new(),
+                status: UserStatus::Active,
+                version: INITIAL_USER_VERSION,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+            client
+                .put_item()
+                .table_name(table)
+                .set_item(Some(user_to_item(&user)))
+                .condition_expression("attribute_not_exists(pk)")
+                .send()
+                .await
+                .expect("seed fixture user item");
+
+            // The dedicated roster item `create_user` would have written (the
+            // suite fixes the user ids, so the items are seeded directly).
+            client
+                .put_item()
+                .table_name(table)
+                .set_item(Some(HashMap::from([
+                    (
+                        "pk".to_string(),
+                        AttributeValue::S(format!("USER#{user_id}")),
+                    ),
+                    ("sk".to_string(), DynamoRepository::user_sk()),
+                    ("families".to_string(), AttributeValue::M(HashMap::new())),
+                ])))
+                .condition_expression("attribute_not_exists(pk)")
+                .send()
+                .await
+                .expect("seed fixture roster item");
+        }
+    }
+
+    /// Write a pre-rotation session item exactly as a pre-rotation deployment
+    /// would have: no `family_id`, no `generation`, no `rotated_at`.
+    async fn seed_legacy_session(
+        client: &aws_sdk_dynamodb::Client,
+        table: &str,
+        token_hash: &str,
+        user_id: &str,
+    ) {
+        seed_fixture_users(client, table, &[user_id]).await;
+        let mut session = session_contract::generation_session(
+            user_id,
+            &session_contract::fixture_family_id("dynamo-legacy:placeholder"),
+            0,
+            token_hash.to_string(),
+            Utc::now() + chrono::Duration::hours(24),
+            Utc::now(),
+            None,
+        );
+        session.family_id = String::new();
+        let mut item = schema::session_to_item(&session);
+        assert!(item.remove("family_id").is_some());
+        assert!(item.remove("generation").is_some());
+        assert!(item.remove("rotated_at").is_none(), "gen 0 has none");
+        client
+            .put_item()
+            .table_name(table)
+            .set_item(Some(item))
+            .condition_expression("attribute_not_exists(pk)")
+            .send()
+            .await
+            .expect("seed legacy session item");
+    }
+
+    async fn retired_item_count(client: &aws_sdk_dynamodb::Client, table: &str) -> u64 {
+        let result = client
+            .scan()
+            .table_name(table)
+            .filter_expression("#sk = :sk")
+            .expression_attribute_names("#sk", "sk")
+            .expression_attribute_values(":sk", AttributeValue::S(schema::RETIRED_SK.to_string()))
+            .select(aws_sdk_dynamodb::types::Select::Count)
+            .send()
+            .await
+            .expect("count retirement items");
+        result.count().try_into().expect("non-negative count")
+    }
+
+    /// The full SR1–SR5 shared suite against the DynamoDB store. One tag
+    /// namespaces every fixture the suite creates; each test gets its own
+    /// table so concurrent ignored runs cannot collide.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn dynamo_session_store_meets_sr1_through_sr5() {
+        let table_name = "oidc-exchange-test-session-conformance";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        seed_fixture_users(&client, table_name, &["usr_conformance", "usr_shared"]).await;
+
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+        session_contract::assert_full_conformance(&repo, "dynamo-session-conformance").await;
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// A legacy row's first redemption swaps atomically but writes no
+    /// retirement record — there is no prior generation to detect reuse
+    /// against — and the presented hash reads Unknown afterwards. The
+    /// replacement carries the caller's newly-minted family; nothing here
+    /// synthesizes one.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn legacy_row_first_redemption_swaps_without_retirement_record() {
+        let table_name = "oidc-exchange-test-dynamo-legacy-first-redemption";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+
+        let legacy_hash = session_contract::fixture_hash("dynamo-legacy:first-redemption");
+        seed_legacy_session(&client, table_name, &legacy_hash, "usr_legacy").await;
+
+        // Classification is storage-factual: the sentinel-carrying row is Live.
+        let live = repo
+            .resolve_refresh_token(&legacy_hash)
+            .await
+            .expect("resolve legacy row");
+        match &live {
+            RefreshResolution::Live(session) => {
+                assert_eq!(session.family_id, "", "sentinel family on read");
+                assert_eq!(session.generation, 0);
+                assert_eq!(session.rotated_at, None);
+            }
+            other => panic!("the stored legacy row must resolve Live, got {other:?}"),
+        }
+
+        let base = Utc::now();
+        let new_family = session_contract::fixture_family_id("dynamo-legacy:new-fam");
+        assert!(is_valid_family_id(&new_family));
+        if let RefreshResolution::Live(legacy) = &live {
+            let replacement = Session {
+                refresh_token_hash: Secret::new(format!("{legacy_hash}-next")),
+                family_id: new_family.clone(),
+                generation: 0,
+                rotated_at: None,
+                expires_at: base + chrono::Duration::hours(24),
+                created_at: base,
+                ..legacy.clone()
+            };
+
+            let won = repo
+                .rotate_refresh_token(&legacy_hash, &replacement)
+                .await
+                .expect("legacy first-redemption swap");
+            assert!(won, "an uncontended legacy redemption must win its CAS");
+
+            assert_eq!(
+                repo.resolve_refresh_token(&legacy_hash)
+                    .await
+                    .expect("resolve consumed hash"),
+                RefreshResolution::Unknown,
+                "a consumed legacy row has no retained record and must read Unknown"
+            );
+            match repo
+                .resolve_refresh_token(replacement.refresh_token_hash.expose())
+                .await
+                .expect("resolve replacement")
+            {
+                RefreshResolution::Live(session) => {
+                    assert_eq!(session.family_id, new_family);
+                    assert_eq!(session.user_id, "usr_legacy");
+                }
+                other => panic!("replacement must be Live, got {other:?}"),
+            }
+            assert_eq!(
+                retired_item_count(&client, table_name).await,
+                0,
+                "a legacy first redemption must not leave a retirement record"
+            );
+        } else {
+            unreachable!("checked Live above");
+        }
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// Negative space: a losing CAS against a legacy row writes nothing at all.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn legacy_row_failed_cas_leaves_store_untouched() {
+        let table_name = "oidc-exchange-test-dynamo-legacy-failed-cas";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+
+        let legacy_hash = session_contract::fixture_hash("dynamo-legacy:cas-failure");
+        seed_legacy_session(&client, table_name, &legacy_hash, "usr_legacy").await;
+
+        let base = Utc::now();
+        let replacement = Session {
+            refresh_token_hash: Secret::new(format!("{legacy_hash}-next")),
+            family_id: session_contract::fixture_family_id("dynamo-legacy:cas-fam"),
+            user_id: "usr_legacy".to_string(),
+            provider: "google".to_string(),
+            expires_at: base + chrono::Duration::hours(24),
+            rotated_at: None,
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: base,
+            generation: 0,
+        };
+
+        let won = repo
+            .rotate_refresh_token("no-such-live-hash", &replacement)
+            .await
+            .expect("rotation against an unknown live hash");
+        assert!(!won, "a missing live generation must lose the CAS");
+        assert!(
+            repo.get_session_by_refresh_token(&Secret::new(legacy_hash.clone()))
+                .await
+                .expect("read legacy row")
+                .is_some(),
+            "the legacy row must survive the lost race"
+        );
+        assert_eq!(
+            retired_item_count(&client, table_name).await,
+            0,
+            "no retirement record may appear when the CAS fails"
+        );
+        assert!(
+            repo.get_session_by_refresh_token(&replacement.refresh_token_hash)
+                .await
+                .expect("read replacement")
+                .is_none(),
+            "the loser's replacement must never be installed"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// Transaction rollback: when the replacement's condition fails
+    /// mid-transaction (its hash colliding with an existing live row), the
+    /// whole unit cancels — the live generation is untouched, no orphaned
+    /// retirement record exists, and — per the DoD — only the *live*
+    /// generation's cancellation maps to `false`; this one is a store error.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn failed_replacement_insert_rolls_back_delete_and_retirement() {
+        let table_name = "oidc-exchange-test-dynamo-rollback";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        seed_fixture_users(&client, table_name, &["usr_rollback", "usr_blocker"]).await;
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+
+        let chain = session_contract::family_chain("dynamo:rollback", 0, "usr_rollback");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
+
+        // An unrelated live row already occupying the replacement's hash: the
+        // mid-transaction collision that forces the rollback.
+        let blocker = Session {
+            refresh_token_hash: chain.gen1.refresh_token_hash.clone(),
+            family_id: session_contract::fixture_family_id("dynamo:rollback:blocker-fam"),
+            user_id: "usr_blocker".to_string(),
+            ..chain.gen1.clone()
+        };
+        repo.store_refresh_token(&blocker)
+            .await
+            .expect("store blocker");
+
+        let result = repo
+            .rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
+            .await;
+        // The collision fails statement 1 (the replacement put), not
+        // statement 0 (the live delete), so it must surface as an error —
+        // never silently as a lost race.
+        match &result {
+            Err(Error::StoreError { detail }) => {
+                assert!(!detail.is_empty(), "StoreError detail should explain it");
+            }
+            Ok(won) => panic!("the colliding insert must fail, got rotate={won}"),
+            Err(other) => panic!("expected Error::StoreError, got {other:?}"),
+        }
+
+        // Rollback completeness: the live generation is still there with its
+        // roster entry, no retirement record was written, the blocker is
+        // untouched.
+        assert_eq!(
+            repo.get_session_by_refresh_token(&chain.gen0.refresh_token_hash)
+                .await
+                .expect("read gen0 after rollback"),
+            Some(chain.gen0),
+            "the cancelled transaction must have left the live generation intact"
+        );
+        assert_eq!(
+            retired_item_count(&client, table_name).await,
+            0,
+            "no orphaned retirement record may survive the rollback"
+        );
+        assert!(
+            repo.get_session_by_refresh_token(&blocker.refresh_token_hash)
+                .await
+                .expect("read blocker after rollback")
+                .is_some(),
+            "the blocking row must be untouched"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// `revoke_all_user_sessions` removes the user's live generations *and*
+    /// their retained retirement records from the authoritative roster,
+    /// leaving other users untouched.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn revoke_all_user_sessions_sweeps_retired_records_of_that_user_only() {
+        let table_name = "oidc-exchange-test-dynamo-revoke-all";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        seed_fixture_users(&client, table_name, &["usr_mine", "usr_theirs"]).await;
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+
+        let mine = session_contract::family_chain("dynamo:revoke-all", 0, "usr_mine");
+        let theirs = session_contract::family_chain("dynamo:revoke-all", 1, "usr_theirs");
+        repo.store_refresh_token(&mine.gen0)
+            .await
+            .expect("store mine");
+        repo.store_refresh_token(&theirs.gen0)
+            .await
+            .expect("store theirs");
+        assert!(
+            repo.rotate_refresh_token(mine.gen0.refresh_token_hash.expose(), &mine.gen1)
+                .await
+                .expect("rotate mine"),
+            "my rotation must win"
+        );
+        assert!(
+            repo.rotate_refresh_token(theirs.gen0.refresh_token_hash.expose(), &theirs.gen1)
+                .await
+                .expect("rotate theirs"),
+            "their rotation must win"
+        );
+        assert_eq!(
+            retired_item_count(&client, table_name).await,
+            2,
+            "one retirement record per rotation"
+        );
+
+        repo.revoke_all_user_sessions("usr_mine")
+            .await
+            .expect("revoke all mine");
+
+        assert_eq!(
+            repo.resolve_refresh_token(mine.gen1.refresh_token_hash.expose())
+                .await
+                .expect("resolve my live"),
+            RefreshResolution::Unknown,
+            "my live generation must be gone"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(mine.gen0.refresh_token_hash.expose())
+                .await
+                .expect("resolve my retired"),
+            RefreshResolution::Unknown,
+            "my retirement record must be gone"
+        );
+        match repo
+            .resolve_refresh_token(theirs.gen1.refresh_token_hash.expose())
+            .await
+            .expect("resolve their live")
+        {
+            RefreshResolution::Live(session) => assert_eq!(session.user_id, "usr_theirs"),
+            other => panic!("another user's family must survive my revocation, got {other:?}"),
+        }
+        assert_eq!(
+            retired_item_count(&client, table_name).await,
+            1,
+            "only the other user's retirement record remains"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// **GSI-staleness regression.** Revocation runs immediately after the
+    /// writes it revokes — inside the window where GSI1 replication lag could
+    /// hide them from an index query — and must still remove everything and
+    /// report it honestly. This pins the sequencing that breaks a GSI-only
+    /// implementation (`g3-dynamo-revoke-all-gsi-incompleteness`): owner
+    /// discovery scans the base table under strong consistency and member
+    /// enumeration reads the user-item roster, so index freshness is
+    /// irrelevant to completeness. (DynamoDB Local cannot *manufacture* real
+    /// replication lag; what it proves is that nothing in the implementation
+    /// depends on waiting one out.)
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn revoke_immediately_after_writes_is_complete_despite_gsi_lag_window() {
+        let table_name = "oidc-exchange-test-dynamo-gsi-staleness";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        seed_fixture_users(&client, table_name, &["usr_stale_gsi"]).await;
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+
+        let chain = session_contract::family_chain("dynamo:stale-gsi", 0, "usr_stale_gsi");
+        let sibling = session_contract::family_chain("dynamo:stale-gsi", 1, "usr_stale_gsi");
+
+        // Store and rotate back-to-back, then revoke with zero delay: the
+        // freshest possible state, i.e. maximal staleness for any index read.
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
+        assert!(
+            repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
+                .await
+                .expect("rotate"),
+            "the rotation must win"
+        );
+        repo.store_refresh_token(&sibling.gen0)
+            .await
+            .expect("store sibling");
+
+        // Family revocation: one live generation + one retirement record.
+        let removed = repo
+            .revoke_family(&chain.family_id)
+            .await
+            .expect("revoke family immediately after writes");
+        assert_eq!(
+            removed, 2,
+            "revocation must count exactly the roster-named entries despite the GSI window"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(chain.gen1.refresh_token_hash.expose())
+                .await
+                .expect("resolve revoked live"),
+            RefreshResolution::Unknown,
+            "a just-written generation must not survive an immediate family revocation"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(chain.gen0.refresh_token_hash.expose())
+                .await
+                .expect("resolve revoked retired"),
+            RefreshResolution::Unknown,
+            "a just-written retirement record must not survive either"
+        );
+
+        // All-user revocation over the sibling, same freshness regime.
+        repo.revoke_all_user_sessions("usr_stale_gsi")
+            .await
+            .expect("revoke all immediately after write");
+        assert_eq!(
+            repo.resolve_refresh_token(sibling.gen0.refresh_token_hash.expose())
+                .await
+                .expect("resolve sibling after revoke-all"),
+            RefreshResolution::Unknown,
+            "an immediately-revoked fresh session must be removed by revoke_all too"
+        );
+        assert_eq!(
+            repo.count_active_sessions().await.expect("active count"),
+            0,
+            "nothing survives the two immediate revocations"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    /// Every session mutation leaves the item and the authoritative roster
+    /// mutually consistent: storing files both, rotating moves both, and a
+    /// strongly consistent roster read reflects each step. Negative space:
+    /// storing for a user whose profile item does not exist is refused (the
+    /// roster arm's condition cancels the transaction) rather than writing an
+    /// unfindable credential.
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn session_mutations_leave_storage_and_roster_mutually_consistent() {
+        let table_name = "oidc-exchange-test-dynamo-roster-consistency";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        seed_fixture_users(&client, table_name, &["usr_roster"]).await;
+        let repo = DynamoRepository::new(
+            client.clone(),
+            table_name.to_string(),
+            TEST_REUSE_RETENTION_SECS,
+        );
+
+        let chain = session_contract::family_chain("dynamo:roster", 0, "usr_roster");
+
+        // Negative space first: no profile item exists for a phantom user.
+        let phantom = session_contract::generation_session(
+            "usr_phantom",
+            &chain.family_id,
+            0,
+            format!("{}-phantom", chain.gen0.refresh_token_hash.expose()),
+            chain.gen0.expires_at,
+            chain.gen0.created_at,
+            None,
+        );
+        let err = repo
+            .store_refresh_token(&phantom)
+            .await
+            .expect_err("storing for a nonexistent user must fail");
+        match err {
+            Error::StoreError { .. } => {}
+            other => panic!("expected Error::StoreError for phantom-user store, got {other:?}"),
+        }
+        assert!(
+            repo.get_session_by_refresh_token(&phantom.refresh_token_hash)
+                .await
+                .expect("read phantom session")
+                .is_none(),
+            "the refused store must not have written the session item"
+        );
+
+        // Store gen0 → the roster names it as the family's only member/live.
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
+        let roster = repo
+            .get_user_roster("usr_roster")
+            .await
+            .expect("read roster after store");
+        assert_eq!(roster.sessions, vec![chain.gen0.refresh_token_hash.expose().clone()]);
+        let family = roster
+            .families
+            .get(&chain.family_id)
+            .expect("store must create the family entry");
+        assert!(family.live == *chain.gen0.refresh_token_hash.expose());
+        assert_eq!(family.members, vec![chain.gen0.refresh_token_hash.expose().clone()]);
+
+        // Rotate → the roster swaps live to gen1 and remembers gen0.
+        assert!(
+            repo.rotate_refresh_token(chain.gen0.refresh_token_hash.expose(), &chain.gen1)
+                .await
+                .expect("rotate"),
+            "the rotation must win"
+        );
+        let roster = repo
+            .get_user_roster("usr_roster")
+            .await
+            .expect("read roster after rotation");
+        assert_eq!(roster.sessions, vec![chain.gen1.refresh_token_hash.expose().clone()]);
+        let family = roster
+            .families
+            .get(&chain.family_id)
+            .expect("rotation keeps the family entry");
+        assert!(family.live == *chain.gen1.refresh_token_hash.expose());
+        assert_eq!(family.members.len(), 2, "gen0 joins the remembered members");
+        assert!(
+            family.members.contains(chain.gen0.refresh_token_hash.expose()),
+            "the retired generation must join the family's member set"
+        );
+        assert!(
+            repo.revoke_family(&chain.family_id)
+                .await
+                .expect("final revoke")
+                >= 2,
+            "the family now holds one live plus one retained record to remove"
+        );
+
+        // After revocation the roster is clean again.
+        let roster = repo
+            .get_user_roster("usr_roster")
+            .await
+            .expect("read roster after revoke");
+        assert!(
+            !roster.families.contains_key(&chain.family_id),
+            "revocation removes the family's roster entry"
+        );
+
+        // Clean up
+        let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    // -- Single-use conformance (shared suite in test-utils) --------------------
+    // DynamoDB expires single-use records natively via the numeric `ttl` attribute, so
+    // the cleanup-sweep scenario does not apply and is deliberately not invoked here.
+
+    use oidc_exchange_test_utils::single_use_conformance as conformance;
+
+    async fn create_single_use_test_repo() -> DynamoRepository {
+        let table_name = "oidc-exchange-single-use-test";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        DynamoRepository::new(client, table_name.to_string(), 3600)
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_first_claim_wins_duplicate_loses() {
+        let repo = create_single_use_test_repo().await;
+        conformance::first_claim_wins_duplicate_loses(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_consume_live_record_exactly_once() {
+        let repo = create_single_use_test_repo().await;
+        conformance::consume_live_record_exactly_once(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_expired_record_is_absent_to_put_and_take() {
+        let repo = create_single_use_test_repo().await;
+        conformance::expired_record_is_absent_to_put_and_take(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_concurrent_put_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_single_use_test_repo().await);
+        conformance::concurrent_put_has_exactly_one_winner(repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_concurrent_take_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_single_use_test_repo().await);
+        conformance::concurrent_take_has_exactly_one_winner(repo).await;
     }
 }

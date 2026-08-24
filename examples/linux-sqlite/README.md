@@ -28,7 +28,9 @@ Two modes are provided:
    cargo build --release
    ```
 
-2. Run the setup script (creates directories, generates a signing key, copies config files):
+2. Run the setup script (creates directories, generates a signing key, copies config files).
+   The shipped config uses `https://auth.example.com` as a valid deployment placeholder for the
+   public issuer; replace it with the HTTPS issuer you publish before deploying:
 
    ```bash
    chmod +x ./examples/linux-sqlite/setup.sh

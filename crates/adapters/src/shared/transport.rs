@@ -9,13 +9,17 @@
 //! 1. **Status before body.** The response status is inspected before any body
 //!    byte is read, so a non-success answer is classified by its status, never
 //!    by attacker-controlled payload shape.
-//! 2. **Bounded bodies.** Every body — success or failure — is read through
-//!    [`crate::shared::http::read_bounded_bytes`], which fails *at*
-//!    [`MAX_UPSTREAM_BODY_BYTES`] rather than after it. A provider cannot make
-//!    this process buffer an unbounded response.
+//! 2. **Bounded bodies.** Every body is read under the shared
+//!    `MAX_UPSTREAM_BODY_BYTES` ceiling. A success body feeds a parser, so it
+//!    goes through [`crate::shared::http::read_bounded_bytes`] and *fails* at
+//!    the ceiling rather than after it; a failure body is only diagnostics, so
+//!    it goes through the truncating [`crate::shared::http::read_bounded`]
+//!    instead. Either way a provider cannot make this process buffer an
+//!    unbounded response.
 //! 3. **Safe error detail.** Non-success responses are described through
-//!    [`crate::shared::upstream::error_detail`], so protocol error codes reach
-//!    operators while response bodies never do.
+//!    [`crate::shared::upstream::error_detail`], so protocol error codes and a
+//!    bounded, credential-redacted excerpt reach operators while raw response
+//!    bodies never do.
 //!
 //! The transport uses the process-wide shared client from
 //! [`crate::shared::http`] with its fixed 5s connect / 10s total timeouts and
@@ -105,29 +109,39 @@ impl ProviderTransport {
         url: &str,
         response: reqwest::Response,
     ) -> Result<UpstreamBody> {
-        // Order is load-bearing: status first, body second.
+        // Order is load-bearing: status first, body second — and the status
+        // decides which bounded read applies. A success body feeds a parser,
+        // so a truncated one is garbage and oversize must FAIL at the ceiling.
+        // A failure body is only ever diagnostics: it is truncated at the same
+        // ceiling instead, so an oversized error page still yields its
+        // status-led, redacted detail rather than collapsing into a cap error.
         let status = response.status();
 
-        let bytes = read_bounded_bytes(response).await.map_err(|e| match e {
-            BoundedBodyError::OverLimit { limit_bytes } => Error::ProviderError {
-                provider: provider.to_string(),
-                // The cap error names both the endpoint and the limit so it
-                // is alertable as a provider fault and actionable without
-                // correlation: "which upstream, and over what bound".
-                detail: format!(
-                    "response from {url} exceeded the {limit_bytes}-byte upstream limit"
-                ),
-            },
-            BoundedBodyError::Network(e) => Error::ProviderError {
-                provider: provider.to_string(),
-                detail: format!("reading response body failed: {e}"),
-            },
-        })?;
+        let bytes = if status.is_success() {
+            read_bounded_bytes(response).await.map_err(|e| match e {
+                BoundedBodyError::OverLimit { limit_bytes } => Error::ProviderError {
+                    provider: provider.to_string(),
+                    // The cap error names both the endpoint and the limit so it
+                    // is alertable as a provider fault and actionable without
+                    // correlation: "which upstream, and over what bound".
+                    detail: format!(
+                        "response from {url} exceeded the {limit_bytes}-byte upstream limit"
+                    ),
+                },
+                BoundedBodyError::Network(e) => Error::ProviderError {
+                    provider: provider.to_string(),
+                    detail: format!("reading response body failed: {e}"),
+                },
+            })?
+        } else {
+            crate::shared::http::read_bounded(provider, response)
+                .await?
+                .into_inner()
+                .into_bytes()
+        };
 
         assert!(
-            bytes.len()
-                <= usize::try_from(crate::shared::http::MAX_UPSTREAM_BODY_BYTES)
-                    .expect("the byte ceiling fits in usize on every supported target"),
+            bytes.len() <= crate::shared::http::MAX_UPSTREAM_BODY_BYTES,
             "bounded body must respect MAX_UPSTREAM_BODY_BYTES"
         );
 
@@ -169,7 +183,15 @@ impl UpstreamBody {
     pub fn error_into(&self, provider: &str) -> Error {
         Error::ProviderError {
             provider: provider.to_string(),
-            detail: upstream::error_detail(self.status, &self.bytes),
+            // The body crosses into the audited redaction boundary as a secret:
+            // `error_detail` consumes it and surfaces only bounded protocol
+            // tokens, never raw upstream text.
+            detail: upstream::error_detail(
+                self.status,
+                oidc_exchange_core::Secret::new(
+                    String::from_utf8_lossy(&self.bytes).into_owned(),
+                ),
+            ),
         }
     }
 
@@ -255,8 +277,9 @@ mod tests {
             "the status must lead the failure description: {message}"
         );
         assert!(
-            !message.contains("<html>"),
-            "the response body must never be echoed into the error: {message}"
+            message.contains("excerpt:"),
+            "the body reaches the detail only through the audited redaction \
+             pipeline (status, length, bounded excerpt): {message}"
         );
     }
 

@@ -1,3 +1,4 @@
+use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::error::{Error, Result};
 use serde::Deserialize;
 
@@ -5,12 +6,12 @@ use crate::shared::origins::{check_pinned_origin, EndpointOrigins, ENDPOINT_ORIG
 use crate::shared::transport::ProviderTransport;
 
 /// Parsed OIDC provider discovery document.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DiscoveryDocument {
-    pub issuer: String,
-    pub token_endpoint: String,
-    pub jwks_uri: String,
-    pub revocation_endpoint: Option<String>,
+    pub issuer: HttpsUrl,
+    pub token_endpoint: HttpsUrl,
+    pub jwks_uri: HttpsUrl,
+    pub revocation_endpoint: Option<HttpsUrl>,
     // Other fields are ignored via serde's default behavior.
 }
 
@@ -30,59 +31,61 @@ pub struct DiscoveryDocument {
 /// before any body is read and the document body cannot exceed the shared byte
 /// ceiling — an oversized "discovery document" is rejected before it is materialised.
 pub async fn discover(
-    issuer_url: &str,
+    issuer_url: &HttpsUrl,
     permitted_origins: &EndpointOrigins,
 ) -> Result<DiscoveryDocument> {
-    assert!(!issuer_url.is_empty(), "issuer_url must not be empty");
     assert!(
         !permitted_origins.as_list().is_empty(),
         "the issuer's own origin always pins at least one permitted origin"
     );
 
-    let normalised_issuer = issuer_url.trim_end_matches('/');
+    let normalised_issuer = issuer_url.as_str().trim_end_matches('/');
     let url = format!("{normalised_issuer}/.well-known/openid-configuration");
-    let doc: DiscoveryDocument = ProviderTransport
-        .get_json(issuer_url, &url)
-        .await?
-        .parsed(issuer_url)?;
 
-    if doc.issuer.trim_end_matches('/') != normalised_issuer {
+    #[derive(Deserialize)]
+    struct RawDiscoveryDocument {
+        issuer: String,
+        token_endpoint: String,
+        jwks_uri: String,
+        revocation_endpoint: Option<String>,
+    }
+
+    let raw: RawDiscoveryDocument = ProviderTransport
+        .get_json(issuer_url.as_str(), &url)
+        .await?
+        .parsed(issuer_url.as_str())?;
+
+    if raw.issuer.trim_end_matches('/') != normalised_issuer {
         return Err(Error::ProviderError {
-            provider: issuer_url.to_string(),
+            provider: issuer_url.as_str().to_string(),
             detail: format!(
                 "discovered issuer '{}' does not match configured issuer '{}'",
-                doc.issuer, normalised_issuer
+                raw.issuer, normalised_issuer
             ),
         });
     }
-
-    assert_eq!(
-        doc.issuer.trim_end_matches('/'),
-        normalised_issuer,
-        "discovery document issuer must match the configured issuer after normalisation"
-    );
 
     // Origin pinning runs after the issuer self-consistency check so a hostile
     // document is already bound to one issuer before its endpoints are judged.
     // Every supplied endpoint passes through the same mode decision — there is
     // no per-endpoint escape hatch that could let enforcement erode quietly.
     check_pinned_origin(
-        issuer_url,
+        issuer_url.as_str(),
         "token_endpoint",
-        &doc.token_endpoint,
+        &raw.token_endpoint,
         permitted_origins,
         ENDPOINT_ORIGIN_CHECK_MODE,
     )?;
     check_pinned_origin(
-        issuer_url,
+        issuer_url.as_str(),
         "jwks_uri",
-        &doc.jwks_uri,
+        &raw.jwks_uri,
         permitted_origins,
         ENDPOINT_ORIGIN_CHECK_MODE,
     )?;
-    if let Some(revocation) = &doc.revocation_endpoint {
+    if let Some(revocation) = &raw.revocation_endpoint {
         check_pinned_origin(
-            issuer_url,
+            issuer_url.as_str(),
             "revocation_endpoint",
             revocation,
             permitted_origins,
@@ -90,7 +93,26 @@ pub async fn discover(
         )?;
     }
 
-    Ok(doc)
+    Ok(DiscoveryDocument {
+        issuer: parse_discovered_endpoint(raw.issuer)?,
+        token_endpoint: parse_discovered_endpoint(raw.token_endpoint)?,
+        jwks_uri: parse_discovered_endpoint(raw.jwks_uri)?,
+        revocation_endpoint: raw
+            .revocation_endpoint
+            .map(parse_discovered_endpoint)
+            .transpose()?,
+    })
+}
+
+/// Parse a discovery endpoint. Production accepts HTTPS only; test builds may use Wiremock HTTP.
+#[cfg(not(test))]
+fn parse_discovered_endpoint(value: String) -> Result<HttpsUrl> {
+    HttpsUrl::parse(value)
+}
+
+#[cfg(test)]
+fn parse_discovered_endpoint(value: String) -> Result<HttpsUrl> {
+    HttpsUrl::parse_for_test(value)
 }
 
 #[cfg(test)]
@@ -124,18 +146,24 @@ mod tests {
             .mount(&server)
             .await;
 
-        let doc = discover(&server.uri(), &issuer_only_origins(&server.uri()))
+        let doc = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
             .await
             .expect("discovery should succeed");
 
-        assert_eq!(doc.issuer, server.uri());
-        assert_eq!(doc.token_endpoint, format!("{}/oauth/token", server.uri()));
+        assert_eq!(doc.issuer.as_str(), server.uri());
         assert_eq!(
-            doc.jwks_uri,
+            doc.token_endpoint.as_str(),
+            format!("{}/oauth/token", server.uri())
+        );
+        assert_eq!(
+            doc.jwks_uri.as_str(),
             format!("{}/.well-known/jwks.json", server.uri())
         );
         assert_eq!(
-            doc.revocation_endpoint.as_deref(),
+            doc.revocation_endpoint.as_ref().map(HttpsUrl::as_str),
             Some(format!("{}/oauth/revoke", server.uri()).as_str())
         );
     }
@@ -156,12 +184,67 @@ mod tests {
             .mount(&server)
             .await;
 
-        let doc = discover(&server.uri(), &issuer_only_origins(&server.uri()))
+        let doc = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
             .await
             .expect("discovery should succeed");
 
-        assert_eq!(doc.issuer, server.uri());
+        assert_eq!(doc.issuer.as_str(), server.uri());
         assert!(doc.revocation_endpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_well_formed_document_on_non_success_status() {
+        for status in [404, 500] {
+            let server = MockServer::start().await;
+            let body = serde_json::json!({
+                "issuer": server.uri(),
+                "token_endpoint": "https://provider.example/token",
+                "jwks_uri": "https://provider.example/jwks"
+            });
+
+            Mock::given(method("GET"))
+                .and(path("/.well-known/openid-configuration"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(&body))
+                .mount(&server)
+                .await;
+
+            let issuer = HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL");
+            let err = discover(&issuer, &issuer_only_origins(&server.uri()))
+                .await
+                .expect_err("non-success discovery response must be rejected before parsing");
+            match err {
+                Error::ProviderError { provider, detail } => {
+                    assert_eq!(provider, server.uri());
+                    assert!(detail.contains(&status.to_string()));
+                }
+                other => panic!("expected ProviderError, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_allows_http_endpoints_only_through_test_fixture_seam() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "issuer": server.uri(),
+            "token_endpoint": "http://provider.example/token",
+            "jwks_uri": "https://provider.example/jwks"
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let issuer = HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL");
+        let doc = discover(&issuer, &issuer_only_origins(&server.uri()))
+            .await
+            .expect("test-only fixture seam should admit only Wiremock endpoints");
+        assert_eq!(doc.token_endpoint.as_str(), "http://provider.example/token");
     }
 
     #[tokio::test]
@@ -174,7 +257,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = discover(&server.uri(), &issuer_only_origins(&server.uri())).await;
+        let result = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -196,11 +283,14 @@ mod tests {
 
         // Pass URL with trailing slash
         let url_with_slash = format!("{}/", server.uri());
-        let doc = discover(&url_with_slash, &issuer_only_origins(&server.uri()))
+        let doc = discover(
+            &HttpsUrl::parse_for_test(url_with_slash).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
             .await
             .expect("discovery should succeed with trailing slash");
 
-        assert_eq!(doc.issuer, server.uri());
+        assert_eq!(doc.issuer.as_str(), server.uri());
     }
 
     #[tokio::test]
@@ -219,7 +309,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = discover(&server.uri(), &issuer_only_origins(&server.uri())).await;
+        let result = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
+        .await;
 
         let err = result.expect_err("mismatched issuer should be rejected");
         match err {
@@ -242,13 +336,16 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                "x".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize + 1),
+                "x".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES + 1),
             ))
             .expect(1)
             .mount(&server)
             .await;
 
-        let err = discover(&server.uri(), &issuer_only_origins(&server.uri()))
+        let err = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
             .await
             .expect_err("an oversized discovery document must not be accepted");
 
@@ -281,7 +378,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = discover(&server.uri(), &issuer_only_origins(&server.uri()))
+        let err = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
             .await
             .expect_err("a 404 discovery response must be an error");
 
@@ -291,8 +391,9 @@ mod tests {
             "the status must be named in the failure: {message}"
         );
         assert!(
-            !message.contains("<html>"),
-            "the error body must never be echoed: {message}"
+            message.contains("excerpt:"),
+            "the body reaches the detail only through the audited redaction \
+             pipeline (status, length, bounded excerpt): {message}"
         );
     }
 
@@ -322,10 +423,13 @@ mod tests {
             "the shipped mode is the warning stage; flipping it is a release decision"
         );
 
-        let doc = discover(&server.uri(), &issuer_only_origins(&server.uri()))
+        let doc = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &issuer_only_origins(&server.uri()),
+        )
             .await
             .expect("warning mode must not reject the same deployment it warns about");
-        assert_eq!(doc.jwks_uri, "https://undeclared.example/jwks.json");
+        assert_eq!(doc.jwks_uri.as_str(), "https://undeclared.example/jwks.json");
     }
 
     #[tokio::test]
@@ -354,12 +458,15 @@ mod tests {
             ],
         );
 
-        let doc = discover(&server.uri(), &permitted)
+        let doc = discover(
+            &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
+            &permitted,
+        )
             .await
             .expect("declared cross-origin endpoints must be accepted");
-        assert_eq!(doc.jwks_uri, "https://www.googleapis.com/jwks.json");
+        assert_eq!(doc.jwks_uri.as_str(), "https://www.googleapis.com/jwks.json");
         assert_eq!(
-            doc.revocation_endpoint.as_deref(),
+            doc.revocation_endpoint.as_ref().map(HttpsUrl::as_str),
             Some("https://oauth2.googleapis.com/revoke")
         );
     }

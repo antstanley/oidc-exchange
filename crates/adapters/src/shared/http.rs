@@ -9,11 +9,21 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use futures::StreamExt;
+use oidc_exchange_core::error::{Error, Result};
+use oidc_exchange_core::Secret;
+
 /// Maximum time allowed to establish the TCP/TLS connection to a provider.
 const CONNECT_TIMEOUT_SECS: u64 = 5;
 
 /// Maximum total time allowed for the whole outbound request (connect + send + receive).
 const REQUEST_TIMEOUT_SECS: u64 = 10;
+
+/// Upper bound, in bytes, on how much of an upstream response body this process will
+/// buffer (`64 KiB`). The cap exists because an upstream chooses its own body size:
+/// reading unbounded text lets a hostile provider decide how much memory the service
+/// retains and how much diagnostic text can later reach a log line.
+pub const MAX_UPSTREAM_BODY_BYTES: usize = 65_536;
 
 static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -22,11 +32,12 @@ static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// Built once, lazily, on first use: `connect_timeout` of [`CONNECT_TIMEOUT_SECS`], `timeout`
 /// of [`REQUEST_TIMEOUT_SECS`], and redirects disabled via `redirect::Policy::none()`.
 ///
-/// Crate-private on purpose: the transport is the only caller, so the
-/// "no adapter issues a provider request directly" rule is enforced by the
-/// compiler rather than by a repository scan. The webhook adapter builds its
-/// own operator-timeout client and deliberately does not use this one.
-pub(crate) fn client() -> &'static reqwest::Client {
+/// Production adapters never call this directly: every provider request goes
+/// through [`crate::shared::transport::ProviderTransport`], which owns the
+/// status-before-body ordering and the bounded reads. The webhook adapter
+/// builds its own operator-timeout client and deliberately does not use this
+/// one.
+pub fn client() -> &'static reqwest::Client {
     SHARED_CLIENT.get_or_init(build_client)
 }
 
@@ -39,131 +50,81 @@ fn build_client() -> reqwest::Client {
         .expect("failed to build shared reqwest client")
 }
 
-// ---------------------------------------------------------------------------
-// Vendored prerequisite: HttpsUrl
-//
-// VENDORED PREREQUISITE — owned by sibling change
-// `.specs/changes/2026-08-05-fail_closed_across_config_and_adapters.md`, which
-// specifies the `HttpsUrl` scheme constraint on configured and discovered
-// provider endpoints. That sibling change is not merged into this unstacked
-// branch, so the outbound-boundary work pins the exact contract locally. The
-// owning PR reconciles ownership: delete this copy or repoint imports at the
-// sibling's type. Nothing here widens the sibling's contract.
-// ---------------------------------------------------------------------------
-
-/// An absolute `https://` URL, validated at construction.
+/// Read an upstream response body under the [`MAX_UPSTREAM_BODY_BYTES`] ceiling and
+/// return it wrapped as a [`Secret<String>`], so whatever a provider sent can be
+/// consumed by the audited redaction path but never formatted directly.
 ///
-/// The type exists so an endpoint that has not passed the scheme check cannot
-/// be represented, let alone sent to: a plain `String` endpoint accepts
-/// `http://` and typo'd schemes silently, and every call site re-deciding the
-/// question is how the check drifts out of existence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpsUrl {
-    url: reqwest::Url,
-}
-
-/// Why a string failed [`HttpsUrl`] validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HttpsUrlError {
-    /// The input did not parse as an acceptable absolute URL (unparseable,
-    /// relative, or hostless — the `url` crate rejects hostless `https` URLs
-    /// at parse time).
-    NotAnAbsoluteUrl,
-    /// The input parsed but its scheme was not `https`.
-    SchemeNotHttps { actual_scheme: String },
-}
-
-impl std::fmt::Display for HttpsUrlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Messages describe the violation class, never echo the rejected input:
-        // error strings end up in logs, and endpoints flow in from config and
-        // from remote discovery documents.
-        match self {
-            Self::NotAnAbsoluteUrl => write!(f, "endpoint is not an absolute URL"),
-            Self::SchemeNotHttps { actual_scheme } => {
-                write!(f, "endpoint scheme must be https, found {actual_scheme:?}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for HttpsUrlError {}
-
-impl HttpsUrl {
-    /// Validate `input` as an absolute `https://` URL.
-    ///
-    /// Only the scheme constraint is enforced here; origin pinning of
-    /// discovered endpoints belongs to the endpoint-origin work and is
-    /// deliberately not folded in.
-    pub fn parse(input: &str) -> Result<Self, HttpsUrlError> {
-        let url = reqwest::Url::parse(input).map_err(|_| HttpsUrlError::NotAnAbsoluteUrl)?;
-
-        assert!(
-            !url.scheme().is_empty(),
-            "a successfully parsed absolute URL always carries a scheme"
-        );
-
-        if url.scheme() != "https" {
-            // The url crate lowercases schemes during parsing, so the comparison
-            // above is the canonical form and `actual_scheme` is safe to report.
-            return Err(HttpsUrlError::SchemeNotHttps {
-                actual_scheme: url.scheme().to_string(),
-            });
-        }
-
-        // The url crate rejects hostless special-scheme URLs (EmptyHost) at
-        // parse time, so an https URL that parsed always names a host. The
-        // assertion pins that invariant instead of silently trusting it: if the
-        // parser's behaviour ever changes, this fails loudly at the boundary
-        // rather than letting a hostless endpoint reach the network.
-        assert!(
-            url.host_str().is_some(),
-            "the url crate guarantees a host for parsed https URLs"
-        );
-
-        Ok(Self { url })
-    }
-
-    /// The validated URL in its canonical string form.
-    pub fn as_str(&self) -> &str {
-        self.url.as_str()
-    }
-
-    /// The validated URL in parsed form, ready to hand to an HTTP client.
-    pub fn as_url(&self) -> &reqwest::Url {
-        &self.url
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Vendored prerequisite: bounded response-body accumulator
-//
-// VENDORED PREREQUISITE — owned by sibling change
-// `.specs/changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md`,
-// which specifies `http::read_bounded` / `MAX_UPSTREAM_BODY_BYTES` and routes
-// the error-body call sites through them. That sibling change is not merged
-// into this unstacked branch, so the success-body bounding work pins the exact
-// contract locally under the source-specified name `read_bounded_bytes`. The
-// owning PR reconciles ownership: delete this copy or repoint imports at the
-// sibling's helper. Nothing here widens the sibling's contract.
-// ---------------------------------------------------------------------------
-
-/// Hard ceiling on any single upstream response body, in bytes (64 KiB).
+/// Explicit behavior at the edges:
 ///
-/// Applies to success and failure bodies alike: a JWKS, a discovery document,
-/// and an OAuth error document are all orders of magnitude smaller than this,
-/// so anything larger is a provider fault, not data worth buffering.
-pub const MAX_UPSTREAM_BODY_BYTES: u64 = 64 * 1024;
+/// - *Oversize body* — streaming stops at the ceiling; only the first
+///   [`MAX_UPSTREAM_BODY_BYTES`] bytes are retained (so an upstream cannot choose how
+///   many bytes the process buffers), and reaching the limit is observable: a
+///   structured `warn!` naming the provider and the limit is emitted. The retained,
+///   possibly cut mid-character bytes are converted lossily to UTF-8 — never a panic.
+/// - *Read failure* — the stream errors partway (connection reset, truncated body): the
+///   partial bytes are dropped, not published, and a `ProviderError` with a generic
+///   detail plus the transport error string (which never carries body content) is
+///   returned.
+///
+/// `provider` labels the observability events and any error; it is never derived from
+/// body content.
+pub async fn read_bounded(provider: &str, response: reqwest::Response) -> Result<Secret<String>> {
+    assert!(
+        !provider.is_empty(),
+        "provider label must not be empty for bounded reads"
+    );
+
+    // Precondition: callers read bodies only after inspecting the status; nothing here
+    // depends on success or failure, so no status assert beyond the label above.
+
+    let mut buffered: Vec<u8> = Vec::with_capacity(1024.min(MAX_UPSTREAM_BODY_BYTES));
+    let mut truncated = false;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::ProviderError {
+            provider: provider.to_string(),
+            detail: format!("failed while reading upstream response body: {e}"),
+        })?;
+        if buffered.len() + chunk.len() > MAX_UPSTREAM_BODY_BYTES {
+            // Take only what fits under the ceiling, then stop consuming: the rest of
+            // the stream is dropped along with the response, releasing the connection.
+            let remaining = MAX_UPSTREAM_BODY_BYTES - buffered.len();
+            buffered.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        buffered.extend_from_slice(&chunk);
+    }
+    // Postcondition: the buffer can never exceed the named ceiling, truncated or not.
+    assert!(
+        buffered.len() <= MAX_UPSTREAM_BODY_BYTES,
+        "bounded read exceeded MAX_UPSTREAM_BODY_BYTES"
+    );
+
+    if truncated {
+        // Reaching a limit is an observable event (development guidelines §Limits):
+        // log it structured, without any body content, and keep serving the truncated
+        // remainder to the caller — for diagnostics the excerpt path bounds it further.
+        tracing::warn!(
+            provider = %provider,
+            limit_bytes = MAX_UPSTREAM_BODY_BYTES,
+            "upstream response body exceeded the read ceiling and was truncated"
+        );
+    }
+
+    Ok(Secret::new(String::from_utf8_lossy(&buffered).into_owned()))
+}
+
 
 /// Why reading an upstream body through the [`MAX_UPSTREAM_BODY_BYTES`]
-/// ceiling failed.
+/// ceiling *fail-closed* failed. See [`read_bounded_bytes`].
 #[derive(Debug)]
 pub enum BoundedBodyError {
     /// The body reached the ceiling. Reported *at* the limit, not after it,
     /// so an oversized response costs bounded memory, and the error names the
     /// limit so it is alertable as a provider fault rather than looking like
     /// a parse failure.
-    OverLimit { limit_bytes: u64 },
+    OverLimit { limit_bytes: usize },
     /// The connection broke or timed out mid-body.
     Network(reqwest::Error),
 }
@@ -182,20 +143,23 @@ impl std::fmt::Display for BoundedBodyError {
 impl std::error::Error for BoundedBodyError {}
 
 /// Read an upstream response body through the [`MAX_UPSTREAM_BODY_BYTES`]
-/// ceiling, failing at the limit rather than after it.
+/// ceiling, **failing at the limit** rather than truncating.
 ///
-/// Two bounds apply before any byte is buffered: an honest `Content-Length`
-/// above the ceiling aborts immediately without reading the body, and a
-/// streamed (or lying-header) body aborts mid-stream the moment the running
-/// total would exceed the ceiling. Callers must have inspected the response
-/// status *before* invoking this — the status-before-body ordering lives in
-/// the transport, not here.
+/// This is the success-body counterpart to [`read_bounded`]: a diagnostic
+/// error body can be truncated and still be useful, but a truncated JWKS or
+/// discovery document is garbage that must not be parsed, so oversize here is
+/// an error, not a prefix. Two bounds apply before any byte is buffered: an
+/// honest `Content-Length` above the ceiling aborts immediately without
+/// reading the body, and a streamed (or lying-header) body aborts mid-stream
+/// the moment the running total would exceed the ceiling. Callers must have
+/// inspected the response status *before* invoking this — the
+/// status-before-body ordering lives in the transport, not here.
 pub async fn read_bounded_bytes(
     mut response: reqwest::Response,
-) -> Result<Vec<u8>, BoundedBodyError> {
+) -> std::result::Result<Vec<u8>, BoundedBodyError> {
     // An honest Content-Length lets us refuse without reading a byte.
     if let Some(declared) = response.content_length() {
-        if declared > MAX_UPSTREAM_BODY_BYTES {
+        if declared > MAX_UPSTREAM_BODY_BYTES as u64 {
             return Err(BoundedBodyError::OverLimit {
                 limit_bytes: MAX_UPSTREAM_BODY_BYTES,
             });
@@ -204,7 +168,7 @@ pub async fn read_bounded_bytes(
 
     let mut buffer = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(BoundedBodyError::Network)? {
-        let new_len = buffer.len() as u64 + chunk.len() as u64;
+        let new_len = buffer.len() + chunk.len();
         if new_len > MAX_UPSTREAM_BODY_BYTES {
             return Err(BoundedBodyError::OverLimit {
                 limit_bytes: MAX_UPSTREAM_BODY_BYTES,
@@ -214,7 +178,7 @@ pub async fn read_bounded_bytes(
     }
 
     assert!(
-        buffer.len() as u64 <= MAX_UPSTREAM_BODY_BYTES,
+        buffer.len() <= MAX_UPSTREAM_BODY_BYTES,
         "bounded read returned more than MAX_UPSTREAM_BODY_BYTES bytes"
     );
 
@@ -223,6 +187,8 @@ pub async fn read_bounded_bytes(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -284,65 +250,177 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // HttpsUrl (vendored prerequisite — see the module comment above the type)
-    // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------
+    // read_bounded
+    // -------------------------------------------------------------------
 
-    #[test]
-    fn https_url_accepts_a_valid_https_url() {
-        let parsed = HttpsUrl::parse("https://accounts.google.com/o/oauth2/v2/auth")
-            .expect("a plain https URL must parse");
+    /// Fetch the given body from a mock server and run [`read_bounded`] over it.
+    async fn read_body_from_server(body: Vec<u8>) -> Result<Secret<String>> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/body"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(body.clone())
+                    .insert_header("content-type", "application/octet-stream"),
+            )
+            .mount(&server)
+            .await;
 
-        assert_eq!(
-            parsed.as_str(),
-            "https://accounts.google.com/o/oauth2/v2/auth"
-        );
-        assert_eq!(parsed.as_url().host_str(), Some("accounts.google.com"));
+        let response = client()
+            .get(format!("{}/body", server.uri()))
+            .send()
+            .await
+            .expect("the request itself must succeed");
+
+        read_bounded("test-provider", response).await
     }
 
-    #[test]
-    fn https_url_rejects_plain_http_with_the_actual_scheme_named() {
-        let err = HttpsUrl::parse("http://accounts.google.com")
-            .expect_err("plain http must be rejected by the scheme constraint");
-
+    #[tokio::test]
+    async fn small_body_round_trips_through_the_secret_wrap() {
+        let body = b"small diagnostic body".to_vec();
+        let secret = read_body_from_server(body.clone())
+            .await
+            .expect("a small body must read successfully");
         assert_eq!(
-            err,
-            HttpsUrlError::SchemeNotHttps {
-                actual_scheme: "http".to_string()
-            }
+            secret.expose(),
+            &String::from_utf8(body).unwrap(),
+            "read_bounded must preserve the exact bytes of an in-ceiling body"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_exactly_at_the_ceiling_is_not_truncated() {
+        let body = vec![b'a'; MAX_UPSTREAM_BODY_BYTES];
+        let secret = read_body_from_server(body.clone())
+            .await
+            .expect("an exactly-at-ceiling body must read successfully");
+        assert_eq!(
+            secret.expose().len(),
+            MAX_UPSTREAM_BODY_BYTES,
+            "a body at the ceiling fits entirely under the bound"
         );
         assert!(
-            err.to_string().contains("https"),
-            "the message must state the required scheme: {err}"
+            secret.expose().ends_with('a'),
+            "the tail byte must survive when nothing is truncated"
         );
     }
 
-    #[test]
-    fn https_url_rejects_relative_and_non_http_schemes() {
+    #[tokio::test]
+    async fn body_one_byte_past_the_ceiling_is_truncated_to_the_ceiling() {
+        let body = vec![b'b'; MAX_UPSTREAM_BODY_BYTES + 1];
+        let secret = read_body_from_server(body)
+            .await
+            .expect("an oversize body still yields the truncated prefix, not an error");
         assert_eq!(
-            HttpsUrl::parse("not a url at all"),
-            Err(HttpsUrlError::NotAnAbsoluteUrl)
+            secret.expose().len(),
+            MAX_UPSTREAM_BODY_BYTES,
+            "retention must stop exactly at MAX_UPSTREAM_BODY_BYTES"
         );
-        assert_eq!(
-            // A relative reference must not pass, even one that looks like a path
-            // on some implied host.
-            HttpsUrl::parse("/.well-known/openid-configuration"),
-            Err(HttpsUrlError::NotAnAbsoluteUrl)
-        );
-        assert_eq!(
-            HttpsUrl::parse("ftp://files.example.com/pub"),
-            Err(HttpsUrlError::SchemeNotHttps {
-                actual_scheme: "ftp".to_string()
-            })
-        );
-        // A hostless https URL is refused by the URL parser itself rather than by
-        // the scheme check; both paths must end in an error, never a value.
-        assert!(HttpsUrl::parse("https://").is_err());
     }
 
-    // -------------------------------------------------------------------------
-    // read_bounded_bytes (vendored prerequisite — see the module comment above it)
-    // -------------------------------------------------------------------------
+    #[tokio::test]
+    async fn non_utf8_body_is_converted_lossily_without_panicking() {
+        // Invalid UTF-8: a lone continuation byte and a cut multi-byte sequence.
+        let body = vec![0xff, 0xfe, b'o', b'k', 0xE2, 0x82];
+        let secret = read_body_from_server(body)
+            .await
+            .expect("non-UTF-8 bodies must convert lossily, never fail or panic");
+        assert!(
+            secret.expose().contains("ok"),
+            "the valid ASCII middle must survive lossy conversion, got {:?}",
+            secret.expose()
+        );
+        assert!(
+            secret.expose().contains('\u{fffd}'),
+            "invalid sequences become replacement characters, got {:?}",
+            secret.expose()
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_truncation_emits_a_structured_warn_event() {
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+
+        struct WarnCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+        impl<S> Layer<S> for WarnCapture
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                if *event.metadata().level() == tracing::Level::WARN {
+                    struct V(Vec<String>);
+                    impl tracing::field::Visit for V {
+                        fn record_debug(
+                            &mut self,
+                            field: &tracing::field::Field,
+                            value: &dyn std::fmt::Debug,
+                        ) {
+                            self.0.push(format!("{}={:?}", field.name(), value));
+                        }
+                    }
+                    let mut fields = V(Vec::new());
+                    event.record(&mut fields);
+                    self.0.lock().unwrap().push(fields.0.join(", "));
+                }
+            }
+        }
+
+        let captured: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let subscriber = tracing_subscriber::registry().with(WarnCapture(captured.clone()));
+
+        let server = MockServer::start().await;
+        let body = vec![b'c'; MAX_UPSTREAM_BODY_BYTES + 42];
+        Mock::given(method("GET"))
+            .and(path("/body"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let response = client()
+            .get(format!("{}/body", server.uri()))
+            .send()
+            .await
+            .expect("the request itself must succeed");
+
+        // Stays active for the whole async body below (single-threaded `#[tokio::test]`
+        // runtime keeps every poll on this OS thread), so the truncation warn is
+        // guaranteed to hit the capturing layer.
+        let _gate = oidc_exchange_test_utils::telemetry::CAPTURE_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        let secret = read_bounded("warn-test-provider", response)
+            .await
+            .expect("oversize body must truncate, not fail");
+        assert_eq!(secret.expose().len(), MAX_UPSTREAM_BODY_BYTES);
+
+        let events = captured.lock().unwrap().clone();
+        // Positive control: the truncation warn fired with the provider label and the
+        // named limit — and negative space: no body bytes appear in any field value.
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one truncation warning must be emitted, got {events:?}"
+        );
+        let event = &events[0];
+        assert!(
+            event.contains("provider=") && event.contains("warn-test-provider"),
+            "the warn must name the provider, got {event:?}"
+        );
+        assert!(
+            event.contains(&format!("limit_bytes={MAX_UPSTREAM_BODY_BYTES}")),
+            "the warn must carry the named ceiling, got {event:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // read_bounded_bytes (fail-closed success-body reads)
+    // -------------------------------------------------------------------
 
     /// Serve one HTTP/1.1 response with `Transfer-Encoding: chunked` from a raw
     /// TCP listener, writing `body` in `chunk_size` chunks.
@@ -403,7 +481,7 @@ mod tests {
 
         // Boundary: exactly MAX bytes with an honest Content-Length must succeed,
         // so the ceiling is inclusive and the failure is strictly above it.
-        let body = "x".repeat(MAX_UPSTREAM_BODY_BYTES as usize);
+        let body = "x".repeat(MAX_UPSTREAM_BODY_BYTES);
         Mock::given(method("GET"))
             .and(path("/bounded"))
             .respond_with(ResponseTemplate::new(200).set_body_string(body))
@@ -418,14 +496,14 @@ mod tests {
             .expect("request should succeed");
         assert_eq!(
             response.content_length(),
-            Some(MAX_UPSTREAM_BODY_BYTES),
+            Some(MAX_UPSTREAM_BODY_BYTES as u64),
             "fixture must carry an honest Content-Length at the limit"
         );
 
         let bytes = read_bounded_bytes(response)
             .await
             .expect("a body at exactly the ceiling fits");
-        assert_eq!(bytes.len() as u64, MAX_UPSTREAM_BODY_BYTES);
+        assert_eq!(bytes.len(), MAX_UPSTREAM_BODY_BYTES);
     }
 
     #[tokio::test]
@@ -436,7 +514,7 @@ mod tests {
             .and(path("/toobig"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string("y".repeat(MAX_UPSTREAM_BODY_BYTES as usize + 1)),
+                    .set_body_string("y".repeat(MAX_UPSTREAM_BODY_BYTES + 1)),
             )
             .expect(1)
             .mount(&server)
@@ -468,7 +546,7 @@ mod tests {
         // running-total check can bound it; the abort happens mid-stream, before
         // the sender finishes writing, which is what keeps memory bounded against
         // a lying or unbounded origin.
-        let oversized = vec![b'a'; MAX_UPSTREAM_BODY_BYTES as usize + 1024];
+        let oversized = vec![b'a'; MAX_UPSTREAM_BODY_BYTES + 1024];
         let url = spawn_chunked_server(oversized, 4096).await;
 
         let response = client()
