@@ -1,3 +1,4 @@
+pub mod assertion;
 pub mod claims;
 pub mod exchange;
 pub mod refresh;
@@ -650,6 +651,12 @@ mod validate_access_token_tests {
         async fn store_refresh_token(&self, _: &Session) -> Result<()> {
             unreachable!("validate_access_token must not write sessions")
         }
+        async fn put_single_use(&self, _: &str, _: chrono::DateTime<Utc>) -> Result<bool> {
+            unreachable!("validate_access_token must not write single-use markers")
+        }
+        async fn take_single_use(&self, _: &str) -> Result<bool> {
+            unreachable!("validate_access_token must not burn single-use markers")
+        }
         async fn get_session_by_refresh_token(&self, _: &str) -> Result<Option<Session>> {
             unreachable!(
                 "validate_access_token must not consult the session store; \
@@ -730,6 +737,9 @@ mod validate_access_token_tests {
         }
         async fn revoke_token(&self, _: &str) -> Result<()> {
             unreachable!("validate_access_token must not revoke at providers")
+        }
+        fn client_id(&self) -> &str {
+            unreachable!("validate_access_token must not read provider client ids")
         }
         fn provider_id(&self) -> &str {
             "never"

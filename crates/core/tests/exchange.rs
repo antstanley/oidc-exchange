@@ -60,6 +60,26 @@ fn base_raw_config() -> RawConfig {
     }
 }
 
+/// Deterministically unique `jti` for test-built assertions, so two exchanges
+/// never share a replay marker unless a test deliberately reuses one.
+fn unique_jti() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    format!("jti-{}", COUNTER.fetch_add(1, Ordering::SeqCst))
+}
+
+/// Raw claims a real validator would return and every binding control accepts:
+/// an `exp` inside the default lifetime ceiling and a fresh `jti`.
+fn verified_raw_claims() -> HashMap<String, serde_json::Value> {
+    let mut raw = HashMap::new();
+    raw.insert(
+        "exp".to_string(),
+        serde_json::json!(chrono::Utc::now().timestamp() + 600),
+    );
+    raw.insert("jti".to_string(), serde_json::json!(unique_jti()));
+    raw
+}
+
 fn make_config() -> Config {
     Config::resolve(base_raw_config()).expect("test config should resolve")
 }
@@ -562,7 +582,8 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
             email_verified: Some(true),
             name: Some("Test User".to_string()),
             is_private_email: None,
-            raw_claims: HashMap::new(),
+            signing_alg: "RS256".to_string(),
+            raw_claims: verified_raw_claims(),
         })
         .await;
 
@@ -611,7 +632,8 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
-                raw_claims: HashMap::new(),
+                signing_alg: "RS256".to_string(),
+                raw_claims: verified_raw_claims(),
             })
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
@@ -638,7 +660,8 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
-                raw_claims: HashMap::new(),
+                signing_alg: "RS256".to_string(),
+                raw_claims: verified_raw_claims(),
             })
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
@@ -665,7 +688,8 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
-                raw_claims: HashMap::new(),
+                signing_alg: "RS256".to_string(),
+                raw_claims: verified_raw_claims(),
             })
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
@@ -697,7 +721,8 @@ async fn exchange_wildcard_subdomain_matching() {
                 email_verified: Some(true),
                 name: None,
                 is_private_email: None,
-                raw_claims: HashMap::new(),
+                signing_alg: "RS256".to_string(),
+                raw_claims: verified_raw_claims(),
             })
             .await;
         let svc = make_service_with_config(repo, provider, base_config());
@@ -808,7 +833,8 @@ async fn exchange_open_registration_requires_verified_email_without_allowlist() 
             email_verified: Some(false),
             name: None,
             is_private_email: None,
-            raw_claims: HashMap::new(),
+            signing_alg: "RS256".to_string(),
+            raw_claims: verified_raw_claims(),
         })
         .await;
     let svc = make_service(repo.clone(), provider);
@@ -849,7 +875,8 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
             email_verified: None,
             name: Some("No Email User".to_string()),
             is_private_email: None,
-            raw_claims: HashMap::new(),
+            signing_alg: "RS256".to_string(),
+            raw_claims: verified_raw_claims(),
         })
         .await;
 
@@ -877,7 +904,33 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
 #[tokio::test]
 async fn exchange_with_direct_id_token_skips_code_exchange() {
     let repo = MockRepository::new();
+
+    // The direct grant requires a server-minted nonce echoed back inside the
+    // assertion. Mint one through a throwaway service over the same repo
+    // (minting touches only the single-use store), then pin claims that carry
+    // it before building the service under test.
+    let minter = make_service(repo.clone(), MockIdentityProvider::new("mock"));
+    let minted = minter
+        .mint_nonce()
+        .await
+        .expect("mint nonce should succeed");
+    assert_eq!(minted.nonce.len(), 43, "nonce is 32 bytes base64url-no-pad");
+    assert!(minted.expires_in > 0);
+
     let provider = MockIdentityProvider::new("mock");
+    let mut raw = verified_raw_claims();
+    raw.insert("nonce".to_string(), serde_json::json!(minted.nonce));
+    provider
+        .set_claims(IdentityClaims {
+            subject: "test-subject".to_string(),
+            email: Some("test@example.com".to_string()),
+            email_verified: Some(true),
+            name: Some("Test User".to_string()),
+            is_private_email: None,
+            signing_alg: "RS256".to_string(),
+            raw_claims: raw,
+        })
+        .await;
 
     let svc = make_service(repo.clone(), provider);
 
@@ -1132,6 +1185,7 @@ async fn exchange_with_client_context_stores_exact_session_values() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        provider_access_token: None,
         ip_address: Some("203.0.113.7".to_string()),
         user_agent: Some("integration-test-agent/1.0".to_string()),
         device_id: Some("device-abc-123".to_string()),
@@ -1165,6 +1219,7 @@ async fn exchange_without_client_context_stores_none_session_values() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        provider_access_token: None,
         ip_address: None,
         user_agent: None,
         device_id: None,
@@ -1201,6 +1256,7 @@ async fn exchange_new_user_emits_user_created_then_token_exchange() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        provider_access_token: None,
         ip_address: Some("203.0.113.9".to_string()),
         user_agent: Some("test-agent/2.0".to_string()),
         device_id: None,
@@ -1273,6 +1329,7 @@ async fn exchange_existing_user_emits_only_token_exchange() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        provider_access_token: None,
         ip_address: Some("203.0.113.10".to_string()),
         user_agent: Some("test-agent/3.0".to_string()),
         device_id: None,
@@ -1339,6 +1396,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        provider_access_token: None,
         ip_address: Some("203.0.113.11".to_string()),
         user_agent: Some("test-agent/4.0".to_string()),
         device_id: None,
@@ -1395,7 +1453,8 @@ async fn exchange_existing_user_allowlist_rejection_names_user_in_audit() {
             email_verified: Some(true),
             name: None,
             is_private_email: None,
-            raw_claims: HashMap::new(),
+            signing_alg: "RS256".to_string(),
+            raw_claims: verified_raw_claims(),
         })
         .await;
     let audit = MockAuditLog::new();
@@ -1479,7 +1538,8 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
             email_verified: Some(true),
             name: Some("Test User".to_string()),
             is_private_email: None,
-            raw_claims: HashMap::new(),
+            signing_alg: "RS256".to_string(),
+            raw_claims: verified_raw_claims(),
         })
         .await;
 
@@ -1492,6 +1552,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
         redirect_uri: Some("https://app.test.com/callback".to_string()),
         id_token: None,
         provider: "mock".to_string(),
+        provider_access_token: None,
         ip_address: Some("203.0.113.12".to_string()),
         user_agent: Some("test-agent/5.0".to_string()),
         device_id: None,

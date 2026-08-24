@@ -11,6 +11,7 @@ pub struct RawConfig {
     pub server: RawServerConfig,
     pub registration: RawRegistrationConfig,
     pub token: RawTokenConfig,
+    pub grants: RawGrantsConfig,
     pub audit: RawAuditConfig,
     pub key_manager: RawKeyManagerConfig,
     pub repository: RawRepositoryConfig,
@@ -28,6 +29,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub registration: RegistrationConfig,
     pub token: TokenConfig,
+    pub grants: GrantsConfig,
     pub audit: AuditConfig,
     pub key_manager: KeyManagerConfig,
     pub repository: RepositoryConfig,
@@ -51,6 +53,7 @@ impl Config {
         let server = ServerConfig::resolve(raw.server)?;
         let registration = RegistrationConfig::resolve(raw.registration)?;
         let token = TokenConfig::resolve(raw.token)?;
+        let grants = GrantsConfig::resolve(raw.grants)?;
         let audit = AuditConfig::resolve(raw.audit)?;
         let key_manager = KeyManagerConfig::resolve(raw.key_manager)?;
         let repository = RepositoryConfig::resolve(raw.repository)?;
@@ -71,6 +74,7 @@ impl Config {
             server,
             registration,
             token,
+            grants,
             audit,
             key_manager,
             repository,
@@ -197,6 +201,76 @@ impl TokenConfig {
             )?,
             audience: NonEmptyString::parse_field("token.audience", raw.audience)?,
             custom_claims: raw.custom_claims,
+        })
+    }
+}
+
+/// Whether the direct ID-token grant is served when `[grants]` is absent from config.
+/// The compiled default keeps the grant **off**: an operator who never asks for the
+/// direct grant serves no new public surface and gains the replay protection this
+/// switch gates by default. See `06-configuration.md` → Sections → `[grants]`.
+pub const DEFAULT_GRANTS_ID_TOKEN: bool = false;
+
+/// Default for `[grants] nonce_ttl` when the key is absent: how long a nonce minted for
+/// the direct ID-token grant remains claimable. A humantime duration string parsed the
+/// same way as the `[token]` TTLs. See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_NONCE_TTL: &str = "10m";
+
+/// Default for `[grants] max_assertion_lifetime` when the key is absent: the ceiling on
+/// an accepted provider ID token's remaining lifetime, so a replay marker always outlives
+/// the assertion it guards. A humantime duration string.
+/// See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_MAX_ASSERTION_LIFETIME: &str = "1h";
+
+/// Serde mirror of `[grants]`, resolved into [`GrantsConfig`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RawGrantsConfig {
+    pub id_token: bool,
+    pub nonce_ttl: String,
+    pub max_assertion_lifetime: String,
+}
+
+impl Default for RawGrantsConfig {
+    fn default() -> Self {
+        Self {
+            id_token: DEFAULT_GRANTS_ID_TOKEN,
+            nonce_ttl: DEFAULT_NONCE_TTL.to_string(),
+            max_assertion_lifetime: DEFAULT_MAX_ASSERTION_LIFETIME.to_string(),
+        }
+    }
+}
+
+/// Which grants `/token` serves and the replay-protection parameters of the direct
+/// ID-token grant. The authorization-code and refresh-token grants are always served and
+/// have no switch; only the direct ID-token grant — whose credential is a transferable
+/// bearer assertion — is opt-in. Both durations are narrowed at load, so an unparseable
+/// value fails config resolution rather than being absorbed until first use.
+/// See `06-configuration.md` → Sections → `[grants]`.
+#[derive(Debug, Clone)]
+pub struct GrantsConfig {
+    /// Whether the direct ID-token grant is served at all. Defaults to
+    /// [`DEFAULT_GRANTS_ID_TOKEN`] (`false`), keeping the grant off unless an operator
+    /// explicitly enables it.
+    pub id_token: bool,
+    /// How long a nonce minted for the direct ID-token grant remains claimable.
+    /// Defaults to [`DEFAULT_NONCE_TTL`].
+    pub nonce_ttl: std::time::Duration,
+    /// The ceiling on the remaining lifetime an accepted provider ID token may carry;
+    /// an assertion with longer to live is refused. Defaults to
+    /// [`DEFAULT_MAX_ASSERTION_LIFETIME`].
+    pub max_assertion_lifetime: std::time::Duration,
+}
+
+impl GrantsConfig {
+    fn resolve(raw: RawGrantsConfig) -> Result<Self, Error> {
+        Ok(Self {
+            id_token: raw.id_token,
+            nonce_ttl: parse_duration_field("grants.nonce_ttl", &raw.nonce_ttl)?,
+            max_assertion_lifetime: parse_duration_field(
+                "grants.max_assertion_lifetime",
+                &raw.max_assertion_lifetime,
+            )?,
         })
     }
 }
@@ -1185,6 +1259,11 @@ mod tests {
         assert_eq!(config.token.access_token_ttl.as_secs(), 15 * 60);
         assert_eq!(config.token.refresh_token_ttl.as_secs(), 30 * 24 * 60 * 60);
         assert_eq!(config.token.audience.as_ref(), "https://api.example.com");
+        // Grants defaults: the direct ID-token grant ships disabled, with the documented
+        // replay-protection durations, even though default.toml carries no `[grants]`.
+        assert!(!config.grants.id_token);
+        assert_eq!(config.grants.nonce_ttl.as_secs(), 10 * 60);
+        assert_eq!(config.grants.max_assertion_lifetime.as_secs(), 60 * 60);
         assert!(config.providers.is_empty());
     }
 
@@ -1293,5 +1372,120 @@ mod tests {
             }
             assert_config_error(Config::resolve(raw), field);
         }
+    }
+
+    /// `[grants]` deserializes to its explicit values when present; every key is
+    /// optional, so an operator can override just one duration.
+    #[test]
+    fn grants_section_resolves_explicit_values() {
+        let parsed: RawConfig = toml::from_str(
+            r#"
+[grants]
+id_token = true
+nonce_ttl = "5m"
+max_assertion_lifetime = "30m"
+"#,
+        )
+        .expect("explicit [grants] must deserialize");
+        let mut raw = default_raw_config();
+        raw.grants = parsed.grants;
+        let explicit = Config::resolve(raw).expect("explicit [grants] must resolve");
+
+        assert!(explicit.grants.id_token);
+        assert_eq!(explicit.grants.nonce_ttl.as_secs(), 5 * 60);
+        assert_eq!(explicit.grants.max_assertion_lifetime.as_secs(), 30 * 60);
+    }
+
+    /// Omitting `[grants]` entirely must land on the safe compiled defaults: direct
+    /// ID-token service off, and the documented `10m` / `1h` durations.
+    #[test]
+    fn omitted_grants_section_uses_disabled_direct_grant_defaults() {
+        let config = Config::resolve(default_raw_config()).expect("default config resolves");
+
+        assert!(
+            !config.grants.id_token,
+            "the direct ID-token grant must default to disabled"
+        );
+        assert_eq!(config.grants.nonce_ttl.as_secs(), 10 * 60);
+        assert_eq!(config.grants.max_assertion_lifetime.as_secs(), 60 * 60);
+
+        // Negative-space on deserialization: an empty TOML document (no sections at all)
+        // must still parse — serde defaults everywhere, per 06-configuration.md.
+        let empty: RawConfig =
+            toml::from_str("").expect("an empty config document must deserialize");
+        assert!(!empty.grants.id_token);
+    }
+
+    /// An unparseable `grants.nonce_ttl` must fail resolution naming the exact field,
+    /// not be absorbed until some later request reads it.
+    #[test]
+    fn resolve_rejects_unparseable_nonce_ttl() {
+        let mut raw = default_raw_config();
+        raw.grants.nonce_ttl = "not-a-duration".to_string();
+
+        let err = Config::resolve(raw).expect_err("bad nonce_ttl must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("grants.nonce_ttl"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("not-a-duration"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// An unparseable `grants.max_assertion_lifetime` fails resolution the same way:
+    /// precise field name, echoed bad value.
+    #[test]
+    fn resolve_rejects_unparseable_max_assertion_lifetime() {
+        let mut raw = default_raw_config();
+        raw.grants.max_assertion_lifetime = "forever".to_string();
+
+        let err = Config::resolve(raw).expect_err("bad max_assertion_lifetime must be rejected");
+
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("grants.max_assertion_lifetime"),
+                    "detail must name the field: {detail}"
+                );
+                assert!(
+                    detail.contains("forever"),
+                    "detail must echo the bad value: {detail}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
+    }
+
+    /// Positive-space boundary: valid custom durations (including a zero-length nonce
+    /// TTL) pass resolution, and an enabled switch resolves too — only *unparseable*
+    /// durations fail closed.
+    #[test]
+    fn resolve_accepts_valid_grant_durations_and_enabled_switch() {
+        let mut enabled = default_raw_config();
+        enabled.grants.id_token = true;
+        enabled.grants.nonce_ttl = "90s".to_string();
+        enabled.grants.max_assertion_lifetime = "2h".to_string();
+        let resolved = Config::resolve(enabled)
+            .expect("valid custom durations with the grant enabled must pass");
+        assert!(resolved.grants.id_token);
+        assert_eq!(resolved.grants.nonce_ttl.as_secs(), 90);
+
+        // At-the-boundary value: "0s" parses fine as a duration (a zero-length claim
+        // window is operationally useless but not malformed), so resolution accepts it;
+        // policy enforcement belongs above the config layer.
+        let mut zero_ttl = default_raw_config();
+        zero_ttl.grants.nonce_ttl = "0s".to_string();
+        assert!(
+            Config::resolve(zero_ttl).is_ok(),
+            "a parseable zero duration must not fail config load"
+        );
     }
 }

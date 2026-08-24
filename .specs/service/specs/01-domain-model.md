@@ -74,6 +74,19 @@ session's identifier: it is the key every `SessionRepository` lookup and revocat
 and it is the value minted access tokens carry as their `sid` claim so a presented access
 token names the session it belongs to.
 
+### SingleUseRecord (`domain/single_use.rs`)
+
+```rust
+struct SingleUseRecord {
+    key: String,                  // "nonce:<sha256hex>" | "assertion:<provider>:…"
+    expires_at: DateTime<Utc>,
+}
+```
+
+A presence-only record: the key is all the information there is. Nonce values and
+assertions are stored only as SHA-256 hex digests, as refresh tokens are. Records are
+removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_sessions`.
+
 ### Token types (`domain/token.rs`)
 
 - **`TokenResponse`** — the `/token` body: `access_token`, optional `refresh_token` (present
@@ -86,7 +99,8 @@ token names the session it belongs to.
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
   `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag; `None`
-  for other providers), and `raw_claims`.
+  for other providers), `signing_alg` (the algorithm the resolved JWK verified with, e.g.
+  `"ES256"`), and `raw_claims`.
 
 ### AuditEvent (`domain/audit.rs`)
 
@@ -188,6 +202,8 @@ revocation (`/revoke`, revoke-all-user-sessions, or a status change to `Suspende
 | Revoke one / all sessions | `SessionRepository::revoke_session` / `revoke_all_user_sessions` |
 | Count active sessions | `SessionRepository::count_active_sessions` |
 | Reap expired sessions | `SessionRepository::cleanup_expired_sessions` |
+| Claim a single-use key | `SessionRepository::put_single_use(key, expires_at)` |
+| Burn a single-use key | `SessionRepository::take_single_use(key)` |
 
 ## Assumptions and open questions
 

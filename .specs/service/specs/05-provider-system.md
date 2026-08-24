@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -68,6 +68,10 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   and `aud` claims to be **present** (`set_required_spec_claims`) and to match the
   configured issuer and `client_id`; `nbf` is validated when present. A token missing
   `iss` or `aud` — e.g. a provider access token presented as an ID token — is rejected.
+  The returned `IdentityClaims` carries `signing_alg` — the algorithm the JWK actually
+  verified with, not the header's — so the core's `at_hash` check can select the matching
+  digest without re-deciding the algorithm. Both validators report it; neither performs
+  any replay or binding check itself.
 - When the matched JWK carries no `alg`, the algorithm is inferred from the key type:
   `kty: EC` by `crv` (P-256 → ES256, P-384 → ES384), `kty: OKP` → EdDSA, `kty: RSA` →
   RS256. Any other alg-less key is rejected. (Azure-AD-style JWKS omit `alg`.)
@@ -100,6 +104,14 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
 
 - *Algorithm from the JWK.* **ID-token validation uses the signing algorithm declared by the
   matched JWK, not the token header.** Closes the `alg`-confusion class of attacks.
+- *Replay binding is above the provider boundary.* **No `IdentityProvider` implementation
+  checks `nonce`, `azp`, `at_hash` or one-time use; `AppService::exchange` does, for all of
+  them.** Two independent validators omitted the same four controls; adding them twice
+  would leave a third implementation free to omit them again. This is consistent with the
+  direction in `hardening/proposals/provider-response-boundary.md`: whether the two
+  validators later consolidate behind a shared `ProviderTransport`/`VerificationKeySet` or
+  collapse into one profile-driven validator, the binding does not move. `signing_alg` is
+  the same algorithm-as-data that a `VerificationKeySet` would carry, surfaced early.
 - *Apple as a separate crate.* **The Apple provider lives in `crates/providers`, not
   `crates/adapters`.** Provider-specific protocol logic (per-request client JWT) is kept apart
   from infrastructure adapters.

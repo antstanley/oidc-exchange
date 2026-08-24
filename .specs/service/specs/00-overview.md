@@ -1,6 +1,6 @@
 # OIDC Exchange Service — Overview
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/*
+**Status:** Implemented · **Date:** 2026-08-15 · **Owner:** Ant Stanley · **Scope:** crates/*
 
 The Rust service at the heart of `oidc-exchange`. It validates ID tokens from third-party
 OIDC providers and exchanges them for self-issued, short-lived access tokens and long-lived
@@ -88,7 +88,7 @@ operator ──Bearer secret──► /internal/* (user CRUD, claims, stats)  �
 
 | Area | In service | Notes |
 |---|---|---|
-| Token exchange (`code` and `id_token` grants) | Yes | `crates/core/src/service/exchange.rs` |
+| Token exchange (`code` and `id_token` grants) | Yes | `crates/core/src/service/exchange.rs`; the `id_token` grant is off by default (`grants.id_token`) and requires a server-issued nonce |
 | Token refresh, revocation | Yes | reusable refresh tokens; no rotation |
 | Registration policy (mode + domain allowlist) | Yes | wildcard `*.example.com` supported |
 | Custom claims (config templates + per-user) | Yes | restricted template language |
@@ -109,9 +109,11 @@ operator ──Bearer secret──► /internal/* (user CRUD, claims, stats)  �
 
 ### Decisions
 
-- *Two grant inputs.* **`/token` accepts both a provider `code` and a raw `id_token`.** Lets
-  browser SDKs (Google Identity Services) post the credential they already hold without a
-  second server-side code exchange.
+- *Two grant inputs, one of them opt-in.* **`/token` accepts a provider `code` always, and a
+  raw `id_token` only when `grants.id_token = true`.** The direct grant lets browser SDKs
+  post a credential they already hold, but an ID token is a transferable bearer assertion
+  with no back-channel redemption behind it, so it is bound to a service-issued nonce, made
+  single-use, and served only where an operator asks for it.
 - *Opaque, hashed, reusable refresh tokens.* **256-bit random, stored as a SHA-256 hash,
   valid until expiry or revocation.** Revocable and leak-resistant, and reusable refresh
   matches what client libraries expect.

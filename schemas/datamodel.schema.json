@@ -63,6 +63,15 @@
           }
         }
       }
+    },
+    "SingleUseRecord": {
+      "type": "object",
+      "required": ["key", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "description": "Namespaced digest key ('nonce:<sha256hex>' or 'assertion:<provider>:[d:]<sha256hex>'); never a raw nonce or raw assertion." },
+        "expires_at": { "type": "string", "format": "date-time", "description": "Instant after which both claim operations treat the record as absent." }
+      }
     }
   }
 }

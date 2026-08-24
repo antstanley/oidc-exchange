@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
 
 One TOML file drives the whole service. `RawConfig` mirrors the merged TOML input; `AppConfig`
 is the resolved configuration held by the service. Every entry point that constructs a running
@@ -159,6 +159,16 @@ contains exact or `*.domain` wildcard entries; entries are ASCII only.
 non-empty — the `aud` claim of every issued access token), and optional `custom_claims`
 (`HashMap<String, String>` of claim templates; see [03-service-flows.md](03-service-flows.md)).
 
+### `[grants]`
+Which grants `/token` serves and the parameters of the direct ID-token grant's replay
+protection. `id_token` (bool, default `false`) — whether the direct ID-token grant is
+served at all. `nonce_ttl` (humantime duration, default `"10m"`) — how long a nonce minted
+for the direct grant remains claimable. `max_assertion_lifetime` (humantime duration,
+default `"1h"`) — the ceiling on an accepted provider ID token's remaining lifetime; an
+assertion with longer to live is refused. The authorization-code and refresh-token grants
+are always served and have no switch. Both durations are validated at startup by
+`AppConfig::validate`, so an unparseable value fails config load.
+
 ### `[audit]`
 
 `adapter` (`noop` | `stdout` | `stderr` | `auto` | `sqs`, default `noop`),
@@ -265,6 +275,8 @@ string through the FFI bindings (`bootstrap::parse_config`).
 | `server.issuer`, `token.audience` | `https://auth.example.com` / `https://api.example.com` *(replace for deployment)* |
 | `registration.mode` | `open` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
+| `grants.id_token` | `false` |
+| `grants.nonce_ttl` / `max_assertion_lifetime` | `10m` / `1h` |
 | `audit.adapter` / `blocking_threshold` / `emit_threshold` | `noop` / `warning` / `info` |
 | `telemetry.enabled` / `exporter` / `sample_rate` | `false` / `none` / `1.0` |
 | `user_sync.enabled`, `internal_api.enabled` | `false`, `false` |

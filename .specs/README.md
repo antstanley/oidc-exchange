@@ -83,6 +83,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md](plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md) | Done | [changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md](changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md) |
 | [plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md](plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md) | Done | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) |
 | [plans/2026-08-05-validate_revoke_token_claims/plan.md](plans/2026-08-05-validate_revoke_token_claims/plan.md) | Done | [changes/2026-08-05-validate_revoke_token_claims.md](changes/2026-08-05-validate_revoke_token_claims.md) |
+| [plans/2026-08-15-bind_id_token_grant_replay_protection/plan.md](plans/2026-08-15-bind_id_token_grant_replay_protection/plan.md) | Done | [changes/2026-08-05-bind_id_token_grant_replay_protection.md](changes/2026-08-05-bind_id_token_grant_replay_protection.md) |
 
 ## Conventions
 
