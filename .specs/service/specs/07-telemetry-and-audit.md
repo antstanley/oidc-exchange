@@ -1,6 +1,6 @@
 # Telemetry and Audit
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
+**Status:** Implemented · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
 
 Two independent observability systems with different purposes.
 
@@ -34,9 +34,19 @@ captured by CloudWatch Logs; in containers by the log driver.
 to a tracing log, then — if its severity is at or above `audit.blocking_threshold` — the
 operation fails; otherwise it proceeds with a warning.
 
+Before dispatching to any adapter, `emit_audit` applies the `[audit] emit_threshold` filter:
+events strictly less severe than the configured threshold (default `info`) are
+dropped outright, so `ValidationFailed` (debug) stays silent unless the threshold is
+lowered.
+
 Adapters: `stdout_audit` (JSON lines; `Auto` sends error-and-above to stderr, the rest to
 stdout), `sqs_audit` (one JSON message per event with a `severity` attribute, FIFO detected by
-a `.fifo` queue suffix), and `noop` (drops events; the default).
+a `.fifo` queue suffix), and `noop` (drops events; the default). The `stdout_audit` adapter
+writes with locked handles; a write failure (e.g. EPIPE from a restarted log collector)
+returns `AuditError` and flows through `emit_audit`'s fallback-and-threshold path rather than
+panicking. On FIFO queues, `sqs_audit` sets `message_group_id` to the event id — each event is
+its own group, so FIFO ordering never serializes throughput — with the event's ULID as the
+deduplication id.
 
 A single request can produce both a telemetry trace and an audit event; they correlate
 through the request id but are otherwise independent.

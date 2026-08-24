@@ -36,6 +36,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
 | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) | Merged | repo-wide: closed config domains, HTTPS URLs, verified key metadata, migration probes, and mandatory installer checks |
 | [changes/merged/2026-07-01-complete_config_loading.md](changes/merged/2026-07-01-complete_config_loading.md) | Merged | service: config overlay merge, env overrides, fail-closed `${VAR}` placeholders, startup validation |
+| [changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md](changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md) | Merged | service/bindings: one shared config resolve, fail-closed placeholders, FFI parity, and `config check` |
 | [changes/merged/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md](changes/merged/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md) | Merged | service: KMS ES* DER→raw JWS signatures, RFC 7518 JWK `n`/`e`, ES512 JWK |
 | [changes/merged/2026-07-01-valkey_session_store_conformance.md](changes/merged/2026-07-01-valkey_session_store_conformance.md) | Merged | service: Valkey session count, atomic TTL'd writes, expired-index cleanup |
 | [changes/merged/2026-07-01-release_gil_in_python_binding.md](changes/merged/2026-07-01-release_gil_in_python_binding.md) | Merged | bindings: release the GIL around the blocking FFI call |
@@ -79,7 +80,8 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-07-02-webhook_user_sync_conformance/plan.md](plans/2026-07-02-webhook_user_sync_conformance/plan.md) | Done | [changes/merged/2026-07-01-webhook_user_sync_conformance.md](changes/merged/2026-07-01-webhook_user_sync_conformance.md) |
 | [plans/2026-07-02-server_error_handling_and_shutdown/plan.md](plans/2026-07-02-server_error_handling_and_shutdown/plan.md) | Done | [changes/merged/2026-07-01-server_error_handling_and_shutdown.md](changes/merged/2026-07-01-server_error_handling_and_shutdown.md) |
 | [plans/2026-07-02-implement_lambda_runtime/plan.md](plans/2026-07-02-implement_lambda_runtime/plan.md) | Done | [changes/merged/2026-07-01-implement_lambda_runtime.md](changes/merged/2026-07-01-implement_lambda_runtime.md) |
-| [plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md](plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md) | In Progress | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) |
+| [plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md](plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md) | Done | [changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md](changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md) |
+| [plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md](plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md) | Done | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) |
 
 ## Conventions
 
