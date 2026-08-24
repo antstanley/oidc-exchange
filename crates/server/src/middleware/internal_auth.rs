@@ -195,27 +195,24 @@ async fn require_security_event(
     client_addr: &ClientAddr,
     route: &str,
 ) -> Result<(), oidc_exchange_core::error::Error> {
+    let failure = match event {
+        SecurityEvent::OperatorAuthenticationFailed { reason } => reason.audit_failure(),
+        _ => oidc_exchange_core::domain::AuditFailure::ThrottleExceeded,
+    };
     state
         .service
-        .emit_security_event(
+        .emit_security_event_with_detail(
             event,
-            oidc_exchange_core::domain::AuditOutcome::Failure {
-                reason: match event {
-                    SecurityEvent::OperatorAuthenticationFailed { reason } => {
-                        reason.as_str().to_string()
-                    }
-                    SecurityEvent::ThrottleExceeded => {
-                        oidc_exchange_core::domain::security_failure_reasons::THROTTLE_EXCEEDED
-                            .to_string()
-                    }
-                },
-            },
+            oidc_exchange_core::domain::AuditOutcome::Failure(failure),
+            None,
             None,
             client_addr.clone(),
+            None,
             auth_event_detail(route),
         )
         .await
 }
+
 
 /// The generic 500 surfaced when a mandatory security event cannot be durably
 /// recorded at a severity meeting `[audit] blocking_threshold`. Deliberately

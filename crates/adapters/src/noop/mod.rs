@@ -29,8 +29,7 @@ impl AuditLog for NoopAuditLog {
 }
 
 /// A no-op rate limiter that always permits requests without retaining state.
-///
-/// VENDORED SEAM (task 03): verbatim from sibling PR #24's noop adapter.
+#[derive(Default)]
 pub struct NoopRateLimiter;
 
 impl NoopRateLimiter {
@@ -39,16 +38,14 @@ impl NoopRateLimiter {
     }
 }
 
-impl Default for NoopRateLimiter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl RateLimiter for NoopRateLimiter {
-    // Both halves of the seam's two-phase contract are unconditional allows:
-    // a no-op throttle consults nothing, consumes nothing, and never denies.
+    // Every shape of the port is an unconditional allow: a no-op throttle
+    // consults nothing, consumes nothing, and never denies.
+    async fn check_and_consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        Ok(RateLimitDecision::Allow)
+    }
+
     async fn check(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
         Ok(RateLimitDecision::Allow)
     }
@@ -121,5 +118,28 @@ impl UserSync for NoopUserSync {
 
     async fn notify_user_deleted(&self, _user_id: &str) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::NoopRateLimiter;
+    use oidc_exchange_core::domain::{RateLimitDecision, RateLimitKey};
+    use oidc_exchange_core::ports::RateLimiter;
+
+    #[tokio::test]
+    async fn noop_rate_limiter_always_allows_without_state() {
+        let limiter = NoopRateLimiter::new();
+        let key = RateLimitKey::ClientAddr(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)));
+        assert_eq!(
+            limiter.check_and_consume(&key).await.unwrap(),
+            RateLimitDecision::Allow
+        );
+        assert_eq!(
+            limiter.check_and_consume(&key).await.unwrap(),
+            RateLimitDecision::Allow
+        );
     }
 }

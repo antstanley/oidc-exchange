@@ -93,11 +93,11 @@ pub trait OperatorAuthenticator: Send + Sync {
 /// and identifies nobody: every success yields the reserved
 /// [`UNATTRIBUTED_OPERATOR_ID`] principal.
 pub struct SharedSecretAuthenticator {
-    expected: String,
+    expected: oidc_exchange_core::Secret<String>,
 }
 
 impl SharedSecretAuthenticator {
-    pub fn new(expected: String) -> Self {
+    pub fn new(expected: oidc_exchange_core::Secret<String>) -> Self {
         Self { expected }
     }
 }
@@ -127,7 +127,7 @@ impl OperatorAuthenticator for SharedSecretAuthenticator {
         };
         // Constant-time comparison with explicit length-branch handling, so
         // no timing oracle survives the migration to named mechanisms.
-        if constant_time_eq(presented.as_bytes(), self.expected.as_bytes()) {
+        if constant_time_eq(presented.as_bytes(), self.expected.expose().as_bytes()) {
             Ok(OperatorPrincipal::unattributed())
         } else {
             Err(OperatorAuthFailureReason::InvalidCredential)
@@ -533,7 +533,7 @@ mod tests {
     /// missing. Debug output never shows the secret (value or length).
     #[tokio::test]
     async fn shared_secret_authenticates_only_the_exact_value() {
-        let auth = SharedSecretAuthenticator::new(SECRET.to_string());
+        let auth = SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()));
         let empty = headers(&[]);
 
         let ok = auth
@@ -566,7 +566,7 @@ mod tests {
     /// the constant-time compare covers the whole value, not a prefix.
     #[tokio::test]
     async fn shared_secret_rejects_prefix_and_padded_variants() {
-        let auth = SharedSecretAuthenticator::new(SECRET.to_string());
+        let auth = SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()));
         let empty = headers(&[]);
 
         for presented in [&SECRET[..SECRET.len() - 1], &format!("{SECRET}x")] {
@@ -842,7 +842,7 @@ mod tests {
 
         let gate = OperatorAuthGate::new(vec![
             Box::new(Rejecting),
-            Box::new(SharedSecretAuthenticator::new(SECRET.to_string())),
+            Box::new(SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()))),
         ]);
         let empty = headers(&[]);
 
@@ -859,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn gate_failure_reasons_follow_the_precedence_contract() {
         let secret_only = OperatorAuthGate::new(vec![Box::new(SharedSecretAuthenticator::new(
-            SECRET.to_string(),
+            oidc_exchange_core::Secret::new(SECRET.to_string()),
         ))]);
         let empty = headers(&[]);
 
@@ -897,7 +897,7 @@ mod tests {
     #[test]
     fn gate_debug_shows_mechanisms_only() {
         let gate = OperatorAuthGate::new(vec![Box::new(SharedSecretAuthenticator::new(
-            SECRET.to_string(),
+            oidc_exchange_core::Secret::new(SECRET.to_string()),
         ))]);
         let rendered = format!("{gate:?}");
         assert!(

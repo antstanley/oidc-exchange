@@ -1,0 +1,57 @@
+error[E0277]: `Secret<String>` doesn't implement `std::fmt::Display`
+ --> tests/ui/tracing_display_field.rs:7:5
+  |
+7 |     tracing::info!(%secret, "must not compile");
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `std::fmt::Display` is not implemented for `Secret<String>`
+  |     required by a bound introduced by this call
+  |
+  = note: required for `&Secret<String>` to implement `std::fmt::Display`
+  = note: 1 redundant requirement hidden
+  = note: required for `&&Secret<String>` to implement `std::fmt::Display`
+note: required by a bound in `display`
+ --> $CARGO/tracing-core-$VERSION/src/field.rs
+  |
+  | pub fn display<T>(t: T) -> DisplayValue<T>
+  |        ------- required by a bound in this function
+  | where
+  |     T: fmt::Display,
+  |        ^^^^^^^^^^^^ required by this bound in `display`
+  = note: this error originates in the macro `$crate::valueset_all` which comes from the expansion of the macro `tracing::info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Secret<String>` doesn't implement `std::fmt::Display`
+ --> tests/ui/tracing_display_field.rs:7:5
+  |
+7 |     tracing::info!(%secret, "must not compile");
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::fmt::Display` is not implemented for `Secret<String>`
+  |
+  = note: required for `&Secret<String>` to implement `std::fmt::Display`
+  = note: 1 redundant requirement hidden
+  = note: required for `&&Secret<String>` to implement `std::fmt::Display`
+note: required by a bound in `DisplayValue`
+ --> $CARGO/tracing-core-$VERSION/src/field.rs
+  |
+  | pub struct DisplayValue<T: fmt::Display>(T);
+  |                            ^^^^^^^^^^^^ required by this bound in `DisplayValue`
+  = note: this error originates in the macro `$crate::valueset_all` which comes from the expansion of the macro `tracing::info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Secret<String>` doesn't implement `std::fmt::Display`
+ --> tests/ui/tracing_display_field.rs:7:5
+  |
+7 |     tracing::info!(%secret, "must not compile");
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::fmt::Display` is not implemented for `Secret<String>`
+  |
+help: the trait `Value` is implemented for `DisplayValue<T>`
+ --> $CARGO/tracing-core-$VERSION/src/field.rs
+  |
+  | / impl<T> Value for DisplayValue<T>
+  | | where
+  | |     T: fmt::Display,
+  | |____________________^
+  = note: required for `&Secret<String>` to implement `std::fmt::Display`
+  = note: 1 redundant requirement hidden
+  = note: required for `&&Secret<String>` to implement `std::fmt::Display`
+  = note: required for `DisplayValue<&&Secret<String>>` to implement `Value`
+  = note: required for the cast from `&DisplayValue<&&Secret<String>>` to `&dyn Value`
+  = note: this error originates in the macro `$crate::valueset_all` which comes from the expansion of the macro `tracing::info` (in Nightly builds, run with -Z macro-backtrace for more info)

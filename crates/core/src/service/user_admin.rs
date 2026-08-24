@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::domain::{
-    clamp_admin_page_limit, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, NewUser,
-    OperatorPrincipal, User, UserPage, UserPatch, UserStatus, DEFAULT_ADMIN_PAGE_SIZE,
-    MAX_ADMIN_PAGE_SIZE,
+    clamp_admin_page_limit, AdminMutationKind, AuditEvent, AuditOutcome, ClientAddr, NewUser,
+    OperatorPrincipal, SecurityEvent, User, UserPage, UserPatch, UserStatus,
+    DEFAULT_ADMIN_PAGE_SIZE, MAX_ADMIN_PAGE_SIZE,
 };
 use crate::error::{Error, Result};
-use crate::service::{claims::find_reserved_claim_key, create_audit_event, AppService};
+use crate::service::{claims::find_reserved_claim_key, AppService};
 
 /// Key under which the claims-mutation operation name (`set_claims` /
 /// `merge_claims` / `clear_claims`) is recorded in a `UserUpdated` audit
@@ -74,18 +74,12 @@ impl AppService {
     ) -> Result<User> {
         let user = self.user_repo.create_user(new_user).await?;
 
-        self.emit_audit(attributed(
-            create_audit_event(
-                AuditEventType::UserCreated,
-                AuditSeverity::Notice,
-                AuditOutcome::Success,
-                Some(user.id.clone()),
-                Some(user.provider.clone()),
-                None,
-                None,
-            ),
+        self.emit_admin_mutation_audit_event(
+            AdminMutationKind::Created,
+            &user,
+            AuditOutcome::Success,
             operator,
-        ))
+        )
         .await?;
 
         if let Err(e) = self.user_sync.notify_user_created(&user).await {
@@ -186,24 +180,13 @@ impl AppService {
             changed_fields.push("status");
         }
 
-        let event_type = if patch.status == Some(UserStatus::Suspended) {
-            AuditEventType::UserSuspended
+        let mutation_kind = if patch.status == Some(UserStatus::Suspended) {
+            AdminMutationKind::Suspended
         } else {
-            AuditEventType::UserUpdated
+            AdminMutationKind::Updated
         };
-        self.emit_audit(attributed(
-            create_audit_event(
-                event_type,
-                AuditSeverity::Notice,
-                AuditOutcome::Success,
-                Some(user.id.clone()),
-                Some(user.provider.clone()),
-                None,
-                None,
-            ),
-            operator,
-        ))
-        .await?;
+        self.emit_admin_mutation_audit_event(mutation_kind, &user, AuditOutcome::Success, operator)
+            .await?;
 
         if let Err(e) = self
             .user_sync
@@ -238,18 +221,12 @@ impl AppService {
         };
         let user = self.apply_validated_patch(user_id, &patch).await?;
 
-        self.emit_audit(attributed(
-            create_audit_event(
-                AuditEventType::UserDeleted,
-                AuditSeverity::Notice,
-                AuditOutcome::Success,
-                Some(user.id.clone()),
-                Some(user.provider.clone()),
-                None,
-                None,
-            ),
+        self.emit_admin_mutation_audit_event(
+            AdminMutationKind::Deleted,
+            &user,
+            AuditOutcome::Success,
             operator,
-        ))
+        )
         .await?;
 
         if let Err(e) = self.user_sync.notify_user_deleted(user_id).await {
@@ -403,14 +380,18 @@ impl AppService {
         user: &User,
         operation: &str,
     ) -> Result<()> {
+        // Claims mutations add operation detail, so build the closed security
+        // event, attribute it to the acting operator, and emit it through the
+        // mandatory durability path with the operation-specific detail.
         let mut event = attributed(
-            create_audit_event(
-                AuditEventType::UserUpdated,
-                AuditSeverity::Notice,
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::Updated,
+            }
+            .into_audit_event(
                 AuditOutcome::Success,
                 Some(user.id.clone()),
                 Some(user.provider.clone()),
-                None,
+                ClientAddr::Unknown,
                 None,
             ),
             operator,
@@ -419,7 +400,56 @@ impl AppService {
             CLAIMS_OPERATION_DETAIL_KEY.to_string(),
             Value::String(operation.to_string()),
         );
-        self.emit_audit(event).await
+        self.emit_admin_mutation_with_detail(event).await
+    }
+
+    /// Emits a detailed admin mutation through the mandatory durability path.
+    async fn emit_admin_mutation_with_detail(
+        &self,
+        event: crate::domain::AuditEvent,
+    ) -> Result<()> {
+        match self.audit.emit(&event).await {
+            Ok(()) => {
+                crate::service::record_mandatory_audit_success();
+                Ok(())
+            }
+            Err(error) => {
+                crate::service::record_mandatory_audit_failure();
+                self.log_audit_fallback(&event);
+                if self.config.audit.durability.is_enforce() {
+                    Err(Error::SecurityAuditDurability {
+                        detail: error.to_string(),
+                    })
+                } else {
+                    tracing::error!(error = %error, audit_durability_degraded = true, "mandatory admin audit provider down");
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Emits an admin mutation through the mandatory durability path.
+    async fn emit_admin_mutation_audit_event(
+        &self,
+        kind: AdminMutationKind,
+        user: &User,
+        outcome: AuditOutcome,
+        operator: &OperatorPrincipal,
+    ) -> Result<()> {
+        // The closed security-event classification and the operator
+        // attribution compose: the event's type/severity stay fixed by the
+        // enum while `attributed` stamps the acting principal exactly once.
+        let event = attributed(
+            SecurityEvent::AdminMutation { kind }.into_audit_event(
+                outcome,
+                Some(user.id.clone()),
+                Some(user.provider.clone()),
+                ClientAddr::Unknown,
+                None,
+            ),
+            operator,
+        );
+        self.emit_mandatory_audit_event(event).await
     }
 
     /// Get aggregate stats for the dashboard.

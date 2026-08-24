@@ -1,0 +1,38 @@
+error[E0277]: `Secret<String>` doesn't implement `std::fmt::Debug`
+ --> tests/ui/instrument_default_capture.rs:9:1
+  |
+9 | #[instrument]
+  | ^^^^^^^^^^^^^ the trait `std::fmt::Debug` is not implemented for `Secret<String>`
+  |
+  = note: required for `&Secret<String>` to implement `std::fmt::Debug`
+  = note: 1 redundant requirement hidden
+  = note: required for `&&Secret<String>` to implement `std::fmt::Debug`
+note: required by a bound in `debug`
+ --> $CARGO/tracing-core-$VERSION/src/field.rs
+  |
+  | pub fn debug<T>(t: T) -> DebugValue<T>
+  |        ----- required by a bound in this function
+  | where
+  |     T: fmt::Debug,
+  |        ^^^^^^^^^^ required by this bound in `debug`
+  = note: this error originates in the attribute macro `instrument` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Secret<String>` doesn't implement `std::fmt::Debug`
+ --> tests/ui/instrument_default_capture.rs:9:1
+  |
+9 | #[instrument]
+  | ^^^^^^^^^^^^^ the trait `std::fmt::Debug` is not implemented for `Secret<String>`
+  |
+help: the trait `Value` is implemented for `DebugValue<T>`
+ --> $CARGO/tracing-core-$VERSION/src/field.rs
+  |
+  | / impl<T> Value for DebugValue<T>
+  | | where
+  | |     T: fmt::Debug,
+  | |__________________^
+  = note: required for `&Secret<String>` to implement `std::fmt::Debug`
+  = note: 1 redundant requirement hidden
+  = note: required for `&&Secret<String>` to implement `std::fmt::Debug`
+  = note: required for `DebugValue<&&Secret<String>>` to implement `Value`
+  = note: required for the cast from `&DebugValue<&&Secret<String>>` to `&dyn Value`
+  = note: this error originates in the macro `$crate::valueset_all` which comes from the expansion of the attribute macro `instrument` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,16 +1,14 @@
-//! Vendored seam + operator-principal domain types for the admin plane.
+//! Operator-principal domain types for the admin plane.
 //!
-//! `VENDORED SEAM (task 03)` — [`ClientAddr`], [`RateLimitKey`],
-//! [`RateLimitDecision`] are minimal vendored primitives from sibling PR #24
-//! (`2026-08-05-audit_and_throttle_authentication_failures`, branch
-//! `spec/audit-and-throttle-auth-failures`). This branch predates that PR; at
-//! merge time these definitions are deleted in favour of #24's canonical ones
-//! and call sites are re-pointed. Only the subset task 05 needs is carried:
-//! peer-only provenance (the admin listener sits behind no untrusted proxy, so
-//! #24's `Forwarded`/`Asserted` variants are intentionally not vendored) plus
-//! the admin plane's own limiter key, which #24 does not define.
-
-use std::net::IpAddr;
+//! The transport-level primitives the admin plane throttles and audits with —
+//! [`crate::domain::ClientAddr`], [`crate::domain::RateLimitKey`],
+//! [`crate::domain::RateLimitDecision`], [`crate::domain::SecurityEvent`] —
+//! are owned by [`crate::domain::audit`] (the
+//! `audit_and_throttle_authentication_failures` change); this module carries
+//! only the operator-specific vocabulary layered on top of them. The admin
+//! listener sits behind no untrusted proxy, so its callers key the
+//! `OperatorAuth` budget from `ClientAddr::Peer` alone — never a forwarded or
+//! client-asserted value.
 
 use serde::{Deserialize, Serialize};
 
@@ -80,69 +78,6 @@ impl OperatorPrincipal {
     }
 }
 
-/// A client address together with how the service learned it.
-///
-/// VENDORED SEAM (task 03): subset of PR #24's type. Only the peer variant is
-/// carried because the only consumer on this branch is the admin plane, whose
-/// throttle key must be the connection's real peer — never a forwarded or
-/// client-asserted value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClientAddr {
-    /// Observed directly by the server from the socket.
-    Peer(IpAddr),
-    /// No usable address was available (e.g. an embedded runtime with no
-    /// connect info).
-    Unknown,
-}
-
-impl ClientAddr {
-    /// Returns an address the server established and may safely use as a
-    /// rate-limit key. `Unknown` yields nothing: no key means no budget is
-    /// drawn down — a deliberate fail-open toward serving rather than toward
-    /// lockout. It must never be *silent*: runtimes without a socket peer can
-    /// still be externally reachable (an API-Gateway-fronted Lambda, for
-    /// instance), so bootstrap warns when the admin plane is served on such a
-    /// runtime, naming that per-peer throttle lockout and peer-attributed
-    /// audit are inactive there.
-    pub fn rate_limit_key(&self) -> Option<IpAddr> {
-        match self {
-            ClientAddr::Peer(address) => Some(*address),
-            ClientAddr::Unknown => None,
-        }
-    }
-
-    /// The address to record on audit events, if any.
-    pub fn audit_address(&self) -> Option<String> {
-        match self {
-            ClientAddr::Peer(address) => Some(address.to_string()),
-            ClientAddr::Unknown => None,
-        }
-    }
-}
-
-/// A bounded, non-raw identity for one rate-limit bucket.
-///
-/// VENDORED SEAM (task 03): carries only this PR's `OperatorAuth` variant;
-/// PR #24 defines the exchange-plane variants (`ClientAddr`, `Subject`,
-/// `Provider`) and its merge folds both sets together.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RateLimitKey {
-    /// Failed `/internal/*` operator authentications from one peer address.
-    /// Kept distinct from any exchange-plane key so a burst of anonymous
-    /// public traffic can never exhaust the operator budget and lock an
-    /// administrator out of the plane they would use to respond to it.
-    OperatorAuth(IpAddr),
-}
-
-/// The result of consuming one unit from a rate-limit bucket.
-///
-/// VENDORED SEAM (task 03): verbatim shape of PR #24's decision type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RateLimitDecision {
-    Allow,
-    Deny { retry_after_secs: u64 },
-}
-
 /// The fixed failure reasons a rejected operator authentication can carry.
 ///
 /// These are the audit stream's closed reason vocabulary for
@@ -159,56 +94,31 @@ pub enum OperatorAuthFailureReason {
 }
 
 impl OperatorAuthFailureReason {
-    /// The fixed wire/audit string for this reason, drawn from the shared
-    /// closed vocabulary in [`crate::domain::security_failure_reasons`] so
-    /// every emitter spells the reasons identically.
+    /// The fixed diagnostic string for this reason, for structured log fields;
+    /// the durable audit channel uses [`Self::audit_failure`] instead.
     pub fn as_str(&self) -> &'static str {
         match self {
-            OperatorAuthFailureReason::MissingCredential => {
-                crate::domain::security_failure_reasons::MISSING_CREDENTIAL
-            }
-            OperatorAuthFailureReason::InvalidCredential => {
-                crate::domain::security_failure_reasons::INVALID_CREDENTIAL
-            }
-            OperatorAuthFailureReason::NotConfigured => {
-                crate::domain::security_failure_reasons::NOT_CONFIGURED
-            }
+            OperatorAuthFailureReason::MissingCredential => "missing_credential",
+            OperatorAuthFailureReason::InvalidCredential => "invalid_credential",
+            OperatorAuthFailureReason::NotConfigured => "not_configured",
         }
     }
-}
 
-/// The security outcomes that always emit through the mandatory audit channel,
-/// bypassing every severity threshold.
-///
-/// VENDORED SEAM (task 03): reduced to the two admin-plane events this PR
-/// constructs; PR #24 owns the full closed enum. Each maps onto an existing
-/// (or sibling-added) `AuditEventType`:
-/// - [`SecurityEvent::OperatorAuthenticationFailed`] renders as the
-///   long-declared-but-unconstructed `AuditEventType::Unauthorized` at
-///   warning severity.
-/// - [`SecurityEvent::ThrottleExceeded`] renders as
-///   `AuditEventType::ThrottleExceeded` (the variant PR #24 adds).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecurityEvent {
-    OperatorAuthenticationFailed { reason: OperatorAuthFailureReason },
-    ThrottleExceeded,
-}
-
-impl SecurityEvent {
-    /// Severity is fixed per event kind, not caller-chosen.
-    pub fn severity(self) -> crate::domain::AuditSeverity {
-        // Both admin-plane security events warn: louder than routine notices,
-        // below error-level paging.
-        crate::domain::AuditSeverity::Warning
-    }
-
-    /// The durable audit classification this security event renders to.
-    pub fn event_type(self) -> crate::domain::AuditEventType {
+    /// The closed [`crate::domain::AuditFailure`] this reason renders to on
+    /// the mandatory audit channel — typed, never free-form text, so audit
+    /// queries can rely on exact matching and the presented credential is
+    /// never among the reasons.
+    pub fn audit_failure(self) -> crate::domain::AuditFailure {
         match self {
-            SecurityEvent::OperatorAuthenticationFailed { .. } => {
-                crate::domain::AuditEventType::Unauthorized
+            OperatorAuthFailureReason::MissingCredential => {
+                crate::domain::AuditFailure::MissingCredential
             }
-            SecurityEvent::ThrottleExceeded => crate::domain::AuditEventType::ThrottleExceeded,
+            OperatorAuthFailureReason::InvalidCredential => {
+                crate::domain::AuditFailure::InvalidCredential
+            }
+            OperatorAuthFailureReason::NotConfigured => {
+                crate::domain::AuditFailure::NotConfigured
+            }
         }
     }
 }
@@ -249,60 +159,21 @@ mod tests {
         }
     }
 
-    /// Peer provenance yields a rate key and an audit address; unknown provenance
-    /// yields neither — a missing address must never become a shared bucket.
-    #[test]
-    fn client_addr_provenance_controls_key_eligibility() {
-        let peer = ClientAddr::Peer("192.0.2.10".parse().expect("valid ip"));
-        assert_eq!(
-            peer.rate_limit_key(),
-            Some("192.0.2.10".parse().expect("valid ip"))
-        );
-        assert_eq!(peer.audit_address().as_deref(), Some("192.0.2.10"));
-
-        let unknown = ClientAddr::Unknown;
-        assert!(unknown.rate_limit_key().is_none());
-        assert!(unknown.audit_address().is_none());
-    }
-
-    /// Security-event classifications are fixed: operator auth failures render
-    /// as the previously-unconstructed Unauthorized audit type, throttle
-    /// lockouts as ThrottleExceeded, both at warning severity.
-    #[test]
-    fn security_events_render_to_fixed_audit_classifications() {
-        let failed = SecurityEvent::OperatorAuthenticationFailed {
-            reason: OperatorAuthFailureReason::InvalidCredential,
-        };
-        assert_eq!(
-            failed.event_type(),
-            crate::domain::AuditEventType::Unauthorized
-        );
-        assert_eq!(failed.severity(), crate::domain::AuditSeverity::Warning);
-
-        let throttled = SecurityEvent::ThrottleExceeded;
-        assert_eq!(
-            throttled.event_type(),
-            crate::domain::AuditEventType::ThrottleExceeded
-        );
-        assert_eq!(throttled.severity(), crate::domain::AuditSeverity::Warning);
-    }
-
-    /// The audit reason vocabulary is the spec's three fixed strings — no
-    /// free-form reason text may enter the channel.
+    /// The audit reason vocabulary is the spec's three fixed, typed
+    /// `AuditFailure` variants (serialized snake_case) — no free-form reason
+    /// text may enter the channel.
     #[test]
     fn failure_reasons_use_the_fixed_vocabulary() {
-        assert_eq!(
-            OperatorAuthFailureReason::MissingCredential.as_str(),
-            "missing_credential"
-        );
-        assert_eq!(
-            OperatorAuthFailureReason::InvalidCredential.as_str(),
-            "invalid_credential"
-        );
-        assert_eq!(
-            OperatorAuthFailureReason::NotConfigured.as_str(),
-            "not_configured"
-        );
+        let cases = [
+            (OperatorAuthFailureReason::MissingCredential, "\"missing_credential\""),
+            (OperatorAuthFailureReason::InvalidCredential, "\"invalid_credential\""),
+            (OperatorAuthFailureReason::NotConfigured, "\"not_configured\""),
+        ];
+        for (reason, wire) in cases {
+            let json = serde_json::to_string(&reason.audit_failure())
+                .expect("audit failure serializes");
+            assert_eq!(json, wire);
+        }
     }
 
     /// Invariant checks accept the two well-formed shapes: a named principal

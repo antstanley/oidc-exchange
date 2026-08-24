@@ -3,21 +3,25 @@ use std::sync::Arc;
 
 use axum::Router;
 use config::{Config, Environment, File, FileFormat, Value, ValueKind};
+use tokio::sync::Semaphore;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use oidc_exchange_core::config::{AppConfig, ProviderConfig};
+use oidc_exchange_core::config::{Config as AppConfig, ProviderConfig, RawConfig, ServerRole};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
     UserSync,
 };
-use oidc_exchange_core::service::{parse_duration_secs, AppService};
+use oidc_exchange_core::service::AppService;
 
+use crate::middleware::access_log::access_log_layer;
 use crate::middleware::audit_context::audit_context_layer;
 use crate::middleware::base_path::with_base_path_strip;
 use crate::middleware::error_handler::panic_handler;
+use crate::middleware::public_throttle::public_concurrency_layer;
 use crate::middleware::request_id::request_id_layer;
+use crate::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets};
 use crate::routes;
 use crate::state::AppState;
 
@@ -56,12 +60,71 @@ const REQUEST_TIMEOUT_MAX_SECS: u64 = 60 * 60;
 /// string) can never force an unbounded scan.
 const PLACEHOLDER_NAME_LEN_MAX: usize = 256;
 
+fn merge_raw_defaults(
+    defaults: RawConfig,
+    override_config: RawConfig,
+) -> Result<RawConfig, Box<dyn std::error::Error>> {
+    let mut base = toml::Value::try_from(defaults)?;
+    let mut override_value = toml::Value::try_from(override_config)?;
+    remove_empty_values(&mut override_value);
+
+    fn merge(base: &mut toml::Value, override_value: toml::Value) {
+        match (base, override_value) {
+            (toml::Value::Table(base), toml::Value::Table(override_table)) => {
+                for (key, value) in override_table {
+                    match base.get_mut(&key) {
+                        Some(existing) => merge(existing, value),
+                        None => {
+                            base.insert(key, value);
+                        }
+                    }
+                }
+            }
+            (base, value) => *base = value,
+        }
+    }
+    merge(&mut base, override_value);
+    Ok(base.try_into()?)
+}
+
+fn remove_empty_values(value: &mut toml::Value) {
+    match value {
+        toml::Value::Table(table) => {
+            table.retain(|_, value| {
+                remove_empty_values(value);
+                !matches!(value, toml::Value::String(string) if string.is_empty())
+                    && !matches!(value, toml::Value::Integer(0))
+                    && !matches!(value, toml::Value::Boolean(false))
+            });
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                remove_empty_values(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Load configuration from config files on disk, using the `OIDC_EXCHANGE_ENV`
 /// environment variable to select the environment-specific config file, and
 /// `OIDC_EXCHANGE__{section}__{key}` environment variables to override the
 /// merged result afterward.
 pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
     load_config_from_dir(CONFIG_DIR)
+}
+
+/// Load and resolve a single TOML file with structural environment overrides.
+/// This is intentionally the same source shape used by inline FFI TOML.
+pub fn load_config_from_file(path: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let builder = Config::builder()
+        .add_source(File::from(std::path::Path::new(path)).format(FileFormat::Toml))
+        .add_source(
+            Environment::with_prefix(ENV_OVERRIDE_PREFIX)
+                .separator(ENV_OVERRIDE_SEPARATOR)
+                .try_parsing(true),
+        );
+    resolve_builder(builder)
 }
 
 /// Core of [`load_config`], parameterized over the config directory so tests
@@ -86,9 +149,9 @@ pub fn load_config() -> Result<AppConfig, Box<dyn std::error::Error>> {
 /// secret) and a failure aborts before any adapter or router is built.
 ///
 /// With no files present and no overriding environment variables, the
-/// deserialized result is `AppConfig::default()` (every field carries
+/// deserialized result is `AppConfig::test_default()` (every field carries
 /// `#[serde(default)]`).
-fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
+pub fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let mut builder = Config::builder().add_source(
         File::with_name(&format!("{config_dir}/default"))
             .format(FileFormat::Toml)
@@ -111,21 +174,84 @@ fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::erro
             .try_parsing(true),
     );
 
-    let mut merged = builder.build()?;
-    resolve_placeholders(&mut merged.cache)?;
-    let config: AppConfig = merged.try_deserialize()?;
-    config.validate()?;
-    Ok(config)
+    resolve_builder(builder)
 }
 
-/// Parse a TOML string directly into an `AppConfig`, validating it exactly as
-/// [`load_config`] does so that config supplied through the FFI bindings
-/// (`OidcExchange::new`/`from_file`) is rejected at construction on the same
-/// terms as an invalid config on disk would be rejected at server startup.
+/// Apply the one common configuration tail after an entry point has assembled
+/// its sources: merge, resolve `${VAR}` placeholders fail-closed, deserialize
+/// the raw shape, merge onto the committed defaults, and resolve the closed
+/// domains ([`AppConfig::resolve`]).
+fn resolve_builder(
+    builder: config::ConfigBuilder<config::builder::DefaultState>,
+) -> Result<AppConfig, Box<dyn std::error::Error>> {
+    let mut merged = builder.build()?;
+    resolve_placeholders(&mut merged.cache, "<root>")?;
+    let raw: RawConfig = merged.try_deserialize()?;
+    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))?;
+    AppConfig::resolve(merge_raw_defaults(defaults, raw)?).map_err(Into::into)
+}
+
+/// Parse raw TOML, merge it onto the committed defaults, and resolve the
+/// resulting typed configuration. This is deliberately side-effect-free:
+/// callers that only need validation never build adapters, telemetry, routers,
+/// or listeners, and no environment source is consulted.
+pub fn resolve_config_toml(toml_str: &str) -> Result<AppConfig, Error> {
+    let raw: RawConfig = toml::from_str(toml_str).map_err(|err| Error::ConfigError {
+        detail: format!("config TOML is invalid: {err}"),
+    })?;
+    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .map_err(|err| Error::ConfigError {
+            detail: format!("committed default config is invalid: {err}"),
+        })?;
+    AppConfig::resolve(
+        merge_raw_defaults(defaults, raw).map_err(|err| Error::ConfigError {
+            detail: format!("config defaults cannot be merged: {err}"),
+        })?,
+    )
+}
+
+/// Parse a TOML string with structural `OIDC_EXCHANGE__{section}__{key}`
+/// overrides and fail-closed `${VAR}` placeholder resolution — the FFI
+/// construction path (`OidcExchange::new`/`from_file`), validated exactly as
+/// [`load_config`] is so config supplied through the bindings is rejected at
+/// construction on the same terms as an invalid config on disk at startup.
 pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
-    let config: AppConfig = toml::from_str(toml_str)?;
-    config.validate()?;
-    Ok(config)
+    let builder = Config::builder()
+        .add_source(File::from_str(toml_str, FileFormat::Toml))
+        .add_source(
+            Environment::with_prefix(ENV_OVERRIDE_PREFIX)
+                .separator(ENV_OVERRIDE_SEPARATOR)
+                .try_parsing(true),
+        );
+    resolve_builder(builder)
+}
+
+/// Read an explicit TOML file and resolve it through the same side-effect-free
+/// path as [`resolve_config_toml`]. An explicit path intentionally does not
+/// load a sibling overlay, consult the working directory, or apply environment
+/// overrides: the supplied file is the complete deployment override, merged
+/// only with the committed defaults.
+pub fn check_config_file(path: impl AsRef<std::path::Path>) -> Result<AppConfig, Error> {
+    let path = path.as_ref();
+    if !path.is_file() {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "config check path '{}' is not a readable file",
+                path.display()
+            ),
+        });
+    }
+    let config_toml = std::fs::read_to_string(path).map_err(|err| Error::ConfigError {
+        detail: format!("config check cannot read '{}': {err}", path.display()),
+    })?;
+    resolve_config_toml(&config_toml)
+}
+
+/// Render a resolved config for `config check` without exposing secrets.
+/// Rendering raw TOML would leak any secret before the closed-domain resolver
+/// has accepted it, so this intentionally uses redacted `Debug` output only.
+pub fn render_checked_config(config: &AppConfig) -> String {
+    format!("{config:#?}")
 }
 
 // ---------------------------------------------------------------------------
@@ -139,22 +265,24 @@ pub fn parse_config(toml_str: &str) -> Result<AppConfig, Box<dyn std::error::Err
 /// the whole resolution with `Error::ConfigError` — the literal placeholder
 /// text must never survive into a live secret. `$${` is the escape for a
 /// literal `${`; the escaped text is never looked up in the environment.
-fn resolve_placeholders(value: &mut Value) -> Result<(), Error> {
+fn resolve_placeholders(value: &mut Value, path: &str) -> Result<(), Error> {
     match &mut value.kind {
-        ValueKind::String(s) => {
-            *s = resolve_placeholders_in_str(s)?;
-        }
+        ValueKind::String(s) => *s = resolve_placeholders_in_str(s, path)?,
         ValueKind::Table(table) => {
-            for nested in table.values_mut() {
-                resolve_placeholders(nested)?;
+            for (key, nested) in table.iter_mut() {
+                let nested_path = if path == "<root>" {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                resolve_placeholders(nested, &nested_path)?;
             }
         }
         ValueKind::Array(items) => {
-            for item in items.iter_mut() {
-                resolve_placeholders(item)?;
+            for (index, item) in items.iter_mut().enumerate() {
+                resolve_placeholders(item, &format!("{path}[{index}]"))?;
             }
         }
-        // Non-string scalars (bool, numbers, nil) carry no placeholders.
         _ => {}
     }
     Ok(())
@@ -162,7 +290,7 @@ fn resolve_placeholders(value: &mut Value) -> Result<(), Error> {
 
 /// Resolve every `${VAR}` placeholder and `$${` escape inside a single
 /// string, returning the rewritten string.
-fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
+fn resolve_placeholders_in_str(input: &str, path: &str) -> Result<String, Error> {
     let bytes = input.as_bytes();
     let mut output = String::with_capacity(input.len());
     let mut i = 0;
@@ -183,18 +311,31 @@ fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
 
         // Placeholder open: `${NAME}`.
         if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
-            if let Some((name, consumed)) = scan_placeholder_name(&input[i + 2..]) {
-                let resolved = std::env::var(name).map_err(|_| Error::ConfigError {
-                    detail: format!(
-                        "config placeholder '${{{name}}}' references unset environment \
-                         variable '{name}'"
-                    ),
+            let (name, consumed) =
+                scan_placeholder_name(&input[i + 2..]).ok_or_else(|| Error::ConfigError {
+                    detail: format!("malformed placeholder at config path '{path}'"),
                 })?;
-                output.push_str(&resolved);
-                i += 2 + consumed;
-                debug_assert!(i > before, "placeholder branch must consume input");
-                continue;
+            if name.is_empty() {
+                return Err(Error::ConfigError {
+                    detail: format!("empty placeholder name at config path '{path}'"),
+                });
             }
+            let resolved = std::env::var(name).map_err(|_| Error::ConfigError {
+                detail: format!(
+                    "config placeholder '${{{name}}}' at config path '{path}' references unset environment variable '{name}'"
+                ),
+            })?;
+            if resolved.is_empty() {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "config placeholder '${{{name}}}' at config path '{path}' references empty environment variable '{name}'"
+                    ),
+                });
+            }
+            output.push_str(&resolved);
+            i += 2 + consumed;
+            debug_assert!(i > before, "placeholder branch must consume input");
+            continue;
         }
 
         // Ordinary text: copy one full UTF-8 scalar value forward. `i` is
@@ -219,8 +360,7 @@ fn resolve_placeholders_in_str(input: &str) -> Result<String, Error> {
 /// Scan forward from just past a `${` opener for its closing `}`, bounded by
 /// [`PLACEHOLDER_NAME_LEN_MAX`]. Returns the placeholder name and the number
 /// of bytes consumed (name plus the closing brace), or `None` when no `}` is
-/// found within the bound — in which case the `${` is left as ordinary text
-/// rather than treated as a malformed placeholder.
+/// found within the bound. Callers reject that as malformed configuration.
 fn scan_placeholder_name(rest: &str) -> Option<(&str, usize)> {
     let bytes = rest.as_bytes();
     let scan_bound = bytes.len().min(PLACEHOLDER_NAME_LEN_MAX);
@@ -284,19 +424,26 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
     // carries the noop limiter rather than live throttle state. Bounds were
     // already validated by `AppConfig::validate`; building eagerly here fails
     // fast on any bound validation missed.
-    let rate_limiter: Box<dyn RateLimiter> = if internal_api_served(config) {
-        let failure_window_secs = parse_duration_secs(&config.internal_api.auth_failure_window)?;
-        let lockout_secs = parse_duration_secs(&config.internal_api.auth_lockout)?;
+    let admin_rate_limiter: Box<dyn RateLimiter> = if internal_api_served(config) {
         Box::new(
             oidc_exchange_adapters::rate_limit::AdminAuthRateLimiter::new(
                 config.internal_api.max_auth_failures,
-                std::time::Duration::from_secs(failure_window_secs),
-                std::time::Duration::from_secs(lockout_secs),
+                config.internal_api.auth_failure_window,
+                config.internal_api.auth_lockout,
             )?,
         )
     } else {
         Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new())
     };
+
+    // One port, two budget families: exchange-plane keys route to the fixed
+    // window limiter, the admin plane's `OperatorAuth` failed-auth budget to
+    // its own limiter — so a burst of anonymous public traffic can never
+    // exhaust the operator budget, and vice versa.
+    let rate_limiter: Box<dyn RateLimiter> = Box::new(CompositeRateLimiter {
+        exchange: build_rate_limiter(config)?,
+        admin: admin_rate_limiter,
+    });
 
     Ok(AppService::new(
         user_repo,
@@ -308,6 +455,47 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
         providers,
         config.clone(),
     ))
+}
+
+/// Routes each [`RateLimitKey`] family to the limiter that owns its budget:
+/// `OperatorAuth` to the admin plane's failed-authentication limiter,
+/// everything else to the exchange plane's fixed-window limiter.
+struct CompositeRateLimiter {
+    exchange: Box<dyn RateLimiter>,
+    admin: Box<dyn RateLimiter>,
+}
+
+impl CompositeRateLimiter {
+    fn route(&self, key: &oidc_exchange_core::domain::RateLimitKey) -> &dyn RateLimiter {
+        match key {
+            oidc_exchange_core::domain::RateLimitKey::OperatorAuth(_) => self.admin.as_ref(),
+            _ => self.exchange.as_ref(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RateLimiter for CompositeRateLimiter {
+    async fn check_and_consume(
+        &self,
+        key: &oidc_exchange_core::domain::RateLimitKey,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::RateLimitDecision> {
+        self.route(key).check_and_consume(key).await
+    }
+
+    async fn check(
+        &self,
+        key: &oidc_exchange_core::domain::RateLimitKey,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::RateLimitDecision> {
+        self.route(key).check(key).await
+    }
+
+    async fn consume(
+        &self,
+        key: &oidc_exchange_core::domain::RateLimitKey,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::RateLimitDecision> {
+        self.route(key).consume(key).await
+    }
 }
 
 /// Whether this process serves `/internal/*`: the role binds the admin
@@ -427,7 +615,17 @@ pub fn build_routers(
     config: &AppConfig,
     service: AppService,
 ) -> Result<Routers, Box<dyn std::error::Error>> {
-    let role = config.server.role.as_str();
+    build_routers_shared(config, Arc::new(service))
+}
+
+/// [`build_routers`] over an already-shared service handle, for runtimes
+/// whose process owns another consumer of the same `AppService` (the hyper
+/// runtime's session reaper).
+pub fn build_routers_shared(
+    config: &AppConfig,
+    service: Arc<AppService>,
+) -> Result<Routers, Box<dyn std::error::Error>> {
+    let role = config.server.role;
 
     // The operator-auth gate exists exactly where the internal-auth layer
     // will mount: an enabled internal API on a role that binds the admin
@@ -440,30 +638,177 @@ pub fn build_routers(
         None
     };
 
-    let state = AppState {
-        service: Arc::new(service),
-        config: Arc::new(config.clone()),
-        operator_auth,
-    };
-
     let mut routers = Routers::default();
 
-    if role == "exchange" || role == "all" {
-        routers.public = Some(build_public_router(config, state.clone()));
+    if matches!(role, ServerRole::Exchange | ServerRole::All) {
+        // The public plane rides the full shared stack — concurrency bound,
+        // access log, address throttle — via the same builder every runtime
+        // uses; it never carries `/internal/*`.
+        routers.public = Some(build_router_shared(config, service.clone()));
     }
-    if role == "admin" || role == "all" {
+    if matches!(role, ServerRole::Admin | ServerRole::All) {
+        let rate_limiter: Arc<dyn RateLimiter> = Arc::from(
+            build_rate_limiter(config)
+                .expect("validated rate-limit config at router construction"),
+        );
+        let state = AppState {
+            service,
+            config: Arc::new(config.clone()),
+            rate_limiter,
+            operator_auth,
+        };
         routers.admin = Some(build_admin_router(config, state));
     }
 
     assert!(
         !routers.is_empty(),
-        "a validated role ({role:?}) must produce at least one router"
+        "a validated role ({:?}) must produce at least one router",
+        role.as_str()
     );
     if let Some(public) = &routers.public {
         assert_public_router_shape(public);
     }
 
     Ok(routers)
+}
+
+/// The base-path strip is applied *last*, wrapping the entire already-assembled, already-
+/// stated router from the outside via [`crate::middleware::base_path::with_base_path_strip`]
+/// — not as one more `.layer()` call. `Router::layer` only wraps each already-registered
+/// route's endpoint, which runs *after* axum has already decided which route (if any) matches
+/// the request's current path; a layer added that way can never influence *which* route is
+/// chosen, so it cannot be used to strip a prefix that needs to affect the routing decision
+/// itself (`/prod/health` → `/health`). Wrapping the whole router from the outside is the one
+/// way to rewrite the path early enough. This is applied unconditionally on this one shared
+/// path used by both the hyper and Lambda runtimes — when `config.server.base_path` is `None`
+/// the wrapper still runs on every request but is a pure pass-through, so there is no separate
+/// Lambda-only branch that installs it only sometimes.
+pub fn build_router(config: &AppConfig, service: AppService) -> Router {
+    build_router_shared(config, Arc::new(service))
+}
+
+/// [`build_router`] over an already-shared service handle — the variant entry
+/// points whose process owns *another* consumer of the same `AppService` call.
+/// `main.rs` hands one `Arc` clone to the session reaper and another to the
+/// router's `AppState`, so both observe one store/audit/provider set;
+/// `build_router` itself is just this plus the wrapping.
+pub fn build_router_shared(config: &AppConfig, service: Arc<AppService>) -> Router {
+    let rate_limiter = Arc::from(
+        build_rate_limiter(config).expect("validated rate-limit config at router construction"),
+    );
+    build_router_shared_with_rate_limiter(config, service, rate_limiter)
+}
+
+/// Builds the production router with the supplied retained public limiter. This is separate
+/// from [`build_router`] so service construction can pass the same concrete limiter to both
+/// core provider/subject enforcement and public address throttling.
+pub fn build_router_with_rate_limiter(
+    config: &AppConfig,
+    service: AppService,
+    rate_limiter: Arc<dyn RateLimiter>,
+) -> Router {
+    build_router_shared_with_rate_limiter(config, Arc::new(service), rate_limiter)
+}
+
+fn build_router_shared_with_rate_limiter(
+    config: &AppConfig,
+    service: Arc<AppService>,
+    rate_limiter: Arc<dyn RateLimiter>,
+) -> Router {
+    let role = config.server.role.as_str();
+
+    if config.rate_limit.enabled
+        && config.server.trusted_proxies.is_empty()
+        && matches!(role, "exchange" | "all")
+    {
+        tracing::warn!(
+            "public rate limiting is enabled with no trusted proxies; direct clients are safe, but deployments behind a reverse proxy must configure server.trusted_proxies and trusted_proxy_hops or all clients will share the proxy address"
+        );
+    }
+
+    // On this single-router path the internal surface mounts only under
+    // role = "admin": the plane-separation invariant says no public router
+    // ever serves `/internal/*`, and role = "all" on a single-plane runtime
+    // serves the public plane (deploy a second instance with role = "admin"
+    // for the internal API). `build_routers` is the two-socket path.
+    let operator_auth = if role == "admin" && internal_api_served(config) {
+        Some(Arc::new(build_operator_auth_gate(config).expect(
+            "validated internal_api config at router construction",
+        )))
+    } else {
+        None
+    };
+    if role == "all" && config.internal_api.enabled {
+        tracing::warn!(
+            unmounted = "/internal/*",
+            "role = \"all\" cannot bind two sockets on this single-router runtime; \
+             serving only the public plane — deploy a second instance with \
+             role = \"admin\" for the internal API"
+        );
+    }
+
+    let state = AppState {
+        service,
+        config: Arc::new(config.clone()),
+        rate_limiter,
+        operator_auth,
+    };
+
+    let mut app: Router<AppState> = Router::new();
+
+    if role == "exchange" || role == "all" {
+        // The nonce route is part of the direct ID-token grant's surface, so
+        // it mounts exactly when the grant does: an exchange-serving role with
+        // `grants.id_token` enabled. The shared router is the single mounting
+        // point — server, Lambda, and FFI cannot diverge — and it joins the
+        // public group *before* the throttle/access-log layers so every public
+        // route shares one concurrency bound, one access log, and one address
+        // throttle.
+        let mut public = routes::public_routes();
+        if config.grants.id_token {
+            public = public.merge(routes::nonce_routes());
+        }
+        app = app.merge(
+            public
+                // This semaphore is shared by every public route and checked before handler
+                // work. Saturation returns 503 instead of waiting in an unbounded queue.
+                .route_layer(axum::middleware::from_fn(public_concurrency_layer(
+                    Arc::new(Semaphore::new(config.rate_limit.max_concurrent_requests)),
+                )))
+                .route_layer(axum::middleware::from_fn(access_log_layer))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::public_throttle::public_throttle_layer,
+                )),
+        );
+    }
+    if role == "admin" && config.internal_api.enabled {
+        app = app.merge(routes::internal_routes(state.clone()));
+    }
+    if role == "admin" {
+        // Ensure /health is available even in admin-only mode, whether or
+        // not the internal API is enabled — "admin" never merges
+        // `public_routes`, which is the only other source of `/health`.
+        app = app.route(
+            "/health",
+            axum::routing::get(routes::health::health_handler),
+        );
+    }
+
+    let router = app
+        .layer(CatchPanicLayer::custom(panic_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit_context_layer,
+        ))
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            request_timeout_duration(config),
+        ))
+        .layer(axum::middleware::from_fn(request_id_layer))
+        .with_state(state);
+
+    with_base_path_strip(router, config.server.base_path.clone())
 }
 
 /// Build the operator-authentication gate from `[internal_api]`
@@ -487,51 +832,57 @@ fn build_operator_auth_gate(
     let mut authenticators: Vec<Box<dyn crate::middleware::operator_auth::OperatorAuthenticator>> =
         Vec::with_capacity(internal.auth_methods.len());
     for method in &internal.auth_methods {
-        match method.as_str() {
-            "shared_secret" => {
-                let secret = internal
-                    .shared_secret
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| Error::ConfigError {
+        match method {
+            oidc_exchange_core::config::InternalAuthMethod::SharedSecret => {
+                let secret = internal.shared_secret.clone().ok_or_else(|| {
+                    Error::ConfigError {
                         detail: "shared_secret mechanism enabled but no secret is configured"
                             .to_string(),
-                    })?;
+                    }
+                })?;
                 authenticators.push(Box::new(SharedSecretAuthenticator::new(secret)));
             }
-            "operator_token" => {
-                // Validation guarantees a non-noop key-manager adapter while
-                // this mechanism is enabled; build a dedicated verification
-                // instance so token checking never contends with signing.
-                if config.key_manager.adapter == "noop" {
-                    return Err(Error::ConfigError {
-                        detail: "operator_token cannot run on the noop key manager".to_string(),
-                    }
-                    .into());
-                }
+            oidc_exchange_core::config::InternalAuthMethod::OperatorToken => {
+                // Validation guarantees a signing-capable key-manager adapter
+                // while this mechanism is enabled; build a dedicated
+                // verification instance so token checking never contends with
+                // signing.
                 let keys = build_key_manager(config)?;
                 authenticators.push(Box::new(OperatorTokenAuthenticator::new(
                     keys,
-                    config.server.issuer.clone(),
+                    config.server.issuer.as_str().to_string(),
                     internal.token_audience.clone(),
                     internal.required_claim.clone(),
                     internal.required_value.clone(),
                 )));
             }
-            "mtls" => {
+            oidc_exchange_core::config::InternalAuthMethod::Mtls => {
                 authenticators.push(Box::new(MtlsSubjectAuthenticator::new(
                     internal.mtls_subject_header().to_string(),
                 )));
             }
             other => {
                 return Err(Error::ConfigError {
-                    detail: format!("unknown internal auth mechanism: {other:?}"),
+                    detail: format!(
+                        "internal auth mechanism {:?} cannot serve the operator gate",
+                        other.as_str()
+                    ),
                 }
                 .into())
             }
         }
     }
 
+    if authenticators.is_empty() {
+        // Validated configs cannot reach this (`Config::resolve` rejects a
+        // served internal API with no mechanisms); hand-built configs get an
+        // error rather than a panic.
+        return Err(Error::ConfigError {
+            detail: "internal_api.auth_methods must be non-empty when the internal API is served"
+                .to_string(),
+        }
+        .into());
+    }
     Ok(OperatorAuthGate::new(authenticators))
 }
 
@@ -550,8 +901,28 @@ fn build_operator_auth_gate(
 /// enough. Both planes apply it identically — when
 /// `config.server.base_path` is `None` the wrapper still runs on every request
 /// but is a pure pass-through.
+/// Build the public exchange router from an already-assembled [`AppState`]:
+/// the public routes (plus the nonce route when the direct ID-token grant is
+/// enabled) behind the shared concurrency bound, access log, and address
+/// throttle, under the shared middleware stack and base-path wrapper. Never
+/// contains `/internal/*`.
 pub fn build_public_router(config: &AppConfig, state: AppState) -> Router {
-    let router = apply_shared_middleware(routes::public_routes(), config).with_state(state);
+    let mut public = routes::public_routes();
+    if config.grants.id_token {
+        public = public.merge(routes::nonce_routes());
+    }
+    let app: Router<AppState> = Router::new().merge(
+        public
+            .route_layer(axum::middleware::from_fn(public_concurrency_layer(
+                Arc::new(Semaphore::new(config.rate_limit.max_concurrent_requests)),
+            )))
+            .route_layer(axum::middleware::from_fn(access_log_layer))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::middleware::public_throttle::public_throttle_layer,
+            )),
+    );
+    let router = apply_shared_middleware(app, config, &state).with_state(state);
     with_base_path_strip(router, config.server.base_path.clone())
 }
 
@@ -573,7 +944,7 @@ pub fn build_admin_router(config: &AppConfig, state: AppState) -> Router {
         axum::routing::get(routes::health::health_handler),
     );
 
-    let router = apply_shared_middleware(app, config).with_state(state);
+    let router = apply_shared_middleware(app, config, &state).with_state(state);
     with_base_path_strip(router, config.server.base_path.clone())
 }
 
@@ -587,24 +958,25 @@ pub fn build_admin_router(config: &AppConfig, state: AppState) -> Router {
 /// per-route layers in the reverse of that list — catch-panic first
 /// (innermost, nearest the handler), then audit-context, then the timeout
 /// layer, then request-id last (outermost among them). This ordering is what
-/// makes a request-timeout response still carry the `x-request-id` header:
-/// because request-id wraps the timeout layer, its header-insertion code always
-/// runs on whatever `next.run()` produces, including the timeout layer's own
-/// manufactured `408` when the inner future is abandoned — whereas a layer
-/// *outside* request-id would have its future abandoned right along with the
-/// rest and never see the response at all. The timeout layer itself wraps
-/// audit-context and catch-panic so the bound covers them and the handler, not
-/// just the handler.
-fn apply_shared_middleware(router: Router<AppState>, config: &AppConfig) -> Router<AppState> {
+/// makes a request-timeout response still carry the `x-request-id` header.
+fn apply_shared_middleware(
+    router: Router<AppState>,
+    config: &AppConfig,
+    state: &AppState,
+) -> Router<AppState> {
     router
         .layer(CatchPanicLayer::custom(panic_handler))
-        .layer(axum::middleware::from_fn(audit_context_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit_context_layer,
+        ))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             request_timeout_duration(config),
         ))
         .layer(axum::middleware::from_fn(request_id_layer))
 }
+
 
 /// Structural assertion backing the task-04 invariant that no public router
 /// ever serves an internal route. Route sets are opaque after `with_state`, so
@@ -630,16 +1002,9 @@ fn assert_public_router_shape(_router: &Router) {
 /// before a router is ever built, so an unparseable value fails config loading closed rather
 /// than reaching this function. Reaching it here anyway (e.g. a hand-built `AppConfig` in a
 /// test that skipped `validate`) is treated as a programmer error and panics loudly instead
-/// of silently substituting [`oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT`].
+/// of silently substituting [`Duration::from_secs(30)`].
 fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
-    let secs = oidc_exchange_core::service::parse_duration_secs(&config.server.request_timeout)
-        .unwrap_or_else(|err| {
-            panic!(
-                "server.request_timeout {:?} is invalid: {err} (AppConfig::validate should \
-                     have rejected this before any router was ever built)",
-                config.server.request_timeout
-            )
-        });
+    let secs = config.server.request_timeout.as_secs();
     assert!(
         secs > 0,
         "parsed request_timeout must be non-zero, got {secs}s from {:?}",
@@ -666,26 +1031,19 @@ fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
 /// `DynamoRepository::with_stats_cache_ttl`; the core-side constants are kept
 /// aligned with the adapter's by a test in the adapters crate.
 fn stats_cache_ttl(config: &AppConfig) -> std::time::Duration {
-    let secs =
-        oidc_exchange_core::service::parse_duration_secs(&config.internal_api.stats_cache_ttl)
-            .unwrap_or_else(|err| {
-                panic!(
-                "internal_api.stats_cache_ttl {:?} is invalid: {err} (AppConfig::validate should \
-                     have rejected this before any repository was built)",
-                config.internal_api.stats_cache_ttl
-            )
-            });
+    // The typed config already parsed and bounded this at load
+    // (`InternalApiConfig::resolve`); the assertions are defence in depth for
+    // hand-built configs that skipped resolution.
+    let ttl = config.internal_api.stats_cache_ttl;
     assert!(
-        secs >= oidc_exchange_core::config::MIN_STATS_CACHE_TTL_SECS,
-        "parsed stats_cache_ttl of {secs}s is below the usable minimum of {}s",
-        oidc_exchange_core::config::MIN_STATS_CACHE_TTL_SECS
+        ttl.as_secs() >= oidc_exchange_core::config::MIN_STATS_CACHE_TTL_SECS,
+        "stats_cache_ttl of {ttl:?} is below the usable minimum"
     );
     assert!(
-        secs <= oidc_exchange_core::config::MAX_STATS_CACHE_TTL_SECS,
-        "parsed stats_cache_ttl of {secs}s exceeds the maximum of {}s",
-        oidc_exchange_core::config::MAX_STATS_CACHE_TTL_SECS
+        ttl.as_secs() <= oidc_exchange_core::config::MAX_STATS_CACHE_TTL_SECS,
+        "stats_cache_ttl of {ttl:?} exceeds the maximum"
     );
-    std::time::Duration::from_secs(secs)
+    ttl
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +1070,7 @@ async fn build_dynamo_client(
 
     let sdk_config = aws_loader.load().await;
     let client = aws_sdk_dynamodb::Client::new(&sdk_config);
-    Ok((client, dynamo_cfg.table_name.clone()))
+    Ok((client, dynamo_cfg.table_name.as_ref().to_string()))
 }
 
 async fn build_user_repository(
@@ -722,8 +1080,12 @@ async fn build_user_repository(
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name)
-                    .with_stats_cache_ttl(stats_cache_ttl(config)),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(
+                    client,
+                    table_name,
+                    config.token.refresh_reuse_retention_secs(),
+                )
+                .with_stats_cache_ttl(stats_cache_ttl(config)),
             ))
         }
         "postgres" => {
@@ -735,13 +1097,16 @@ async fn build_user_repository(
                 }
             })?;
             let pool = oidc_exchange_adapters::postgres::create_pool(
-                &pg_cfg.url,
+                pg_cfg.url.as_ref(),
                 pg_cfg.max_connections.unwrap_or(5),
                 pg_cfg.run_migrations.unwrap_or(true),
             )
             .await?;
             Ok(Box::new(
-                oidc_exchange_adapters::postgres::PostgresRepository::new(pool),
+                oidc_exchange_adapters::postgres::PostgresRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "sqlite" => {
@@ -754,9 +1119,12 @@ async fn build_user_repository(
                         "repository.adapter is 'sqlite' but [repository.sqlite] section is missing"
                             .into(),
                 })?;
-            let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
+            let pool = oidc_exchange_adapters::sqlite::create_pool(sq_cfg.path.as_ref()).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
+                oidc_exchange_adapters::sqlite::SqliteRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "" => Err(Box::new(Error::ConfigError {
@@ -776,15 +1144,20 @@ async fn build_session_repository(
     let adapter = config
         .session_repository
         .adapter
-        .as_deref()
+        .as_ref()
+        .map(|adapter| adapter.as_str())
         .unwrap_or(config.repository.adapter.as_str());
 
     match adapter {
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name)
-                    .with_stats_cache_ttl(stats_cache_ttl(config)),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(
+                    client,
+                    table_name,
+                    config.token.refresh_reuse_retention_secs(),
+                )
+                .with_stats_cache_ttl(stats_cache_ttl(config)),
             ))
         }
         "postgres" => {
@@ -796,13 +1169,16 @@ async fn build_session_repository(
                 }
             })?;
             let pool = oidc_exchange_adapters::postgres::create_pool(
-                &pg_cfg.url,
+                pg_cfg.url.as_ref(),
                 pg_cfg.max_connections.unwrap_or(5),
                 pg_cfg.run_migrations.unwrap_or(true),
             )
             .await?;
             Ok(Box::new(
-                oidc_exchange_adapters::postgres::PostgresRepository::new(pool),
+                oidc_exchange_adapters::postgres::PostgresRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "sqlite" => {
@@ -813,9 +1189,12 @@ async fn build_session_repository(
                             .into(),
                 }
             })?;
-            let pool = oidc_exchange_adapters::sqlite::create_pool(&sq_cfg.path).await?;
+            let pool = oidc_exchange_adapters::sqlite::create_pool(sq_cfg.path.as_ref()).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
+                oidc_exchange_adapters::sqlite::SqliteRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "valkey" => {
@@ -827,11 +1206,12 @@ async fn build_session_repository(
                 }
             })?;
             let client = oidc_exchange_adapters::valkey::ValkeySessionRepository::new(
-                &vk_cfg.url,
+                vk_cfg.url.as_ref(),
                 vk_cfg
                     .key_prefix
                     .clone()
                     .unwrap_or_else(|| "oidc:".to_string()),
+                config.token.refresh_reuse_retention_secs(),
             )
             .await?;
             Ok(Box::new(client))
@@ -845,8 +1225,9 @@ async fn build_session_repository(
                 }
             })?;
             let repo = oidc_exchange_adapters::lmdb::LmdbSessionRepository::new(
-                &lm_cfg.path,
+                lm_cfg.path.as_ref(),
                 lm_cfg.max_size_mb.unwrap_or(256),
+                config.token.refresh_reuse_retention_secs(),
             )?;
             Ok(Box::new(repo))
         }
@@ -878,9 +1259,9 @@ fn build_key_manager(
                     })?;
 
             let mgr = oidc_exchange_adapters::local_keys::LocalKeyManager::from_file(
-                &local_cfg.private_key_path,
-                &local_cfg.algorithm,
-                &local_cfg.kid,
+                local_cfg.private_key_path.as_ref(),
+                local_cfg.algorithm.as_str(),
+                local_cfg.kid.as_ref(),
             )?;
             Ok(Box::new(mgr))
         }
@@ -902,9 +1283,9 @@ fn build_key_manager(
 
             Ok(Box::new(oidc_exchange_adapters::kms::KmsKeyManager::new(
                 client,
-                kms_cfg.key_id.clone(),
-                kms_cfg.algorithm.clone(),
-                kms_cfg.kid.clone(),
+                kms_cfg.key_id.as_ref().to_string(),
+                kms_cfg.algorithm,
+                kms_cfg.kid.as_ref().to_string(),
             )))
         }
         "" => Err(Box::new(Error::ConfigError {
@@ -916,11 +1297,35 @@ fn build_key_manager(
     }
 }
 
+/// Select a limiter at the server construction boundary. The resulting port is
+/// retained in `AppState` for future core/router consumers.
+fn build_rate_limiter(
+    config: &AppConfig,
+) -> Result<Box<dyn RateLimiter>, Box<dyn std::error::Error>> {
+    if !config.rate_limit.enabled
+        || config.rate_limit.store == oidc_exchange_core::config::RateLimitStore::None
+    {
+        return Ok(Box::new(
+            oidc_exchange_adapters::noop::NoopRateLimiter::new(),
+        ));
+    }
+    Ok(Box::new(FixedWindowRateLimiter::new(
+        config.rate_limit.window,
+        RateLimitBudgets {
+            per_ip: config.rate_limit.per_ip,
+            per_ip_failures: config.rate_limit.per_ip_failures,
+            per_subject: config.rate_limit.per_subject,
+            per_provider: config.rate_limit.per_provider,
+        },
+        config.rate_limit.max_entries,
+    )?))
+}
+
 async fn build_audit_log(
     config: &AppConfig,
 ) -> Result<Box<dyn AuditLog>, Box<dyn std::error::Error>> {
     match config.audit.adapter.as_str() {
-        "noop" | "" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
+        "noop" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
         "stdout" | "stderr" | "auto" => {
             use oidc_exchange_adapters::stdout_audit::{OutputTarget, StdoutAuditLog};
             let target = match config.audit.adapter.as_str() {
@@ -964,7 +1369,12 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
         return Ok(Box::new(oidc_exchange_adapters::noop::NoopUserSync::new()));
     }
 
-    match config.user_sync.adapter.as_deref() {
+    match config
+        .user_sync
+        .adapter
+        .as_ref()
+        .map(|adapter| adapter.as_str())
+    {
         Some("webhook") => {
             let wh_cfg = config
                 .user_sync
@@ -976,25 +1386,16 @@ fn build_user_sync(config: &AppConfig) -> Result<Box<dyn UserSync>, Box<dyn std:
                             .into(),
                 })?;
 
-            let timeout_secs = wh_cfg
+            let timeout = wh_cfg
                 .timeout
-                .as_deref()
-                .and_then(|s| {
-                    let s = s.trim();
-                    if let Some(stripped) = s.strip_suffix('s') {
-                        stripped.parse::<u64>().ok()
-                    } else {
-                        s.parse::<u64>().ok()
-                    }
-                })
-                .unwrap_or(5);
+                .unwrap_or_else(|| std::time::Duration::from_secs(5));
             let retries = wh_cfg.effective_retries();
 
             Ok(Box::new(
                 oidc_exchange_adapters::webhook::WebhookUserSync::new(
                     wh_cfg.url.clone(),
-                    wh_cfg.secret.clone(),
-                    std::time::Duration::from_secs(timeout_secs),
+                    wh_cfg.secret.expose().to_string(),
+                    timeout,
                     retries,
                 ),
             ))
@@ -1016,7 +1417,7 @@ async fn build_providers(
 
     for (name, provider_cfg) in &config.providers {
         let provider = build_single_provider(name, provider_cfg).await?;
-        providers.insert(name.clone(), provider);
+        providers.insert(name.to_string(), provider);
     }
 
     Ok(providers)
@@ -1046,10 +1447,19 @@ async fn build_single_provider(
 
 /// Convert the generic `ProviderConfig` (with its `extra` map) into the typed
 /// `OidcProviderConfig` expected by the OIDC adapter.
+///
+/// `endpoint_origins` is validated here, at the config boundary: each entry
+/// must be a bare `https` origin (`scheme://host[:port]`, no path, query, or
+/// fragment), the list is capped, and entries are length-bounded before any
+/// parse so hostile config text never reaches an error message. The adapter
+/// re-validates defensively at construction.
 fn provider_config_to_oidc(
     name: &str,
     config: &ProviderConfig,
 ) -> Result<oidc_exchange_core::domain::provider::OidcProviderConfig, Error> {
+    use oidc_exchange_adapters::shared::origins::{
+        parse_https_origin, MAX_ENDPOINT_ORIGINS, MAX_ENDPOINT_ORIGIN_LEN_BYTES,
+    };
     use oidc_exchange_core::domain::provider::OidcProviderConfig;
 
     let get_str = |key: &str| -> Option<String> {
@@ -1060,7 +1470,7 @@ fn provider_config_to_oidc(
             .map(String::from)
     };
 
-    let issuer = get_str("issuer").ok_or_else(|| Error::ConfigError {
+    let issuer = config.issuer.clone().ok_or_else(|| Error::ConfigError {
         detail: format!("provider '{name}': missing 'issuer'"),
     })?;
 
@@ -1079,17 +1489,260 @@ fn provider_config_to_oidc(
         })
         .unwrap_or_else(|| vec!["openid".to_string()]);
 
+    // Absent means empty: a provider without `endpoint_origins` is pinned to
+    // its issuer's origin plus its explicitly configured endpoints.
+    let endpoint_origins = match config.extra.get("endpoint_origins") {
+        None => Vec::new(),
+        Some(raw) => {
+            let entries = raw.as_array().ok_or_else(|| Error::ConfigError {
+                detail: format!(
+                    "provider '{name}': 'endpoint_origins' must be an array of https origins"
+                ),
+            })?;
+            if entries.len() > MAX_ENDPOINT_ORIGINS {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "provider '{name}': more than {MAX_ENDPOINT_ORIGINS} endpoint_origins"
+                    ),
+                });
+            }
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let Some(entry) = value.as_str() else {
+                        return Err(Error::ConfigError {
+                            detail: format!(
+                                "provider '{name}': endpoint_origins[{index}] must be a string"
+                            ),
+                        });
+                    };
+                    if entry.len() > MAX_ENDPOINT_ORIGIN_LEN_BYTES {
+                        // Rejected before any parse: the message names only the
+                        // index, so the oversized entry never becomes log text.
+                        return Err(Error::ConfigError {
+                            detail: format!(
+                                "provider '{name}': endpoint_origins[{index}] exceeds \
+                                 {MAX_ENDPOINT_ORIGIN_LEN_BYTES} bytes"
+                            ),
+                        });
+                    }
+                    parse_https_origin(entry).map_err(|e| Error::ConfigError {
+                        detail: format!(
+                            "provider '{name}': invalid endpoint_origins[{index}]: {e}"
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?
+        }
+    };
+
     Ok(OidcProviderConfig {
         provider_id: name.to_string(),
         issuer,
         client_id,
-        client_secret: get_str("client_secret"),
-        jwks_uri: get_str("jwks_uri"),
-        token_endpoint: get_str("token_endpoint"),
-        revocation_endpoint: get_str("revocation_endpoint"),
+        client_secret: get_str("client_secret").map(oidc_exchange_core::secret::Secret::new),
+        jwks_uri: config.jwks_uri.clone(),
+        token_endpoint: config.token_endpoint.clone(),
+        revocation_endpoint: config.revocation_endpoint.clone(),
+        endpoint_origins,
         scopes,
         additional_params: HashMap::new(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// provider_config_to_oidc: endpoint_origins lifting and validation tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod provider_config_to_oidc_tests {
+    use super::*;
+    use oidc_exchange_core::config::{HttpsUrl, ProviderAdapter};
+
+    /// Build a minimal valid OIDC `ProviderConfig`, with optional extra keys
+    /// merged in (e.g. an `endpoint_origins` array).
+    fn oidc_provider_config(extra: Vec<(&str, toml::Value)>) -> ProviderConfig {
+        let mut map: HashMap<String, toml::Value> = HashMap::from([
+            (
+                "issuer".into(),
+                toml::Value::from("https://accounts.google.com"),
+            ),
+            ("client_id".into(), toml::Value::from("client-id")),
+            (
+                "scopes".into(),
+                toml::Value::Array(vec![toml::Value::from("openid")]),
+            ),
+        ]);
+        for (key, value) in extra {
+            map.insert(key.to_string(), value);
+        }
+        ProviderConfig {
+            provider_id: "google".to_string(),
+            adapter: ProviderAdapter::Oidc,
+            issuer: Some(
+                HttpsUrl::parse("https://accounts.google.com").expect("fixture issuer"),
+            ),
+            jwks_uri: None,
+            token_endpoint: None,
+            revocation_endpoint: None,
+            extra: map,
+        }
+    }
+
+    #[test]
+    fn absent_endpoint_origins_lifts_as_empty_and_pins_nothing_extra() {
+        let converted = provider_config_to_oidc("google", &oidc_provider_config(vec![]))
+            .expect("a minimal provider config must convert");
+
+        assert!(
+            converted.endpoint_origins.is_empty(),
+            "no declared origins must lift as an empty set, got {:?}",
+            converted.endpoint_origins
+        );
+        // The other required fields still lift.
+        assert_eq!(converted.issuer.as_str(), "https://accounts.google.com");
+        assert_eq!(converted.client_id, "client-id");
+    }
+
+    #[test]
+    fn declared_https_origins_lift_into_the_typed_config_normalized() {
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "endpoint_origins",
+                toml::Value::Array(vec![
+                    toml::Value::from("https://oauth2.googleapis.com"),
+                    toml::Value::from("https://www.googleapis.com:443"),
+                ]),
+            )]),
+        )
+        .expect("declared https origins must convert");
+
+        assert_eq!(
+            converted.endpoint_origins,
+            vec![
+                "https://oauth2.googleapis.com".to_string(),
+                // The explicit default port normalizes away during validation,
+                // so the pinned string is canonical before it reaches adapters.
+                "https://www.googleapis.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_endpoint_origin_entries_are_rejected_with_indexed_config_errors() {
+        let cases: Vec<(&str, toml::Value)> = vec![
+            (
+                "plain http scheme",
+                toml::Value::Array(vec![toml::Value::from("http://insecure.example")]),
+            ),
+            (
+                "path carried",
+                toml::Value::Array(vec![toml::Value::from("https://example.com/token")]),
+            ),
+            (
+                "query carried",
+                toml::Value::Array(vec![toml::Value::from("https://example.com/?x=1")]),
+            ),
+            (
+                "not a URL",
+                toml::Value::Array(vec![toml::Value::from("garbage")]),
+            ),
+            (
+                "non-string entry",
+                toml::Value::Array(vec![toml::Value::Integer(42)]),
+            ),
+            (
+                "over-length entry rejected before parse",
+                toml::Value::Array(vec![toml::Value::from(format!(
+                    "https://{}.example",
+                    "x".repeat(300)
+                ))]),
+            ),
+        ];
+
+        for (label, value) in cases {
+            let err = provider_config_to_oidc(
+                "google",
+                &oidc_provider_config(vec![("endpoint_origins", value)]),
+            )
+            .expect_err(&format!("{label} must be rejected at the config boundary"));
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains("endpoint_origins"),
+                        "{label}: the error names the offending field: {detail}"
+                    );
+                    assert!(
+                        detail.contains("google"),
+                        "{label}: the error names the provider: {detail}"
+                    );
+                }
+                other => panic!("{label}: expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_array_endpoint_origins_value_is_rejected() {
+        let err = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "endpoint_origins",
+                toml::Value::from("https://not-an-array.example"),
+            )]),
+        )
+        .expect_err("a scalar endpoint_origins value must be rejected");
+
+        assert!(
+            matches!(err, Error::ConfigError { .. }),
+            "expected ConfigError, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn more_than_the_cap_of_declared_origins_is_rejected() {
+        use oidc_exchange_adapters::shared::origins::MAX_ENDPOINT_ORIGINS;
+
+        let entries: Vec<toml::Value> = (0..=MAX_ENDPOINT_ORIGINS)
+            .map(|i| toml::Value::from(format!("https://host{i}.example")))
+            .collect();
+
+        let err = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![("endpoint_origins", toml::Value::Array(entries))]),
+        )
+        .expect_err("declared origins beyond MAX_ENDPOINT_ORIGINS must be rejected");
+
+        let detail = match err {
+            Error::ConfigError { detail } => detail,
+            other => panic!("expected ConfigError, got {other:?}"),
+        };
+        assert!(
+            detail.contains(&MAX_ENDPOINT_ORIGINS.to_string()),
+            "the rejection names the cap: {detail}"
+        );
+    }
+
+    #[test]
+    fn exactly_at_the_cap_is_accepted() {
+        use oidc_exchange_adapters::shared::origins::MAX_ENDPOINT_ORIGINS;
+
+        // Boundary: AT the cap is valid; only above it is a config error.
+        let entries: Vec<toml::Value> = (0..MAX_ENDPOINT_ORIGINS)
+            .map(|i| toml::Value::from(format!("https://host{i}.example")))
+            .collect();
+
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![("endpoint_origins", toml::Value::Array(entries))]),
+        )
+        .expect("exactly MAX_ENDPOINT_ORIGINS entries must be accepted");
+
+        assert_eq!(converted.endpoint_origins.len(), MAX_ENDPOINT_ORIGINS);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,7 +1763,7 @@ mod load_config_tests {
     fn lock_test_environment() -> MutexGuard<'static, ()> {
         CONFIG_TEST_ENV_LOCK
             .lock()
-            .expect("config test environment lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Restores every touched process-global variable to its prior state.
@@ -1173,6 +1826,9 @@ mod load_config_tests {
                 [server]
                 host = "0.0.0.0"
                 port = 8080
+                issuer = "https://localhost:8080"
+                role = "all"
+                request_timeout = "30s"
 
                 [registration]
                 mode = "open"
@@ -1192,7 +1848,7 @@ mod load_config_tests {
 
         // A key present only in default.toml survives the overlay...
         assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(config.registration.mode, "open");
+        assert_eq!(config.registration.mode.as_str(), "open");
         // ...while a key set in both takes the overlay's value.
         assert_eq!(config.server.port, 9090);
     }
@@ -1206,10 +1862,32 @@ mod load_config_tests {
             "default",
             r#"
                 [server]
+                host = "0.0.0.0"
                 port = 8080
+                issuer = "https://localhost:8080"
+                role = "all"
+                request_timeout = "30s"
+
+                [registration]
+                mode = "open"
+
+                [token]
+                access_token_ttl = "15m"
+                refresh_token_ttl = "30d"
+                audience = "oidc-exchange"
+
+                [audit]
+                adapter = "noop"
+                blocking_threshold = "warning"
+                emit_threshold = "info"
+
+                [telemetry]
+                enabled = false
+                exporter = "none"
 
                 [providers.google]
                 adapter = "oidc"
+                issuer = "https://accounts.google.example.com"
                 client_id = "default-client"
             "#,
         );
@@ -1225,7 +1903,11 @@ mod load_config_tests {
 
         assert_eq!(config.server.port, 9999);
         let google = config.providers.get("google").expect("google provider");
-        assert_eq!(google.adapter, "oidc", "unrelated fields survive the merge");
+        assert_eq!(
+            google.adapter.as_str(),
+            "oidc",
+            "unrelated fields survive the merge"
+        );
         assert_eq!(
             google.extra.get("client_id").and_then(|v| v.as_str()),
             Some("overridden-client")
@@ -1242,6 +1924,7 @@ mod load_config_tests {
             r#"
                 [providers.my_idp]
                 adapter = "oidc"
+                issuer = "https://idp.example.com"
                 client_id = "a"
             "#,
         );
@@ -1271,7 +1954,8 @@ mod load_config_tests {
         // No files written at all, and no OIDC_EXCHANGE_ENV set.
 
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
-        let defaults = AppConfig::default();
+        let defaults =
+            parse_config(include_str!("../../../config/default.toml")).expect("default config");
 
         assert_eq!(config.server.host, defaults.server.host);
         assert_eq!(config.server.port, defaults.server.port);
@@ -1324,6 +2008,9 @@ mod load_config_tests {
                 [server]
                 host = "0.0.0.0"
                 port = 8080
+                issuer = "https://localhost:8080"
+                role = "all"
+                request_timeout = "30s"
 
                 [registration]
                 mode = "open"
@@ -1345,7 +2032,7 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         // Untouched by either overlay or env var — the compiled default TOML value.
-        assert_eq!(config.registration.mode, "open");
+        assert_eq!(config.registration.mode.as_str(), "open");
         // Set by the env overlay TOML, not present in the env var.
         assert_eq!(config.server.port, 9090);
         // Set by the OIDC_EXCHANGE__ env var, on top of the overlay and default.
@@ -1373,11 +2060,19 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|s| s.expose().as_str()),
             Some("super-secret-value")
         );
         assert_ne!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|s| s.expose().as_str()),
             Some("${INTERNAL_API_SECRET}"),
             "the literal placeholder must never survive resolution"
         );
@@ -1426,11 +2121,19 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|s| s.expose().as_str()),
             Some("${LITERAL_NOT_A_VAR}")
         );
         assert_ne!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|s| s.expose().as_str()),
             Some("$${LITERAL_NOT_A_VAR}"),
             "the escape's leading '$$' must be collapsed to a single '$'"
         );
@@ -1452,7 +2155,7 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
 
         assert_eq!(config.server.host, "plain-value.example.com");
-        assert_eq!(config.server.port, AppConfig::default().server.port);
+        assert_eq!(config.server.port, 8080);
     }
 
     #[test]
@@ -1465,6 +2168,7 @@ mod load_config_tests {
             r#"
                 [providers.google]
                 adapter = "oidc"
+                issuer = "https://accounts.google.example.com"
                 client_secret = "${GOOGLE_CLIENT_SECRET}"
             "#,
         );
@@ -1476,7 +2180,7 @@ mod load_config_tests {
             .providers
             .get("google")
             .expect("google provider present");
-        assert_eq!(google.adapter, "oidc");
+        assert_eq!(google.adapter.as_str(), "oidc");
         assert_eq!(
             google.extra.get("client_secret").and_then(|v| v.as_str()),
             Some("nested-secret")
@@ -1509,29 +2213,47 @@ mod load_config_tests {
             "the error must name the unset variable, got: {err}"
         );
 
-        // Replace the unset placeholder with the escape form and reload —
-        // the set variable still resolves, the escape becomes a literal, and
-        // the singular `auth_method` key (kept for pre-hardening configs)
-        // reads back as a one-element `auth_methods` list.
+        // Replace the unset placeholder with a valid auth method and reload —
+        // the set variable still resolves, and the singular `auth_method` key
+        // (kept for pre-hardening configs) reads back as a one-element
+        // `auth_methods` list.
         write_toml(
             dir.path(),
             "default",
             r#"
                 [internal_api]
                 shared_secret = "${SET_VAR}"
-                auth_method = "$${LITERAL}"
+                auth_method = "shared_secret"
             "#,
         );
         let config = load_config_from_dir(dir_str(dir.path())).expect("load config");
         assert_eq!(
-            config.internal_api.shared_secret.as_deref(),
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|s| s.expose().as_str()),
             Some("resolved-value")
         );
         assert_eq!(
             config.internal_api.auth_methods,
-            vec!["${LITERAL}".to_string()],
+            vec![oidc_exchange_core::config::InternalAuthMethod::SharedSecret],
             "the singular auth_method key must read as a one-element list"
         );
+    }
+
+    #[test]
+    fn rate_limit_budget_errors_name_the_offending_field() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            "[rate_limit]\nper_subject = 1000001\n",
+        );
+
+        let err = load_config_from_dir(dir_str(dir.path())).expect_err("invalid budget rejected");
+        assert!(err.to_string().contains("rate_limit.per_subject"));
     }
 
     // -----------------------------------------------------------------
@@ -1589,10 +2311,14 @@ mod load_config_tests {
         let config = load_config_from_dir(dir_str(dir.path()))
             .expect("a well-formed config must load and validate successfully");
 
-        assert_eq!(config.server.role, "exchange");
+        assert_eq!(config.server.role.as_str(), "exchange");
         assert_eq!(
-            config.registration.domain_allowlist,
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            config
+                .registration
+                .domain_allowlist
+                .as_ref()
+                .map(|patterns| patterns.iter().map(AsRef::as_ref).collect::<Vec<_>>()),
+            Some(vec!["example.com", "*.example.org"])
         );
     }
 
@@ -1632,7 +2358,150 @@ mod load_config_tests {
 
         let config = parse_config(toml_str).expect("a well-formed config must parse and validate");
 
-        assert_eq!(config.server.role, "all");
+        assert_eq!(config.server.role.as_str(), "all");
+    }
+
+    #[test]
+    fn check_config_file_uses_the_side_effect_free_resolver() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("deployment.toml");
+        std::fs::write(&path, include_str!("../../../config/default.toml")).expect("write config");
+
+        let config = check_config_file(&path).expect("config check should resolve valid TOML");
+
+        assert_eq!(config.server.role.as_str(), "exchange");
+    }
+
+    #[test]
+    fn check_config_file_rejects_the_same_invalid_closed_domain() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("deployment.toml");
+        std::fs::write(&path, "[server]\nrole = \"not-a-role\"\n").expect("write config");
+
+        let err = check_config_file(&path).expect_err("invalid role must fail closed");
+
+        assert!(err.to_string().contains("server.role"));
+    }
+
+    #[test]
+    fn check_config_file_rejects_non_file_paths_without_fallback() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let err = check_config_file(dir.path()).expect_err("directories are not config files");
+
+        assert!(err.to_string().contains("config error"));
+        assert!(err.to_string().contains("not a readable file"));
+    }
+
+    #[test]
+    fn check_config_file_ignores_cwd_overlays_and_environment_overrides() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("deployment.toml");
+        std::fs::write(&path, "[server]\nrole = \"exchange\"\n").expect("write config");
+        let old_cwd = std::env::current_dir().expect("current directory");
+        let cwd = tempfile::tempdir().expect("cwd temp dir");
+        std::fs::create_dir(cwd.path().join("config")).expect("create config directory");
+        std::fs::write(
+            cwd.path().join("config/default.toml"),
+            "[server]\nrole = \"admin\"\n",
+        )
+        .expect("write cwd default");
+        std::env::set_current_dir(cwd.path()).expect("change cwd");
+        std::env::set_var("OIDC_EXCHANGE__SERVER__ROLE", "admin");
+
+        let config = check_config_file(&path).expect("explicit config must resolve");
+
+        std::env::remove_var("OIDC_EXCHANGE__SERVER__ROLE");
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
+        assert_eq!(config.server.role.as_str(), "exchange");
+    }
+
+    #[test]
+    fn checked_config_rendering_redacts_secrets() {
+        let _env_lock = lock_test_environment();
+        let config = parse_config(
+            "[internal_api]\nenabled = true\nauth_method = \"shared_secret\"\nshared_secret = \"do-not-print-me-0123456789abcdef\"\n",
+        )
+        .expect("config should resolve");
+
+        let rendered = render_checked_config(&config);
+
+        assert!(!rendered.contains("do-not-print-me-0123456789abcdef"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn parse_config_resolves_placeholders_for_ffi_callers() {
+        let _env_lock = lock_test_environment();
+        let _guard =
+            EnvVarGuard::set(&[("INTERNAL_API_SECRET", "ffi-secret-0123456789abcdef012345")]);
+        let config = parse_config(
+            r#"
+                [server]
+                role = "all"
+                [internal_api]
+                enabled = true
+                auth_method = "shared_secret"
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        )
+        .expect("FFI TOML placeholders must resolve before validation");
+
+        assert_eq!(
+            config
+                .internal_api
+                .shared_secret
+                .as_ref()
+                .map(|secret| secret.expose().as_str()),
+            Some("ffi-secret-0123456789abcdef012345")
+        );
+    }
+
+    #[test]
+    fn parse_config_applies_structural_environment_overrides_for_ffi_callers() {
+        let _env_lock = lock_test_environment();
+        let _guard =
+            EnvVarGuard::set(&[("OIDC_EXCHANGE__REGISTRATION__MODE", "existing_users_only")]);
+        let config = parse_config("[server]\nrole = \"all\"")
+            .expect("FFI TOML must receive structural environment overrides");
+
+        assert_eq!(config.registration.mode.as_str(), "existing_users_only");
+    }
+
+    #[test]
+    fn parse_config_rejects_empty_placeholder_values_with_a_path() {
+        let _env_lock = lock_test_environment();
+        let _guard = EnvVarGuard::set(&[("INTERNAL_API_SECRET", "")]);
+        let err = parse_config(
+            r#"
+                [server]
+                role = "all"
+                [internal_api]
+                enabled = true
+                shared_secret = "${INTERNAL_API_SECRET}"
+            "#,
+        )
+        .expect_err("empty placeholder values must fail closed");
+        let message = err.to_string();
+        assert!(message.contains("empty environment variable 'INTERNAL_API_SECRET'"));
+        assert!(message.contains("internal_api.shared_secret"));
+        assert!(!message.contains("ffi-secret"));
+    }
+
+    #[test]
+    fn parse_config_rejects_malformed_and_empty_placeholders() {
+        let _env_lock = lock_test_environment();
+        for placeholder in ["${", "${}"] {
+            let err = parse_config(&format!(
+                "[server]\nrole = \"all\"\n[internal_api]\nenabled = true\nshared_secret = \"{placeholder}\""
+            ))
+            .expect_err("malformed placeholders must fail closed");
+            assert!(err.to_string().contains("internal_api.shared_secret"));
+        }
     }
 }
 
@@ -1656,6 +2525,37 @@ mod build_router_tests {
 
     const TEST_SECRET: &str = "test-internal-secret-build-router";
 
+    fn router_config(role: &str, internal_enabled: bool, shared_secret: Option<&str>) -> AppConfig {
+        let secret = shared_secret
+            .map(|value| format!("auth_method = \"shared_secret\"\nshared_secret = {value:?}"))
+            .unwrap_or_default();
+        resolve_config_toml(&format!(
+            r#"[server]
+host = "0.0.0.0"
+port = 8080
+issuer = "https://localhost:8080"
+role = {role:?}
+request_timeout = "30s"
+[registration]
+mode = "open"
+[token]
+access_token_ttl = "15m"
+refresh_token_ttl = "30d"
+audience = "oidc-exchange"
+[audit]
+adapter = "noop"
+blocking_threshold = "warning"
+emit_threshold = "info"
+[telemetry]
+enabled = false
+exporter = "none"
+[internal_api]
+enabled = {internal_enabled}
+{secret}
+"#,
+        ))
+        .expect("test config should resolve")
+    }
     /// Build an `AppService` backed entirely by in-memory mocks, matching
     /// the given `AppConfig`.
     fn build_test_service(config: &AppConfig) -> AppService {
@@ -1700,10 +2600,7 @@ mod build_router_tests {
     /// router at all — not even an empty one.
     #[tokio::test]
     async fn enabled_true_admin_mounts_internal_behind_bearer_auth() {
-        let mut config = AppConfig::default();
-        config.server.role = "admin".to_string();
-        config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let config = router_config("admin", true, Some(TEST_SECRET));
         let service = build_test_service(&config);
 
         let (public, admin) = build_planes(&config, service);
@@ -1737,10 +2634,7 @@ mod build_router_tests {
     /// the property the listener split exists to provide.
     #[tokio::test]
     async fn enabled_true_all_binds_two_disjoint_routers() {
-        let mut config = AppConfig::default();
-        config.server.role = "all".to_string();
-        config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        let config = router_config("all", true, Some(TEST_SECRET));
         let service = build_test_service(&config);
 
         let (public, admin) = build_planes(&config, service);
@@ -1779,9 +2673,7 @@ mod build_router_tests {
     /// not error and the instance stays observable.
     #[tokio::test]
     async fn enabled_false_admin_serves_only_health_no_internal_routes() {
-        let mut config = AppConfig::default();
-        config.server.role = "admin".to_string();
-        config.internal_api.enabled = false;
+        let config = router_config("admin", false, None);
         let service = build_test_service(&config);
 
         let (public, admin) = build_planes(&config, service);
@@ -1804,9 +2696,7 @@ mod build_router_tests {
     /// public routes and `/health`, but no `/internal/*` route anywhere.
     #[tokio::test]
     async fn enabled_false_all_serves_public_and_health_no_internal_routes() {
-        let mut config = AppConfig::default();
-        config.server.role = "all".to_string();
-        config.internal_api.enabled = false;
+        let config = router_config("all", false, None);
         let service = build_test_service(&config);
 
         let (public, admin) = build_planes(&config, service);
@@ -1839,14 +2729,40 @@ mod build_router_tests {
     /// plane are both explicit, deliberate acts.
     #[tokio::test]
     async fn default_role_serves_exchange_routes_only_despite_enabled_internal_api() {
-        let mut config = AppConfig::default();
+        // No `role` key at all: the absent-role default must resolve to the
+        // exchange-only plane.
+        let config = resolve_config_toml(&format!(
+            r#"[server]
+host = "0.0.0.0"
+port = 8080
+issuer = "https://localhost:8080"
+request_timeout = "30s"
+[registration]
+mode = "open"
+[token]
+access_token_ttl = "15m"
+refresh_token_ttl = "30d"
+audience = "oidc-exchange"
+[audit]
+adapter = "noop"
+blocking_threshold = "warning"
+emit_threshold = "info"
+[key_manager]
+adapter = "local"
+[repository]
+adapter = "sqlite"
+[internal_api]
+enabled = true
+auth_method = "shared_secret"
+shared_secret = {TEST_SECRET:?}
+"#
+        ))
+        .expect("absent-role config resolves");
         assert_eq!(
             config.server.role,
-            oidc_exchange_core::config::DEFAULT_SERVER_ROLE,
+            oidc_exchange_core::config::ServerRole::Exchange,
             "the test is only meaningful for the absent-role default"
         );
-        config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
         let service = build_test_service(&config);
 
         let (public, admin) = build_planes(&config, service);
@@ -1877,10 +2793,12 @@ mod build_router_tests {
     /// `AppConfig::validate`, which rejects the same config at load.
     #[tokio::test]
     async fn empty_shared_secret_fails_router_build() {
-        let mut config = AppConfig::default();
-        config.server.role = "admin".to_string();
+        let mut config = AppConfig::test_default();
+        config.server.role = oidc_exchange_core::config::ServerRole::Admin;
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(String::new());
+        config.internal_api.auth_methods =
+            vec![oidc_exchange_core::config::InternalAuthMethod::SharedSecret];
+        config.internal_api.shared_secret = None;
         let service = build_test_service(&config);
 
         let outcome = build_routers(&config, service);
@@ -1901,10 +2819,12 @@ mod build_router_tests {
     /// been handed back).
     #[tokio::test]
     async fn single_plane_selection_follows_the_runtime_rule() {
-        let mut config = AppConfig::default();
-        config.server.role = "all".to_string();
+        let mut config = AppConfig::test_default();
+        config.server.role = oidc_exchange_core::config::ServerRole::All;
         config.internal_api.enabled = true;
-        config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+        config.internal_api.auth_methods =
+            vec![oidc_exchange_core::config::InternalAuthMethod::SharedSecret];
+        config.internal_api.shared_secret = Some(oidc_exchange_core::Secret::new(TEST_SECRET.to_string()));
         let all = build_routers(&config, build_test_service(&config))
             .expect("test configs always build routers");
         assert!(all.public.is_some() && all.admin.is_some());
@@ -1924,13 +2844,13 @@ mod build_router_tests {
              superset would 200/401 here instead of 404"
         );
 
-        config.server.role = "exchange".to_string();
+        config.server.role = oidc_exchange_core::config::ServerRole::Exchange;
         let exchange = build_routers(&config, build_test_service(&config))
             .expect("test configs always build routers");
         assert!(exchange.admin.is_none());
         assert!(exchange.single_plane().is_some());
 
-        config.server.role = "admin".to_string();
+        config.server.role = oidc_exchange_core::config::ServerRole::Admin;
         let admin = build_routers(&config, build_test_service(&config))
             .expect("test configs always build routers");
         assert!(
@@ -1965,23 +2885,20 @@ mod request_timeout_tests {
     /// seconds — the value `06-configuration.md`'s Defaults summary documents.
     #[test]
     fn request_timeout_duration_resolves_documented_default() {
-        let config = AppConfig::default();
+        let config =
+            resolve_config_toml(include_str!("../../../config/default.toml")).expect("default config");
 
         let duration = request_timeout_duration(&config);
 
         assert_eq!(duration, Duration::from_secs(30));
-        assert_eq!(
-            config.server.request_timeout,
-            oidc_exchange_core::config::DEFAULT_REQUEST_TIMEOUT
-        );
+        assert_eq!(config.server.request_timeout, Duration::from_secs(30));
     }
 
     /// An overridden `server.request_timeout` parses to the matching `Duration`, not just
     /// the default.
     #[test]
     fn request_timeout_duration_resolves_configured_override() {
-        let mut config = AppConfig::default();
-        config.server.request_timeout = "2m".to_string();
+        let config = resolve_config_toml("[server]\nhost = \"0.0.0.0\"\nport = 8080\nissuer = \"https://localhost:8080\"\nrole = \"all\"\nrequest_timeout = \"2m\"\n[registration]\nmode = \"open\"\n[token]\naccess_token_ttl = \"15m\"\nrefresh_token_ttl = \"30d\"\naudience = \"oidc-exchange\"\n[audit]\nadapter = \"noop\"\nblocking_threshold = \"warning\"\nemit_threshold = \"info\"\n[telemetry]\nenabled = false\nexporter = \"none\"").expect("configured config");
 
         let duration = request_timeout_duration(&config);
 
@@ -1994,16 +2911,13 @@ mod request_timeout_tests {
     /// with a bad value is a programmer error that must fail loudly.
     #[test]
     fn request_timeout_duration_panics_on_unparseable_value() {
-        let mut config = AppConfig::default();
-        config.server.request_timeout = "not-a-duration".to_string();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            request_timeout_duration(&config)
-        }));
-
+        let result = resolve_config_toml(&format!(
+            "{}\n[server]\nrequest_timeout = \"not-a-duration\"",
+            include_str!("../../../config/default.toml")
+        ));
         assert!(
             result.is_err(),
-            "an unparseable request_timeout must panic, not silently default"
+            "an unparseable request_timeout must be rejected during config resolution"
         );
     }
 
@@ -2013,17 +2927,13 @@ mod request_timeout_tests {
     /// `TimeoutLayer`.
     #[test]
     fn request_timeout_duration_panics_on_zero_seconds() {
-        let mut config = AppConfig::default();
-        config.server.request_timeout = "0s".to_string();
-
+        let config = resolve_config_toml("[server]\nhost = \"0.0.0.0\"\nport = 8080\nissuer = \"https://localhost:8080\"\nrole = \"all\"\nrequest_timeout = \"0s\"\n[registration]\nmode = \"open\"\n[token]\naccess_token_ttl = \"15m\"\nrefresh_token_ttl = \"30d\"\naudience = \"oidc-exchange\"\n[audit]\nadapter = \"noop\"\nblocking_threshold = \"warning\"\nemit_threshold = \"info\"\n[telemetry]\nenabled = false\nexporter = \"none\"").expect("zero timeout config");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             request_timeout_duration(&config)
         }));
-
         assert!(
             result.is_err(),
-            "a zero-second request_timeout must panic rather than build a degenerate timeout \
-             layer"
+            "a zero-second request_timeout must panic rather than build a degenerate timeout layer"
         );
     }
 
@@ -2047,7 +2957,9 @@ mod request_timeout_tests {
             .route("/fast", get(fast_handler))
             .route("/slow", get(slow_handler))
             .layer(CatchPanicLayer::custom(panic_handler))
-            .layer(axum::middleware::from_fn(audit_context_layer))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::audit_context::ffi_audit_context_layer,
+            ))
             .layer(TimeoutLayer::with_status_code(
                 StatusCode::REQUEST_TIMEOUT,
                 timeout,
@@ -2107,12 +3019,12 @@ mod stats_cache_ttl_tests {
     /// explicit override parses to its own duration.
     #[test]
     fn stats_cache_ttl_resolves_default_and_override() {
-        let config = AppConfig::default();
-        assert_eq!(config.internal_api.stats_cache_ttl, "60s");
+        let config = AppConfig::test_default();
+        assert_eq!(config.internal_api.stats_cache_ttl.as_secs(), 60);
         assert_eq!(stats_cache_ttl(&config), std::time::Duration::from_secs(60));
 
-        let mut config = AppConfig::default();
-        config.internal_api.stats_cache_ttl = "2m".to_string();
+        let mut config = AppConfig::test_default();
+        config.internal_api.stats_cache_ttl = std::time::Duration::from_secs(120);
         assert_eq!(
             stats_cache_ttl(&config),
             std::time::Duration::from_secs(120)
@@ -2124,9 +3036,9 @@ mod stats_cache_ttl_tests {
     /// `AppConfig::validate` is expected to have rejected these at load.
     #[test]
     fn stats_cache_ttl_panics_on_values_validation_should_have_rejected() {
-        for bad in ["0s", "3601s", "not-a-duration"] {
-            let mut config = AppConfig::default();
-            config.internal_api.stats_cache_ttl = bad.to_string();
+        for bad in [std::time::Duration::ZERO, std::time::Duration::from_secs(3601)] {
+            let mut config = AppConfig::test_default();
+            config.internal_api.stats_cache_ttl = bad;
 
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stats_cache_ttl(&config)));
@@ -2149,22 +3061,20 @@ mod stats_cache_ttl_tests {
 mod postgres_bootstrap_tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use oidc_exchange_core::config::PostgresConfig;
     use oidc_exchange_core::domain::{NewUser, Session};
+    use oidc_exchange_core::Secret;
     use uuid::Uuid;
 
     /// An `AppConfig` whose user repository (and, since `session_repository.adapter` is
     /// left unset, the session repository via its documented fallback) both target
     /// Postgres at `url`, with `run_migrations` left as given.
     fn postgres_config(url: &str, run_migrations: Option<bool>) -> AppConfig {
-        let mut config = AppConfig::default();
-        config.repository.adapter = "postgres".to_string();
-        config.repository.postgres = Some(PostgresConfig {
-            url: url.to_string(),
-            max_connections: None,
-            run_migrations,
-        });
-        config
+        resolve_config_toml(&format!(
+            "{}\n[repository]\nadapter = \"postgres\"\n[repository.postgres]\nurl = {url:?}\nrun_migrations = {}",
+            include_str!("../../../config/default.toml"),
+            run_migrations.map(|value| value.to_string()).unwrap_or_else(|| "false".to_string()),
+        ))
+        .expect("postgres test config should resolve")
     }
 
     /// Gated on `DATABASE_URL` (skips cleanly, not a failure, when unset, so
@@ -2232,9 +3142,12 @@ mod postgres_bootstrap_tests {
         let refresh_token_hash = format!("bootstrap-test-hash-{}", Uuid::new_v4());
         let session = Session {
             user_id: created.id.clone(),
-            refresh_token_hash: refresh_token_hash.clone(),
+            refresh_token_hash: Secret::new(refresh_token_hash.clone()),
+            family_id: oidc_exchange_core::domain::new_family_id(),
+            generation: 0,
             provider: "bootstrap-test".to_string(),
             expires_at: now + Duration::hours(1),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,
@@ -2244,7 +3157,7 @@ mod postgres_bootstrap_tests {
             "store_refresh_token must succeed once bootstrap has migrated the session pool",
         );
         let fetched_session = session_repo
-            .get_session_by_refresh_token(&refresh_token_hash)
+            .get_session_by_refresh_token(&Secret::new(refresh_token_hash.clone()))
             .await
             .expect("get_session_by_refresh_token")
             .expect(
@@ -2255,8 +3168,8 @@ mod postgres_bootstrap_tests {
             fetched_session.user_id, created.id,
             "round-tripped session user_id must match"
         );
-        assert_eq!(
-            fetched_session.refresh_token_hash, refresh_token_hash,
+        assert!(
+            fetched_session.refresh_token_hash == Secret::new(refresh_token_hash),
             "round-tripped session refresh_token_hash must match"
         );
     }

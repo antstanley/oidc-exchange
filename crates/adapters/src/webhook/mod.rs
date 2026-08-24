@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
+use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::domain::User;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::UserSync;
@@ -33,14 +34,14 @@ fn backoff_delay(attempt: u32) -> std::time::Duration {
 
 /// Sends user lifecycle events as webhook HTTP POST requests with HMAC-SHA256 signatures.
 pub struct WebhookUserSync {
-    url: String,
+    url: HttpsUrl,
     secret: String,
     retries: u32,
     client: reqwest::Client,
 }
 
 impl WebhookUserSync {
-    pub fn new(url: String, secret: String, timeout: std::time::Duration, retries: u32) -> Self {
+    pub fn new(url: HttpsUrl, secret: String, timeout: std::time::Duration, retries: u32) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -55,11 +56,28 @@ impl WebhookUserSync {
         }
     }
 
-    /// Build payload JSON, sign it, and POST with retries.
+    /// Build payload JSON, sign the delivery, and POST with retries.
+    ///
+    /// All delivery identity material — the RFC3339 timestamp, the ULID
+    /// delivery id, and the signature over all three inputs — is minted ONCE,
+    /// before the retry loop. Every attempt in a retry burst is byte-identical
+    /// in body and delivery-authentication headers, so a receiver that saw one
+    /// attempt has seen everything that defines the delivery; a repeated id is
+    /// unambiguously a retry of the same occasion, never a new one.
     async fn send_webhook(&self, event_name: &str, data: serde_json::Value) -> Result<()> {
+        let sent_at = chrono::Utc::now().to_rfc3339();
+        let delivery_id = ulid::Ulid::new().to_string();
+
+        assert!(
+            !sent_at.is_empty() && !delivery_id.is_empty(),
+            "delivery identity material must be minted before signing"
+        );
+
         let payload = serde_json::json!({
             "event": event_name,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
+            // The in-body timestamp remains for receivers written against the
+            // previous contract; it records the same single delivery occasion.
+            "timestamp": sent_at,
             "data": data,
         });
 
@@ -67,7 +85,7 @@ impl WebhookUserSync {
             detail: format!("failed to serialize webhook payload: {e}"),
         })?;
 
-        let signature = compute_hmac_hex(&self.secret, &body);
+        let signature = compute_delivery_signature(&self.secret, &sent_at, &delivery_id, &body);
 
         let mut last_err = None;
         for attempt in 0..=self.retries {
@@ -78,8 +96,12 @@ impl WebhookUserSync {
 
             match self
                 .client
-                .post(&self.url)
+                .post(self.url.as_str())
                 .header("Content-Type", "application/json")
+                // The three delivery headers travel on every attempt, with the
+                // values minted once above.
+                .header("X-Webhook-Timestamp", &sent_at)
+                .header("X-Webhook-Delivery-Id", &delivery_id)
                 .header("X-Signature-256", &signature)
                 .body(body.clone())
                 .send()
@@ -121,12 +143,29 @@ impl WebhookUserSync {
     }
 }
 
-fn compute_hmac_hex(secret: &str, body: &[u8]) -> String {
+/// Compute the `X-Signature-256` value for one webhook delivery.
+///
+/// The MAC covers `<timestamp> "." <delivery-id> "." <raw body>` under the
+/// configured secret, hex-encoded and prefixed with `sha256=`. The dot
+/// separators make the signed input unambiguous (a body cannot splice itself
+/// across field boundaries), and binding the timestamp plus delivery id means a
+/// captured `(body, signature)` pair from one delivery is worthless for another:
+/// origin authenticity alone was replayable forever.
+fn compute_delivery_signature(
+    secret: &str,
+    timestamp: &str,
+    delivery_id: &str,
+    body: &[u8],
+) -> String {
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(delivery_id.as_bytes());
+    mac.update(b".");
     mac.update(body);
     let result = mac.finalize();
-    hex::encode(result.into_bytes())
+    format!("sha256={}", hex::encode(result.into_bytes()))
 }
 
 #[async_trait]
@@ -158,6 +197,7 @@ impl UserSync for WebhookUserSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oidc_exchange_core::config::HttpsUrl;
     use std::collections::HashMap;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -211,9 +251,6 @@ mod tests {
         let server = MockServer::start().await;
         let secret = "test-secret-key";
 
-        // We need a custom matcher to verify HMAC
-        // For simplicity, we set up the mock to accept any valid request and then
-        // verify the signature on the captured request.
         Mock::given(method("POST"))
             .and(path("/"))
             .and(header("Content-Type", "application/json"))
@@ -223,7 +260,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             secret.to_string(),
             std::time::Duration::from_secs(5),
             2,
@@ -240,7 +277,7 @@ mod tests {
 
         let req = &requests[0];
 
-        // Verify the signature header is present and correct
+        // All three delivery headers must travel together.
         let sig_header = req
             .headers
             .get("X-Signature-256")
@@ -248,18 +285,225 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
+        let ts_header = req
+            .headers
+            .get("X-Webhook-Timestamp")
+            .expect("X-Webhook-Timestamp header should be present")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let id_header = req
+            .headers
+            .get("X-Webhook-Delivery-Id")
+            .expect("X-Webhook-Delivery-Id header should be present")
+            .to_str()
+            .unwrap()
+            .to_string();
 
-        // Recompute HMAC over the request body
-        let expected_sig = compute_hmac_hex(secret, &req.body);
-        assert_eq!(sig_header, expected_sig, "HMAC signature should match");
+        // The signature is the sha256=-prefixed MAC over
+        // timestamp "." delivery-id "." raw body.
+        let expected_sig = compute_delivery_signature(secret, &ts_header, &id_header, &req.body);
+        assert_eq!(sig_header, expected_sig, "delivery HMAC should match");
+        assert!(
+            sig_header.starts_with("sha256="),
+            "the emitted value carries the algorithm prefix: {sig_header}"
+        );
+        assert_eq!(sig_header.len(), "sha256=".len() + 64);
 
-        // Verify payload structure
+        // Verify payload structure: the in-body timestamp remains for old parsers.
         let payload: serde_json::Value =
             serde_json::from_slice(&req.body).expect("body should be valid JSON");
         assert_eq!(payload["event"], "user.created");
-        assert!(payload["timestamp"].is_string());
+        assert_eq!(
+            payload["timestamp"], ts_header,
+            "body timestamp records the same minted delivery instant"
+        );
         assert_eq!(payload["data"]["id"], "usr_test123");
         assert_eq!(payload["data"]["email"], "alice@example.com");
+    }
+
+    /// A captured old `(body, signature)` pair must not validate as a new
+    /// delivery under the documented receiver algorithm — the exact migration
+    /// hazard the receiver docs describe.
+    #[test]
+    fn body_only_signature_from_the_old_scheme_never_validates() {
+        let secret = "test-secret-key";
+        let body = br#"{"event":"user.created","timestamp":"2026-01-01T00:00:00Z"}"#;
+
+        // What the OLD sender emitted for this body (hex MAC over body only).
+        let mut old_mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("key ok");
+        old_mac.update(body);
+        let old_emitted = hex::encode(old_mac.finalize().into_bytes());
+
+        // A receiver verifying per the NEW protocol recomputes over
+        // timestamp.id.body with fresh header values.
+        let receiver_computed = compute_delivery_signature(
+            secret,
+            "2026-08-05T12:00:00+00:00",
+            "01J2ZXQEXAMPLEULID0000000",
+            body,
+        );
+
+        assert_ne!(
+            format!("sha256={old_emitted}"),
+            receiver_computed,
+            "an old captured pair must fail new-scheme verification"
+        );
+    }
+
+    #[test]
+    fn mutating_any_signed_field_invalidates_the_signature() {
+        let secret = "test-secret-key";
+        let body = br#"{"event":"user.deleted"}"#;
+        let valid =
+            compute_delivery_signature(secret, "2026-08-05T12:00:00+00:00", "01JTESTID", body);
+
+        let tampered_timestamp =
+            compute_delivery_signature(secret, "2026-08-05T13:00:00+00:00", "01JTESTID", body);
+        let tampered_id =
+            compute_delivery_signature(secret, "2026-08-05T12:00:00+00:00", "01JOTHERID", body);
+        let tampered_body =
+            compute_delivery_signature(secret, "2026-08-05T12:00:00+00:00", "01JTESTID", b"{}");
+
+        assert_ne!(valid, tampered_timestamp, "timestamp is inside the MAC");
+        assert_ne!(valid, tampered_id, "delivery id is inside the MAC");
+        assert_ne!(valid, tampered_body, "body stays inside the MAC");
+    }
+
+    #[test]
+    fn separator_positions_matter_to_the_mac() {
+        // Without the dots, ("ab", "c") and ("a", "bc") would sign identically.
+        let with_dots = compute_delivery_signature("s", "abc", "def", b"x");
+        let shifted = compute_delivery_signature("s", "abcd", "ef", b"x");
+        assert_ne!(with_dots, shifted, "separators make the input unambiguous");
+    }
+
+    #[tokio::test]
+    async fn independent_deliveries_carry_distinct_delivery_ids() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let sync = WebhookUserSync::new(
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock url"),
+            "secret".to_string(),
+            std::time::Duration::from_secs(5),
+            0,
+        );
+
+        let mut user = test_user();
+        sync.notify_user_created(&user)
+            .await
+            .expect("first delivery");
+        user.id = "usr_second456".to_string();
+        sync.notify_user_created(&user)
+            .await
+            .expect("second delivery");
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+
+        let id_of = |req: &wiremock::Request| {
+            req.headers
+                .get("X-Webhook-Delivery-Id")
+                .expect("delivery id present")
+                .to_str()
+                .expect("header is ascii")
+                .to_string()
+        };
+        let first_id = id_of(&requests[0]);
+        let second_id = id_of(&requests[1]);
+
+        assert_ne!(
+            first_id, second_id,
+            "two logical deliveries are two occasions with distinct ids"
+        );
+
+        // Sanity on id shape: ULIDs are 26 characters.
+        assert_eq!(first_id.len(), 26);
+    }
+
+    #[tokio::test]
+    async fn retry_burst_reuses_the_same_id_timestamp_and_signature() {
+        let server = MockServer::start().await;
+
+        // Serve 500 twice, then 200 — three attempts of one delivery burst.
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(2)
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let sync = WebhookUserSync::new(
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock url"),
+            "secret".to_string(),
+            std::time::Duration::from_secs(5),
+            2,
+        );
+
+        sync.notify_user_created(&test_user())
+            .await
+            .expect("burst should eventually succeed");
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3, "one initial attempt plus two retries");
+
+        let header_of = |req: &wiremock::Request, name: &str| {
+            req.headers
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} present on every attempt"))
+                .to_str()
+                .expect("header is ascii")
+                .to_string()
+        };
+
+        let ids: Vec<String> = requests
+            .iter()
+            .map(|r| header_of(r, "X-Webhook-Delivery-Id"))
+            .collect();
+        let timestamps: Vec<String> = requests
+            .iter()
+            .map(|r| header_of(r, "X-Webhook-Timestamp"))
+            .collect();
+        let signatures: Vec<String> = requests
+            .iter()
+            .map(|r| header_of(r, "X-Signature-256"))
+            .collect();
+
+        assert!(
+            ids.windows(2).all(|w| w[0] == w[1]),
+            "every attempt in a burst carries ONE delivery id: {ids:?}"
+        );
+        assert!(
+            timestamps.windows(2).all(|w| w[0] == w[1]),
+            "every attempt carries the same minted timestamp: {timestamps:?}"
+        );
+        assert!(
+            signatures.windows(2).all(|w| w[0] == w[1]),
+            "every attempt carries the one signature minted outside the loop"
+        );
+        assert!(
+            requests.windows(2).all(|w| w[0].body == w[1].body),
+            "retry attempts are byte-identical in body"
+        );
+
+        // And the shared signature verifies against the shared identity material.
+        let recomputed =
+            compute_delivery_signature("secret", &timestamps[0], &ids[0], &requests[0].body);
+        assert_eq!(signatures[0], recomputed);
     }
 
     #[tokio::test]
@@ -283,7 +527,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             "secret".to_string(),
             std::time::Duration::from_secs(5),
             2, // 1 initial + 2 retries = 3 attempts total
@@ -311,7 +555,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             "secret".to_string(),
             std::time::Duration::from_secs(5),
             2,
@@ -345,7 +589,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             "secret".to_string(),
             std::time::Duration::from_secs(5),
             2,

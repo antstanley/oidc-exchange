@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use oidc_exchange::bootstrap::{build_routers, Routers};
-use oidc_exchange_core::config::{AppConfig, DEFAULT_INTERNAL_API_HOST, DEFAULT_INTERNAL_API_PORT};
+use oidc_exchange_core::config::{DEFAULT_INTERNAL_API_HOST, DEFAULT_INTERNAL_API_PORT};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -32,11 +32,16 @@ fn build_planes(role: &str, internal_enabled: bool) -> Routers {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.server.role = role.to_string();
-    config.internal_api.enabled = internal_enabled;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    let mut raw: oidc_exchange_core::config::RawConfig =
+        toml::from_str(include_str!("../../../config/default.toml"))
+            .expect("default test config is valid");
+    raw.server.issuer = "https://auth.example.com".to_string();
+    raw.server.role = role.to_string();
+    raw.internal_api.enabled = internal_enabled;
+    raw.internal_api.auth_methods = vec!["shared_secret".to_string()];
+    raw.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    let config = oidc_exchange_core::config::Config::resolve(raw)
+        .expect("listener-matrix test config resolves");
 
     let service = AppService::new(
         Box::new(MockRepository::new()),

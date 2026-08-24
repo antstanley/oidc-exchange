@@ -10,7 +10,8 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use oidc_exchange::bootstrap::build_routers;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange::middleware::audit_context::audit_context_from_request;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -27,8 +28,10 @@ fn build_app() -> axum::Router {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw_config).expect("test config should resolve");
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -119,6 +122,22 @@ async fn apigw_v2_event_for_keys_returns_200_with_jwks() {
 /// Negative space: an API Gateway v2 event for a path no route serves returns 404 through the
 /// exact same `lambda_http` → router path — the Lambda translation must not swallow or
 /// mis-route an unknown path into a false 200.
+#[tokio::test]
+async fn lambda_platform_source_ip_wins_over_forwarding_header() {
+    let event = apigw_v2_get_event("/keys").replace(
+        "\"x-forwarded-for\": \"65.78.31.245\"",
+        "\"x-forwarded-for\": \"203.0.113.99\"",
+    );
+    let request = lambda_http::request::from_str(&event).expect("valid apigw v2 event parses");
+    let context = audit_context_from_request(&request, None, &[], 1);
+
+    assert_eq!(
+        context.ip_address().as_deref(),
+        Some("65.78.31.245"),
+        "Lambda provenance must use requestContext.http.sourceIp, not X-Forwarded-For"
+    );
+}
+
 #[tokio::test]
 async fn apigw_v2_event_for_unknown_path_returns_404() {
     let app = build_app();

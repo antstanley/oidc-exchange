@@ -12,7 +12,8 @@ Configuration is loaded and merged in the following order, with later sources ov
 1. **`config/default.toml`** --- baseline defaults shipped with the binary
 2. **`config/{OIDC_EXCHANGE_ENV}.toml`** --- environment-specific overrides. The `OIDC_EXCHANGE_ENV` environment variable selects the file (e.g., `production`, `staging`, `local`). If unset, only `default.toml` is loaded.
 3. **Environment variable overrides** --- structural overrides using double-underscore delimiters: `OIDC_EXCHANGE__{section}__{key}` (e.g., `OIDC_EXCHANGE__SERVER__PORT=9090`)
-4. **`${VAR_NAME}` placeholder resolution** --- any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time
+4. **`${VAR_NAME}` placeholder resolution** --- any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time; an unset value is a configuration error
+5. **Closed-domain resolution** --- the merged configuration is narrowed into typed values; invalid security-relevant values (including non-HTTPS issuer, provider, and webhook URLs) fail before startup
 
 Secrets (client secrets, API keys, KMS ARNs) should always use `${VAR_NAME}` placeholders and be injected via environment variables. Never hardcode secrets in TOML files.
 
@@ -27,6 +28,9 @@ host = "0.0.0.0"                       # bind address
 port = 8080                            # listen port
 issuer = "https://auth.example.com"    # issuer URL for JWTs (iss claim)
 role = "exchange"                      # "exchange" (default), "admin", or "all" — see Upgrading below
+# Trust X-Forwarded-For only from these peer CIDRs. Empty means never trust it.
+trusted_proxies = ["10.0.0.0/8"]
+trusted_proxy_hops = 1                 # select this many entries from X-Forwarded-For's right side
 
 # ─── Registration policy ──────────────────────────────────────────
 [registration]
@@ -62,13 +66,13 @@ adapter = "local"                      # "local" or "kms"
 # Local key signing — load a PEM private key from disk
 [key_manager.local]
 private_key_path = "./keys/ed25519.pem"
-algorithm = "EdDSA"                    # "EdDSA" (Ed25519) or "ES256" (P-256)
+algorithm = "EdDSA"                    # EdDSA only: the local adapter signs Ed25519 keys
 kid = "key-1"                          # key ID for JWT kid header
 
 # AWS KMS — sign with a KMS asymmetric key
 [key_manager.kms]
 key_id = "arn:aws:kms:us-east-1:123456789:key/abcd-1234"
-algorithm = "ECDSA_SHA_256"            # KMS signing algorithm (ECC_NIST_P256)
+algorithm = "ES256"                    # JWS signing algorithm (ECC_NIST_P256)
 kid = "key-2024-01"
 
 # ─── User and session storage ─────────────────────────────────────
@@ -103,11 +107,26 @@ max_size_mb = 64
 
 # ─── Audit logging ────────────────────────────────────────────────
 [audit]
-adapter = "noop"                       # "noop", "stdout", or "sqs"
-# Severity threshold for blocking. If the audit provider fails and the
-# event's severity is at or above this threshold, the operation fails.
-# Severities (RFC 5424): emergency, alert, critical, error, warning, notice, info, debug
+adapter = "stdout"                     # "noop", "stdout", or "sqs" (default: stdout)
+# Best-effort events below this severity are not dispatched. Shipped security events use
+# the mandatory channel, which no threshold suppresses.
+emit_threshold = "info"
+# Best-effort sink-failure policy threshold (RFC 5424 severities).
 blocking_threshold = "warning"
+# Mandatory security-event sink failures: "observe" logs degradation; "enforce" fails the operation.
+durability = "observe"
+
+# ─── Public-route rate limiting ───────────────────────────────────
+[rate_limit]
+enabled = true
+store = "in_process"                   # "in_process" or "none"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10                    # consumed only by authentication failures
+per_subject = 10
+per_provider = 600
+max_concurrent_requests = 256
+max_entries = 10000
 
 # SQS adapter — send audit events to an SQS queue (e.g., for Firehose → S3/Iceberg pipeline)
 [audit.sqs]
@@ -180,6 +199,10 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Extra origins Google's discovery document may name beyond accounts.google.com:
+# token/revocation endpoints on oauth2.googleapis.com, JWKS on www.googleapis.com.
+# Each entry is a bare https origin; defaults to empty (issuer's origin only).
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 
 [providers.apple]
 adapter = "apple"
@@ -220,6 +243,8 @@ client_secret = "${GOOGLE_CLIENT_SECRET}"
 
 At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`, the config value becomes that string. If the environment variable is not set, the service fails to start with a configuration error.
 
+Use `oidc-exchange config check path/to/config.toml` to run the same side-effect-free resolver used at startup. It merges the file with committed defaults but intentionally ignores environment variables and overlays, so pass a fully materialized deployment file. It reports missing deployment inputs (such as unresolved placeholders) separately from invalid value domains, and redacts secrets in its rendered output.
+
 ## Defaults
 
 | Setting | Default |
@@ -227,6 +252,7 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 | `server.host` | `0.0.0.0` |
 | `server.port` | `8080` |
 | `server.role` | `exchange` |
+| `server.issuer`, `token.audience` | `https://auth.example.com` / `https://api.example.com` (deployment placeholders; replace before production) |
 | `registration.mode` | `open` |
 | `registration.domain_allowlist` | none (all domains allowed) |
 | `token.access_token_ttl` | `15m` |
@@ -234,8 +260,14 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 | `telemetry.enabled` | `false` |
 | `telemetry.exporter` | `none` |
 | `telemetry.sample_rate` | `1.0` |
-| `audit.adapter` | `noop` |
+| `audit.adapter` | `stdout` |
+| `audit.durability` | `observe` |
+| `audit.emit_threshold` | `info` |
+| `rate_limit.enabled` / `store` / `window` | `true` / `in_process` / `1m` |
+| `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
+| `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `audit.blocking_threshold` | `warning` |
+| `providers.<name>.endpoint_origins` | none — the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
 | `internal_api.enabled` | `false` |
 | `internal_api.host` / `.port` | `127.0.0.1:8081` |
@@ -272,3 +304,13 @@ only from your operator network. An `exchange`-role process never mounts
 `/internal/*`, so a forgotten `internal_api.enabled = true` there fails closed
 instead of publishing the privilege-assignment primitive.
 
+## Trusted proxies and rate limiting
+
+The server uses the connection peer as the client address by default. It reads
+`X-Forwarded-For` only when that peer belongs to `server.trusted_proxies`; it then selects
+`trusted_proxy_hops` entries from the **right** of the comma-separated chain. This makes the
+address `forwarded`; direct peers are `peer`. A forwarding header from any other peer is
+client-asserted and is never used as a rate-limit key or authorization input.
+
+The shipped in-process limiter is per process. Use an API gateway, WAF, or other edge control
+for a global limit across replicas or Lambda execution environments.

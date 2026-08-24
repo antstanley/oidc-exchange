@@ -1,15 +1,15 @@
-//! VENDORED SEAM (task 03): the rate-limit port, modelled on sibling PR #24
-//! (`2026-08-05-audit_and_throttle_authentication_failures`, branch
-//! `spec/audit-and-throttle-auth-failures`). This branch carries it so the
-//! admin plane can throttle failed operator authentications; at merge time
-//! this file is deleted in favour of #24's identical port.
+//! The rate-limit port: bounded budgets over [`RateLimitKey`]s.
 //!
-//! One deliberate divergence from a single `check_and_consume` shape: the
-//! source spec requires that "a unit is consumed only by a failed attempt",
-//! so the auth layer must consult the budget *before* evaluating a credential
-//! without drawing it down. Expressing consult-without-consume and
-//! consume-on-failure needs the two methods below; if #24's port lands as one
-//! method, this seam's call sites adapt to it then.
+//! Two consumption shapes coexist because two planes need them:
+//!
+//! - The exchange plane throttles *requests*: every attempt draws down the
+//!   budget, so [`RateLimiter::check_and_consume`] decides and consumes in
+//!   one step.
+//! - The admin plane throttles *failed authentications only* (the source
+//!   spec requires that "a unit is consumed only by a failed attempt"), so
+//!   its callers consult [`RateLimiter::check`] before evaluating a
+//!   credential — consuming nothing — and call [`RateLimiter::consume`]
+//!   only when the attempt fails.
 
 use async_trait::async_trait;
 
@@ -19,6 +19,9 @@ use crate::error::Result;
 /// A bounded rate-limit budget over [`RateLimitKey`]s.
 #[async_trait]
 pub trait RateLimiter: Send + Sync {
+    /// Decide and consume in one step: every call draws down `key`'s budget.
+    async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision>;
+
     /// Consult whether `key` is currently locked out, consuming nothing.
     /// `Deny { retry_after_secs }` means locked out for at least that many
     /// seconds; `Allow` means the key may proceed to whatever follows the

@@ -28,7 +28,7 @@ use tower::ServiceExt;
 
 use oidc_exchange::bootstrap::build_routers;
 use oidc_exchange_adapters::local_keys::LocalKeyManager;
-use oidc_exchange_core::config::{AppConfig, LocalKeyConfig};
+use oidc_exchange_core::config::Config as AppConfig;
 use oidc_exchange_core::domain::{AuditEvent, AuditEventType, AuditOutcome};
 use oidc_exchange_core::ports::{IdentityProvider, KeyManager};
 use oidc_exchange_core::service::AppService;
@@ -44,9 +44,15 @@ const UNAUTHORIZED_AUDIT_TYPE: &str = "unauthorized";
 const THROTTLE_EXCEEDED_AUDIT_TYPE: &str = "throttle_exceeded";
 
 /// Render an outcome's fixed failure reason, if it is a failure at all.
-fn outcome_reason(outcome: &AuditOutcome) -> Option<&str> {
+fn outcome_reason(outcome: &AuditOutcome) -> Option<String> {
     match outcome {
-        AuditOutcome::Failure { reason } => Some(reason.as_str()),
+        AuditOutcome::Failure(reason) => Some(
+            serde_json::to_value(reason)
+                .expect("audit failure serializes")
+                .as_str()
+                .expect("audit failure is a string on the wire")
+                .to_string(),
+        ),
         AuditOutcome::Success => None,
     }
 }
@@ -136,14 +142,37 @@ fn mock_service(
     (service, audit, limiter)
 }
 
+fn admin_raw(auth_methods: &[&str]) -> oidc_exchange_core::config::RawConfig {
+    let mut raw: oidc_exchange_core::config::RawConfig =
+        toml::from_str(include_str!("../../../config/default.toml"))
+            .expect("default test config is valid");
+    raw.server.role = "admin".to_string();
+    raw.server.issuer = ISSUER.to_string();
+    raw.internal_api.enabled = true;
+    raw.internal_api.auth_methods = auth_methods.iter().map(|s| s.to_string()).collect();
+    raw.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    raw
+}
+
 fn admin_config(auth_methods: &[&str]) -> AppConfig {
-    let mut config = AppConfig::default();
-    config.server.role = "admin".to_string();
-    config.server.issuer = ISSUER.to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.auth_methods = auth_methods.iter().map(|s| s.to_string()).collect();
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
-    config
+    oidc_exchange_core::config::Config::resolve(admin_raw(auth_methods))
+        .expect("admin test config resolves")
+}
+
+/// An operator-token admin config over a local key manager whose signing key
+/// lives in `dir` — the key manager must be configured *before* resolve, which
+/// validates that the mechanism has a real key manager to verify against.
+fn admin_config_with_local_keys(dir: &std::path::Path) -> AppConfig {
+    let key_path = dir.join("operator-signing-key.pem");
+    std::fs::write(&key_path, TEST_SIGNING_KEY_PEM).expect("writing the test key succeeds");
+    let mut raw = admin_raw(&["operator_token"]);
+    raw.key_manager.adapter = "local".to_string();
+    raw.key_manager.local = Some(oidc_exchange_core::config::RawLocalKeyConfig {
+        private_key_path: key_path.to_string_lossy().to_string(),
+        algorithm: "EdDSA".to_string(),
+        kid: "operator-e2e-key".to_string(),
+    });
+    oidc_exchange_core::config::Config::resolve(raw).expect("operator-token config resolves")
 }
 
 async fn body_to_json(body: Body) -> serde_json::Value {
@@ -184,7 +213,7 @@ async fn missing_credential_is_rejected_and_audited_and_consumes_budget() {
     assert_eq!(event_type_str(&events[0]), UNAUTHORIZED_AUDIT_TYPE);
     assert_eq!(
         outcome_reason(&events[0].outcome),
-        Some("missing_credential")
+        Some("missing_credential".to_string())
     );
     assert!(events[0].operator.is_none());
 }
@@ -213,7 +242,7 @@ async fn wrong_secret_is_rejected_as_invalid_credential() {
     assert_eq!(events.len(), 1);
     assert_eq!(
         outcome_reason(&events[0].outcome),
-        Some("invalid_credential")
+        Some("invalid_credential".to_string())
     );
     // The rejected guess itself must not be recorded anywhere in the event.
     let rendered = format!("{:?}", events[0]);
@@ -335,7 +364,10 @@ async fn plane_with(config: &AppConfig) -> AdminPlane {
 
 #[tokio::test]
 async fn failed_auth_fails_closed_500_when_the_mandatory_audit_sink_blocks() {
-    let config = admin_config(&["shared_secret"]);
+    // Mandatory-channel durability is the governing policy: under `enforce`, a
+    // sink failure fails the request closed.
+    let mut config = admin_config(&["shared_secret"]);
+    config.audit.durability = oidc_exchange_core::config::AuditDurability::Enforce;
     let plane = plane_with(&config).await;
     // The audit sink is down. `OperatorAuthenticationFailed` warns, which
     // meets the default `blocking_threshold = "warning"`, so the event cannot
@@ -365,7 +397,7 @@ async fn failed_auth_stays_401_when_the_audit_failure_is_below_the_blocking_thre
     // On the RFC 5424 scale warning is less severe than critical, so a sink
     // failure under this threshold logs the fallback and lets the request
     // proceed to its normal outcome.
-    config.audit.blocking_threshold = "critical".to_string();
+    config.audit.blocking_threshold = oidc_exchange_core::domain::AuditSeverity::Critical;
     let plane = plane_with(&config).await;
     plane.audit.set_fail_mode(true).await;
 
@@ -383,7 +415,10 @@ async fn failed_auth_stays_401_when_the_audit_failure_is_below_the_blocking_thre
 
 #[tokio::test]
 async fn throttle_denial_fails_closed_500_when_the_mandatory_audit_sink_blocks() {
-    let config = admin_config(&["shared_secret"]);
+    // Mandatory-channel durability is the governing policy: under `enforce`, a
+    // sink failure fails the lockout response closed.
+    let mut config = admin_config(&["shared_secret"]);
+    config.audit.durability = oidc_exchange_core::config::AuditDurability::Enforce;
     let plane = plane_with(&config).await;
     plane.limiter.set_deny_mode(true).await;
     plane.audit.set_fail_mode(true).await;
@@ -406,7 +441,7 @@ async fn throttle_denial_fails_closed_500_when_the_mandatory_audit_sink_blocks()
 #[tokio::test]
 async fn throttle_denial_stays_429_when_the_audit_failure_is_below_the_blocking_threshold() {
     let mut config = admin_config(&["shared_secret"]);
-    config.audit.blocking_threshold = "critical".to_string();
+    config.audit.blocking_threshold = oidc_exchange_core::domain::AuditSeverity::Critical;
     let plane = plane_with(&config).await;
     plane.limiter.set_deny_mode(true).await;
     plane.audit.set_fail_mode(true).await;
@@ -492,7 +527,7 @@ async fn mtls_headers_change_nothing_on_the_public_plane() {
     let (service, _audit, _limiter) = mock_service(&config, providers);
 
     let mut config_all = config.clone();
-    config_all.server.role = "all".to_string();
+    config_all.server.role = oidc_exchange_core::config::ServerRole::All;
     let routers =
         build_routers(&config_all, service).expect("the all-role mtls config builds routers");
     let public = routers.public.expect("role all binds the public plane");
@@ -536,16 +571,6 @@ async fn mtls_headers_change_nothing_on_the_public_plane() {
 // Operator-token mechanism: real key manager, verified claims, named subject
 // ---------------------------------------------------------------------------
 
-fn local_key_config(dir: &std::path::Path) -> LocalKeyConfig {
-    let key_path = dir.join("operator-signing-key.pem");
-    std::fs::write(&key_path, TEST_SIGNING_KEY_PEM).expect("writing the test key succeeds");
-    LocalKeyConfig {
-        private_key_path: key_path.to_string_lossy().to_string(),
-        algorithm: "EdDSA".to_string(),
-        kid: "operator-e2e-key".to_string(),
-    }
-}
-
 fn b64(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)
 }
@@ -580,9 +605,7 @@ async fn mint_operator_token(
 #[tokio::test]
 async fn valid_operator_token_authenticates_to_its_subject() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut config = admin_config(&["operator_token"]);
-    config.key_manager.adapter = "local".to_string();
-    config.key_manager.local = Some(local_key_config(dir.path()));
+    let config = admin_config_with_local_keys(dir.path());
 
     let signing_keys =
         LocalKeyManager::from_pem(TEST_SIGNING_KEY_PEM.as_bytes(), "EdDSA", "operator-e2e-key")
@@ -630,9 +653,7 @@ async fn valid_operator_token_authenticates_to_its_subject() {
 #[tokio::test]
 async fn defective_operator_tokens_are_rejected_with_invalid_credential() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut config = admin_config(&["operator_token"]);
-    config.key_manager.adapter = "local".to_string();
-    config.key_manager.local = Some(local_key_config(dir.path()));
+    let config = admin_config_with_local_keys(dir.path());
 
     let signing_keys =
         LocalKeyManager::from_pem(TEST_SIGNING_KEY_PEM.as_bytes(), "EdDSA", "operator-e2e-key")
@@ -708,7 +729,7 @@ async fn defective_operator_tokens_are_rejected_with_invalid_credential() {
     let events = audit.events().await;
     assert_eq!(events.len(), 4, "one event per rejected attempt");
     for event in &events {
-        assert_eq!(outcome_reason(&event.outcome), Some("invalid_credential"));
+        assert_eq!(outcome_reason(&event.outcome), Some("invalid_credential".to_string()));
     }
     let rendered = format!("{events:?}");
     assert!(
@@ -731,7 +752,7 @@ async fn exchange_plane_events_retain_null_operator_attribution() {
     );
     let (service, audit, _limiter) = mock_service(&config, providers);
 
-    config.server.role = "all".to_string();
+    config.server.role = oidc_exchange_core::config::ServerRole::All;
     let routers = build_routers(&config, service).expect("the all-role config builds");
     let public = routers.public.expect("role all binds the public plane");
 

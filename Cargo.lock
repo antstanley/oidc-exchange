@@ -1695,6 +1695,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2742,7 +2748,9 @@ dependencies = [
  "chrono",
  "config",
  "futures",
+ "hex",
  "http-body-util",
+ "ipnet",
  "lambda_http",
  "oidc-exchange-adapters",
  "oidc-exchange-core",
@@ -2750,6 +2758,7 @@ dependencies = [
  "oidc-exchange-test-utils",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "tempfile",
  "tokio",
@@ -2759,6 +2768,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -2796,6 +2806,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "ulid",
  "wiremock",
 ]
@@ -2808,15 +2819,18 @@ dependencies = [
  "base64",
  "chrono",
  "hex",
+ "ipnet",
  "oidc-exchange-test-utils",
  "rand 0.10.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "subtle",
  "thiserror",
  "tokio",
  "toml",
  "tracing",
+ "trybuild",
  "ulid",
 ]
 
@@ -2865,6 +2879,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
@@ -2887,10 +2902,14 @@ dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek 3.0.0-rc.1",
+ "hex",
  "oidc-exchange-core",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "ulid",
 ]
 
@@ -3615,6 +3634,7 @@ dependencies = [
  "bytes",
  "encoding_rs",
  "futures-core",
+ "futures-util",
  "h2 0.4.15",
  "http 1.4.2",
  "http-body 1.0.1",
@@ -3637,12 +3657,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -4530,6 +4552,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "target-triple"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3a6bfce3d99adfa72d24750a61f782f3036a81e7f86d8841ee1326deaebd171"
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4540,6 +4568,15 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]
@@ -4878,6 +4915,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "trybuild"
+version = "1.0.120"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
+dependencies = [
+ "glob",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "target-triple",
+ "termcolor",
+ "toml",
+]
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5102,6 +5154,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

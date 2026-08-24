@@ -1,0 +1,8 @@
+error[E0277]: `Secret<String>` doesn't implement `std::fmt::Debug`
+ --> tests/ui/debug_format.rs:7:14
+  |
+7 |     format!("{secret:?}")
+  |              ^^^^^^^^^^ `Secret<String>` cannot be formatted using `{:?}` because it doesn't implement `std::fmt::Debug`
+  |
+  = help: the trait `std::fmt::Debug` is not implemented for `Secret<String>`
+  = note: required for `&Secret<String>` to implement `std::fmt::Debug`

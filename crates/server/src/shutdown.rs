@@ -90,10 +90,26 @@ impl ShutdownSignal {
         Self(rx)
     }
 
+    /// A signal that never fires, for hosts that have no OS-signal story —
+    /// the FFI embedder stops its session reaper by aborting the task on
+    /// drop, not by delivering SIGTERM into the host process.
+    ///
+    /// The sending half is deliberately leaked rather than dropped: dropping
+    /// the only sender *closes* a watch channel, and a closed channel resolves
+    /// every `changed()` immediately — which would silently disarm the signal
+    /// and stop the reaper on its first loop iteration.
+    pub fn never() -> Self {
+        let (tx, rx) = watch::channel(false);
+        std::mem::forget(tx);
+        Self(rx)
+    }
+
     /// Wrap an already-fired signal source (test helper) so the same racing logic used in
     /// production can be exercised against a controllable trigger instead of real OS signals.
+    /// `pub(crate)` (rather than private) so the reaper's own tests can drive a controllable
+    /// signal too; still `cfg(test)`, never compiled into production builds.
     #[cfg(test)]
-    fn from_receiver(rx: watch::Receiver<bool>) -> Self {
+    pub(crate) fn from_receiver(rx: watch::Receiver<bool>) -> Self {
         Self(rx)
     }
 
@@ -274,5 +290,29 @@ mod tests {
     async fn rejects_zero_deadline() {
         let (signal, _tx) = controllable_signal();
         let _ = run_with_drain_deadline(pending::<()>(), signal, Duration::ZERO).await;
+    }
+
+    /// [`ShutdownSignal::never`] stays unarmed for as far as the clock can
+    /// advance: its whole purpose is hosting reapers whose stop mechanism is
+    /// task abort, so an immediately-resolving signal would stop the loop on
+    /// its first iteration. This is exactly the bug dropping the sender would
+    /// cause (a closed channel resolves every waiter), asserted against both
+    /// observation paths — the raw value and `wait()`.
+    #[tokio::test(start_paused = true)]
+    async fn never_signal_stays_unarmed_indefinitely() {
+        let mut signal = ShutdownSignal::never();
+
+        // Advance paused time by a full day of timer deadlines; nothing may arm.
+        tokio::time::sleep(Duration::from_secs(24 * 60 * 60)).await;
+
+        assert!(
+            !*signal.0.borrow_and_update(),
+            "the value must still read false after a day of advanced time"
+        );
+        let raced = tokio::time::timeout(Duration::from_secs(3600), signal.clone().wait());
+        assert!(
+            raced.await.is_err(),
+            "wait() must stay pending on a never-firing signal"
+        );
     }
 }
