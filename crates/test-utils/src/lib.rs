@@ -6,14 +6,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
+use oidc_exchange_core::config::DEFAULT_REFRESH_REUSE_RETENTION;
 use oidc_exchange_core::domain::{
-    AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, SingleUseRecord, User, UserPatch,
-    UserStatus, INITIAL_USER_VERSION,
+    is_valid_family_id, AuditEvent, IdentityClaims, NewUser, ProviderTokens, RefreshResolution,
+    RetiredRefreshToken, Session, SingleUseRecord, User, UserPatch, UserStatus,
+    INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
 };
+
+pub mod session_contract;
 
 // ---------------------------------------------------------------------------
 // MockRepository
@@ -21,25 +25,37 @@ use oidc_exchange_core::ports::{
 
 struct MockRepositoryState {
     users: HashMap<String, User>,
+    /// Live session generations, keyed by refresh-token hash. At most one
+    /// generation of a family lives at any instant.
     sessions: HashMap<String, Session>,
     /// Single-use records (nonces, assertion-replay markers) keyed by their namespaced
     /// digest. Shared by every `MockRepository` clone of one instance, so claim
     /// operations are atomic exactly as against a real store.
     single_use: HashMap<String, DateTime<Utc>>,
+    /// Retired generations retained for reuse detection, keyed by the retired
+    /// hash. Written only by `rotate_refresh_token`'s atomic swap.
+    retired: HashMap<String, RetiredRefreshToken>,
 }
 
 #[derive(Clone)]
 pub struct MockRepository {
     state: Arc<Mutex<MockRepositoryState>>,
-    /// When set, `revoke_session` and `revoke_all_user_sessions` return
-    /// `Err(StoreError)` instead of mutating state — models a session store
-    /// that is unreachable, for exercising the `/revoke` 503 path.
+    /// When set, `revoke_session`, `revoke_family`, and
+    /// `revoke_all_user_sessions` return `Err(StoreError)` instead of mutating
+    /// state — models a session store that is unreachable, for exercising the
+    /// `/revoke` 503 path.
     session_fail_mode: Arc<Mutex<bool>>,
     /// When set, `get_session_by_refresh_token` returns `Err(StoreError)`
     /// instead of a lookup result — models a session store that is
     /// unreachable during the `/revoke` presence-check read, distinct from
     /// `session_fail_mode` which only fires on the mutating revoke calls.
     session_lookup_fail_mode: Arc<Mutex<bool>>,
+    /// How long a retirement record stays readable after its rotation:
+    /// `retired_at + reuse_retention_secs`, capped per record at the family's
+    /// absolute `expires_at`. Mirrors what each persistent adapter computes
+    /// from `[token] refresh_reuse_retention`; configurable so tests can pin
+    /// record expiry deterministically instead of sleeping past the default.
+    reuse_retention_secs: u64,
 }
 
 impl MockRepository {
@@ -49,10 +65,33 @@ impl MockRepository {
                 users: HashMap::new(),
                 sessions: HashMap::new(),
                 single_use: HashMap::new(),
+                retired: HashMap::new(),
             })),
             session_fail_mode: Arc::new(Mutex::new(false)),
             session_lookup_fail_mode: Arc::new(Mutex::new(false)),
+            reuse_retention_secs: Self::default_reuse_retention_secs(),
         }
+    }
+
+    /// Build a repository whose retirement records expire exactly
+    /// `reuse_retention_secs` after their rotation (still capped by the
+    /// family's absolute deadline). Must be positive: a zero-width retention
+    /// window would retire and forget a generation in the same instant,
+    /// silently disarming reuse detection.
+    pub fn with_refresh_reuse_retention_secs(reuse_retention_secs: u64) -> Self {
+        assert!(
+            reuse_retention_secs > 0,
+            "reuse retention must be greater than zero"
+        );
+        Self {
+            reuse_retention_secs,
+            ..Self::new()
+        }
+    }
+
+    fn default_reuse_retention_secs() -> u64 {
+        oidc_exchange_core::service::parse_duration_secs(DEFAULT_REFRESH_REUSE_RETENTION)
+            .expect("DEFAULT_REFRESH_REUSE_RETENTION must parse as a duration")
     }
 
     pub async fn get_all_users(&self) -> Vec<User> {
@@ -62,9 +101,42 @@ impl MockRepository {
 
     pub async fn get_all_sessions(&self) -> Vec<Session> {
         let state = self.state.lock().await;
-        state.sessions.values().cloned().collect()
+        let mut sessions: Vec<Session> = state.sessions.values().cloned().collect();
+        // Sort by hash so callers observe a deterministic order from the
+        // hash-map-backed store (assertions on collections must not depend on
+        // HashMap iteration order).
+        sessions.sort_by(|a, b| a.refresh_token_hash.cmp(&b.refresh_token_hash));
+        sessions
     }
 
+    /// Every retained retirement record, sorted by retired hash for
+    /// deterministic inspection of the reuse-detection state.
+    pub async fn get_all_retired_tokens(&self) -> Vec<RetiredRefreshToken> {
+        let state = self.state.lock().await;
+        let mut retired: Vec<RetiredRefreshToken> = state.retired.values().cloned().collect();
+        retired.sort_by(|a, b| a.refresh_token_hash.cmp(&b.refresh_token_hash));
+        retired
+    }
+
+    /// Test infrastructure: rewind one retirement record's `retired_at` by
+    /// `seconds` so a flow test can place it deterministically outside the
+    /// grace window without sleeping. Returns whether a record named by
+    /// `token_hash` existed and was rewritten; callers assert on it.
+    pub async fn backdate_retirement(&self, token_hash: &str, seconds: u64) -> bool {
+        assert!(seconds > 0, "backdating by zero seconds is a no-op bug");
+        let mut state = self.state.lock().await;
+        match state.retired.get_mut(token_hash) {
+            Some(record) => {
+                record.retired_at -= chrono::Duration::seconds(seconds as i64);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Toggle whether `revoke_session`, `revoke_family`, and
+    /// `revoke_all_user_sessions` fail with `Error::StoreError`, simulating an
+    /// unreachable session store.
     /// Observe stored single-use records (test introspection): the live record at
     /// `key`, or `None` when the key is absent. Expired records may still be physically
     /// present until a cleanup — the claim operations treat them as absent.
@@ -76,8 +148,6 @@ impl MockRepository {
         })
     }
 
-    /// Toggle whether `revoke_session` / `revoke_all_user_sessions` fail
-    /// with `Error::StoreError`, simulating an unreachable session store.
     pub async fn set_session_fail_mode(&self, fail: bool) {
         *self.session_fail_mode.lock().await = fail;
     }
@@ -236,6 +306,21 @@ impl UserRepository for MockRepository {
 #[async_trait]
 impl SessionRepository for MockRepository {
     async fn store_refresh_token(&self, session: &Session) -> Result<()> {
+        // Precondition: callers mint well-formed family ids; a malformed one
+        // here is a programmer error, not data to store silently. The
+        // empty-string sentinel is the one non-well-formed value accepted: it
+        // is how every backend represents a pre-rotation (legacy) row, and the
+        // persistent adapters must be able to hold one just like this store.
+        assert!(
+            session.family_id.is_empty() || is_valid_family_id(&session.family_id),
+            "store_refresh_token: malformed family id {:?}",
+            session.family_id
+        );
+        assert!(
+            !session.refresh_token_hash.is_empty(),
+            "store_refresh_token: refresh_token_hash must not be empty"
+        );
+
         let mut state = self.state.lock().await;
         state
             .sessions
@@ -253,6 +338,125 @@ impl SessionRepository for MockRepository {
         Ok(state.sessions.get(token_hash).cloned())
     }
 
+    /// Classify against live generations first, then retained retirement
+    /// records. A record whose successor is still live reports `Superseded`
+    /// (the grace-eligible shape); anything else it reports `Retired`. All
+    /// under one lock acquisition, so the answer can never straddle a
+    /// concurrent rotation (SR1).
+    async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution> {
+        let state = self.state.lock().await;
+
+        if let Some(live) = state.sessions.get(token_hash) {
+            return Ok(RefreshResolution::Live(live.clone()));
+        }
+
+        let Some(record) = state.retired.get(token_hash) else {
+            return Ok(RefreshResolution::Unknown);
+        };
+
+        match state.sessions.get(&record.successor_hash) {
+            Some(successor_live) => {
+                // Pairing invariant of `rotate_refresh_token`: a successor
+                // pointer always names a generation of the same family.
+                assert_eq!(
+                    successor_live.family_id, record.family_id,
+                    "mock store corruption: successor {} names family {} but lives in {}",
+                    record.successor_hash, record.family_id, successor_live.family_id
+                );
+                Ok(RefreshResolution::Superseded {
+                    live: successor_live.clone(),
+                    retired_at: record.retired_at,
+                })
+            }
+            None => Ok(RefreshResolution::Retired {
+                family_id: record.family_id.clone(),
+                user_id: record.user_id.clone(),
+                retired_at: record.retired_at,
+            }),
+        }
+    }
+
+    /// One mutex-guarded transition performing all three effects — delete the
+    /// live row, write the retirement record, install the replacement — or
+    /// nothing (SR2/SR3/SR4). A failed condition returns before any mutation,
+    /// so the store stays byte-identical across a losing redemption.
+    async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
+        assert!(
+            is_valid_family_id(&replacement.family_id),
+            "rotate_refresh_token: malformed family id {:?}",
+            replacement.family_id
+        );
+        assert_ne!(
+            live_hash, replacement.refresh_token_hash,
+            "rotate_refresh_token: replacement must be a fresh generation"
+        );
+
+        let mut state = self.state.lock().await;
+
+        // CAS condition: the named hash must still be a live generation.
+        let Some(live) = state.sessions.get(live_hash) else {
+            return Ok(false);
+        };
+        // Precondition on well-formed rows: a rotation replaces a generation
+        // of the same family for the same user — anything else would strand
+        // credentials in a family their holder no longer controls. A legacy
+        // row (empty-family sentinel, written before rotation shipped) is the
+        // one exception: it belongs to no family, so its first redemption
+        // swaps to the caller's newly-minted family without a retirement
+        // record (there is no prior generation to detect reuse against) and
+        // only user identity is asserted.
+        let legacy_row = live.family_id.is_empty();
+        if !legacy_row {
+            assert_eq!(
+                live.family_id, replacement.family_id,
+                "rotate_refresh_token: replacement family {:?} must match live family {:?}",
+                replacement.family_id, live.family_id
+            );
+        }
+        assert_eq!(
+            live.user_id, replacement.user_id,
+            "rotate_refresh_token: replacement user {:?} must match live user {:?}",
+            replacement.user_id, live.user_id
+        );
+        assert!(
+            !state.sessions.contains_key(&replacement.refresh_token_hash),
+            "rotate_refresh_token: replacement hash already exists as a live session"
+        );
+        assert!(
+            !state.retired.contains_key(&replacement.refresh_token_hash),
+            "rotate_refresh_token: replacement hash already exists as a retired record"
+        );
+
+        let now = Utc::now();
+        if !legacy_row {
+            // A legacy row produces no retirement record: there is no prior
+            // generation to detect reuse against (the source spec's SQL
+            // first-redemption rule, mirrored here so wave-C flow tests
+            // behave identically on the mock and the persistent stores).
+            let retired_record = RetiredRefreshToken {
+                refresh_token_hash: live_hash.to_string(),
+                family_id: replacement.family_id.clone(),
+                user_id: replacement.user_id.clone(),
+                successor_hash: replacement.refresh_token_hash.clone(),
+                retired_at: now,
+                expires_at: RetiredRefreshToken::retention_deadline(
+                    now,
+                    self.reuse_retention_secs,
+                    replacement.expires_at,
+                ),
+            };
+            state
+                .retired
+                .insert(retired_record.refresh_token_hash.clone(), retired_record);
+        }
+        state.sessions.remove(live_hash);
+        state
+            .sessions
+            .insert(replacement.refresh_token_hash.clone(), replacement.clone());
+
+        Ok(true)
+    }
+
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
         if *self.session_fail_mode.lock().await {
             return Err(Error::StoreError {
@@ -262,6 +466,36 @@ impl SessionRepository for MockRepository {
         let mut state = self.state.lock().await;
         state.sessions.remove(token_hash);
         Ok(())
+    }
+
+    /// Remove the family's live generation and every retained retirement
+    /// record, returning the combined count (SR5), under one lock acquisition.
+    async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        assert!(
+            is_valid_family_id(family_id),
+            "revoke_family: malformed family id {family_id:?}"
+        );
+        if *self.session_fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock session store failure".into(),
+            });
+        }
+
+        let mut state = self.state.lock().await;
+
+        let live_before = state.sessions.len();
+        state
+            .sessions
+            .retain(|_, session| session.family_id != family_id);
+        let sessions_removed = (live_before - state.sessions.len()) as u64;
+
+        let retired_before = state.retired.len();
+        state
+            .retired
+            .retain(|_, record| record.family_id != family_id);
+        let retired_removed = (retired_before - state.retired.len()) as u64;
+
+        Ok(sessions_removed + retired_removed)
     }
 
     async fn count_active_sessions(&self) -> Result<u64> {
@@ -275,6 +509,9 @@ impl SessionRepository for MockRepository {
         Ok(count as u64)
     }
 
+    /// Remove every live generation and retained retirement record belonging
+    /// to `user_id` — the SR5 removal guarantee applied across the user's
+    /// whole family set.
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
         if *self.session_fail_mode.lock().await {
             return Err(Error::StoreError {
@@ -283,15 +520,23 @@ impl SessionRepository for MockRepository {
         }
         let mut state = self.state.lock().await;
         state.sessions.retain(|_, s| s.user_id != user_id);
+        state.retired.retain(|_, r| r.user_id != user_id);
         Ok(())
     }
 
+    /// Sweep both expired sessions and expired retirement records; the count
+    /// covers both, mirroring the SQL adapters' two-table sweep.
     async fn cleanup_expired_sessions(&self) -> Result<u64> {
         let mut state = self.state.lock().await;
         let now = Utc::now();
-        let before = state.sessions.len();
+
+        let sessions_before = state.sessions.len();
         state.sessions.retain(|_, s| s.expires_at > now);
-        let sessions_removed = (before - state.sessions.len()) as u64;
+        let sessions_removed = (sessions_before - state.sessions.len()) as u64;
+
+        let retired_before = state.retired.len();
+        state.retired.retain(|_, r| r.expires_at > now);
+        let retired_removed = (retired_before - state.retired.len()) as u64;
 
         // The sweep also reclaims expired single-use records (space reclamation only —
         // the claim operations already treat an expired record as absent), and the
@@ -301,10 +546,10 @@ impl SessionRepository for MockRepository {
         let single_use_removed = (single_use_before - state.single_use.len()) as u64;
 
         debug_assert!(
-            sessions_removed as usize <= before,
+            sessions_removed as usize <= sessions_before,
             "removed session count cannot exceed the pre-sweep size"
         );
-        Ok(sessions_removed + single_use_removed)
+        Ok(sessions_removed + retired_removed + single_use_removed)
     }
 
     async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool> {
@@ -348,6 +593,27 @@ impl MockKeyManager {
         let seed: [u8; 32] = [1u8; 32];
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
         Self { signing_key }
+    }
+
+    /// Test infrastructure: sign an arbitrary JSON payload into a compact
+    /// three-part JWS with the same header shape and encoding
+    /// (`{"alg":"EdDSA","typ":"JWT"}`, base64url-no-pad) the service mints,
+    /// so tests can present validly-signed tokens carrying claim values the
+    /// service itself would never issue (e.g. hash-form `sid`s from before a
+    /// rotation-capable build) without reconstructing signing keys.
+    pub fn sign_payload_jws(&self, payload: &serde_json::Value) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signature = self.signing_key.sign(signing_input.as_bytes());
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        )
     }
 }
 
@@ -923,6 +1189,9 @@ pub mod single_use_conformance {
         // One expired and one live session alongside them.
         let make_session = |hash: &str, expires_at: chrono::DateTime<Utc>| Session {
             user_id: format!("usr_su_cleanup_{}", ulid::Ulid::new()),
+            family_id: oidc_exchange_core::domain::new_family_id(),
+            generation: 0,
+            rotated_at: None,
             refresh_token_hash: hash.to_string(),
             provider: "mock".to_string(),
             expires_at,
@@ -979,7 +1248,10 @@ pub mod single_use_conformance {
 mod tests {
     use super::single_use_conformance as conformance;
     use super::{MockIdentityProvider, MockRepository, MOCK_CLIENT_ID};
-    use oidc_exchange_core::domain::{NewUser, UserPatch, INITIAL_USER_VERSION};
+    use crate::session_contract;
+    use oidc_exchange_core::domain::{
+        NewUser, RetiredRefreshToken, UserPatch, INITIAL_USER_VERSION,
+    };
     use oidc_exchange_core::error::Error;
     use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
@@ -989,6 +1261,36 @@ mod tests {
             provider: provider.to_string(),
             email: Some("user@example.com".to_string()),
             display_name: Some("Test User".to_string()),
+        }
+    }
+
+    /// Deterministic fixture builder: well-formed `fam_` ids from the
+    /// Crockford alphabet so `MockRepository`'s family-id assertions accept
+    /// them, with no clock or randomness in the identifiers themselves.
+    fn session_fixture(
+        user_id: &str,
+        hash: &str,
+        family_suffix: &str,
+        generation: u32,
+    ) -> oidc_exchange_core::domain::Session {
+        assert_eq!(
+            family_suffix.len(),
+            26,
+            "fixture family suffix must be a full ULID-length string"
+        );
+        let now = chrono::Utc::now();
+        oidc_exchange_core::domain::Session {
+            user_id: user_id.to_string(),
+            refresh_token_hash: hash.to_string(),
+            family_id: format!("fam_{family_suffix}"),
+            generation,
+            provider: "mock".to_string(),
+            expires_at: now + chrono::Duration::hours(24),
+            rotated_at: (generation > 0).then_some(now),
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: now,
         }
     }
 
@@ -1094,6 +1396,289 @@ mod tests {
             after_second.status,
             oidc_exchange_core::domain::UserStatus::Suspended
         );
+    }
+
+    const FAMILY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const FAMILY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    // -----------------------------------------------------------------------
+    // SR1–SR5 conformance — MockRepository runs the shared suite
+    // -----------------------------------------------------------------------
+    //
+    // Each obligation's named assertion lives in
+    // `session_contract` and is generic over any `SessionRepository`; the
+    // tests below invoke it against `MockRepository`, one test per assertion,
+    // so a regression localizes to its obligation. `conformance_full_suite`
+    // additionally proves the orchestrator wires the whole set.
+
+    /// SR1 classification surface: Live → Superseded → Retired → Unknown.
+    #[tokio::test]
+    async fn conformance_classification_all_four_shapes() {
+        session_contract::assert_resolution_classifies_all_four_shapes(
+            &MockRepository::new(),
+            "mock:classify",
+        )
+        .await;
+    }
+
+    /// SR2 observable effects: successor installed, presented demoted.
+    #[tokio::test]
+    async fn conformance_rotation_installs_successor_and_demotes_presented() {
+        session_contract::assert_rotation_installs_successor_and_demotes_presented(
+            &MockRepository::new(),
+            "mock:install",
+        )
+        .await;
+    }
+
+    /// SR2 negative space: a losing CAS is invisible through the port.
+    #[tokio::test]
+    async fn conformance_failed_cas_leaves_store_byte_identical() {
+        session_contract::assert_failed_cas_leaves_store_byte_identical(
+            &MockRepository::new(),
+            "mock:cas-port",
+        )
+        .await;
+    }
+
+    /// SR3: two concurrent rotations, exactly one winner, store agrees.
+    #[tokio::test]
+    async fn conformance_concurrent_rotation_yields_exactly_one_winner() {
+        session_contract::assert_concurrent_rotation_yields_exactly_one_winner(
+            &MockRepository::new(),
+            "mock:race",
+        )
+        .await;
+    }
+
+    /// SR4: the retirement record is readable the instant the rotation is.
+    #[tokio::test]
+    async fn conformance_retirement_readable_immediately_after_rotation() {
+        session_contract::assert_retirement_readable_immediately_after_rotation(
+            &MockRepository::new(),
+            "mock:sr4",
+        )
+        .await;
+    }
+
+    /// SR1/SR4 retained history: an older generation resolves Retired.
+    #[tokio::test]
+    async fn conformance_older_generation_resolves_as_retired() {
+        session_contract::assert_older_generation_resolves_as_retired(
+            &MockRepository::new(),
+            "mock:older",
+        )
+        .await;
+    }
+
+    /// SR5: family revocation removes everything and returns the count.
+    #[tokio::test]
+    async fn conformance_family_revocation_removes_everything_and_returns_count() {
+        session_contract::assert_family_revocation_removes_everything_and_returns_count(
+            &MockRepository::new(),
+            "mock:revoke",
+        )
+        .await;
+    }
+
+    /// SR1 negative space: Unknown immediately after revoke_session.
+    #[tokio::test]
+    async fn conformance_resolution_unknown_immediately_after_revoke() {
+        session_contract::assert_resolution_unknown_immediately_after_revoke(
+            &MockRepository::new(),
+            "mock:sr1-revoke",
+        )
+        .await;
+    }
+
+    /// Expiry inheritance: rotation never moves the absolute deadline.
+    #[tokio::test]
+    async fn conformance_rotation_preserves_absolute_expiry() {
+        session_contract::assert_rotation_preserves_absolute_expiry(
+            &MockRepository::new(),
+            "mock:expiry",
+        )
+        .await;
+    }
+
+    /// The whole suite through one orchestrator call — exactly what a
+    /// persistent adapter invokes once its implementation is complete.
+    #[tokio::test]
+    async fn conformance_full_suite() {
+        let repo = MockRepository::new();
+        session_contract::assert_full_conformance(&repo, "mock:full").await;
+    }
+
+    /// A losing compare-and-swap must be a complete no-op. The shared suite
+    /// proves this through the port surface; this mock-only companion
+    /// snapshots the store's *internal* maps (every live row and every
+    /// retirement record, not just the hashes in play) for a literal
+    /// byte-identical check.
+    #[tokio::test]
+    async fn failed_cas_leaves_internal_maps_byte_identical() {
+        let repo = MockRepository::new();
+        let gen0 = session_fixture("usr_1", "hash_gen0", FAMILY_A, 0);
+        repo.store_refresh_token(&gen0).await.expect("store gen 0");
+
+        let mut gen1 = session_fixture("usr_1", "hash_gen1", FAMILY_A, 1);
+        gen1.expires_at = gen0.expires_at;
+        gen1.created_at = gen0.created_at;
+        assert!(
+            repo.rotate_refresh_token("hash_gen0", &gen1)
+                .await
+                .expect("rotate"),
+            "the first rotation must win"
+        );
+        // Also retire a second family so the snapshot covers mixed state.
+        let other_family = session_fixture("usr_1", "hash_other", FAMILY_B, 0);
+        repo.store_refresh_token(&other_family)
+            .await
+            .expect("store other family");
+
+        let snapshot = || async {
+            (
+                repo.get_all_sessions().await,
+                repo.get_all_retired_tokens().await,
+                repo.count_active_sessions().await.expect("count"),
+            )
+        };
+        let (sessions_before, retired_before, count_before) = snapshot().await;
+
+        // Lose the race: rotate against gen 0's hash after gen 1 already
+        // replaced it. Also lose against a hash that never existed.
+        let stale_replacement = session_fixture("usr_1", "hash_stale", FAMILY_A, 2);
+        assert!(
+            !repo
+                .rotate_refresh_token("hash_gen0", &stale_replacement)
+                .await
+                .expect("stale CAS must report false, not error"),
+            "a CAS against a moved live generation must return false"
+        );
+        assert!(
+            !repo
+                .rotate_refresh_token("hash_never_seen", &stale_replacement)
+                .await
+                .expect("unknown-hash CAS must report false, not error"),
+            "a CAS against an unknown hash must return false"
+        );
+
+        let (sessions_after, retired_after, count_after) = snapshot().await;
+        assert_eq!(
+            sessions_before, sessions_after,
+            "live sessions must be untouched"
+        );
+        assert_eq!(
+            retired_before, retired_after,
+            "retirement records must be untouched by a losing CAS"
+        );
+        assert_eq!(count_before, count_after, "active count must be untouched");
+        assert!(
+            !repo
+                .get_all_retired_tokens()
+                .await
+                .iter()
+                .any(|r| r.refresh_token_hash == stale_replacement.refresh_token_hash),
+            "the loser's replacement must never appear as a retirement record"
+        );
+    }
+
+    /// Retirement records expire at min(retired_at + retention, family
+    /// expiry): the mock computes the same deadline the persistent adapters
+    /// must, so a record can never outlive its family.
+    #[tokio::test]
+    async fn retirement_records_are_capped_at_the_family_deadline() {
+        // Retention far beyond the family's remaining life: capped at expiry.
+        let long_retention = MockRepository::with_refresh_reuse_retention_secs(86_400 * 30);
+        let gen0 = session_fixture("usr_cap", "hash_cap0", FAMILY_A, 0);
+        long_retention
+            .store_refresh_token(&gen0)
+            .await
+            .expect("store gen 0");
+        let mut gen1 = session_fixture("usr_cap", "hash_cap1", FAMILY_A, 1);
+        gen1.expires_at = gen0.expires_at;
+        gen1.created_at = gen0.created_at;
+        assert!(
+            long_retention
+                .rotate_refresh_token("hash_cap0", &gen1)
+                .await
+                .expect("rotate"),
+            "rotation must win"
+        );
+        let records = long_retention.get_all_retired_tokens().await;
+        assert_eq!(records.len(), 1, "exactly one record after one rotation");
+        assert_eq!(
+            records[0].expires_at, gen0.expires_at,
+            "record expiry must be capped at the family deadline"
+        );
+        assert_eq!(
+            records[0].successor_hash, gen1.refresh_token_hash,
+            "record must name its successor"
+        );
+
+        // The constructor rejects a zero-width retention window outright:
+        // it would silently disarm reuse detection.
+        let result = std::panic::catch_unwind(|| {
+            MockRepository::with_refresh_reuse_retention_secs(0);
+        });
+        assert!(result.is_err(), "zero retention must be rejected");
+    }
+
+    /// Cleanup sweeps expired sessions and expired retirement records alike,
+    /// counting both — the shape every persistent adapter's sweep must match.
+    #[tokio::test]
+    async fn cleanup_sweeps_expired_sessions_and_counts_them() {
+        let repo = MockRepository::new();
+        let live = session_fixture("usr_sweep", "hash_live", FAMILY_A, 0);
+        repo.store_refresh_token(&live).await.expect("store live");
+
+        // An already-expired session (written directly; store_refresh_token on
+        // the mock does not police expiry) must be swept and counted.
+        let mut expired = session_fixture("usr_sweep", "hash_expired", FAMILY_A, 0);
+        expired.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        repo.store_refresh_token(&expired)
+            .await
+            .expect("store expired");
+
+        let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
+        assert_eq!(removed, 1, "cleanup must remove exactly the expired row");
+        assert!(
+            repo.get_all_sessions()
+                .await
+                .iter()
+                .all(|s| s.refresh_token_hash != "hash_expired"),
+            "expired session must be gone after cleanup"
+        );
+        assert_eq!(
+            repo.count_active_sessions().await.expect("count"),
+            1,
+            "the live session must survive cleanup"
+        );
+
+        // A second sweep has nothing left to do: the count is honest about it.
+        assert_eq!(
+            repo.cleanup_expired_sessions()
+                .await
+                .expect("second cleanup"),
+            0,
+            "an idempotent second sweep must report zero removals"
+        );
+    }
+
+    /// The mock keeps hashes-only data in its retirement records: nothing in
+    /// the retained type carries a raw refresh token (audit/telemetry safety).
+    #[test]
+    fn retired_record_debug_leaks_nothing_but_hashes() {
+        let record = RetiredRefreshToken {
+            refresh_token_hash: "hash_retired".to_string(),
+            family_id: format!("fam_{FAMILY_A}"),
+            user_id: "usr_x".to_string(),
+            successor_hash: "hash_successor".to_string(),
+            retired_at: chrono::Utc::now(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+        };
+        let debug = format!("{record:?}");
+        assert!(debug.contains("hash_retired"));
+        assert!(!debug.to_lowercase().contains("token: \""));
     }
 
     /// The shared single-use conformance suite, run against `MockRepository`: the mock

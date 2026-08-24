@@ -7,7 +7,9 @@ use serde_json::Value;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
-    /// Present on code exchange, absent on refresh
+    /// Present on code exchange and on refresh (rotation issues a replacement
+    /// on every redemption). Absent on refresh only when
+    /// `token.refresh_rotation = false`, which restores reusable tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
     /// Always "Bearer"
@@ -38,13 +40,17 @@ pub struct AccessTokenClaims {
     /// This service's issuer URL
     pub iss: String,
     pub aud: String,
+    /// Stable session identity: the `family_id` (`fam_` + lowercase ULID) of
+    /// the session this token was minted for. Rotation never moves it, so the
+    /// `sid` names exactly one revocable token family for the token's whole
+    /// validity however often the refresh token rotates beneath it. Revocation
+    /// acts solely on this claim.
+    ///
+    /// A plain `String` field is required on deserialization: a payload
+    /// without a `sid` fails closed rather than minting an un-revocable token.
+    pub sid: String,
     pub iat: u64,
     pub exp: u64,
-    /// Session identifier: the SHA-256 hex refresh-token hash of the session
-    /// this token was minted for. Revocation acts solely on this claim, so a
-    /// payload without it cannot be revoked safely and fails to deserialize
-    /// rather than silently authorizing an account-wide revoke.
-    pub sid: String,
     /// Merged: config template claims + user.claims
     #[serde(flatten)]
     pub custom: HashMap<String, Value>,

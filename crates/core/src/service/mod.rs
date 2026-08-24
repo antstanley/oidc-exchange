@@ -1,6 +1,7 @@
 pub mod assertion;
 pub mod claims;
 pub mod exchange;
+pub mod maintenance;
 pub mod refresh;
 pub mod revoke;
 pub mod user_admin;
@@ -13,7 +14,8 @@ use chrono::Utc;
 
 use crate::config::Config;
 use crate::domain::{
-    AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
+    is_valid_family_id, AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity,
+    User,
 };
 use crate::error::{Error, Result};
 use crate::ports::{
@@ -61,27 +63,37 @@ impl AppService {
         self.keys.algorithm()
     }
 
-    /// Build and sign an access token JWT for the given user, bound to the
-    /// session identified by `sid`.
+    /// Build and sign an access token JWT for the given user, naming the
+    /// session family it belongs to.
     ///
-    /// `sid` is the session's refresh-token hash: `/revoke` looks a presented
-    /// access token up by exactly this value, so binding the hash at mint
-    /// time is what makes "revoke this token" mean "end this one session"
-    /// rather than "end every session of this subject".
+    /// `family_id` is supplied by the caller — the family `exchange` has just
+    /// created or the one `refresh` has just rotated (or is serving under
+    /// rotation disabled). It rides the JWT as the stable `sid` claim, so
+    /// every access token names exactly the one family it may revoke,
+    /// invariant across rotations.
     ///
     /// Returns `(jwt_string, expires_in_seconds)`.
-    pub(crate) async fn build_access_token(&self, user: &User, sid: &str) -> Result<(String, u64)> {
-        // Preconditions: a token without a subject authorizes nothing and one
-        // without a session identifier could never be revoked through its own
-        // `sid`, so either would mint an unusable credential — both are
-        // programmer errors, not runtime conditions.
+    ///
+    /// VENDORED SEAM (task 08): the `sid` claim is the minimal in-branch slice
+    /// of the sibling `2026-08-05-validate_revoke_token_claims` contract (PR
+    /// #19); reconcile against that PR at merge time.
+    pub(crate) async fn build_access_token(
+        &self,
+        user: &User,
+        family_id: &str,
+    ) -> Result<(String, u64)> {
+        // Boundary precondition: callers mint well-formed families. The one
+        // tolerated exception is the rotation-disabled refresh of a pre-
+        // rotation legacy row, whose sentinel (empty string) would otherwise
+        // break a refresh path that must keep working unchanged; such a token
+        // fails closed at consumption time like any hash-form sid.
+        assert!(
+            family_id.is_empty() || is_valid_family_id(family_id),
+            "build_access_token: malformed family id {family_id:?}"
+        );
         assert!(
             !user.id.is_empty(),
             "build_access_token: user id must not be empty"
-        );
-        assert!(
-            !sid.is_empty(),
-            "build_access_token: session id must not be empty"
         );
 
         let now = Utc::now();
@@ -91,9 +103,9 @@ impl AppService {
             sub: user.id.clone(),
             iss: self.config.server.issuer.as_ref().to_string(),
             aud: self.config.token.audience.as_ref().to_string(),
+            sid: family_id.to_string(),
             iat: now.timestamp() as u64,
             exp: (now.timestamp() as u64) + access_ttl_secs,
-            sid: sid.to_string(),
             custom: claims::resolve_custom_claims(&self.config.token.custom_claims, user),
         };
 
@@ -653,6 +665,15 @@ mod validate_access_token_tests {
         }
         async fn put_single_use(&self, _: &str, _: chrono::DateTime<Utc>) -> Result<bool> {
             unreachable!("validate_access_token must not write single-use markers")
+        }
+        async fn resolve_refresh_token(&self, _: &str) -> Result<crate::domain::RefreshResolution> {
+            unreachable!("validate_access_token must not classify refresh tokens")
+        }
+        async fn rotate_refresh_token(&self, _: &str, _: &Session) -> Result<bool> {
+            unreachable!("validate_access_token must not rotate sessions")
+        }
+        async fn revoke_family(&self, _: &str) -> Result<u64> {
+            unreachable!("validate_access_token must not revoke families")
         }
         async fn take_single_use(&self, _: &str) -> Result<bool> {
             unreachable!("validate_access_token must not burn single-use markers")

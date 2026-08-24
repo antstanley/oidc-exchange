@@ -12,7 +12,8 @@ this page.
 | Entity | Identifier | Form | Generated where |
 |---|---|---|---|
 | User | `User.id` | `usr_` + lowercase ULID | the repository adapter on `create_user` |
-| Session | `Session.refresh_token_hash` | SHA-256 hex of the opaque refresh token | core (`exchange`) |
+| Session family | `Session.family_id` | `fam_` + lowercase ULID | core (`exchange`) |
+| Session generation | `Session.refresh_token_hash` | SHA-256 hex of the opaque refresh token | core (`exchange`, `refresh`) |
 | AuditEvent | `AuditEvent.id` | bare ULID | core (`create_audit_event`) |
 
 User IDs are minted by each repository adapter (`dynamo`, `postgres`, `sqlite`), not by the
@@ -57,22 +58,47 @@ private claims injected into the access token, managed through the internal API.
 struct Session {
     user_id: String,
     refresh_token_hash: String,       // SHA-256 hex; never the raw token
+    family_id: String,                // "fam_…"; stable across every rotation
+    generation: u32,                  // 0 at exchange, +1 per rotation
     provider: String,
-    expires_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,        // absolute; set at exchange, never moved
+    rotated_at: Option<DateTime<Utc>>, // when this generation was issued; None at generation 0
     device_id: Option<String>,
     user_agent: Option<String>,
     ip_address: Option<String>,
-    created_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,        // when the family was created
 }
 ```
 
-The raw refresh token exists only in memory during issuance and in the response to the
-client. Only the hash is stored. `device_id`, `user_agent`, and `ip_address` are populated
-from the request context: the audit-context middleware captures them at the HTTP edge and
-the exchange flow threads them into the stored session. `refresh_token_hash` is also the
-session's identifier: it is the key every `SessionRepository` lookup and revocation takes,
-and it is the value minted access tokens carry as their `sid` claim so a presented access
-token names the session it belongs to.
+A `Session` is one **generation** of a token family. The raw refresh token exists only in
+memory during issuance and in the response to the client; only the hash is stored.
+`family_id` and `created_at` identify the sign-in and survive rotation; `expires_at` is the
+family's absolute deadline and is copied unchanged into every replacement. `device_id`,
+`user_agent`, and `ip_address` are populated from the request context: the audit-context
+middleware captures them at the HTTP edge and the exchange flow threads them into the
+stored session. `refresh_token_hash` is the *generation's* lookup key — every
+`SessionRepository` lookup takes it — while `family_id` is the *stable* identity minted
+access tokens carry as their `sid` claim, so a presented access token names the one token
+family it belongs to across every rotation.
+
+### RetiredRefreshToken (`domain/session.rs`)
+
+```rust
+struct RetiredRefreshToken {
+    refresh_token_hash: String,       // SHA-256 hex of the retired generation
+    family_id: String,
+    user_id: String,
+    successor_hash: String,           // the generation that replaced it
+    retired_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,        // min(retired_at + reuse retention, family expires_at)
+}
+```
+
+The record that makes reuse detectable. It is written by the same atomic operation that
+retires the generation it names, and reaped by the same expiry machinery as sessions —
+DynamoDB and Valkey natively, SQL and LMDB through `cleanup_expired_sessions`. A generation
+presented after its record has expired resolves as `Unknown`: it is refused, but it raises
+no alarm.
 
 ### SingleUseRecord (`domain/single_use.rs`)
 
@@ -89,12 +115,13 @@ removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_ses
 
 ### Token types (`domain/token.rs`)
 
-- **`TokenResponse`** — the `/token` body: `access_token`, optional `refresh_token` (present
-  on exchange, absent on refresh), `token_type` (always `"Bearer"`), `expires_in` seconds.
-- **`AccessTokenClaims`** — JWT payload: `sub` (internal user id), `iss`, `aud`, `iat`,
-  `exp`, `sid` (the `refresh_token_hash` of the session the token was minted for), plus a
-  flattened `custom: HashMap<String, Value>` of resolved claims. All six registered fields
-  are required on both serialization and deserialization.
+- **`TokenResponse`** — the `/token` body: `access_token`, optional `refresh_token`
+  (present on exchange and on refresh; absent on refresh only when
+  `token.refresh_rotation = false`), `token_type` (always `"Bearer"`), `expires_in` seconds.
+- **`AccessTokenClaims`** — JWT payload: `sub` (internal user id), `iss`, `aud`, `sid` (the
+  `family_id` of the session the token was minted for), `iat`, `exp`, plus a flattened
+  `custom: HashMap<String, Value>` of resolved claims. All six registered fields are
+  required on both serialization and deserialization.
 - **`ProviderTokens`** — what a provider returns from code exchange: `id_token`, optional
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
@@ -144,7 +171,8 @@ struct AuditEvent {
 
 `AuditEventType` variants: `TokenExchange`, `TokenRefresh`, `TokenRevocation`,
 `SessionRevoked`, `AllSessionsRevoked`, `UserCreated`, `UserUpdated`, `UserSuspended`,
-`UserDeleted`, `ValidationFailed`, `RegistrationDenied`, `ProviderError`, `Unauthorized`.
+`UserDeleted`, `ValidationFailed`, `RegistrationDenied`, `ProviderError`, `Unauthorized`,
+`RefreshTokenReuse`.
 `AuditOutcome` serializes to `{ "status": "success" }` or `{ "status": "failure", "reason": … }`.
 
 ### OidcProviderConfig (`domain/provider.rs`)
@@ -208,10 +236,28 @@ patch at all (see above): `Deleted → Deleted` is rejected, not a no-op.
 
 ### Session
 
-Created on token exchange with `expires_at = now + refresh_token_ttl`. Removed by explicit
-revocation (`/revoke`, revoke-all-user-sessions, or a status change to `Suspended` or
-`Deleted`) or by expiry — DynamoDB via its TTL attribute, other stores via
-`cleanup_expired_sessions`.
+```
+  exchange                refresh                    refresh
+     │                       │                          │
+     ▼                       ▼                          ▼
+ ┌────────┐  rotate     ┌────────┐  rotate         ┌────────┐
+ │ gen 0  │ ──────────► │ gen 1  │ ──────────────► │ gen 2  │  ◄── live
+ └───┬────┘             └───┬────┘                 └────────┘
+     │ retired              │ retired
+     ▼                      ▼
+ ┌──────────────────────────────────┐
+ │ RetiredRefreshToken records      │  presenting one of these:
+ │ (kept for the reuse-retention    │   · successor still live, inside grace → rotate
+ │  window, capped at family expiry)│   · otherwise → reuse: revoke the whole family
+ └──────────────────────────────────┘
+```
+
+A family is created on token exchange with `expires_at = now + refresh_token_ttl` and
+generation 0. Each refresh advances the live generation and retires its predecessor; the
+absolute `expires_at` never moves, so the family dies at the deadline set at sign-in however
+often it rotates. A family ends at that deadline, on explicit revocation (`/revoke`,
+delete-user, revoke-all-user-sessions, or a status change to `Suspended` or `Deleted`), or
+on reuse detection.
 
 ## Required query patterns
 
@@ -221,7 +267,9 @@ revocation (`/revoke`, revoke-all-user-sessions, or a status change to `Suspende
 | Look up a user by provider subject | `UserRepository::get_user_by_external_id(external_id, provider)` |
 | Count users by status | `UserRepository::count_by_status` |
 | List users (paged) | `UserRepository::list_users(offset, limit)` |
-| Resolve a refresh token | `SessionRepository::get_session_by_refresh_token(hash)` |
+| Classify a presented refresh token | `SessionRepository::resolve_refresh_token(hash)` |
+| Rotate the live generation | `SessionRepository::rotate_refresh_token(live_hash, replacement)` |
+| Revoke one family | `SessionRepository::revoke_family(family_id)` |
 | Revoke one / all sessions | `SessionRepository::revoke_session` / `revoke_all_user_sessions` |
 | Count active sessions | `SessionRepository::count_active_sessions` |
 | Reap expired sessions | `SessionRepository::cleanup_expired_sessions` |

@@ -31,6 +31,7 @@ fn base_raw_config() -> RawConfig {
             refresh_token_ttl: "30d".to_string(),
             audience: "https://api.test.com".to_string(),
             custom_claims: None,
+            ..RawTokenConfig::default()
         },
         audit: RawAuditConfig {
             adapter: "noop".to_string(),

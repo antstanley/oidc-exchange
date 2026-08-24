@@ -840,6 +840,21 @@ impl SessionRepository for SingleUseFailRepo {
         self.inner.get_session_by_refresh_token(token_hash).await
     }
 
+    async fn resolve_refresh_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<oidc_exchange_core::domain::RefreshResolution> {
+        self.inner.resolve_refresh_token(token_hash).await
+    }
+
+    async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
+        self.inner.rotate_refresh_token(live_hash, replacement).await
+    }
+
+    async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+        self.inner.revoke_family(family_id).await
+    }
+
     async fn revoke_session(&self, token_hash: &str) -> Result<()> {
         self.inner.revoke_session(token_hash).await
     }

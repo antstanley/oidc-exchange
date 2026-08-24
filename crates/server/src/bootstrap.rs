@@ -460,10 +460,19 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
 /// the wrapper still runs on every request but is a pure pass-through, so there is no separate
 /// Lambda-only branch that installs it only sometimes.
 pub fn build_router(config: &AppConfig, service: AppService) -> Router {
+    build_router_shared(config, Arc::new(service))
+}
+
+/// [`build_router`] over an already-shared service handle — the variant entry
+/// points whose process owns *another* consumer of the same `AppService` call.
+/// `main.rs` hands one `Arc` clone to the session reaper and another to the
+/// router's `AppState`, so both observe one store/audit/provider set;
+/// `build_router` itself is just this plus the wrapping.
+pub fn build_router_shared(config: &AppConfig, service: Arc<AppService>) -> Router {
     let role = config.server.role.as_str();
 
     let state = AppState {
-        service: Arc::new(service),
+        service,
         config: Arc::new(config.clone()),
     };
 
@@ -565,7 +574,11 @@ async fn build_user_repository(
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(
+                    client,
+                    table_name,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "postgres" => {
@@ -583,7 +596,10 @@ async fn build_user_repository(
             )
             .await?;
             Ok(Box::new(
-                oidc_exchange_adapters::postgres::PostgresRepository::new(pool),
+                oidc_exchange_adapters::postgres::PostgresRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "sqlite" => {
@@ -598,7 +614,10 @@ async fn build_user_repository(
                 })?;
             let pool = oidc_exchange_adapters::sqlite::create_pool(sq_cfg.path.as_ref()).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
+                oidc_exchange_adapters::sqlite::SqliteRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "" => Err(Box::new(Error::ConfigError {
@@ -626,7 +645,11 @@ async fn build_session_repository(
         "dynamodb" => {
             let (client, table_name) = build_dynamo_client(config).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::dynamo::DynamoRepository::new(client, table_name),
+                oidc_exchange_adapters::dynamo::DynamoRepository::new(
+                    client,
+                    table_name,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "postgres" => {
@@ -644,7 +667,10 @@ async fn build_session_repository(
             )
             .await?;
             Ok(Box::new(
-                oidc_exchange_adapters::postgres::PostgresRepository::new(pool),
+                oidc_exchange_adapters::postgres::PostgresRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "sqlite" => {
@@ -657,7 +683,10 @@ async fn build_session_repository(
             })?;
             let pool = oidc_exchange_adapters::sqlite::create_pool(sq_cfg.path.as_ref()).await?;
             Ok(Box::new(
-                oidc_exchange_adapters::sqlite::SqliteRepository::new(pool),
+                oidc_exchange_adapters::sqlite::SqliteRepository::new(
+                    pool,
+                    config.token.refresh_reuse_retention_secs(),
+                ),
             ))
         }
         "valkey" => {
@@ -674,6 +703,7 @@ async fn build_session_repository(
                     .key_prefix
                     .clone()
                     .unwrap_or_else(|| "oidc:".to_string()),
+                config.token.refresh_reuse_retention_secs(),
             )
             .await?;
             Ok(Box::new(client))
@@ -689,6 +719,7 @@ async fn build_session_repository(
             let repo = oidc_exchange_adapters::lmdb::LmdbSessionRepository::new(
                 lm_cfg.path.as_ref(),
                 lm_cfg.max_size_mb.unwrap_or(256),
+                config.token.refresh_reuse_retention_secs(),
             )?;
             Ok(Box::new(repo))
         }
@@ -2072,8 +2103,11 @@ mod postgres_bootstrap_tests {
         let session = Session {
             user_id: created.id.clone(),
             refresh_token_hash: refresh_token_hash.clone(),
+            family_id: oidc_exchange_core::domain::new_family_id(),
+            generation: 0,
             provider: "bootstrap-test".to_string(),
             expires_at: now + Duration::hours(1),
+            rotated_at: None,
             device_id: None,
             user_agent: None,
             ip_address: None,

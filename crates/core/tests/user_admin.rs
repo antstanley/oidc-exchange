@@ -35,6 +35,7 @@ fn base_raw_config() -> RawConfig {
             refresh_token_ttl: "30d".to_string(),
             audience: "https://api.test.com".to_string(),
             custom_claims: None,
+            ..RawTokenConfig::default()
         },
         audit: RawAuditConfig {
             adapter: "noop".to_string(),
@@ -602,8 +603,11 @@ async fn suspended_to_suspended_is_a_noop_and_does_not_re_revoke() {
     let sentinel = Session {
         user_id: user_id.clone(),
         refresh_token_hash: "sentinel-hash".to_string(),
+        family_id: "fam_0000000000000000000000000d".to_string(),
+        generation: 0,
         provider: "mock".to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+        rotated_at: None,
         device_id: None,
         user_agent: None,
         ip_address: None,

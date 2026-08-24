@@ -119,6 +119,12 @@ mode = "open"
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
 audience = "https://api.example.com"
+refresh_rotation = true
+refresh_rotation_grace = "10s"
+refresh_reuse_retention = "24h"
+
+[session_repository]
+cleanup_interval = "1h"
 
 [audit]
 adapter = "noop"
@@ -156,8 +162,18 @@ contains exact or `*.domain` wildcard entries; entries are ASCII only.
 ### `[token]`
 
 `access_token_ttl` (`"15m"`), `refresh_token_ttl` (`"30d"`), `audience` (**required**,
-non-empty — the `aud` claim of every issued access token), and optional `custom_claims`
-(`HashMap<String, String>` of claim templates; see [03-service-flows.md](03-service-flows.md)).
+non-empty — the `aud` claim of every issued access token), optional `custom_claims`
+(`HashMap<String, String>` of claim templates; see [03-service-flows.md](03-service-flows.md)),
+`refresh_rotation` (bool, default `true`), `refresh_rotation_grace` (duration string,
+default `"10s"`) and `refresh_reuse_retention` (duration string, default `"24h"`).
+
+`refresh_rotation_grace` is the window in which the immediately-preceding generation is
+still redeemable; config resolution rejects a value above `60s`, because the window is a
+deliberate weakening and an unbounded one is indistinguishable from no rotation.
+`refresh_reuse_retention` is how long a retired generation is remembered so its
+re-presentation raises an alarm; it is capped per record at the family's own `expires_at`.
+Both durations are narrowed at load, so an unparseable or zero value fails config
+resolution.
 
 ### `[grants]`
 Which grants `/token` serves and the parameters of the direct ID-token grant's replay
@@ -196,9 +212,13 @@ locked-down databases where migrations are applied out-of-band.
 ### `[session_repository]` (optional, sessions only)
 
 When present, overrides where sessions are stored: `adapter` (`valkey` | `lmdb`) with
-`[session_repository.valkey] { url, key_prefix? }` or
-`[session_repository.lmdb] { path, max_size_mb? }`. Absent means sessions live in the
-`[repository]` store.
+`[session_repository.valkey] { url, key_prefix? }` or `[session_repository.lmdb] { path,
+max_size_mb? }`. Absent → sessions live in the `[repository]` store. `cleanup_interval`
+(duration string, default `"1h"`) — how often the long-lived runtimes run
+`cleanup_expired_sessions` ([04-http-api.md](04-http-api.md) → Bootstrap). The sweep covers
+`sessions` and `retired_refresh_tokens` alike; on the natively-expiring stores (DynamoDB
+TTL, Valkey key expiry) it is a cheap backstop for whatever native expiry has not yet
+reaped.
 
 ### `[user_sync]`
 
@@ -243,6 +263,8 @@ The closed domains:
 | `registration.domain_allowlist[]` | `AsciiDomainPattern` | exact domain or `*.`-prefixed wildcard; non-ASCII rejected |
 | `token.audience` | `NonEmptyString` | required, non-empty |
 | `token.access_token_ttl`, `token.refresh_token_ttl`, `server.request_timeout` | `Duration` | `<integer><s\|m\|h\|d>`, no overflow |
+| `token.refresh_rotation_grace` | `Duration` | strictly positive, at most `60s` |
+| `token.refresh_reuse_retention`, `session_repository.cleanup_interval` | `Duration` | strictly positive |
 | `key_manager.local.algorithm` | `SigningAlgorithm` | `EdDSA` — the only algorithm the local adapter can produce |
 | `key_manager.kms.algorithm` | `SigningAlgorithm` | `RS256` \| `RS384` \| `RS512` \| `PS256` \| `PS384` \| `PS512` \| `ES256` \| `ES384` \| `ES512` (JWS names, RFC 7518 §3.1 — not AWS `SigningAlgorithmSpec` names) |
 | `audit.adapter` | `AuditAdapter` | `noop` \| `stdout` \| `stderr` \| `auto` \| `sqs` |
@@ -277,6 +299,8 @@ string through the FFI bindings (`bootstrap::parse_config`).
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
 | `grants.id_token` | `false` |
 | `grants.nonce_ttl` / `max_assertion_lifetime` | `10m` / `1h` |
+| `token.refresh_rotation` / `refresh_rotation_grace` / `refresh_reuse_retention` | `true` / `"10s"` / `"24h"` |
+| `session_repository.cleanup_interval` | `"1h"` |
 | `audit.adapter` / `blocking_threshold` / `emit_threshold` | `noop` / `warning` / `info` |
 | `telemetry.enabled` / `exporter` / `sample_rate` | `false` / `none` / `1.0` |
 | `user_sync.enabled`, `internal_api.enabled` | `false`, `false` |

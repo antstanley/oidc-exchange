@@ -156,9 +156,17 @@ async fn e2e_full_auth_flow() {
     let new_access_token = refresh_json["access_token"].as_str().unwrap();
     assert!(!new_access_token.is_empty());
     assert_eq!(refresh_json["token_type"], "Bearer");
+    // Rotation is on by default: the refresh grant returns a replacement, and
+    // the presented token is now retired (grace-superseded).
+    let rotated_refresh_token = refresh_json["refresh_token"].as_str().unwrap();
+    assert!(!rotated_refresh_token.is_empty());
+    assert_ne!(rotated_refresh_token, refresh_token);
 
-    // Step 3: POST /revoke with the refresh token → 200
-    let revoke_body = format!("token={}&token_type_hint=refresh_token", refresh_token);
+    // Step 3: POST /revoke with the *current* generation → 200
+    let revoke_body = format!(
+        "token={}&token_type_hint=refresh_token",
+        rotated_refresh_token
+    );
 
     let response = app
         .clone()
@@ -175,14 +183,17 @@ async fn e2e_full_auth_flow() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Step 4: POST /token with grant_type=refresh_token (same token) → should fail
+    // Step 4: POST /token with grant_type=refresh_token (the revoked current
+    // generation) → should fail as unknown: the revocation removed it.
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/token")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(refresh_body))
+                .body(Body::from(format!(
+                    "grant_type=refresh_token&refresh_token={rotated_refresh_token}"
+                )))
                 .unwrap(),
         )
         .await

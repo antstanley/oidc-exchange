@@ -10,8 +10,8 @@ use oidc_exchange_core::config::{
     RawTokenConfig,
 };
 use oidc_exchange_core::domain::{
-    AccessTokenClaims, AuditEventType, AuditOutcome, AuditSeverity, IdentityClaims, NewUser, User,
-    UserPatch, UserStatus,
+    is_valid_family_id, AccessTokenClaims, AuditEventType, AuditOutcome, AuditSeverity,
+    IdentityClaims, NewUser, User, UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -41,6 +41,7 @@ fn base_raw_config() -> RawConfig {
             refresh_token_ttl: "30d".to_string(),
             audience: "https://api.test.com".to_string(),
             custom_claims: None,
+            ..RawTokenConfig::default()
         },
         audit: RawAuditConfig {
             adapter: "noop".to_string(),
@@ -384,17 +385,27 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
     assert_eq!(sessions[0].user_id, users[0].id);
     assert_eq!(sessions[0].provider, "mock");
 
-    // The token's `sid` must name exactly the stored session: it equals the
-    // SHA-256 of the refresh token handed to the client and the hash the
-    // store holds, so a presented access token revokes precisely this
-    // session and nothing else.
-    assert_eq!(
-        claims.sid, expected_hash,
-        "sid must be the refresh token hash"
+    // The token's `sid` must name exactly the stored session's family: the
+    // stable identity rotation never moves, so a presented access token
+    // revokes precisely this credential chain and nothing else.
+    assert!(
+        is_valid_family_id(&claims.sid),
+        "sid must be a well-formed family id, got {:?}",
+        claims.sid
     );
     assert_eq!(
-        claims.sid, sessions[0].refresh_token_hash,
-        "sid must match the stored session identifier"
+        claims.sid, sessions[0].family_id,
+        "sid must be the stored session's family id"
+    );
+
+    // Exchange issues the family: generation 0, no rotation yet, and the
+    // access token's `sid` names exactly that family.
+    assert!(is_valid_family_id(&sessions[0].family_id));
+    assert_eq!(sessions[0].generation, 0);
+    assert_eq!(sessions[0].rotated_at, None);
+    assert_eq!(
+        claims.sid, sessions[0].family_id,
+        "the sid claim must carry the session's stable family identifier"
     );
 }
 
@@ -459,9 +470,9 @@ async fn exchange_existing_user_does_not_create_new() {
 
     assert_eq!(claims1.sub, claims2.sub);
 
-    // Each token binds to its own session: the sid is the hash of the
-    // refresh token that exchange handed back, and the two sessions are
-    // distinct, so the sids must differ even though the subject matches.
+    // Each token binds to its own session family: the two sign-ins create
+    // distinct families, so the sids must differ even though the subject
+    // matches.
     let hash1 = hex::encode(Sha256::digest(
         resp1
             .refresh_token
@@ -474,17 +485,28 @@ async fn exchange_existing_user_does_not_create_new() {
             .expect("second exchange should return a refresh token")
             .as_bytes(),
     ));
+    let sessions = repo.get_all_sessions().await;
+    let family_for = |hash: &str| {
+        sessions
+            .iter()
+            .find(|s| s.refresh_token_hash == hash)
+            .expect("session stored for hash")
+            .family_id
+            .clone()
+    };
     assert_eq!(
-        claims1.sid, hash1,
-        "first token's sid must be its own session"
+        claims1.sid,
+        family_for(&hash1),
+        "first token's sid must be its own session's family"
     );
     assert_eq!(
-        claims2.sid, hash2,
-        "second token's sid must be its own session"
+        claims2.sid,
+        family_for(&hash2),
+        "second token's sid must be its own session's family"
     );
     assert_ne!(
         claims1.sid, claims2.sid,
-        "separate exchanges must mint tokens for separate sessions"
+        "separate exchanges must mint tokens for separate families"
     );
 }
 

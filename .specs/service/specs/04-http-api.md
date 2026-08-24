@@ -27,6 +27,7 @@ role. When mounted they sit behind Bearer auth (see Middleware stack).
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/internal/stats` | aggregate user/session counts (`AdminStats`) |
+| POST | `/internal/sessions/cleanup` | run `cleanup_expired_sessions` once; returns `{ "deleted": <count> }` |
 | GET | `/internal/users` | list users, query `offset`/`limit` |
 | POST | `/internal/users` | create user (`NewUser`) → 201 |
 | GET | `/internal/users/{id}` | get user (404 if absent) |
@@ -70,7 +71,10 @@ does not recognise, which these are not. Parameters outside this set entirely ar
 The client names the provider (`provider=google`), not a raw issuer URL. The handler parses
 the form into a `TokenGrant` before calling the service, so a request whose fields do not
 match its declared grant never reaches `AppService`. Response body is `TokenResponse`
-([01-domain-model.md](01-domain-model.md)).
+([01-domain-model.md](01-domain-model.md)); it carries a `refresh_token` on every grant,
+including `refresh_token`, and a client must discard the token it presented once it holds
+the replacement (RFC 6749 §6). With `token.refresh_rotation = false` the refresh grant
+returns no `refresh_token` and the presented one stays valid.
 
 The direct grant requires the ID token to carry a `nonce` claim whose value came from this
 service's `POST /nonce`; the client passes that value into the provider's authentication
@@ -189,10 +193,21 @@ be network-isolated independently from one binary.
    both strip a configured `server.base_path` prefix from incoming request paths before routing
    ([06-configuration.md](06-configuration.md)) — covering API Gateway stages and mount
    prefixes.
+7. Under a long-lived runtime — hyper, and a `crates/ffi` embedder whose host process
+   persists — spawn the **session reaper**: a periodic task that calls
+   `SessionRepository::cleanup_expired_sessions` every
+   `session_repository.cleanup_interval` (default `"1h"`), logs the deleted count on every
+   run — a silently dead reaper must be distinguishable from one with nothing to delete —
+   and is aborted with the graceful-shutdown drain. Under Lambda there is no long-lived
+   process to host the task; the reaper is not spawned, and the same control is reachable
+   as `POST /internal/sessions/cleanup` for an external scheduler (EventBridge) to drive
+   on the deployment's own cadence.
 
 `crates/ffi` layers its own sources into the same resolve and then calls the same
 `build_service` / `build_router` path, so in-process bindings get identical configuration
-semantics, routing, and middleware.
+semantics, routing, and middleware. An embedder instance detects its host the same way
+`main.rs` does (`AWS_LAMBDA_RUNTIME_API`) and hosts the session reaper on its own runtime
+only when that host persists; inside a Lambda function it spawns none.
 
 ## Error mapping (`error.rs`)
 

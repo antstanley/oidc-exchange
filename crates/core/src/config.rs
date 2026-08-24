@@ -171,14 +171,61 @@ impl RegistrationConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawTokenConfig {
     pub access_token_ttl: String,
     pub refresh_token_ttl: String,
     pub audience: String,
     pub custom_claims: Option<HashMap<String, String>>,
+    /// Whether each refresh-token redemption mints a replacement and retires
+    /// the presented generation (the default), or restores reusable tokens for
+    /// clients that cannot discard a rotated token. `false` disables both the
+    /// replacement response and rotation itself; retirement records left over
+    /// from a rotation-enabled period are then refused as unknown.
+    pub refresh_rotation: bool,
+    /// Duration string bounding how long the immediately-preceding generation
+    /// stays redeemable after a rotation. Narrowed at load: strictly positive
+    /// and capped at [`MAX_REFRESH_ROTATION_GRACE_SECS`].
+    pub refresh_rotation_grace: String,
+    /// Duration string bounding how long a retired generation is remembered so
+    /// its re-presentation raises a reuse alarm; per record it is additionally
+    /// capped at the family's own `expires_at`. Narrowed at load: strictly
+    /// positive.
+    pub refresh_reuse_retention: String,
 }
+
+impl Default for RawTokenConfig {
+    fn default() -> Self {
+        Self {
+            access_token_ttl: String::new(),
+            refresh_token_ttl: String::new(),
+            audience: String::new(),
+            custom_claims: None,
+            refresh_rotation: true,
+            refresh_rotation_grace: DEFAULT_REFRESH_ROTATION_GRACE.to_string(),
+            refresh_reuse_retention: DEFAULT_REFRESH_REUSE_RETENTION.to_string(),
+        }
+    }
+}
+
+/// Upper bound, in seconds, on `[token] refresh_rotation_grace`. The grace
+/// window is a deliberate weakening — inside it a superseded generation may
+/// still rotate — so an unbounded window is indistinguishable from no
+/// rotation. See `06-configuration.md` → `[token]`.
+pub const MAX_REFRESH_ROTATION_GRACE_SECS: u64 = 60;
+
+/// Default for `[token] refresh_rotation_grace`: covers a retried HTTP round
+/// trip and little else. Named rather than a bare literal so the value backing
+/// resolution, `RawTokenConfig::default`, and the docs stay in lockstep. See
+/// `06-configuration.md` → Defaults summary.
+pub const DEFAULT_REFRESH_ROTATION_GRACE: &str = "10s";
+
+/// Default for `[token] refresh_reuse_retention`: long enough to cover an
+/// attacker racing the legitimate holder for the current credential, short
+/// enough that continuously-refreshing families do not accumulate thousands of
+/// retirement records. See `06-configuration.md` → Defaults summary.
+pub const DEFAULT_REFRESH_REUSE_RETENTION: &str = "24h";
 
 #[derive(Debug, Clone)]
 pub struct TokenConfig {
@@ -186,6 +233,23 @@ pub struct TokenConfig {
     pub refresh_token_ttl: std::time::Duration,
     pub audience: NonEmptyString,
     pub custom_claims: Option<HashMap<String, String>>,
+    /// Whether refresh-token redemption rotates the presented generation.
+    pub refresh_rotation: bool,
+    /// How long the immediately-preceding generation stays redeemable after a
+    /// rotation. Strictly positive, at most [`MAX_REFRESH_ROTATION_GRACE_SECS`].
+    pub refresh_rotation_grace: std::time::Duration,
+    /// How long a retired generation is remembered so its re-presentation
+    /// raises a reuse alarm. Strictly positive.
+    pub refresh_reuse_retention: std::time::Duration,
+}
+
+impl TokenConfig {
+    /// The reuse-retention window in seconds. The session adapters compute
+    /// every retirement record's deadline from this. Mirrors
+    /// [`SessionRepositoryConfig::cleanup_interval_secs`].
+    pub fn refresh_reuse_retention_secs(&self) -> u64 {
+        self.refresh_reuse_retention.as_secs()
+    }
 }
 
 impl TokenConfig {
@@ -201,6 +265,16 @@ impl TokenConfig {
             )?,
             audience: NonEmptyString::parse_field("token.audience", raw.audience)?,
             custom_claims: raw.custom_claims,
+            refresh_rotation: raw.refresh_rotation,
+            refresh_rotation_grace: parse_positive_duration_field_capped(
+                "token.refresh_rotation_grace",
+                &raw.refresh_rotation_grace,
+                MAX_REFRESH_ROTATION_GRACE_SECS,
+            )?,
+            refresh_reuse_retention: parse_positive_duration_field(
+                "token.refresh_reuse_retention",
+                &raw.refresh_reuse_retention,
+            )?,
         })
     }
 }
@@ -474,12 +548,34 @@ impl RepositoryConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// Default for `[session_repository] cleanup_interval`: how often the
+/// long-lived runtimes' session reaper calls `cleanup_expired_sessions` to
+/// sweep expired sessions and retirement records. On the natively-expiring
+/// stores (DynamoDB TTL, Valkey key expiry) the sweep is a cheap backstop. See
+/// `06-configuration.md` → Defaults summary.
+pub const DEFAULT_SESSION_CLEANUP_INTERVAL: &str = "1h";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawSessionRepositoryConfig {
     pub adapter: Option<String>,
     pub valkey: Option<RawValkeyConfig>,
     pub lmdb: Option<RawLmdbConfig>,
+    /// Duration string setting how often the long-lived runtimes' reaper calls
+    /// `cleanup_expired_sessions` to sweep expired sessions and retirement
+    /// records. Narrowed at load: strictly positive.
+    pub cleanup_interval: String,
+}
+
+impl Default for RawSessionRepositoryConfig {
+    fn default() -> Self {
+        Self {
+            adapter: None,
+            valkey: None,
+            lmdb: None,
+            cleanup_interval: DEFAULT_SESSION_CLEANUP_INTERVAL.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +583,16 @@ pub struct SessionRepositoryConfig {
     pub adapter: Option<ProviderAdapter>,
     pub valkey: Option<ValkeyConfig>,
     pub lmdb: Option<LmdbConfig>,
+    /// How often the long-lived runtimes' session reaper sweeps expired
+    /// sessions and retirement records. Strictly positive.
+    pub cleanup_interval: std::time::Duration,
+}
+
+impl SessionRepositoryConfig {
+    /// The cleanup interval in seconds, for the reaper's tick arithmetic.
+    pub fn cleanup_interval_secs(&self) -> u64 {
+        self.cleanup_interval.as_secs()
+    }
 }
 
 impl SessionRepositoryConfig {
@@ -498,6 +604,10 @@ impl SessionRepositoryConfig {
                 .transpose()?,
             valkey: raw.valkey.map(ValkeyConfig::resolve).transpose()?,
             lmdb: raw.lmdb.map(LmdbConfig::resolve).transpose()?,
+            cleanup_interval: parse_positive_duration_field(
+                "session_repository.cleanup_interval",
+                &raw.cleanup_interval,
+            )?,
         })
     }
 }
@@ -1206,6 +1316,43 @@ impl AsRef<str> for NonEmptyString {
     fn as_ref(&self) -> &str {
         &self.0
     }
+}
+
+/// [`parse_duration_field`] plus a strictly-positive requirement. Zero is
+/// rejected because a zero-width window or interval can never do its job (a
+/// zero grace window makes every lost response a reuse alarm; a zero cleanup
+/// interval would spin); negatives cannot be expressed through the unsigned
+/// parser, so only zero needs an explicit check.
+fn parse_positive_duration_field(
+    field: &str,
+    value: &str,
+) -> Result<std::time::Duration, Error> {
+    let duration = parse_duration_field(field, value)?;
+    if duration.as_secs() == 0 {
+        return Err(Error::ConfigError {
+            detail: format!("{field}: {value:?} must be greater than zero"),
+        });
+    }
+    Ok(duration)
+}
+
+/// [`parse_positive_duration_field`] plus an inclusive upper bound in seconds.
+/// The grace window is a deliberate weakening of rotation (an
+/// immediately-preceding generation stays redeemable), so an unbounded value
+/// is indistinguishable from no rotation and is rejected at load rather than
+/// trusted.
+fn parse_positive_duration_field_capped(
+    field: &str,
+    value: &str,
+    max_secs: u64,
+) -> Result<std::time::Duration, Error> {
+    let duration = parse_positive_duration_field(field, value)?;
+    if duration.as_secs() > max_secs {
+        return Err(Error::ConfigError {
+            detail: format!("{field}: {value:?} exceeds the maximum of {max_secs}s"),
+        });
+    }
+    Ok(duration)
 }
 
 fn parse_duration_field(field: &str, value: &str) -> Result<std::time::Duration, Error> {

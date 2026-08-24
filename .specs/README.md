@@ -35,6 +35,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
 | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) | Merged | repo-wide: closed config domains, HTTPS URLs, verified key metadata, migration probes, and mandatory installer checks |
+| [changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md) | Merged | service: rotating refresh tokens, reuse detection, session-family persistence, and owned cleanup |
 | [changes/merged/2026-07-01-complete_config_loading.md](changes/merged/2026-07-01-complete_config_loading.md) | Merged | service: config overlay merge, env overrides, fail-closed `${VAR}` placeholders, startup validation |
 | [changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md](changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md) | Merged | service/bindings: one shared config resolve, fail-closed placeholders, FFI parity, and `config check` |
 | [changes/merged/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md](changes/merged/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md) | Merged | service: KMS ES* DER→raw JWS signatures, RFC 7518 JWK `n`/`e`, ES512 JWK |
@@ -85,6 +86,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-validate_revoke_token_claims/plan.md](plans/2026-08-05-validate_revoke_token_claims/plan.md) | Done | [changes/2026-08-05-validate_revoke_token_claims.md](changes/2026-08-05-validate_revoke_token_claims.md) |
 | [plans/2026-08-15-bind_id_token_grant_replay_protection/plan.md](plans/2026-08-15-bind_id_token_grant_replay_protection/plan.md) | Done | [changes/2026-08-05-bind_id_token_grant_replay_protection.md](changes/2026-08-05-bind_id_token_grant_replay_protection.md) |
 | [plans/2026-08-05-bind_grant_type_at_token_endpoint/plan.md](plans/2026-08-05-bind_grant_type_at_token_endpoint/plan.md) | Done | [changes/2026-08-05-bind_grant_type_at_token_endpoint.md](changes/2026-08-05-bind_grant_type_at_token_endpoint.md) |
+| [plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md](plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md) | Done | [changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md) |
 
 ## Conventions
 

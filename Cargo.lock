@@ -2732,6 +2732,7 @@ dependencies = [
 name = "oidc-exchange"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "aws-config",
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
@@ -2886,9 +2887,11 @@ dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek 3.0.0-rc.1",
+ "hex",
  "oidc-exchange-core",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "ulid",
 ]

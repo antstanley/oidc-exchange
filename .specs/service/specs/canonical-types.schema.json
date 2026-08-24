@@ -48,16 +48,34 @@
     },
     "Session": {
       "type": "object",
-      "required": ["user_id", "refresh_token_hash", "provider", "expires_at", "created_at"],
+      "description": "One generation of a refresh-token family.",
+      "required": ["user_id", "refresh_token_hash", "family_id", "generation", "provider", "expires_at", "created_at"],
       "properties": {
         "user_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
         "refresh_token_hash": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "SHA-256 hex of the opaque refresh token." },
+        "family_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id", "description": "fam_<lowercase ulid>; stable across every rotation of one sign-in." },
+        "generation": { "type": "integer", "minimum": 0, "description": "0 at exchange, incremented once per rotation." },
         "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
-        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "Absolute family deadline; set at exchange and never moved by rotation." },
+        "rotated_at": { "type": ["string", "null"], "format": "date-time", "description": "When this generation was issued; null at generation 0." },
         "device_id": { "type": ["string", "null"] },
         "user_agent": { "type": ["string", "null"] },
         "ip_address": { "type": ["string", "null"] },
-        "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
+        "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "When the family was created." }
+      }
+    },
+    "RetiredRefreshToken": {
+      "type": "object",
+      "description": "A retired refresh-token generation, retained so that its re-presentation is detectable as reuse.",
+      "required": ["refresh_token_hash", "family_id", "user_id", "successor_hash", "retired_at", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "refresh_token_hash": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+        "family_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
+        "user_id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
+        "successor_hash": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "The generation that replaced this one. Grace applies only while this is still the family's live generation." },
+        "retired_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "min(retired_at + token.refresh_reuse_retention, family expires_at)." }
       }
     },
     "SingleUseRecord": {
@@ -77,7 +95,7 @@
       "required": ["access_token", "token_type", "expires_in"],
       "properties": {
         "access_token": { "type": "string" },
-        "refresh_token": { "type": ["string", "null"], "description": "Present on exchange, absent on refresh." },
+        "refresh_token": { "type": ["string", "null"], "description": "Present on exchange and on refresh; null on refresh only when token.refresh_rotation is false." },
         "token_type": { "type": "string", "const": "Bearer" },
         "expires_in": { "type": "integer", "minimum": 0, "description": "Seconds until the access token expires." }
       }
@@ -97,6 +115,11 @@
           "type": "string",
           "minLength": 1,
           "description": "Single audience string (no array). token.audience; required non-empty at config load."
+        },
+        "sid": {
+          "type": "string",
+          "pattern": "^fam_[0-9a-z]{26}$",
+          "description": "Session identifier: the family_id of the session this access token was minted for. Stable across refresh-token rotation; names the only session (token family) the token may revoke."
         },
         "iat": { "type": "integer" },
         "exp": { "type": "integer" },
@@ -186,7 +209,7 @@
         "token_exchange", "token_refresh", "token_revocation", "session_revoked",
         "all_sessions_revoked", "user_created", "user_updated", "user_suspended",
         "user_deleted", "validation_failed", "registration_denied", "provider_error",
-        "unauthorized"
+        "unauthorized", "refresh_token_reuse"
       ]
     },
     "AuditOutcome": {

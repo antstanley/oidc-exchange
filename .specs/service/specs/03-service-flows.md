@@ -4,8 +4,8 @@
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
-`crates/core/src/service/{exchange,refresh,revoke,user_admin,claims}.rs` and the helpers in
-`service/mod.rs`.
+`crates/core/src/service/{exchange,refresh,revoke,user_admin,claims,maintenance}.rs` and the
+helpers in `service/mod.rs`.
 
 ## Token exchange (`exchange.rs`)
 
@@ -82,9 +82,10 @@ already parsed the form into a `TokenGrant`, so `AppService::exchange` receives 
        create already audited it — and the flow otherwise proceeds as for a found user.
 5. **Mint refresh token** — 32 random bytes, base64url-no-pad for the opaque token; SHA-256
    hex of the bytes is the stored hash.
-6. **Store session** — `expires_at = now + refresh_token_ttl`; `store_refresh_token`.
-7. **Sign access token** — `build_access_token(user, &session.refresh_token_hash)` (below):
-   the token is minted bound to the session stored in step 6.
+6. **Store session** — mint the family id (`fam_` + lowercase ULID), set `generation = 0`
+   and `rotated_at = None`, `expires_at = now + refresh_token_ttl`; `store_refresh_token`.
+7. **Sign access token** — `build_access_token(user, &family_id)` (below): the token is
+   minted bound to the family stored in step 6.
 8. **Respond** — `TokenResponse { access_token, refresh_token: Some(opaque), token_type:
    "Bearer", expires_in }`.
 
@@ -107,16 +108,70 @@ created user audits `UserCreated` (notice, success); a successful exchange audit
 
 ## Token refresh (`refresh.rs`)
 
-`POST /token` with `grant_type=refresh_token`.
+`POST /token` with `grant_type=refresh_token`. Redemption is a state transition: the
+family's live generation is retired and a replacement is issued in one atomic store
+operation. A refresh token belongs to a **family** — every generation descended from one
+sign-in shares a `family_id`, and a family has exactly one live generation at any instant.
 
 1. SHA-256 hex the presented token.
-2. `get_session_by_refresh_token(hash)`; missing → `InvalidToken`.
-3. `session.expires_at < now` → `InvalidToken`.
-4. `get_user_by_id(session.user_id)`; missing → `InvalidToken`; suspended → `UserSuspended`.
-5. `build_access_token(user, &session.refresh_token_hash)` — the same session read in step 2;
-   refresh does not rotate it, so the re-minted token stays bound to that one session.
-6. Respond with `refresh_token: None` — refresh tokens are reusable until expiry; refreshing
-   does not rotate them.
+2. `resolve_refresh_token(hash)` classifies the hash against the family's live generation
+   and its retained retirement records:
+   - **`Unknown`** — no live generation and no retained record → `InvalidToken` (audited
+     `ValidationFailed`, `Debug`), as before.
+   - **`Live(session)`** — the hash is the live generation → rotate (step 4).
+   - **`Superseded { live, retired_at }`** — the hash is retired and its successor is still
+     the family's live generation. Inside `token.refresh_rotation_grace` of `retired_at` →
+     rotate from `live` (step 4). Outside it → reuse (step 3).
+   - **`Retired { family_id, user_id, .. }`** — the hash is retired and its successor is no
+     longer live → reuse (step 3).
+3. **Reuse.** `revoke_family(family_id)`, then emit `RefreshTokenReuse` at
+   `AuditSeverity::Warning` with `detail { family_id, sessions_revoked }`, then return
+   `InvalidToken` carrying the same reason string as the unknown-token branch — the response
+   does not tell the presenter that an alarm fired. Revocation runs before the emission so a
+   blocking audit failure cannot leave the family alive.
+4. `session.expires_at < now` → `InvalidToken`. The family's absolute expiry is fixed at
+   exchange; rotation never moves it.
+5. `get_user_by_id(session.user_id)`; missing → `InvalidToken`; suspended → `UserSuspended`.
+   Both are decided before anything is written.
+6. Mint the replacement — 32 random bytes, base64url-no-pad for the opaque token, SHA-256
+   hex of the bytes for the new hash. The replacement `Session` inherits `family_id`,
+   `user_id`, `provider`, `created_at`, `expires_at` and the device fields unchanged, sets
+   `generation = live.generation + 1` and `rotated_at = now`.
+7. `rotate_refresh_token(live_hash, replacement)` — one atomic compare-and-swap conditioned
+   on `live_hash` still being the family's live generation. It deletes the live session,
+   writes a `RetiredRefreshToken` for `live_hash` naming the replacement as its successor,
+   and installs the replacement, or it writes nothing. A `false` return means a concurrent
+   redemption won the race; the caller returns `InvalidToken` without revoking the family,
+   and the loser's retry lands on the grace path.
+8. `build_access_token(user, &family_id)` — the access token's `sid` claim carries the
+   family identifier, which rotation never moves (see the *Build access token* section).
+9. Audit `TokenRefresh` at `Info` with `detail { family_id, generation, grace }`. No token
+   hash appears in an audit event.
+10. Respond `TokenResponse { access_token, refresh_token: Some(replacement), token_type:
+    "Bearer", expires_in }`.
+
+**Grace.** A client that loses the response to a rotation still holds the generation the
+server just retired. Returning the current token again is impossible here — the store keeps
+only digests, so the service cannot reproduce a plaintext it has already discarded — so the
+grace window instead lets that client rotate forward once more: presenting the
+immediately-preceding generation inside `token.refresh_rotation_grace` rotates from the
+current live generation and issues a fresh one. "Immediately preceding" and "once" are the
+same condition, and it needs no extra state: a retirement record grants grace only while the
+successor it names is still live, and a grace rotation retires that successor. Every later
+presentation of the same generation is reuse.
+
+**Rotation disabled.** With `token.refresh_rotation = false` the flow is steps 1–2, 4, 5,
+8, 9 and a response with `refresh_token: None`. Nothing is minted and nothing is retired.
+Retirement records left over from a rotation-enabled period still resolve until they expire;
+while rotation is off, `Superseded` and `Retired` are treated as `Unknown` — refused as
+`InvalidToken`, no alarm, no family revocation — because the switch disables the response
+along with the rotation.
+
+`RefreshRequest` carries the same client context as exchange; audit events in the flow
+record its `ip_address` and `user_agent`. A suspended user audits `UserSuspended` (warning,
+failure); unknown and expired tokens audit `ValidationFailed` (debug, failure) — below the
+default `emit_threshold` of `info` — and `RefreshTokenReuse` (warning) is the signal that
+survives the defaults.
 
 `RefreshRequest` carries the same client context; audit events in the flow record its
 `ip_address` and `user_agent`. A suspended user audits `UserSuspended`; a successful refresh
@@ -128,41 +183,48 @@ audit `ValidationFailed` (debug, failure) — an abuse-detection signal that the
 
 `POST /revoke` (RFC 7009 — token-state failures still succeed toward the client; backend
 failures propagate). Revocation authority comes from the credential the caller presents, and
-reaches exactly the session that credential names. `/revoke` never removes a session the
-caller presented no credential for.
+reaches exactly the token family that credential names. `/revoke` never removes a session
+the caller presented no credential for.
 
 - hint `refresh_token`, absent, or unknown → SHA-256 hex the token,
   `get_session_by_refresh_token(hash)`, and on a match `revoke_session(hash)` (audited
   `TokenRevocation`). A missing session is `Ok` (idempotent delete, 200) and emits nothing;
   a store error propagates, and the server maps it to 503.
 - hint `access_token` → `validate_access_token(token)` (below). The returned claims carry
-  `sid`, the `refresh_token_hash` of the session the token was minted for;
-  `revoke_session(sid)` removes that one session — audited `TokenRevocation` through the
-  same lookup-revoke-audit helper as the refresh arm. The subject's other sessions are
+  `sid`, the `family_id` of the session the token was minted for, which must additionally
+  be a well-formed family identifier (`fam_` + lowercase ULID) — a validated token whose
+  `sid` is not (including one minted before rotation shipped, carrying a 64-hex
+  refresh-token hash) fails closed with the same fixed-reason rejection and revokes
+  nothing; passing a hash-valued `sid` onward would "revoke" a family that does not exist
+  and hide the miss. `revoke_family(claims.sid)` then removes the live generation and every
+  retained retirement record of exactly that family (audited `TokenRevocation`, with
+  `family_id` and the removed count in `detail`). One family is one sign-in, so the
+  authority is unchanged: the credential revokes exactly the session it was minted for,
+  under whichever generation that session has rotated to. The subject's other families are
   untouched, and `revoke_all_user_sessions` is not reachable from this endpoint.
 - Any validation failure — malformed, wrong type, bad signature, expired, wrong issuer or
-  audience — revokes nothing and emits one `ValidationFailed` event carrying a fixed reason
-  string, then returns 200 like every other token-state outcome. The client cannot
-  distinguish a rejected token from an accepted one (RFC 7009 §2.2); an operator can see the
-  attempt. Both arms emit exactly one event at the same severity whenever they emit —
-  success only when a session matched, rejection always — which is what keeps them
-  indistinguishable under the current blocking-threshold durability model as well as in
-  normal operation.
+  audience, or an unusable `sid` — revokes nothing and emits one `ValidationFailed` event
+  carrying a fixed reason string, then returns 200 like every other token-state outcome.
+  The client cannot distinguish a rejected token from an accepted one (RFC 7009 §2.2); an
+  operator can see the attempt. Both arms emit exactly one event at the same severity
+  whenever they emit — success only when a family or session matched, rejection always —
+  which is what keeps them indistinguishable under the current blocking-threshold
+  durability model as well as in normal operation. A session-repo error from
+  `revoke_family` propagates, and the server maps it to 503.
 
 `RevokeRequest` carries the same client context; audit events in the flow record its
-`ip_address` and `user_agent`. The access-token path audits `AllSessionsRevoked` when
-signature verification succeeds; the refresh-token path audits `TokenRevocation` when a
-session was actually revoked. Failed verification and unknown tokens emit nothing, matching
-RFC 7009's silence.
+`ip_address` and `user_agent`.
 
 ## Build access token (`service/mod.rs::build_access_token`)
 
 1. Parse `token.access_token_ttl` to seconds (`parse_duration_secs`).
 2. Assemble `AccessTokenClaims { sub: user.id, iss: server.issuer, aud: token.audience,
-   iat, exp, sid, custom }`, where `sid` is the `refresh_token_hash` of the session this
-   token is minted for — supplied by the caller, from the session `exchange` has just stored
-   or the one `refresh` has just read — and `custom` comes from `resolve_custom_claims`.
-   `iss` and `aud` are required non-empty configuration values.
+   iat, exp, sid, custom }`, where `sid` is the `family_id` of the session this token is
+   minted for — supplied by the caller, from the family `exchange` has just created or the
+   one `refresh` has just rotated — and `custom` comes from `resolve_custom_claims`.
+   `family_id` is stable across every rotation, so a `sid` minted at exchange names its
+   session for the token's whole validity however often the refresh token rotates beneath
+   it. `iss` and `aud` are required non-empty configuration values.
 3. Header `{ alg: keys.algorithm(), typ: "at+jwt", kid: keys.key_id() }` — the RFC 9068 media
    type for a JWT access token, which `validate_access_token` requires.
 4. base64url(header).base64url(payload), `keys.sign` the signing input, append
@@ -296,8 +358,30 @@ operations carry no client `ip_address`/`user_agent` context.
   marker's TTL instead would leave the assertion replayable after the cap. Real ID tokens
   live 5–60 minutes, so the ceiling rejects nothing legitimate and bounds the state a
   single assertion can pin.
-- *Refresh does not rotate.* **A successful refresh returns no new refresh token.** Reusable
-  refresh tokens match common client libraries; rotation is not implemented.
+- *Refresh rotates.* **Each redemption issues a replacement refresh token and retires the
+  presented generation in one atomic store operation.** A long-lived credential that is
+  never consumed makes possession indistinguishable from entitlement for its whole TTL;
+  rotation bounds a stolen token to one use and, more importantly, makes a second holder
+  visible. `token.refresh_rotation = false` restores reusable tokens.
+- *Rotation does not slide the expiry.* **The replacement inherits the family's original
+  `expires_at` and `created_at`.** Recomputing the expiry on every rotation would convert a
+  bounded 30-day session into an unbounded one that never dies while it is used, removing
+  the only bound that currently ends a stolen token's life.
+- *Reuse revokes the family, not the user.* **A retired generation presented outside its
+  grace window revokes every generation of that one login chain.** The evidence is that one
+  credential chain leaked; logging the user out of every other device is disproportionate to
+  it.
+- *The reuse alarm is emitted at `Warning`.* **`RefreshTokenReuse` carries
+  `AuditSeverity::Warning`.** The shipped audit defaults are `emit_threshold = "info"` and
+  `blocking_threshold = "warning"`, so `Warning` is the least severe level that both
+  survives a default deployment and fails the request rather than being silently dropped
+  when the audit backend is down.
+- *`sid` is the session's family identifier.* **The access token carries `family_id` as its
+  `sid` claim, and `/revoke`'s access-token arm resolves it with `revoke_family`.** The hash
+  was the right identifier while refresh never rotated, and rotation is exactly the change
+  that orphans it — after one refresh every outstanding access token would name a retired
+  hash and access-token revocation would silently become a no-op. A rotation-independent
+  identifier keeps the `sid` resolvable for the token's full TTL.
 - *Registration demands a verified email.* **Every just-in-time user creation requires
   `email_verified == true`, whether or not an allowlist is configured.** The requirement is a
   property of accepting the email claim, not of the allowlist; nesting it inside an optional

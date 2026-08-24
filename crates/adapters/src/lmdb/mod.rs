@@ -1,37 +1,237 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use heed::types::{Bytes, Str};
-use heed::{Database, Env, EnvOpenOptions};
-use oidc_exchange_core::domain::Session;
+use heed::{Database, Env, EnvOpenOptions, RwTxn};
+use oidc_exchange_core::domain::{
+    is_valid_family_id, RefreshResolution, RetiredRefreshToken, Session,
+};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::SessionRepository;
 use std::fs;
 use tracing::instrument;
 
+/// Number of keys one write transaction deletes during
+/// `cleanup_expired_sessions`. LMDB is copy-on-write, so a delete must
+/// allocate dirty pages before it frees old ones: a sweep that deletes
+/// everything in one transaction can fail `MDB_MAP_FULL` on a map filled past
+/// roughly 95% (the finding this batching answers), while committing in
+/// batches keeps freeing pages as it goes. Named, not inlined, because the
+/// bound *is* the behaviour.
+pub const LMDB_CLEANUP_BATCH_SIZE: usize = 256;
+
+/// How many times the sweeper may halve its transaction width when a batch
+/// cannot fit in the map's remaining headroom (`MAP_FULL`). Starting at
+/// [`LMDB_CLEANUP_BATCH_SIZE`] and halving reaches single-delete transactions
+/// in exactly this many steps, which is the deepest degradation that can make
+/// progress; below it the map is out of room entirely and the sweep errors,
+/// leaving recovery (raising `max_size_mb`) to the operator.
+const CLEANUP_MAX_BATCH_HALVINGS: u32 = 8;
+
+/// `family_index` value marking the hash it is filed under as the family's
+/// live generation.
+const FAMILY_INDEX_KIND_LIVE: &str = "live";
+
+/// `family_index` value marking the hash it is filed under as a retained
+/// retirement record.
+const FAMILY_INDEX_KIND_RETIRED: &str = "retired";
+
+/// An expired entry queued for deletion by the batched sweep, carrying
+/// everything needed to unhook its index filings.
+enum Expired {
+    Live(Session),
+    Retired(RetiredRefreshToken),
+}
+
+/// The four named databases, cloned out for movement into a
+/// `spawn_blocking` closure (`heed::Database` is a cheap copyable handle).
+#[derive(Clone, Copy)]
+struct Dbs {
+    sessions: Database<Str, Bytes>,
+    user_sessions: Database<Str, Str>,
+    retired_tokens: Database<Str, Bytes>,
+    family_index: Database<Str, Str>,
+}
+
+impl Dbs {
+    fn store_err(e: impl std::fmt::Display) -> Error {
+        Error::StoreError {
+            detail: e.to_string(),
+        }
+    }
+}
+
+/// Delete one live generation and both of its index filings. Returns whether
+/// the session row existed. Legacy (sentinel-family) rows carry no
+/// family-index entry to remove.
+fn remove_live_entry(
+    dbs: &Dbs,
+    wtxn: &mut RwTxn,
+    token_hash: &str,
+    session: &Session,
+) -> oidc_exchange_core::error::Result<bool> {
+    remove_live_entry_raw(dbs, wtxn, token_hash, session).map_err(Dbs::store_err)
+}
+
+/// Delete one retirement record and its family-index filing. Returns whether
+/// the record existed.
+fn remove_retired_entry(
+    dbs: &Dbs,
+    wtxn: &mut RwTxn,
+    record: &RetiredRefreshToken,
+) -> oidc_exchange_core::error::Result<bool> {
+    remove_retired_entry_raw(dbs, wtxn, record).map_err(Dbs::store_err)
+}
+
+/// [`remove_live_entry`] with the raw error type, for [`commit_deletion_batch`]
+/// whose caller must distinguish `MAP_FULL` from every other failure.
+fn remove_live_entry_raw(
+    dbs: &Dbs,
+    wtxn: &mut RwTxn,
+    token_hash: &str,
+    session: &Session,
+) -> Result<bool, heed::Error> {
+    let existed = dbs.sessions.delete(wtxn, token_hash)?;
+    let index_key = user_session_key(&session.user_id, token_hash);
+    dbs.user_sessions.delete(wtxn, &index_key)?;
+    if !session.family_id.is_empty() {
+        let family_key = family_index_key(&session.family_id, token_hash);
+        dbs.family_index.delete(wtxn, &family_key)?;
+    }
+    Ok(existed)
+}
+
+/// [`remove_retired_entry`] with the raw error type, for
+/// [`commit_deletion_batch`] whose caller must distinguish `MAP_FULL` from
+/// every other failure.
+fn remove_retired_entry_raw(
+    dbs: &Dbs,
+    wtxn: &mut RwTxn,
+    record: &RetiredRefreshToken,
+) -> Result<bool, heed::Error> {
+    let existed = dbs
+        .retired_tokens
+        .delete(wtxn, &record.refresh_token_hash)?;
+    let family_key = family_index_key(&record.family_id, &record.refresh_token_hash);
+    dbs.family_index.delete(wtxn, &family_key)?;
+    Ok(existed)
+}
+
+/// Delete one slice of the sweep queue inside a single committed write
+/// transaction, returning the number of entries actually removed. The raw
+/// `heed::Error` is returned so the caller can distinguish a `MAP_FULL`
+/// condition (shrink and retry) from every other failure (surface it).
+fn commit_deletion_batch(env: &Env, dbs: &Dbs, batch: &[Expired]) -> Result<u64, heed::Error> {
+    let mut wtxn = env.write_txn()?;
+    let mut removed: u64 = 0;
+    for entry in batch {
+        let existed = match entry {
+            Expired::Live(session) => {
+                remove_live_entry_raw(dbs, &mut wtxn, &session.refresh_token_hash, session)?
+            }
+            Expired::Retired(record) => remove_retired_entry_raw(dbs, &mut wtxn, record)?,
+        };
+        removed += u64::from(existed);
+    }
+    wtxn.commit()?;
+    Ok(removed)
+}
+
+/// Build the retirement record a winning rotation writes for `live`. The
+/// successor inherits the family identity; the deadline is
+/// `min(now + reuse_retention, family expires_at)` so no record outlives its
+/// family. Legacy rows must never reach this helper — there is no prior
+/// generation for them to be detected against.
+fn retirement_record(
+    live_hash: &str,
+    live: &Session,
+    replacement: &Session,
+    reuse_retention_secs: u64,
+    now: DateTime<Utc>,
+) -> RetiredRefreshToken {
+    assert_eq!(
+        live.refresh_token_hash, live_hash,
+        "retirement record must name the presented hash"
+    );
+    assert!(
+        is_valid_family_id(&live.family_id),
+        "a legacy row must not produce a retirement record: {:?}",
+        live.family_id
+    );
+    RetiredRefreshToken {
+        refresh_token_hash: live_hash.to_string(),
+        family_id: live.family_id.clone(),
+        user_id: live.user_id.clone(),
+        successor_hash: replacement.refresh_token_hash.clone(),
+        retired_at: now,
+        expires_at: RetiredRefreshToken::retention_deadline(
+            now,
+            reuse_retention_secs,
+            replacement.expires_at,
+        ),
+    }
+}
+
 /// LMDB-backed session repository using the `heed` crate.
 ///
-/// Three named databases are maintained:
-/// - `sessions`: `token_hash -> JSON(Session)`
-/// - `user_sessions`: `"{user_id}:{token_hash}" -> ""` (secondary index)
+/// Five named databases are maintained:
+/// - `sessions`: `token_hash -> JSON(Session)` (the live generations)
+/// - `user_sessions`: `"{user_id}:{token_hash}" -> ""` (revoke-all index)
+/// - `retired_tokens`: `token_hash -> JSON(RetiredRefreshToken)` (reuse
+///   detection)
+/// - `family_index`: `"{family_id}\0{token_hash}" -> "live"|"retired"`
+///   (`revoke_family`'s enumeration; the NUL separator cannot appear in a
+///   family id or hash, so no key is a prefix of another family's keys)
 /// - `single_use`: `digest_key -> RFC3339(expires_at)` for single-use records
+///   (nonces, assertion-replay markers)
+///
+/// Every mutation touches all the databases its effect spans inside one write
+/// transaction, which is what makes rotation atomic (SR2) and revocation
+/// complete (SR5).
 pub struct LmdbSessionRepository {
     env: Env,
     sessions: Database<Str, Bytes>,
     user_sessions: Database<Str, Str>,
-    /// Single-use records (nonces, assertion-replay markers), keyed by namespaced
-    /// digest. A separate named database keeps their key space disjoint from session
-    /// token hashes.
+    retired_tokens: Database<Str, Bytes>,
+    family_index: Database<Str, Str>,
+    /// How long a retirement record stays readable after its rotation:
+    /// `retired_at + reuse_retention_secs`, capped per record at the family's
+    /// absolute `expires_at` by [`RetiredRefreshToken::retention_deadline`].
+    /// Resolved from `[token] refresh_reuse_retention` at bootstrap; injected
+    /// here because the store, not the caller, stamps every record's deadline.
+    reuse_retention_secs: u64,
+    /// Single-use records (nonces, assertion-replay markers), keyed by
+    /// namespaced digest. A separate named database keeps their key space
+    /// disjoint from session token hashes.
     single_use: Database<Str, Str>,
 }
 
+/// Build the composite key used in the `user_sessions` index.
+fn user_session_key(user_id: &str, token_hash: &str) -> String {
+    format!("{user_id}:{token_hash}")
+}
+
+/// Build the composite key used in the `family_index` database.
+fn family_index_key(family_id: &str, token_hash: &str) -> String {
+    format!("{family_id}\0{token_hash}")
+}
+
 impl LmdbSessionRepository {
-    /// Opens (or creates) an LMDB environment at `path` with the given max size.
-    pub fn new(path: &str, max_size_mb: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Opens (or creates) an LMDB environment at `path` with the given max
+    /// size and reuse-retention window.
+    pub fn new(
+        path: &str,
+        max_size_mb: u64,
+        reuse_retention_secs: u64,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        assert!(
+            reuse_retention_secs > 0,
+            "reuse retention must be greater than zero"
+        );
         fs::create_dir_all(path)?;
 
         let env = unsafe {
             EnvOpenOptions::new()
-                .max_dbs(3)
+                .max_dbs(5)
                 .map_size((max_size_mb * 1024 * 1024) as usize)
                 .open(path)?
         };
@@ -40,6 +240,10 @@ impl LmdbSessionRepository {
         let sessions: Database<Str, Bytes> = env.create_database(&mut wtxn, Some("sessions"))?;
         let user_sessions: Database<Str, Str> =
             env.create_database(&mut wtxn, Some("user_sessions"))?;
+        let retired_tokens: Database<Str, Bytes> =
+            env.create_database(&mut wtxn, Some("retired_tokens"))?;
+        let family_index: Database<Str, Str> =
+            env.create_database(&mut wtxn, Some("family_index"))?;
         let single_use: Database<Str, Str> = env.create_database(&mut wtxn, Some("single_use"))?;
         wtxn.commit()?;
 
@@ -47,13 +251,20 @@ impl LmdbSessionRepository {
             env,
             sessions,
             user_sessions,
+            retired_tokens,
+            family_index,
+            reuse_retention_secs,
             single_use,
         })
     }
 
-    /// Build the composite key used in the `user_sessions` index.
-    fn user_session_key(user_id: &str, token_hash: &str) -> String {
-        format!("{user_id}:{token_hash}")
+    fn databases(&self) -> Dbs {
+        Dbs {
+            sessions: self.sessions,
+            user_sessions: self.user_sessions,
+            retired_tokens: self.retired_tokens,
+            family_index: self.family_index,
+        }
     }
 }
 
@@ -64,39 +275,48 @@ impl SessionRepository for LmdbSessionRepository {
         &self,
         session: &Session,
     ) -> oidc_exchange_core::error::Result<()> {
+        // Precondition: callers mint well-formed family ids; the empty-string
+        // sentinel is the one non-well-formed value accepted (a pre-rotation
+        // legacy row, which belongs to no family).
+        assert!(
+            session.family_id.is_empty() || is_valid_family_id(&session.family_id),
+            "store_refresh_token: malformed family id {:?}",
+            session.family_id
+        );
+        assert!(
+            !session.refresh_token_hash.is_empty(),
+            "store_refresh_token: refresh_token_hash must not be empty"
+        );
+
         let env = self.env.clone();
-        let sessions_db = self.sessions;
-        let user_sessions_db = self.user_sessions;
+        let dbs = self.databases();
         let session = session.clone();
 
         tokio::task::spawn_blocking(move || {
-            let json = serde_json::to_vec(&session).map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            let json = serde_json::to_vec(&session).map_err(Dbs::store_err)?;
 
-            let mut wtxn = env.write_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            let mut wtxn = env.write_txn().map_err(Dbs::store_err)?;
 
-            sessions_db
+            dbs.sessions
                 .put(&mut wtxn, &session.refresh_token_hash, &json)
-                .map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
+                .map_err(Dbs::store_err)?;
 
-            let index_key = LmdbSessionRepository::user_session_key(
-                &session.user_id,
-                &session.refresh_token_hash,
-            );
-            user_sessions_db
+            let index_key = user_session_key(&session.user_id, &session.refresh_token_hash);
+            dbs.user_sessions
                 .put(&mut wtxn, &index_key, "")
-                .map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
+                .map_err(Dbs::store_err)?;
 
-            wtxn.commit().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            // A sentinel-family (legacy) row gets no family-index entry: it
+            // belongs to no family, and `revoke_family` rejects the empty id,
+            // so an entry filed under "" could never be addressed.
+            if !session.family_id.is_empty() {
+                let family_key = family_index_key(&session.family_id, &session.refresh_token_hash);
+                dbs.family_index
+                    .put(&mut wtxn, &family_key, FAMILY_INDEX_KIND_LIVE)
+                    .map_err(Dbs::store_err)?;
+            }
+
+            wtxn.commit().map_err(Dbs::store_err)?;
 
             Ok(())
         })
@@ -116,23 +336,15 @@ impl SessionRepository for LmdbSessionRepository {
         let token_hash = token_hash.to_owned();
 
         tokio::task::spawn_blocking(move || {
-            let rtxn = env.read_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            let rtxn = env.read_txn().map_err(Dbs::store_err)?;
 
-            let maybe_bytes =
-                sessions_db
-                    .get(&rtxn, &token_hash)
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
+            let maybe_bytes = sessions_db
+                .get(&rtxn, &token_hash)
+                .map_err(Dbs::store_err)?;
 
             match maybe_bytes {
                 Some(bytes) => {
-                    let session: Session =
-                        serde_json::from_slice(bytes).map_err(|e| Error::StoreError {
-                            detail: e.to_string(),
-                        })?;
+                    let session: Session = serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
                     Ok(Some(session))
                 }
                 None => Ok(None),
@@ -144,64 +356,263 @@ impl SessionRepository for LmdbSessionRepository {
         })?
     }
 
-    #[instrument(skip(self))]
-    async fn revoke_session(&self, token_hash: &str) -> oidc_exchange_core::error::Result<()> {
+    /// Classify `token_hash` against live generations first, then retained
+    /// retirement records (SR1). An LMDB read transaction observes every
+    /// committed write, so the answer is strongly consistent. A record past
+    /// its retention deadline answers `Unknown` until the sweep physically
+    /// deletes it — reuse detection must not fire on a window that has
+    /// closed.
+    #[instrument(skip(self), fields(token_hash))]
+    async fn resolve_refresh_token(
+        &self,
+        token_hash: &str,
+    ) -> oidc_exchange_core::error::Result<RefreshResolution> {
+        assert!(
+            !token_hash.is_empty(),
+            "resolve_refresh_token: token_hash must not be empty"
+        );
+
         let env = self.env.clone();
-        let sessions_db = self.sessions;
-        let user_sessions_db = self.user_sessions;
+        let dbs = self.databases();
         let token_hash = token_hash.to_owned();
 
         tokio::task::spawn_blocking(move || {
-            // First, read the session to get the user_id for index cleanup.
-            let rtxn = env.read_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            let rtxn = env.read_txn().map_err(Dbs::store_err)?;
 
-            let maybe_bytes =
-                sessions_db
-                    .get(&rtxn, &*token_hash)
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
-
-            let user_id = match maybe_bytes {
-                Some(bytes) => {
-                    let session: Session =
-                        serde_json::from_slice(bytes).map_err(|e| Error::StoreError {
-                            detail: e.to_string(),
-                        })?;
-                    Some(session.user_id)
-                }
-                None => None,
-            };
-            drop(rtxn);
-
-            let mut wtxn = env.write_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-
-            // Delete from sessions db.
-            sessions_db
-                .delete(&mut wtxn, &*token_hash)
-                .map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
-
-            // Delete from user_sessions index if we found the user_id.
-            if let Some(uid) = user_id {
-                let index_key = LmdbSessionRepository::user_session_key(&uid, &token_hash);
-                user_sessions_db
-                    .delete(&mut wtxn, &index_key)
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
+            if let Some(bytes) = dbs
+                .sessions
+                .get(&rtxn, &token_hash)
+                .map_err(Dbs::store_err)?
+            {
+                let session: Session = serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
+                return Ok(RefreshResolution::Live(session));
             }
 
-            wtxn.commit().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            let Some(bytes) = dbs
+                .retired_tokens
+                .get(&rtxn, &token_hash)
+                .map_err(Dbs::store_err)?
+            else {
+                return Ok(RefreshResolution::Unknown);
+            };
+            let record: RetiredRefreshToken =
+                serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
+            if record.expires_at <= Utc::now() {
+                return Ok(RefreshResolution::Unknown);
+            }
+
+            match dbs
+                .sessions
+                .get(&rtxn, &record.successor_hash)
+                .map_err(Dbs::store_err)?
+            {
+                Some(successor_bytes) => {
+                    let successor: Session =
+                        serde_json::from_slice(successor_bytes).map_err(Dbs::store_err)?;
+                    // Pairing invariant of `rotate_refresh_token`: a successor
+                    // pointer always names a generation of the same family.
+                    assert_eq!(
+                        successor.family_id, record.family_id,
+                        "store corruption: successor of {} names family {} but lives in {}",
+                        record.refresh_token_hash, record.family_id, successor.family_id
+                    );
+                    Ok(RefreshResolution::Superseded {
+                        live: successor,
+                        retired_at: record.retired_at,
+                    })
+                }
+                None => Ok(RefreshResolution::Retired {
+                    family_id: record.family_id,
+                    user_id: record.user_id,
+                    retired_at: record.retired_at,
+                }),
+            }
+        })
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?
+    }
+
+    /// All reads and writes happen inside one `heed` write transaction, which
+    /// is where the compare-and-swap condition is evaluated (SR2/SR3/SR4).
+    /// LMDB write transactions are exclusive, so exactly one caller observes
+    /// the live generation, and the delete, retirement write, replacement
+    /// install, and all three index updates commit as a unit or not at all.
+    ///
+    /// A live row carrying the empty-family sentinel is a pre-rotation legacy
+    /// row: its first redemption deletes it and installs the replacement
+    /// *without* a retirement record — there is no prior generation to detect
+    /// reuse against — and the replacement carries whatever family the caller
+    /// minted. The store never invents one.
+    #[instrument(skip(self, replacement), fields(token_hash = %live_hash, user_id = %replacement.user_id))]
+    async fn rotate_refresh_token(
+        &self,
+        live_hash: &str,
+        replacement: &Session,
+    ) -> oidc_exchange_core::error::Result<bool> {
+        assert!(
+            is_valid_family_id(&replacement.family_id),
+            "rotate_refresh_token: malformed replacement family id {:?}",
+            replacement.family_id
+        );
+        assert_ne!(
+            live_hash, replacement.refresh_token_hash,
+            "rotate_refresh_token: replacement must be a fresh generation"
+        );
+
+        let env = self.env.clone();
+        let dbs = self.databases();
+        let reuse_retention_secs = self.reuse_retention_secs;
+        let live_hash = live_hash.to_owned();
+        let replacement = replacement.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut wtxn = env.write_txn().map_err(Dbs::store_err)?;
+
+            // CAS condition inside the exclusive write transaction: the named
+            // hash must still be a live generation.
+            let live: Session = match dbs
+                .sessions
+                .get(&wtxn, live_hash.as_str())
+                .map_err(Dbs::store_err)?
+            {
+                Some(bytes) => serde_json::from_slice(bytes).map_err(Dbs::store_err)?,
+                None => {
+                    // The condition failed: a concurrent redemption moved the
+                    // live generation first. Drop the transaction without
+                    // writing.
+                    drop(wtxn);
+                    return Ok(false);
+                }
+            };
+            let legacy_row = live.family_id.is_empty();
+            if !legacy_row {
+                // A rotation replaces a generation of the same family —
+                // anything else would strand credentials outside their
+                // holder's control.
+                assert_eq!(
+                    live.family_id, replacement.family_id,
+                    "rotate_refresh_token: family mismatch between live and replacement"
+                );
+            }
+            assert_eq!(
+                live.user_id, replacement.user_id,
+                "rotate_refresh_token: user mismatch between live and replacement"
+            );
+            // The replacement must be a fresh generation: colliding with any
+            // existing live row or retirement record is a caller bug, not a
+            // state to overwrite silently.
+            assert!(
+                dbs.sessions
+                    .get(&wtxn, replacement.refresh_token_hash.as_str())
+                    .map_err(Dbs::store_err)?
+                    .is_none(),
+                "rotate_refresh_token: replacement hash already exists as a live session"
+            );
+            assert!(
+                dbs.retired_tokens
+                    .get(&wtxn, replacement.refresh_token_hash.as_str())
+                    .map_err(Dbs::store_err)?
+                    .is_none(),
+                "rotate_refresh_token: replacement hash already exists as a retired record"
+            );
+
+            remove_live_entry(&dbs, &mut wtxn, &live_hash, &live)?;
+
+            if !legacy_row {
+                let record = retirement_record(
+                    &live_hash,
+                    &live,
+                    &replacement,
+                    reuse_retention_secs,
+                    Utc::now(),
+                );
+                let record_json = serde_json::to_vec(&record).map_err(Dbs::store_err)?;
+                dbs.retired_tokens
+                    .put(&mut wtxn, record.refresh_token_hash.as_str(), &record_json)
+                    .map_err(Dbs::store_err)?;
+                let retired_family_key =
+                    family_index_key(&record.family_id, &record.refresh_token_hash);
+                dbs.family_index
+                    .put(&mut wtxn, &retired_family_key, FAMILY_INDEX_KIND_RETIRED)
+                    .map_err(Dbs::store_err)?;
+            }
+
+            install_live_entry(&dbs, &mut wtxn, &replacement)?;
+
+            wtxn.commit().map_err(Dbs::store_err)?;
+
+            Ok(true)
+        })
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?
+    }
+
+    #[instrument(skip(self))]
+    async fn revoke_session(&self, token_hash: &str) -> oidc_exchange_core::error::Result<()> {
+        assert!(
+            !token_hash.is_empty(),
+            "revoke_session: token_hash must not be empty"
+        );
+
+        let env = self.env.clone();
+        let dbs = self.databases();
+        let token_hash = token_hash.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            let mut wtxn = env.write_txn().map_err(Dbs::store_err)?;
+
+            // Read inside the write transaction so the entry cannot move
+            // between the lookup and the delete (write transactions are
+            // exclusive, so nothing can interleave anyway).
+            let session: Option<Session> = match dbs
+                .sessions
+                .get(&wtxn, token_hash.as_str())
+                .map_err(Dbs::store_err)?
+            {
+                Some(bytes) => Some(serde_json::from_slice(bytes).map_err(Dbs::store_err)?),
+                None => None,
+            };
+
+            if let Some(session) = session {
+                remove_live_entry(&dbs, &mut wtxn, &token_hash, &session)?;
+                wtxn.commit().map_err(Dbs::store_err)?;
+            }
+            // An unknown or already-removed hash is idempotently a no-op;
+            // retirement records are not touched (port contract).
 
             Ok(())
+        })
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?
+    }
+
+    /// Remove the family's live generation and every retained retirement
+    /// record, returning the combined count (SR5), enumerating through the
+    /// `family_index` inside one write transaction so a concurrent rotation
+    /// cannot resurrect an entry mid-sweep. Idempotent: an unknown (but
+    /// well-formed) family id removes nothing and returns `Ok(0)`.
+    #[instrument(skip(self), fields(family_id))]
+    async fn revoke_family(&self, family_id: &str) -> oidc_exchange_core::error::Result<u64> {
+        assert!(
+            is_valid_family_id(family_id),
+            "revoke_family: malformed family id {family_id:?}"
+        );
+
+        let env = self.env.clone();
+        let dbs = self.databases();
+        let family_id = family_id.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            let mut wtxn = env.write_txn().map_err(Dbs::store_err)?;
+            let removed = revoke_family_wtxn(&dbs, &mut wtxn, &family_id)?;
+            wtxn.commit().map_err(Dbs::store_err)?;
+            Ok(removed)
         })
         .await
         .map_err(|e| Error::StoreError {
@@ -216,19 +627,13 @@ impl SessionRepository for LmdbSessionRepository {
 
         tokio::task::spawn_blocking(move || {
             let now = Utc::now();
-            let rtxn = env.read_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            let rtxn = env.read_txn().map_err(Dbs::store_err)?;
 
             let mut count: u64 = 0;
-            let iter = sessions_db.iter(&rtxn).map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            let iter = sessions_db.iter(&rtxn).map_err(Dbs::store_err)?;
 
             for result in iter {
-                let (_key, bytes) = result.map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
+                let (_key, bytes) = result.map_err(Dbs::store_err)?;
                 if let Ok(session) = serde_json::from_slice::<Session>(bytes) {
                     if session.expires_at > now {
                         count += 1;
@@ -244,100 +649,119 @@ impl SessionRepository for LmdbSessionRepository {
         })?
     }
 
+    /// Delete every expired session and expired retirement record, committing
+    /// the deletes in fixed-size [`LMDB_CLEANUP_BATCH_SIZE`] batches rather
+    /// than one all-or-nothing transaction: each commit frees pages back to
+    /// the map, so the sweep stays effective on a map filled near capacity
+    /// where a single transaction would fail `MDB_MAP_FULL`. The count is the
+    /// number of entries actually removed (an entry concurrently revoked
+    /// between the read and its batch is simply no longer there).
     #[instrument(skip(self))]
     async fn cleanup_expired_sessions(&self) -> oidc_exchange_core::error::Result<u64> {
         let env = self.env.clone();
-        let sessions_db = self.sessions;
-        let user_sessions_db = self.user_sessions;
+        let dbs = self.databases();
         let single_use_db = self.single_use;
 
         tokio::task::spawn_blocking(move || {
             let now = Utc::now();
 
-            let rtxn = env.read_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-
-            let mut to_delete: Vec<(String, String)> = Vec::new(); // (token_hash, user_id)
-            let iter = sessions_db.iter(&rtxn).map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-
-            for result in iter {
-                let (key, bytes) = result.map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
-                if let Ok(session) = serde_json::from_slice::<Session>(bytes) {
-                    if session.expires_at <= now {
-                        to_delete.push((key.to_owned(), session.user_id.clone()));
+            // Read phase: collect the expired entries carrying everything the
+            // delete phase needs to unhook their index filings.
+            let mut expired: Vec<Expired> = Vec::new();
+            {
+                let rtxn = env.read_txn().map_err(Dbs::store_err)?;
+                let iter = dbs.sessions.iter(&rtxn).map_err(Dbs::store_err)?;
+                for result in iter {
+                    let (_key, bytes) = result.map_err(Dbs::store_err)?;
+                    if let Ok(session) = serde_json::from_slice::<Session>(bytes) {
+                        if session.expires_at <= now {
+                            expired.push(Expired::Live(session));
+                        }
+                    }
+                }
+                let iter = dbs.retired_tokens.iter(&rtxn).map_err(Dbs::store_err)?;
+                for result in iter {
+                    let (_key, bytes) = result.map_err(Dbs::store_err)?;
+                    if let Ok(record) = serde_json::from_slice::<RetiredRefreshToken>(bytes) {
+                        if record.expires_at <= now {
+                            expired.push(Expired::Retired(record));
+                        }
                     }
                 }
             }
 
-            // Collect expired single-use records too: LMDB has no native expiry, so the
-            // sweep is their only space reclamation. The claim operations already treat
-            // an expired record as absent, so a skipped sweep never affects correctness.
+            // Delete phase: one committed write transaction per batch, each
+            // commit freeing its pages before the next begins. A batch that
+            // cannot fit in the map's remaining headroom (`MDB_MAP_FULL`) is
+            // retried at half width — down to single-delete transactions,
+            // bounded by [`CLEANUP_MAX_BATCH_HALVINGS`] — so the sweep
+            // degrades gracefully instead of wedging on the very maps it
+            // exists to rescue.
+            let mut deleted: u64 = 0;
+            let mut cursor: usize = 0;
+            while cursor < expired.len() {
+                let mut width = LMDB_CLEANUP_BATCH_SIZE.min(expired.len() - cursor);
+                let mut halvings: u32 = 0;
+                loop {
+                    match commit_deletion_batch(&env, &dbs, &expired[cursor..cursor + width]) {
+                        Ok(removed) => {
+                            deleted += removed;
+                            break;
+                        }
+                        Err(err) => {
+                            let is_map_full =
+                                matches!(err, heed::Error::Mdb(heed::MdbError::MapFull));
+                            if is_map_full && width > 1 && halvings < CLEANUP_MAX_BATCH_HALVINGS {
+                                // The map has no room for this batch's
+                                // copy-on-write pages; halve and retry. The
+                                // failed transaction wrote nothing.
+                                halvings += 1;
+                                width = std::cmp::max(width / 2, 1);
+                                continue;
+                            }
+                            return Err(Dbs::store_err(err));
+                        }
+                    }
+                }
+                cursor += width;
+            }
+
+            // Sweep expired single-use records too: LMDB has no native
+            // expiry, so this sweep is their only space reclamation. The
+            // claim operations already treat an expired record as absent, so
+            // a skipped sweep never affects correctness.
             let mut single_use_to_delete: Vec<String> = Vec::new();
-            let single_use_iter = single_use_db.iter(&rtxn).map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-            for result in single_use_iter {
-                let (key, expires_at_str) = result.map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
-                match DateTime::parse_from_rfc3339(expires_at_str) {
-                    Ok(expires_at) if expires_at.with_timezone(&Utc) <= now => {
-                        single_use_to_delete.push(key.to_owned());
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Err(Error::StoreError {
-                            detail: format!(
-                                "single_use record has unparsable expiry (key withheld): {e}"
-                            ),
-                        });
+            {
+                let rtxn = env.read_txn().map_err(Dbs::store_err)?;
+                let iter = single_use_db.iter(&rtxn).map_err(Dbs::store_err)?;
+                for result in iter {
+                    let (key, expires_at_str) = result.map_err(Dbs::store_err)?;
+                    match DateTime::parse_from_rfc3339(expires_at_str) {
+                        Ok(expires_at) if expires_at.with_timezone(&Utc) <= now => {
+                            single_use_to_delete.push(key.to_owned());
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Err(Error::StoreError {
+                                detail: format!(
+                                    "single_use record has unparsable expiry (key withheld): {e}"
+                                ),
+                            });
+                        }
                     }
                 }
             }
-            drop(rtxn);
-
-            if to_delete.is_empty() && single_use_to_delete.is_empty() {
-                return Ok(0);
+            if !single_use_to_delete.is_empty() {
+                let mut wtxn = env.write_txn().map_err(Dbs::store_err)?;
+                for key in &single_use_to_delete {
+                    single_use_db
+                        .delete(&mut wtxn, key.as_str())
+                        .map_err(Dbs::store_err)?;
+                }
+                wtxn.commit().map_err(Dbs::store_err)?;
+                deleted += single_use_to_delete.len() as u64;
             }
 
-            let deleted = to_delete.len() as u64 + single_use_to_delete.len() as u64;
-            let mut wtxn = env.write_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-
-            for (token_hash, user_id) in &to_delete {
-                sessions_db
-                    .delete(&mut wtxn, token_hash.as_str())
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
-
-                let index_key = LmdbSessionRepository::user_session_key(user_id, token_hash);
-                user_sessions_db
-                    .delete(&mut wtxn, index_key.as_str())
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
-            }
-
-            for key in &single_use_to_delete {
-                single_use_db
-                    .delete(&mut wtxn, key.as_str())
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
-            }
-
-            wtxn.commit().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-
-            debug_assert!(deleted > 0, "a non-empty sweep must report deletions");
             Ok(deleted)
         })
         .await
@@ -351,66 +775,73 @@ impl SessionRepository for LmdbSessionRepository {
         &self,
         user_id: &str,
     ) -> oidc_exchange_core::error::Result<()> {
+        assert!(
+            !user_id.is_empty(),
+            "revoke_all_user_sessions: user_id must not be empty"
+        );
+
         let env = self.env.clone();
-        let sessions_db = self.sessions;
-        let user_sessions_db = self.user_sessions;
+        let dbs = self.databases();
         let user_id = user_id.to_owned();
 
         tokio::task::spawn_blocking(move || {
+            let mut wtxn = env.write_txn().map_err(Dbs::store_err)?;
             let prefix = format!("{user_id}:");
 
-            // Collect all matching index keys and their token hashes.
-            let rtxn = env.read_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-
-            let mut to_delete: Vec<(String, String)> = Vec::new(); // (index_key, token_hash)
-
-            let iter =
-                user_sessions_db
-                    .prefix_iter(&rtxn, &prefix)
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
-
-            for result in iter {
-                let (key, _val) = result.map_err(|e| Error::StoreError {
-                    detail: e.to_string(),
-                })?;
-                // key is "user_id:token_hash"
-                if let Some(token_hash) = key.strip_prefix(&prefix) {
-                    to_delete.push((key.to_owned(), token_hash.to_owned()));
+            // The user's live generations come off the user_sessions index;
+            // their retained retirement records are swept from the
+            // `retired_tokens` database by owner (a full scan, bounded by the
+            // retention window's steady-state size).
+            let mut live: Vec<(String, Session)> = Vec::new();
+            {
+                let iter = dbs
+                    .user_sessions
+                    .prefix_iter(&wtxn, &prefix)
+                    .map_err(Dbs::store_err)?;
+                for result in iter {
+                    let (key, _val) = result.map_err(Dbs::store_err)?;
+                    let token_hash = key
+                        .strip_prefix(&prefix)
+                        .expect("prefix_iter keys carry the prefix")
+                        .to_owned();
+                    let bytes = dbs
+                        .sessions
+                        .get(&wtxn, token_hash.as_str())
+                        .map_err(Dbs::store_err)?
+                        .ok_or_else(|| {
+                            Dbs::store_err(format!(
+                                "user_sessions names live session {token_hash} but none is stored"
+                            ))
+                        })?;
+                    let session: Session = serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
+                    assert_eq!(
+                        session.user_id, user_id,
+                        "user_sessions entry must agree with the stored session's owner"
+                    );
+                    live.push((token_hash, session));
                 }
             }
-            drop(rtxn);
-
-            if to_delete.is_empty() {
-                return Ok(());
+            let mut retired: Vec<RetiredRefreshToken> = Vec::new();
+            {
+                let iter = dbs.retired_tokens.iter(&wtxn).map_err(Dbs::store_err)?;
+                for result in iter {
+                    let (_key, bytes) = result.map_err(Dbs::store_err)?;
+                    let record: RetiredRefreshToken =
+                        serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
+                    if record.user_id == user_id {
+                        retired.push(record);
+                    }
+                }
             }
 
-            let mut wtxn = env.write_txn().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
-
-            for (index_key, token_hash) in &to_delete {
-                // Delete from sessions db.
-                sessions_db
-                    .delete(&mut wtxn, token_hash.as_str())
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
-
-                // Delete from user_sessions index.
-                user_sessions_db
-                    .delete(&mut wtxn, index_key.as_str())
-                    .map_err(|e| Error::StoreError {
-                        detail: e.to_string(),
-                    })?;
+            for (token_hash, session) in &live {
+                remove_live_entry(&dbs, &mut wtxn, token_hash, session)?;
+            }
+            for record in &retired {
+                remove_retired_entry(&dbs, &mut wtxn, record)?;
             }
 
-            wtxn.commit().map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+            wtxn.commit().map_err(Dbs::store_err)?;
 
             Ok(())
         })
@@ -544,13 +975,16 @@ mod tests {
         let path = dir.path().join("lmdb_test");
         let path_str = path.to_str().expect("utf8 path").to_string();
         std::mem::forget(dir);
-        LmdbSessionRepository::new(&path_str, 16).expect("open lmdb env")
+        LmdbSessionRepository::new(&path_str, 16, 3600).expect("open lmdb env")
     }
 
     fn sample_session(user_id: &str, hash: &str, ttl_seconds: i64) -> Session {
         let now = Utc::now();
         Session {
             user_id: user_id.to_string(),
+            family_id: oidc_exchange_core::domain::new_family_id(),
+            generation: 0,
+            rotated_at: None,
             refresh_token_hash: hash.to_string(),
             provider: "google".to_string(),
             expires_at: now + chrono::Duration::seconds(ttl_seconds),
@@ -699,5 +1133,625 @@ mod tests {
             let repo = create_test_repo().await;
             single_use_conformance::cleanup_sweeps_expired_single_use_records(&repo).await;
         }
+    }
+}
+
+/// Write one live generation and both of its index filings into an open write
+/// transaction. A sentinel-family (legacy) row is stored without a
+/// family-index entry, mirroring `store_refresh_token`.
+fn install_live_entry(
+    dbs: &Dbs,
+    wtxn: &mut RwTxn,
+    session: &Session,
+) -> oidc_exchange_core::error::Result<()> {
+    let json = serde_json::to_vec(session).map_err(Dbs::store_err)?;
+    dbs.sessions
+        .put(wtxn, &session.refresh_token_hash, &json)
+        .map_err(Dbs::store_err)?;
+    let index_key = user_session_key(&session.user_id, &session.refresh_token_hash);
+    dbs.user_sessions
+        .put(wtxn, &index_key, "")
+        .map_err(Dbs::store_err)?;
+    if !session.family_id.is_empty() {
+        let family_key = family_index_key(&session.family_id, &session.refresh_token_hash);
+        dbs.family_index
+            .put(wtxn, &family_key, FAMILY_INDEX_KIND_LIVE)
+            .map_err(Dbs::store_err)?;
+    }
+    Ok(())
+}
+
+/// Enumerate and remove one family's entries through the family index inside
+/// an open write transaction. Split from [`SessionRepository::revoke_family`]
+/// so the port method stays within the line budget and tests can exercise the
+/// transaction body directly.
+fn revoke_family_wtxn(
+    dbs: &Dbs,
+    wtxn: &mut RwTxn,
+    family_id: &str,
+) -> oidc_exchange_core::error::Result<u64> {
+    // Collect the family's entries from this same write transaction (the
+    // iterator's immutable borrow ends before the deletes), then remove each
+    // one and its index filing.
+    let prefix = format!("{family_id}\0");
+    let mut live_hashes: Vec<String> = Vec::new();
+    let mut retired_hashes: Vec<String> = Vec::new();
+    {
+        let iter = dbs
+            .family_index
+            .prefix_iter(wtxn, &prefix)
+            .map_err(Dbs::store_err)?;
+        for result in iter {
+            let (key, kind) = result.map_err(Dbs::store_err)?;
+            let token_hash = key
+                .strip_prefix(&prefix)
+                .expect("prefix_iter keys carry the prefix")
+                .to_owned();
+            if kind == FAMILY_INDEX_KIND_LIVE {
+                live_hashes.push(token_hash);
+            } else {
+                assert_eq!(
+                    kind, FAMILY_INDEX_KIND_RETIRED,
+                    "unknown family_index kind {kind:?}"
+                );
+                retired_hashes.push(token_hash);
+            }
+        }
+    }
+
+    let mut removed: u64 = 0;
+    for token_hash in &live_hashes {
+        let bytes = dbs
+            .sessions
+            .get(wtxn, token_hash.as_str())
+            .map_err(Dbs::store_err)?
+            .ok_or_else(|| {
+                Dbs::store_err(format!(
+                    "family_index names live session {token_hash} but none is stored"
+                ))
+            })?;
+        let session: Session = serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
+        assert_eq!(
+            session.family_id, family_id,
+            "family_index entry must agree with the stored session's family"
+        );
+        remove_live_entry(dbs, wtxn, token_hash, &session)?;
+        removed += 1;
+    }
+    for token_hash in &retired_hashes {
+        let bytes = dbs
+            .retired_tokens
+            .get(wtxn, token_hash.as_str())
+            .map_err(Dbs::store_err)?
+            .ok_or_else(|| {
+                Dbs::store_err(format!(
+                    "family_index names retired record {token_hash} but none is stored"
+                ))
+            })?;
+        let record: RetiredRefreshToken = serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
+        assert_eq!(
+            record.family_id, family_id,
+            "family_index entry must agree with the stored record's family"
+        );
+        remove_retired_entry(dbs, wtxn, &record)?;
+        removed += 1;
+    }
+
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod single_use_tests {
+    use super::*;
+    use oidc_exchange_test_utils::session_contract::{self, family_chain, fixture_family_id};
+    use tempfile::TempDir;
+
+    /// Reuse-retention window used by every test repository: one hour — short
+    /// enough that deadline arithmetic stays inside a test's lifetime, and
+    /// positive per the constructor's precondition.
+    const TEST_REUSE_RETENTION_SECS: u64 = 3600;
+
+    /// Generous bound on the fill loop in
+    /// [`cleanup_reclaims_a_map_filled_near_capacity_in_batches`]: far more
+    /// attempts than the smallest map could ever take, so the loop exits on
+    /// its occupancy target, never on the bound.
+    const FILL_MAX_ATTEMPTS: usize = 100_000;
+
+    /// Fraction (of the map size) at which the fill loop stops seeding. Past
+    /// roughly this occupancy, copy-on-write pressure makes wide delete
+    /// transactions start failing `MDB_MAP_FULL` (the finding reports the
+    /// shipped single-transaction sweep wedging at ≥99%), which is the
+    /// regime the batched sweep must survive. If an insert already fails
+    /// before the target is reached, the loop stops there instead: a map
+    /// wedged past that point admits no transaction at all, and recovery is
+    /// raising `max_size_mb` (documented, and out of the sweeper's reach).
+    const FILL_TARGET_FRACTION: f64 = 0.90;
+
+    /// Lowest occupancy the fill loop accepts as "near capacity". Below it,
+    /// the regression would say nothing about copy-on-write pressure.
+    const FILL_FLOOR_FRACTION: f64 = 0.85;
+
+    struct TestRepo {
+        repo: LmdbSessionRepository,
+        // LMDB memory-maps the directory; the guard keeps it alive for the
+        // whole test so the files never disappear underneath the env.
+        _dir: TempDir,
+    }
+
+    impl std::ops::Deref for TestRepo {
+        type Target = LmdbSessionRepository;
+
+        fn deref(&self) -> &Self::Target {
+            &self.repo
+        }
+    }
+
+    async fn create_test_repo() -> TestRepo {
+        create_test_repo_with_map_mb(64).await
+    }
+
+    async fn create_test_repo_with_map_mb(max_size_mb: u64) -> TestRepo {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.lmdb");
+        let repo = LmdbSessionRepository::new(
+            path.to_str().expect("utf8 path"),
+            max_size_mb,
+            TEST_REUSE_RETENTION_SECS,
+        )
+        .expect("open LMDB environment");
+        TestRepo { repo, _dir: dir }
+    }
+
+    /// Store one distinct, already-expired session, returning the store
+    /// outcome so the fill loop can detect the insertion boundary.
+    async fn seed_expired_session(
+        repo: &LmdbSessionRepository,
+        index: usize,
+    ) -> oidc_exchange_core::error::Result<()> {
+        let base = Utc::now() - chrono::Duration::hours(2);
+        let session = session_contract::generation_session(
+            "usr_fill",
+            &fixture_family_id(&format!("lmdb-fill:{index}")),
+            0,
+            format!("fill-hash-{index:016x}"),
+            base,
+            base,
+            None,
+        );
+        repo.store_refresh_token(&session).await
+    }
+
+    /// Fraction of the map currently occupied, from LMDB's own accounting:
+    /// last allocated page number times the page size over the map size.
+    fn map_occupancy(repo: &LmdbSessionRepository) -> f64 {
+        let info = repo.env.info();
+        let stat = repo.env.stat();
+        let used_bytes = (info.last_page_number as u64 + 1) * u64::from(stat.page_size);
+        used_bytes as f64 / info.map_size as f64
+    }
+
+    /// Rewrite every stored timestamp backwards so every session and every
+    /// retirement record becomes expired in place — the moral equivalent of
+    /// the SQL tests' `UPDATE … SET expires_at`, done through the databases
+    /// directly because the port has no expiry-editing operation.
+    fn expire_everything_in_place(repo: &LmdbSessionRepository) {
+        let dbs = repo.databases();
+        let past = Utc::now() - chrono::Duration::hours(2);
+        let mut wtxn = repo.env.write_txn().expect("write txn");
+
+        let mut sessions: Vec<(String, Session)> = Vec::new();
+        {
+            let iter = dbs.sessions.iter(&wtxn).expect("iterate sessions");
+            for result in iter {
+                let (key, bytes) = result.expect("session entry");
+                let mut session: Session = serde_json::from_slice(bytes).expect("parse session");
+                session.expires_at = past;
+                sessions.push((key.to_owned(), session));
+            }
+        }
+        for (key, session) in &sessions {
+            let json = serde_json::to_vec(session).expect("serialize session");
+            dbs.sessions
+                .put(&mut wtxn, key, &json)
+                .expect("rewrite session");
+        }
+
+        let mut records: Vec<(String, RetiredRefreshToken)> = Vec::new();
+        {
+            let iter = dbs.retired_tokens.iter(&wtxn).expect("iterate retired");
+            for result in iter {
+                let (key, bytes) = result.expect("retired entry");
+                let mut record: RetiredRefreshToken =
+                    serde_json::from_slice(bytes).expect("parse record");
+                record.expires_at = past;
+                records.push((key.to_owned(), record));
+            }
+        }
+        for (key, record) in &records {
+            let json = serde_json::to_vec(record).expect("serialize record");
+            dbs.retired_tokens
+                .put(&mut wtxn, key, &json)
+                .expect("rewrite record");
+        }
+
+        wtxn.commit().expect("commit expiry rewrite");
+    }
+
+    #[tokio::test]
+    async fn lmdb_session_store_meets_sr1_through_sr5() {
+        let test = create_test_repo().await;
+        session_contract::assert_full_conformance(&test.repo, "lmdb-session-conformance").await;
+    }
+
+    /// A legacy row's first redemption swaps atomically but writes no
+    /// retirement record — there is no prior generation to detect reuse
+    /// against — and the presented hash reads Unknown afterwards. The
+    /// honest-count probe: revoking the replacement's family afterwards
+    /// removes exactly one entry (the replacement itself); a stray retirement
+    /// record would make it two.
+    #[tokio::test]
+    async fn legacy_row_first_redemption_swaps_without_retirement_record() {
+        let test = create_test_repo().await;
+        let repo = &test.repo;
+        let legacy_hash = session_contract::fixture_hash("lmdb-legacy:first-redemption");
+        let base = Utc::now();
+
+        let legacy = Session {
+            refresh_token_hash: legacy_hash.clone(),
+            family_id: String::new(),
+            generation: 0,
+            rotated_at: None,
+            user_id: "usr_legacy".to_string(),
+            provider: "google".to_string(),
+            expires_at: base + chrono::Duration::hours(24),
+            created_at: base,
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+        };
+        repo.store_refresh_token(&legacy)
+            .await
+            .expect("store legacy row");
+
+        match repo
+            .resolve_refresh_token(&legacy_hash)
+            .await
+            .expect("resolve legacy")
+        {
+            RefreshResolution::Live(session) => {
+                assert_eq!(session.family_id, "", "sentinel family on read");
+                assert_eq!(session.generation, 0);
+                assert_eq!(session.rotated_at, None);
+            }
+            other => panic!("the stored legacy row must resolve Live, got {other:?}"),
+        }
+
+        let new_family = fixture_family_id("lmdb-legacy:new-fam");
+        assert!(is_valid_family_id(&new_family));
+        let replacement = Session {
+            refresh_token_hash: format!("{legacy_hash}-next"),
+            family_id: new_family.clone(),
+            ..legacy.clone()
+        };
+
+        let won = repo
+            .rotate_refresh_token(&legacy_hash, &replacement)
+            .await
+            .expect("legacy first-redemption swap");
+        assert!(won, "an uncontended legacy redemption must win its CAS");
+
+        assert_eq!(
+            repo.resolve_refresh_token(&legacy_hash)
+                .await
+                .expect("resolve consumed hash"),
+            RefreshResolution::Unknown,
+            "a consumed legacy row has no retained record and must read Unknown"
+        );
+        match repo
+            .resolve_refresh_token(&replacement.refresh_token_hash)
+            .await
+            .expect("resolve replacement")
+        {
+            RefreshResolution::Live(session) => {
+                assert_eq!(session.family_id, new_family);
+                assert_eq!(session.user_id, "usr_legacy");
+            }
+            other => panic!("replacement must be Live, got {other:?}"),
+        }
+
+        let revoked = repo
+            .revoke_family(&new_family)
+            .await
+            .expect("revoke new family");
+        assert_eq!(
+            revoked, 1,
+            "only the replacement may exist for the new family - a legacy swap \
+             must not have written a retirement record"
+        );
+    }
+
+    /// Negative space: a losing CAS against a missing live generation writes
+    /// nothing at all.
+    #[tokio::test]
+    async fn legacy_row_failed_cas_leaves_store_untouched() {
+        let test = create_test_repo().await;
+        let repo = &test.repo;
+        let legacy_hash = session_contract::fixture_hash("lmdb-legacy:cas-failure");
+        let base = Utc::now();
+
+        let legacy = Session {
+            refresh_token_hash: legacy_hash.clone(),
+            family_id: String::new(),
+            generation: 0,
+            rotated_at: None,
+            user_id: "usr_legacy".to_string(),
+            provider: "google".to_string(),
+            expires_at: base + chrono::Duration::hours(24),
+            created_at: base,
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+        };
+        repo.store_refresh_token(&legacy)
+            .await
+            .expect("store legacy row");
+
+        let replacement = Session {
+            refresh_token_hash: format!("{legacy_hash}-next"),
+            family_id: fixture_family_id("lmdb-legacy:cas-fam"),
+            ..legacy.clone()
+        };
+
+        let won = repo
+            .rotate_refresh_token("no-such-live-hash", &replacement)
+            .await
+            .expect("rotation against an unknown live hash");
+        assert!(!won, "a missing live generation must lose the CAS");
+        assert!(
+            repo.get_session_by_refresh_token(&legacy_hash)
+                .await
+                .expect("read legacy row")
+                .is_some(),
+            "the legacy row must survive the lost race"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(&replacement.refresh_token_hash)
+                .await
+                .expect("resolve loser's proposal"),
+            RefreshResolution::Unknown,
+            "the loser's replacement must never be installed"
+        );
+    }
+
+    /// Cleanup sweeps expired sessions *and* expired retirement records, its
+    /// count covering both, leaving live state alone.
+    #[tokio::test]
+    async fn cleanup_counts_expired_sessions_and_retired_records_together() {
+        let test = create_test_repo().await;
+        let repo = &test.repo;
+        let chain = family_chain("lmdb:cleanup", 0, "usr_cleanup");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store gen0");
+        assert!(
+            repo.rotate_refresh_token(&chain.gen0.refresh_token_hash, &chain.gen1)
+                .await
+                .expect("rotate"),
+            "rotation must win"
+        );
+
+        expire_everything_in_place(repo);
+
+        let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
+        assert_eq!(
+            removed, 2,
+            "cleanup must count one expired session plus one expired retirement record"
+        );
+        assert_eq!(
+            repo.count_active_sessions().await.expect("active count"),
+            0,
+            "nothing live remains after the sweep"
+        );
+        assert_eq!(
+            repo.cleanup_expired_sessions()
+                .await
+                .expect("second cleanup"),
+            0,
+            "a second sweep over a clean store reports zero"
+        );
+    }
+
+    /// A live session survives a cleanup that reaps its expired neighbours.
+    #[tokio::test]
+    async fn cleanup_leaves_live_sessions_alive() {
+        let test = create_test_repo().await;
+        let repo = &test.repo;
+        let chain = family_chain("lmdb:cleanup-live", 0, "usr_mixed");
+        repo.store_refresh_token(&chain.gen0)
+            .await
+            .expect("store live gen0");
+
+        let dead_hash = session_contract::fixture_hash("lmdb:cleanup-live:dead");
+        let dead = session_contract::generation_session(
+            "usr_mixed",
+            &fixture_family_id("lmdb:cleanup-live:dead-fam"),
+            0,
+            dead_hash.clone(),
+            Utc::now() - chrono::Duration::hours(1),
+            Utc::now(),
+            None,
+        );
+        repo.store_refresh_token(&dead)
+            .await
+            .expect("store expired session");
+
+        let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
+        assert_eq!(removed, 1, "exactly the expired neighbour is reaped");
+        assert_eq!(
+            repo.resolve_refresh_token(&chain.gen0.refresh_token_hash)
+                .await
+                .expect("resolve live session"),
+            RefreshResolution::Live(chain.gen0),
+            "the live session must survive the sweep"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(&dead_hash)
+                .await
+                .expect("resolve dead session"),
+            RefreshResolution::Unknown,
+            "the expired session must be gone"
+        );
+    }
+
+    /// `revoke_all_user_sessions` removes the user's live generations *and*
+    /// their retained retirement records, leaving other users untouched.
+    #[tokio::test]
+    async fn revoke_all_user_sessions_sweeps_retired_records_of_that_user_only() {
+        let test = create_test_repo().await;
+        let repo = &test.repo;
+        let mine = family_chain("lmdb:revoke-all", 0, "usr_mine");
+        let theirs = family_chain("lmdb:revoke-all", 1, "usr_theirs");
+        repo.store_refresh_token(&mine.gen0)
+            .await
+            .expect("store mine");
+        repo.store_refresh_token(&theirs.gen0)
+            .await
+            .expect("store theirs");
+        assert!(
+            repo.rotate_refresh_token(&mine.gen0.refresh_token_hash, &mine.gen1)
+                .await
+                .expect("rotate mine"),
+            "my rotation must win"
+        );
+        assert!(
+            repo.rotate_refresh_token(&theirs.gen0.refresh_token_hash, &theirs.gen1)
+                .await
+                .expect("rotate theirs"),
+            "their rotation must win"
+        );
+
+        repo.revoke_all_user_sessions("usr_mine")
+            .await
+            .expect("revoke all mine");
+
+        assert_eq!(
+            repo.resolve_refresh_token(&mine.gen1.refresh_token_hash)
+                .await
+                .expect("resolve my live"),
+            RefreshResolution::Unknown,
+            "my live generation must be gone"
+        );
+        assert_eq!(
+            repo.resolve_refresh_token(&mine.gen0.refresh_token_hash)
+                .await
+                .expect("resolve my retired"),
+            RefreshResolution::Unknown,
+            "my retirement record must be gone"
+        );
+        match repo
+            .resolve_refresh_token(&theirs.gen1.refresh_token_hash)
+            .await
+            .expect("resolve their live")
+        {
+            RefreshResolution::Live(session) => assert_eq!(session.user_id, "usr_theirs"),
+            other => panic!("another user's family must survive my revocation, got {other:?}"),
+        }
+        // Their retirement record survives: revoking their family must still
+        // find exactly the live generation plus the record.
+        let revoked = repo
+            .revoke_family(&theirs.family_id)
+            .await
+            .expect("revoke theirs");
+        assert_eq!(
+            revoked, 2,
+            "the untouched family must keep both its live generation and its record"
+        );
+    }
+
+    /// The high-occupancy regression behind [`LMDB_CLEANUP_BATCH_SIZE`]: on a
+    /// map filled to near capacity with expired entries, the batched sweep
+    /// completes (spawning several committed batches), reports every removal,
+    /// and leaves the map writable again. A single-transaction sweep of the
+    /// same occupancy fails `MDB_MAP_FULL`, which is the wedge this batching
+    /// exists to prevent.
+    #[tokio::test]
+    async fn cleanup_reclaims_a_map_filled_near_capacity_in_batches() {
+        let test = create_test_repo_with_map_mb(1).await;
+        let repo = &test.repo;
+
+        let mut seeded: usize = 0;
+        for index in 0..FILL_MAX_ATTEMPTS {
+            // Seed until the map crosses the near-capacity target (or an
+            // insert already fails: a wedged-past-recovery map is outside the
+            // sweeper's contract). Everything seeded is expired, so the sweep
+            // has real work to do.
+            if map_occupancy(repo) >= FILL_TARGET_FRACTION {
+                break;
+            }
+            match seed_expired_session(repo, index).await {
+                Ok(()) => seeded += 1,
+                Err(Error::StoreError { detail }) if detail.contains("MDB_MAP_FULL") => break,
+                Err(err) => panic!("unexpected failure while seeding: {err:?}"),
+            }
+        }
+        assert!(
+            seeded > LMDB_CLEANUP_BATCH_SIZE,
+            "precondition: the fill loop must seed more than one batch worth \
+             ({LMDB_CLEANUP_BATCH_SIZE}) of entries to prove batching, got {seeded}"
+        );
+        assert!(
+            map_occupancy(repo) >= FILL_FLOOR_FRACTION,
+            "precondition: the map must actually be near capacity, got {:.1}%",
+            map_occupancy(repo) * 100.0
+        );
+
+        // The batched sweep must succeed on this near-capacity map — the
+        // regime where wide delete transactions hit copy-on-write pressure —
+        // and account for every expired entry. More removals than one batch
+        // holds proves several committed write transactions (each freeing its
+        // pages before the next begins), not one monolithic sweep; where the
+        // pressure bites, the width degrades down to single-delete
+        // transactions rather than failing.
+        //
+        // A deliberately monolithic control is intentionally absent: LMDB's
+        // within-transaction page reuse lets even a whole-map sweep fit
+        // whenever *any* headroom exists, so "monolithic fails here" is only
+        // true at occupancy levels where no transaction of any width can run
+        // — the documented grow-the-map boundary, not something a sweeper
+        // regression can assert deterministically. What this test pins is the
+        // property production relies on: high-occupancy sweeps complete in
+        // bounded-size committed batches and leave the map writable.
+        let removed = repo
+            .cleanup_expired_sessions()
+            .await
+            .expect("the batched sweep must succeed on a near-full map");
+        assert_eq!(
+            removed as usize, seeded,
+            "every seeded expired session must be reported as removed"
+        );
+        assert!(
+            removed > LMDB_CLEANUP_BATCH_SIZE as u64,
+            "more than one batch commit must have been exercised, removed={removed}"
+        );
+
+        // The freed pages are really back: a fresh live session stores and
+        // classifies normally after the sweep.
+        let survivor = session_contract::generation_session(
+            "usr_after_fill",
+            &fixture_family_id("lmdb-fill:after"),
+            0,
+            "after-cleanup-hash".to_string(),
+            Utc::now() + chrono::Duration::hours(1),
+            Utc::now(),
+            None,
+        );
+        repo.store_refresh_token(&survivor)
+            .await
+            .expect("store after cleanup");
+        assert_eq!(
+            repo.count_active_sessions().await.expect("active count"),
+            1,
+            "exactly the post-sweep session remains active"
+        );
     }
 }

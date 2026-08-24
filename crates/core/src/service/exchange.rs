@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{AsciiDomainPattern, RegistrationMode};
 use crate::domain::{
-    AuditEventType, AuditOutcome, AuditSeverity, NewUser, Session, TokenResponse, UserStatus,
+    is_valid_family_id, new_family_id, AuditEventType, AuditOutcome, AuditSeverity, NewUser,
+    Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::assertion::{AssertionBindError, AssertionContext};
@@ -401,12 +402,22 @@ impl AppService {
         let refresh_ttl_secs = self.config.token.refresh_token_ttl.as_secs();
         let expires_at = Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
 
-        // 8. Store session
+        // 8. Store session. Exchange mints the family: one `fam_` id shared by
+        // every generation this sign-in ever rotates through, generation 0,
+        // and no rotation timestamp yet.
+        let family_id = new_family_id();
+        assert!(
+            is_valid_family_id(&family_id),
+            "exchange: minted family id must be well-formed"
+        );
         let session = Session {
             user_id: user.id.clone(),
             refresh_token_hash: token_hash,
+            family_id,
+            generation: 0,
             provider: request.provider.clone(),
             expires_at,
+            rotated_at: None,
             device_id: request.device_id.clone(),
             user_agent: request.user_agent.clone(),
             ip_address: request.ip_address.clone(),
@@ -414,13 +425,11 @@ impl AppService {
         };
         self.session_repo.store_refresh_token(&session).await?;
 
-        // 9. Build access token JWT (shared logic). The token binds to the
-        // session just stored — `token_hash` moved into
-        // `session.refresh_token_hash`, so read it back from there to keep a
-        // single authoritative copy of the value the `sid` claim carries.
-        let (access_token, access_ttl_secs) = self
-            .build_access_token(&user, &session.refresh_token_hash)
-            .await?;
+        // 9. Build access token JWT (shared logic). The token's `sid` names
+        // the family just minted, so it stays revocation-stable for the
+        // token's whole validity however often the refresh token rotates.
+        let (access_token, access_ttl_secs) =
+            self.build_access_token(&user, &session.family_id).await?;
 
         let response = TokenResponse {
             access_token,
