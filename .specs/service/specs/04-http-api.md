@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -13,7 +13,7 @@ startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/
 |---|---|---|---|
 | GET | `/health` | `health` | `{"status":"ok"}` — mounted for every role |
 | POST | `/token` | `token` | exchange (`authorization_code`/`id_token`) and refresh (`refresh_token`) |
-| POST | `/revoke` | `revoke` | RFC 7009 revocation: 200 for invalid/unknown tokens, 503 on backend failure |
+| POST | `/revoke` | `revoke` | RFC 7009 revocation of the session the presented credential names: 200 for invalid/unknown tokens, 503 on backend failure |
 | GET | `/keys` | `keys` | JWKS: `{"keys":[<jwk>]}` from `KeyManager::public_jwk` |
 | GET | `/.well-known/openid-configuration` | `openid_config` | discovery document |
 
@@ -175,6 +175,12 @@ infrastructure detail is never leaked to the client.
   was revoked, invalid, or unknown, and 503 when the backend fails.** RFC 7009 forbids
   leaking whether a token existed (§2.2) but permits 503 when the server cannot handle the
   request (§2.2.1); a client must never be told a live session is dead.
+- *Revocation reaches one session.* **`/revoke` removes the session named by the credential
+  presented and nothing else.** The endpoint is unauthenticated by design (RFC 7009 §2.1
+  permits it, and the token is the credential), so its blast radius must be the credential's
+  own; a public endpoint that can end every session of a named subject is a
+  denial-of-service primitive for anyone who scavenges one token. Ending all of a user's
+  sessions is an operator action and lives behind internal auth.
 - *Discovery reflects the live key.* **`id_token_signing_alg_values_supported` comes from the
   configured `KeyManager`.** The advertised algorithm always matches the signing key.
 

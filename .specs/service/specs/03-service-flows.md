@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, a `providers` map, and `config`. The flows below live in
@@ -44,7 +44,8 @@
 4. **Mint refresh token** — 32 random bytes, base64url-no-pad for the opaque token; SHA-256
    hex of the bytes is the stored hash.
 5. **Store session** — `expires_at = now + refresh_token_ttl`; `store_refresh_token`.
-6. **Sign access token** — `build_access_token(user)` (below).
+6. **Sign access token** — `build_access_token(user, &session.refresh_token_hash)` (below):
+   the token is minted bound to the session stored in step 5.
 7. **Respond** — `TokenResponse { access_token, refresh_token: Some(opaque), token_type:
    "Bearer", expires_in }`.
 
@@ -64,7 +65,8 @@ created user audits `UserCreated` (notice, success); a successful exchange audit
 2. `get_session_by_refresh_token(hash)`; missing → `InvalidToken`.
 3. `session.expires_at < now` → `InvalidToken`.
 4. `get_user_by_id(session.user_id)`; missing → `InvalidToken`; suspended → `UserSuspended`.
-5. `build_access_token(user)`.
+5. `build_access_token(user, &session.refresh_token_hash)` — the same session read in step 2;
+   refresh does not rotate it, so the re-minted token stays bound to that one session.
 6. Respond with `refresh_token: None` — refresh tokens are reusable until expiry; refreshing
    does not rotate them.
 
@@ -77,18 +79,27 @@ audit `ValidationFailed` (debug, failure) — an abuse-detection signal that the
 ## Revocation (`revoke.rs`)
 
 `POST /revoke` (RFC 7009 — token-state failures still succeed toward the client; backend
-failures propagate).
+failures propagate). Revocation authority comes from the credential the caller presents, and
+reaches exactly the session that credential names. `/revoke` never removes a session the
+caller presented no credential for.
 
-- `token_type_hint == "access_token"` → `verify_and_extract_sub(token)`: split the JWT,
-  base64url the signature, `keys.verify(signing_input, signature)`, and on success decode
-  the payload and read `sub`; then `revoke_all_user_sessions(sub)`. A token-verification
-  failure (malformed, unsigned, expired, or unknown token) is swallowed and still returns
-  200 — individual access JWTs cannot be revoked and RFC 7009 §2.2 forbids leaking whether
-  a token existed — but a session-repo error from `revoke_all_user_sessions` propagates,
-  and the server maps it to 503.
-- hint `refresh_token`, absent, or unknown → SHA-256 hex the token and
-  `revoke_session(hash)`. A missing session is `Ok` (idempotent delete, 200); a store
-  error propagates, and the server maps it to 503.
+- hint `refresh_token`, absent, or unknown → SHA-256 hex the token,
+  `get_session_by_refresh_token(hash)`, and on a match `revoke_session(hash)` (audited
+  `TokenRevocation`). A missing session is `Ok` (idempotent delete, 200) and emits nothing;
+  a store error propagates, and the server maps it to 503.
+- hint `access_token` → `validate_access_token(token)` (below). The returned claims carry
+  `sid`, the `refresh_token_hash` of the session the token was minted for;
+  `revoke_session(sid)` removes that one session — audited `TokenRevocation` through the
+  same lookup-revoke-audit helper as the refresh arm. The subject's other sessions are
+  untouched, and `revoke_all_user_sessions` is not reachable from this endpoint.
+- Any validation failure — malformed, wrong type, bad signature, expired, wrong issuer or
+  audience — revokes nothing and emits one `ValidationFailed` event carrying a fixed reason
+  string, then returns 200 like every other token-state outcome. The client cannot
+  distinguish a rejected token from an accepted one (RFC 7009 §2.2); an operator can see the
+  attempt. Both arms emit exactly one event at the same severity whenever they emit —
+  success only when a session matched, rejection always — which is what keeps them
+  indistinguishable under the current blocking-threshold durability model as well as in
+  normal operation.
 
 `RevokeRequest` carries the same client context; audit events in the flow record its
 `ip_address` and `user_agent`. The access-token path audits `AllSessionsRevoked` when
@@ -100,11 +111,41 @@ RFC 7009's silence.
 
 1. Parse `token.access_token_ttl` to seconds (`parse_duration_secs`).
 2. Assemble `AccessTokenClaims { sub: user.id, iss: server.issuer, aud: token.audience,
-   iat, exp, custom }` where `custom` comes from `resolve_custom_claims`. Both values are
-   required non-empty configuration values.
-3. Header `{ alg: keys.algorithm(), typ: "JWT", kid: keys.key_id() }`.
+   iat, exp, sid, custom }`, where `sid` is the `refresh_token_hash` of the session this
+   token is minted for — supplied by the caller, from the session `exchange` has just stored
+   or the one `refresh` has just read — and `custom` comes from `resolve_custom_claims`.
+   `iss` and `aud` are required non-empty configuration values.
+3. Header `{ alg: keys.algorithm(), typ: "at+jwt", kid: keys.key_id() }` — the RFC 9068 media
+   type for a JWT access token, which `validate_access_token` requires.
 4. base64url(header).base64url(payload), `keys.sign` the signing input, append
    base64url(signature). Return `(jwt, ttl_secs)`.
+
+## Validate access token (`service/mod.rs::validate_access_token`)
+
+The only path by which a claim of a service-minted JWT becomes readable. It returns
+`AccessTokenClaims` or a fixed rejection reason — used solely as the audit `reason`; it never
+reaches the client — and a caller cannot reach `sub` without having proved everything below.
+
+1. Split on `.` — exactly three non-empty segments, each base64url-no-pad decodable.
+2. Header: `alg == keys.algorithm()`, `kid == keys.key_id()`, `typ == "at+jwt"`. The header is
+   covered by the signature but is not self-authenticating, so it is pinned to what this
+   service mints rather than read for direction; the three members are required fields of the
+   typed header struct, so a header missing any of them fails to parse.
+3. `keys.verify(signing_input, signature)` over `header.payload` exactly as received. No
+   claim is read before this step succeeds.
+4. Deserialize the payload into `AccessTokenClaims`. `sub`, `iss`, `aud`, `iat`, `exp` and
+   `sid` are required fields, so a missing claim is a parse failure rather than a check that
+   can be omitted.
+5. `iss == server.issuer`; `aud == token.audience` (the empty string when unset — the same
+   value `build_access_token` stamps, so the two agree by construction).
+6. Validity window against one captured `Utc::now()` with 60 seconds of clock skew
+   (`CLOCK_SKEW_SECS`) on every comparison, saturating arithmetic throughout: expired when
+   `now > exp + skew` — expiry exactly at the skew edge is still inside the window;
+   future-dated when `iat > now + skew`; not-yet-valid when an optional `nbf > now + skew`.
+   The service never mints `nbf` and it is deliberately not a field of `AccessTokenClaims`;
+   it is parsed separately only after the typed required claims succeed, and a non-numeric
+   `nbf` is rejected.
+7. `sub` and `sid` are non-empty after trimming.
 
 ## Custom claims (`claims.rs`)
 
@@ -114,7 +155,9 @@ Two sources merge into `AccessTokenClaims.custom`:
 2. **Per-user claims** — `user.claims`, applied on top (per-user overrides config on key
    collision).
 
-Reserved names `sub`, `iss`, `aud`, `iat`, `exp` are silently dropped from both sources.
+Reserved names `sub`, `iss`, `aud`, `iat`, `exp`, `nbf` and `sid` are silently dropped from
+both sources. `sid` carries revocation authority and `nbf` bounds validity, so neither may be
+set from a config template or a per-user claim.
 
 Template language (config values only):
 
@@ -173,6 +216,15 @@ operations carry no client `ip_address`/`user_agent` context.
 - The provider has already verified the ID token's signature and issuer in
   `validate_id_token`; the service trusts the returned `IdentityClaims`.
 - `parse_duration_secs` accepts an integer followed by `s`/`m`/`h`/`d`.
+- Access-token revocation records rejections as fixed-reason `ValidationFailed` events on
+  the current audit surface. Two sibling proposals are external dependencies that merge
+  separately and are deliberately not absorbed here: the
+  `2026-08-05-audit_and_throttle_authentication_failures` change (dedicated
+  `AuthenticationFailed` security-event type, mandatory security-event channel, durability
+  config, per-IP throttling) and the
+  `2026-08-05-rotate_refresh_tokens_with_reuse_detection` change (supersedes the
+  hash-valued `sid` with a rotation-independent `family_id`). This page keeps their
+  ordering/supersession caveats with the decisions that depend on them.
 
 ### Decisions
 
@@ -194,6 +246,49 @@ operations carry no client `ip_address`/`user_agent` context.
   Sync is a downstream convenience, not a correctness dependency.
 - *Audit fallback always records.* **On backend failure the event is still written to a
   tracing log before the blocking decision.** No audited event is silently lost.
+- *One validator for first-party tokens.* **Every read of a claim from a JWT this service
+  minted goes through `AppService::validate_access_token`.** `exchange` delegates JWT
+  validation to the provider adapters and `refresh` validates an opaque token against the
+  session store, so neither validates a first-party JWT; revoke's former hand-rolled check
+  was the only one in the workspace, and hand-rolling is what made stopping after the
+  signature possible.
+- *Required claims are parse-enforced.* **`sub`, `iss`, `aud`, `iat`, `exp` and `sid` are
+  required fields of `AccessTokenClaims`, so presence is a deserialization outcome, not a
+  check.** The same discipline `set_required_spec_claims` gives the provider paths, in a
+  crate that carries no `jsonwebtoken` dependency.
+- *A credential revokes only its own session.* **The access-token branch of `/revoke`
+  revokes the single session named by `sid`.** A stateless access token is not a session
+  credential; treating it as authority over every session of its subject gave any holder of
+  any leaked token an account-wide logout. Account-wide revocation remains on the
+  authenticated admin path — `apply_validated_patch` revokes every session when a status
+  patch moves a user into `Suspended` or `Deleted`, on behalf of both `admin_update_user`
+  and `admin_delete_user`.
+- *`sid` is the session's refresh-token hash.* **The access token carries the session's
+  existing primary key rather than a new identifier.** `revoke_session` already takes that
+  hash, so no `Session` field, port method or store migration is needed. The digest becomes
+  visible to any holder of the access token; it cannot be replayed as a refresh token (both
+  the refresh and the refresh-revoke paths hash the *presented* value before lookup), and it
+  is a SHA-256 of 256 CSPRNG bits, so the authority it confers is exactly the authority the
+  access token already implies. What `sid` *means* is fixed independently of what it
+  *contains*: it denotes **the current session identifier** — whatever value names the one
+  session the token was minted for — and the hash is merely the value that identifier takes
+  while refresh does not rotate. The proposed
+  `2026-08-05-rotate_refresh_tokens_with_reuse_detection` change merges later and supersedes
+  this binding with the rotation-independent `family_id`; `/revoke`'s access-token arm must
+  resolve whichever identifier is current — the hash before that sibling lands, the
+  `family_id` after.
+- *Failed revocation is recorded, not silent.* **A rejected `/revoke` emits one
+  `ValidationFailed` event and still returns 200.** RFC 7009 §2.2 constrains what the caller
+  observes, not what the operator records — and an unauthenticated endpoint that answers 200
+  regardless is precisely the one whose abuse is invisible without a record. The rejection
+  event carries the same severity as the success-path `TokenRevocation` emission, so success
+  and failure have identical durability semantics under the current blocking-threshold
+  config: emitting only on success would answer 503 for a token that existed and 200 for one
+  that did not whenever the sink is down — reintroducing, as degraded-mode behaviour, the
+  existence oracle the silence was meant to prevent. Renaming the event to a dedicated
+  `AuthenticationFailed` type on a mandatory security-event channel, with per-IP throttling,
+  belongs to the external `2026-08-05-audit_and_throttle_authentication_failures` proposal
+  and is not absorbed here.
 
 ### Open questions
 

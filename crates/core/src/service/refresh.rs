@@ -103,8 +103,13 @@ impl AppService {
             return Err(Error::UserSuspended { user_id: user.id });
         }
 
-        // 5. Build and sign a new access token JWT (shared logic)
-        let (access_token, expires_in) = self.build_access_token(&user).await?;
+        // 5. Build and sign a new access token JWT (shared logic). The token
+        // binds to the session resolved by the presented refresh token, so
+        // the `sid` claim stays stable across refreshes — revocation by
+        // access token keeps naming the same live session.
+        let (access_token, expires_in) = self
+            .build_access_token(&user, &session.refresh_token_hash)
+            .await?;
 
         // 6. Audit the successful refresh, after the access token is built.
         self.emit_audit(create_audit_event(

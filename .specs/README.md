@@ -82,6 +82,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-07-02-implement_lambda_runtime/plan.md](plans/2026-07-02-implement_lambda_runtime/plan.md) | Done | [changes/merged/2026-07-01-implement_lambda_runtime.md](changes/merged/2026-07-01-implement_lambda_runtime.md) |
 | [plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md](plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md) | Done | [changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md](changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md) |
 | [plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md](plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md) | Done | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) |
+| [plans/2026-08-05-validate_revoke_token_claims/plan.md](plans/2026-08-05-validate_revoke_token_claims/plan.md) | Done | [changes/2026-08-05-validate_revoke_token_claims.md](changes/2026-08-05-validate_revoke_token_claims.md) |
 
 ## Conventions
 

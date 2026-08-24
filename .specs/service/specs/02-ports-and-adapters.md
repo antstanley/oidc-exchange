@@ -1,6 +1,6 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
@@ -59,8 +59,11 @@ fn algorithm(&self) -> &str;     // "EdDSA", "ES256", …
 fn key_id(&self) -> &str;        // JWT kid
 ```
 
-`verify` exists so the revoke flow can authenticate an access token JWT before revoking the
-user's sessions.
+`verify` exists so `AppService::validate_access_token` can authenticate a service-minted
+access token before any of its claims is read. The signature check is the first step of that
+validation, not the whole of it: origin is established here, and validity — type, issuer,
+audience and window — by the claim checks that follow
+([03-service-flows.md](03-service-flows.md)).
 
 `algorithm()` returns the algorithm **derived from the key material the adapter loaded**, not
 the operator's configured string. The local adapter parses an Ed25519 PKCS#8 PEM and reports
