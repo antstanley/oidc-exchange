@@ -1,6 +1,6 @@
 # Architecture Principles
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** Repo-wide
+**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** Repo-wide
 
 Repo-wide architecture for `oidc-exchange`: a Rust service that validates ID tokens from
 third-party OIDC providers and exchanges them for self-issued access and refresh tokens.
@@ -65,6 +65,32 @@ Every port is IO-bound (a network call, a disk write, a KMS sign). The service h
 ports as `Box<dyn Trait>` trait objects so the concrete adapter is chosen at runtime from
 configuration. The nanosecond cost of virtual dispatch is irrelevant next to the IO it
 guards, and runtime selection is what lets one binary serve every deployment shape.
+
+## Fail closed
+
+A security control that cannot be evaluated denies. A configuration that cannot be
+validated refuses to start. Neither degrades to the permissive interpretation, and neither
+defers the decision to the first request that depends on it.
+
+Three rules follow, and every crate observes them:
+
+1. **Closed value domains.** A configuration field that selects a security control is a
+typed enum or newtype whose constructor is the only way to obtain a value. Comparing an
+operator-supplied `String` by equality against one literal is the anti-pattern this
+replaces: it makes the unrecognised case indistinguishable from the deliberate one, and it
+always resolves to whichever branch the `==` did not select.
+2. **Reject at startup, not at request time.** Wherever the input is configuration, the
+rejection belongs in config load. A service that will never work correctly refuses to boot
+rather than running in a weakened mode and reporting itself healthy. Request paths consume
+already-narrowed types and have no fallback branch to take.
+3. **A control that could not run did not pass.** An unread HTTP status, an absent hashing
+utility, or a probe that answers a weaker question than the invariant it stands in for are
+failures, not silence. Where a degraded path is genuinely wanted (a DDL-denied database role
+or an out-of-band migration), it is reached by explicit configuration and still verifies the
+invariant it is skipping enforcement of.
+
+The service loads configuration once, at startup; there is no reload path, so these
+guarantees are established exactly once per process.
 
 ## Monorepo layout
 
@@ -170,6 +196,10 @@ Toolchain commands, code style, and the definition of done live in
 - *FFI re-uses the server router.* **Bindings call the same axum router via `crates/ffi`.**
   Avoids a second HTTP implementation and keeps behaviour identical in-process and over the
   wire.
+- *Fail closed.* **A security control that cannot be evaluated denies; a configuration that
+  cannot be validated refuses to start.** Closed value domains, rejection at startup, and
+  could-not-run-did-not-pass replace per-site permissive fallbacks — the three rules in the
+  *Fail closed* section above.
 
 ### Open questions
 

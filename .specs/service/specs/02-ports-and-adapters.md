@@ -1,6 +1,6 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
@@ -43,11 +43,28 @@ async fn revoke_session(&self, token_hash: &str) -> Result<()>;
 async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
 async fn count_active_sessions(&self) -> Result<u64>;
 async fn cleanup_expired_sessions(&self) -> Result<u64>;  // returns rows deleted
+async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool>;
+async fn take_single_use(&self, key: &str) -> Result<bool>;
 ```
 
 User and session storage are separate traits so a deployment can back sessions with a fast
 embedded or in-memory store while keeping users in a durable SQL/DynamoDB table. A single
 adapter (DynamoDB, Postgres, SQLite) may implement both.
+
+The single-use pair backs nonces and assertion-replay markers (see
+[01-domain-model.md](01-domain-model.md) → SingleUseRecord). `put_single_use` is an atomic
+insert-if-absent returning `true` when *this* call wrote the record and `false` when a live
+record already held the key; `take_single_use` is an atomic remove-and-report returning
+`true` when a live record was found and is now gone. **Both treat a record whose
+`expires_at` has passed as absent**, so correctness never depends on the reaper having run:
+an expired nonce cannot be taken, and an expired marker's key is reusable.
+`cleanup_expired_sessions` also reclaims expired single-use records where the store has no
+native expiry, and its return count covers sessions and single-use records. Nonces and
+markers are short-lived and high-churn, exactly like sessions, so they live wherever
+sessions live — the `[session_repository]` store when one is configured, otherwise the
+`[repository]` store — with no new configuration surface. `key` is always a namespaced
+digest (`"nonce:<sha256hex>"` or `"assertion:<provider>:[d:]<sha256hex>"`); storage never
+holds raw nonce or raw assertion material.
 
 ### KeyManager (`ports/key_manager.rs`)
 
@@ -59,8 +76,19 @@ fn algorithm(&self) -> &str;     // "EdDSA", "ES256", …
 fn key_id(&self) -> &str;        // JWT kid
 ```
 
-`verify` exists so the revoke flow can authenticate an access token JWT before revoking the
-user's sessions.
+`verify` exists so `AppService::validate_access_token` can authenticate a service-minted
+access token before any of its claims is read. The signature check is the first step of that
+validation, not the whole of it: origin is established here, and validity — type, issuer,
+audience and window — by the claim checks that follow
+([03-service-flows.md](03-service-flows.md)).
+
+`algorithm()` returns the algorithm **derived from the key material the adapter loaded**, not
+the operator's configured string. The local adapter parses an Ed25519 PKCS#8 PEM and reports
+`EdDSA`; the KMS adapter reports the algorithm its configured JWS name maps to, checked against
+the SPKI it fetches for the JWK. Config load compares the declared `key_manager.*.algorithm`
+against this value and fails when they disagree, so the `alg` in every issued JWT header, the
+JWK at `GET /keys`, and `id_token_signing_alg_values_supported` in the discovery document all
+describe the key that actually signs.
 
 `sign` returns signature bytes in the form the JWS serialization uses directly. For the ES\*
 algorithms the KMS adapter converts the DER-encoded `Ecdsa-Sig-Value` returned by KMS Sign
@@ -77,7 +105,12 @@ async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<Provider
 async fn validate_id_token(&self, id_token: &str) -> Result<IdentityClaims>;
 async fn revoke_token(&self, token: &str) -> Result<()>;
 fn provider_id(&self) -> &str;
+fn client_id(&self) -> &str;
 ```
+
+`client_id` reports the audience the provider pins, so the core's `azp` check does not
+have to reach into `[providers.<name>]` config. `validate_id_token`'s signature is
+unchanged — the binding controls read the claims it already returns.
 
 ### AuditLog (`ports/audit.rs`)
 
@@ -100,8 +133,8 @@ async fn notify_user_deleted(&self, user_id: &str) -> Result<()>;
 | UserRepository + SessionRepository | DynamoDB | `adapters/dynamo` | single-table, GSI1; see [08-persistence.md](08-persistence.md) |
 | UserRepository + SessionRepository | Postgres | `adapters/postgres` | `users` + `sessions` tables, JSONB columns, `sqlx` |
 | UserRepository + SessionRepository | SQLite | `adapters/sqlite` | JSON-as-TEXT, WAL mode, `sqlx` |
-| SessionRepository | LMDB | `adapters/lmdb` | embedded; `heed`; `sessions` + `user_sessions` DBs |
-| SessionRepository | Valkey/Redis | `adapters/valkey` | `fred`; `{prefix}session:{hash}`, `{prefix}user_sessions:{user_id}` set (TTL bumped via `EXPIRE … GT`), `{prefix}active_sessions` counter; atomic pipelined writes; cleanup prunes index sets and reconciles the counter |
+| SessionRepository | LMDB | `adapters/lmdb` | embedded; `heed`; `sessions` + `user_sessions` + `single_use` DBs |
+| SessionRepository | Valkey/Redis | `adapters/valkey` | `fred`; `{prefix}session:{hash}`, `{prefix}user_sessions:{user_id}` set (TTL bumped via `EXPIRE … GT`), `{prefix}active_sessions` counter, `{prefix}single_use:{digest}` (`SET NX EX` claim / `GETDEL` burn); atomic pipelined writes; cleanup prunes index sets and reconciles the counter |
 | KeyManager | AWS KMS | `adapters/kms` | RS/PS/ES 256/384/512; ECDSA DER→raw JWS conversion on sign; local verify against the cached public key; JWK cached on `OnceCell`; `Sign`/`GetPublicKey` |
 | KeyManager | Local Ed25519 | `adapters/local_keys` | EdDSA only; PKCS#8 PEM from file or bytes |
 | KeyManager | Noop | `adapters/noop` | every op errors; used in admin-only role |
@@ -134,7 +167,10 @@ Reused by the OIDC and Apple providers:
 - `jwks::JwksCache` — fetches and caches a remote JWKS behind a read/write lock with a TTL
   (default 1h); `with_ttl` overrides.
 - `discovery::discover(issuer)` — fetches and parses `.well-known/openid-configuration` into
-  `DiscoveryDocument { issuer, token_endpoint, jwks_uri, revocation_endpoint }`.
+  `DiscoveryDocument { issuer, token_endpoint, jwks_uri, revocation_endpoint }`. A non-success
+  HTTP status is rejected before the body is read (`ProviderError` naming the issuer and status),
+  matching `JwksCache`'s handling of the same failure; the parsed `issuer` must then equal the
+  configured issuer per RFC 8414 §3.3.
 - `token_endpoint::exchange_code(endpoint, client_id, client_secret, code, redirect_uri)` —
   the standard form-encoded `grant_type=authorization_code` POST.
 

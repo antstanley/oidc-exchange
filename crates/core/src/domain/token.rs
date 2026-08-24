@@ -40,6 +40,11 @@ pub struct AccessTokenClaims {
     pub aud: String,
     pub iat: u64,
     pub exp: u64,
+    /// Session identifier: the SHA-256 hex refresh-token hash of the session
+    /// this token was minted for. Revocation acts solely on this claim, so a
+    /// payload without it cannot be revoked safely and fails to deserialize
+    /// rather than silently authorizing an account-wide revoke.
+    pub sid: String,
     /// Merged: config template claims + user.claims
     #[serde(flatten)]
     pub custom: HashMap<String, Value>,
@@ -80,5 +85,11 @@ pub struct IdentityClaims {
     /// Apple private-relay flag, coerced bool-or-string like `email_verified`;
     /// `None` for non-Apple providers.
     pub is_private_email: Option<bool>,
+    /// The JWS algorithm the resolved JWK actually verified this ID token with
+    /// (e.g. `"RS256"`, `"ES256"`), never the untrusted JWT header's value. The
+    /// core's `at_hash` binding check reads it to select the matching digest
+    /// (SHA-256 for `*256`, SHA-384 for `*384`, SHA-512 for `*512`) without
+    /// re-deciding the algorithm itself.
+    pub signing_alg: String,
     pub raw_claims: HashMap<String, Value>,
 }

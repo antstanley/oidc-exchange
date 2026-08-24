@@ -25,6 +25,10 @@ pub struct TokenForm {
     pub provider: Option<String>,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
+    /// Provider access token co-issued with a directly-presented ID token.
+    /// Bearer credential: bound once by the core's `at_hash` check, never
+    /// logged or persisted.
+    pub provider_access_token: Option<String>,
 }
 
 /// All-optional mirror of `TokenForm` used only inside the extractor: a body
@@ -39,6 +43,7 @@ struct RawTokenForm {
     provider: Option<String>,
     refresh_token: Option<String>,
     id_token: Option<String>,
+    provider_access_token: Option<String>,
 }
 
 impl TryFrom<RawTokenForm> for TokenForm {
@@ -57,6 +62,7 @@ impl TryFrom<RawTokenForm> for TokenForm {
             provider: raw.provider,
             refresh_token: raw.refresh_token,
             id_token: raw.id_token,
+            provider_access_token: raw.provider_access_token,
         })
     }
 }
@@ -98,6 +104,10 @@ pub enum TokenGrant {
     IdTokenAssertion {
         provider: String,
         id_token: String,
+        /// Provider access token co-issued with the presented ID token,
+        /// carried only so the core's `at_hash` binding control can verify
+        /// it. Bearer credential: never logged, never persisted.
+        provider_access_token: Option<String>,
     },
     RefreshToken {
         refresh_token: String,
@@ -108,9 +118,9 @@ pub enum TokenGrant {
 ///
 /// | `grant_type`        | required                            | rejected if present                          |
 /// |---------------------|-------------------------------------|----------------------------------------------|
-/// | `authorization_code`| `provider`, `code`, `redirect_uri`  | `id_token`, `refresh_token`                  |
-/// | `id_token`          | `provider`, `id_token`              | `code`, `redirect_uri`, `refresh_token`      |
-/// | `refresh_token`     | `refresh_token`                     | `provider`, `code`, `redirect_uri`, `id_token`|
+/// | `authorization_code`| `provider`, `code`, `redirect_uri`  | `id_token`, `refresh_token`, `provider_access_token` |
+/// | `id_token`          | `provider`, `id_token` (+ optional `provider_access_token`) | `code`, `redirect_uri`, `refresh_token` |
+/// | `refresh_token`     | `refresh_token`                     | `provider`, `code`, `redirect_uri`, `id_token`, `provider_access_token` |
 ///
 /// Cross-grant fields are rejected (not ignored) before required members are
 /// checked, because the closed-set rule is unconditional. Parameters outside
@@ -144,6 +154,9 @@ impl TryFrom<TokenForm> for TokenGrant {
                 if form.refresh_token.is_some() {
                     return Err(cross_grant("refresh_token", AUTHORIZATION_CODE));
                 }
+                if form.provider_access_token.is_some() {
+                    return Err(cross_grant("provider_access_token", AUTHORIZATION_CODE));
+                }
                 let provider = form.provider.ok_or_else(|| missing("provider"))?;
                 let code = form.code.ok_or_else(|| missing("code"))?;
                 let redirect_uri = form.redirect_uri.ok_or_else(|| missing("redirect_uri"))?;
@@ -165,7 +178,11 @@ impl TryFrom<TokenForm> for TokenGrant {
                 }
                 let provider = form.provider.ok_or_else(|| missing("provider"))?;
                 let id_token = form.id_token.ok_or_else(|| missing("id_token"))?;
-                Ok(TokenGrant::IdTokenAssertion { provider, id_token })
+                Ok(TokenGrant::IdTokenAssertion {
+                    provider,
+                    id_token,
+                    provider_access_token: form.provider_access_token,
+                })
             }
             REFRESH_TOKEN => {
                 if form.provider.is_some() {
@@ -179,6 +196,9 @@ impl TryFrom<TokenForm> for TokenGrant {
                 }
                 if form.id_token.is_some() {
                     return Err(cross_grant("id_token", REFRESH_TOKEN));
+                }
+                if form.provider_access_token.is_some() {
+                    return Err(cross_grant("provider_access_token", REFRESH_TOKEN));
                 }
                 let refresh_token = form.refresh_token.ok_or_else(|| missing("refresh_token"))?;
                 Ok(TokenGrant::RefreshToken { refresh_token })
@@ -195,6 +215,17 @@ pub async fn token_handler(
     Extension(audit_ctx): Extension<AuditContext>,
     form: TokenForm,
 ) -> Result<impl IntoResponse, ApiError> {
+    // The grants switch gates exposure, and it gates it up front: when the
+    // direct ID-token grant is disabled, a request carrying an `id_token`
+    // field is rejected as `unsupported_grant_type` whatever `grant_type`
+    // declares, so field-presence branch selection cannot evade the switch.
+    // The gate lives in this handler (not the core) because
+    // `unsupported_grant_type` is a server-layer error class, and this handler
+    // is shared by the server, Lambda, and FFI runtimes via `build_router`.
+    if form.id_token.is_some() && !state.config.grants.id_token {
+        return Err(ApiError::UnsupportedGrantType);
+    }
+
     // Parse/validate at the boundary: everything below this line sees a
     // coherent declared grant, so neither provider port is reachable for a
     // request whose fields disagree with its declared grant.
@@ -210,6 +241,7 @@ pub async fn token_handler(
                 .exchange(ExchangeRequest {
                     credential: ExchangeCredential::AuthorizationCode { code, redirect_uri },
                     provider,
+                    provider_access_token: None,
                     ip_address: audit_ctx.ip_address.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
@@ -217,12 +249,17 @@ pub async fn token_handler(
                 .await?;
             Ok(Json(result))
         }
-        TokenGrant::IdTokenAssertion { provider, id_token } => {
+        TokenGrant::IdTokenAssertion {
+            provider,
+            id_token,
+            provider_access_token,
+        } => {
             let result = state
                 .service
                 .exchange(ExchangeRequest {
                     credential: ExchangeCredential::IdTokenAssertion { id_token },
                     provider,
+                    provider_access_token,
                     ip_address: audit_ctx.ip_address.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
@@ -259,6 +296,7 @@ mod tests {
             provider: None,
             refresh_token: None,
             id_token: None,
+            provider_access_token: None,
         }
     }
 
@@ -343,6 +381,7 @@ mod tests {
             TokenGrant::IdTokenAssertion {
                 provider: "google".to_string(),
                 id_token: "fake.id.token".to_string(),
+                provider_access_token: None,
             }
         );
 
@@ -427,6 +466,7 @@ mod tests {
             provider: Some("google".to_string()),
             refresh_token: None,
             id_token: None,
+            provider_access_token: None,
         };
         match TokenForm::try_from(raw) {
             Err(ApiError::Domain(Error::InvalidRequest { reason })) => assert_eq!(

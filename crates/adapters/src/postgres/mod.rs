@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -51,6 +51,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
+
+-- Single-use records (nonces and assertion-replay markers): a presence-only digest key
+-- plus an expiry. The `expires_at` index serves only the cleanup sweep — both claim
+-- operations are keyed lookups that evaluate expiry themselves.
+CREATE TABLE IF NOT EXISTS single_use (
+    key         TEXT PRIMARY KEY,
+    expires_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_single_use_expires_at ON single_use (expires_at);
 "#;
 
 pub struct PostgresRepository {
@@ -139,11 +149,54 @@ fn is_insufficient_privilege_code(code: Option<&str>) -> bool {
 /// out-of-band.
 ///
 /// A migration failure whose database error carries [`INSUFFICIENT_PRIVILEGE_SQLSTATE`]
-/// (`42501`, the role lacks DDL rights) degrades instead of failing outright: it logs a
-/// structured warning and probes `to_regclass('users')` / `to_regclass('sessions')`, returning
-/// the pool when both already exist (a pre-provisioned schema under a restricted role) and the
-/// *original* migration error when either is missing. Every other migration error — including
-/// a failed probe — is returned unchanged, so a genuinely broken database still fails startup.
+/// (`42501`, the role lacks DDL rights) degrades only after a probe proves the pre-provisioned
+/// schema provides every invariant established by [`MIGRATIONS`]: the `users` and `sessions`
+/// tables, the unique partial `idx_users_external_id_provider` index, and `users.version`.
+/// Every missing, malformed, or unreadable probe result returns the *original* migration error.
+/// Every other migration error fails fast unchanged.
+async fn migration_invariants_hold(pool: &PgPool) -> bool {
+    const INVARIANT_PROBE: &str = "SELECT \
+        to_regclass('users') IS NOT NULL AS users_exists, \
+        to_regclass('sessions') IS NOT NULL AS sessions_exists, \
+        EXISTS ( \
+            SELECT 1 \
+            FROM pg_index index_definition \
+            INNER JOIN pg_class index_relation ON index_relation.oid = index_definition.indexrelid \
+            WHERE index_relation.relname = 'idx_users_external_id_provider' \
+              AND index_definition.indisunique \
+              AND index_definition.indpred IS NOT NULL \
+        ) AS external_id_provider_index_valid, \
+        EXISTS ( \
+            SELECT 1 \
+            FROM pg_attribute column_definition \
+            WHERE column_definition.attrelid = to_regclass('users') \
+              AND column_definition.attname = 'version' \
+              AND column_definition.attnum > 0 \
+              AND NOT column_definition.attisdropped \
+        ) AS users_version_exists";
+
+    let Ok(row) = sqlx::query(INVARIANT_PROBE).fetch_one(pool).await else {
+        return false;
+    };
+
+    let Ok(users_exists) = row.try_get::<bool, _>("users_exists") else {
+        return false;
+    };
+    let Ok(sessions_exists) = row.try_get::<bool, _>("sessions_exists") else {
+        return false;
+    };
+    let Ok(external_id_provider_index_valid) =
+        row.try_get::<bool, _>("external_id_provider_index_valid")
+    else {
+        return false;
+    };
+    let Ok(users_version_exists) = row.try_get::<bool, _>("users_version_exists") else {
+        return false;
+    };
+
+    users_exists && sessions_exists && external_id_provider_index_valid && users_version_exists
+}
+
 pub async fn create_pool(
     url: &str,
     max_connections: u32,
@@ -163,25 +216,11 @@ pub async fn create_pool(
 
             tracing::warn!(
                 sqlstate = INSUFFICIENT_PRIVILEGE_SQLSTATE,
-                "postgres migration denied (insufficient privilege); probing for pre-existing \
-                 users/sessions tables"
+                "postgres migration denied (insufficient privilege); probing pre-provisioned \
+                 schema invariants"
             );
 
-            let tables_exist = sqlx::query(
-                "SELECT to_regclass('users')::text AS users_reg, \
-                        to_regclass('sessions')::text AS sessions_reg",
-            )
-            .fetch_one(&pool)
-            .await
-            .ok()
-            .map(|row| {
-                let users_reg: Option<String> = row.try_get("users_reg").unwrap_or(None);
-                let sessions_reg: Option<String> = row.try_get("sessions_reg").unwrap_or(None);
-                users_reg.is_some() && sessions_reg.is_some()
-            })
-            .unwrap_or(false);
-
-            if !tables_exist {
+            if !migration_invariants_hold(&pool).await {
                 // Return the original migration error, not a probe-derived one: the denied
                 // DDL is why startup is failing, and a failed or inconclusive probe must not
                 // mask that.
@@ -189,7 +228,7 @@ pub async fn create_pool(
             }
 
             tracing::warn!(
-                "proceeding despite denied migration DDL: users/sessions tables already exist"
+                "proceeding despite denied migration DDL: required schema invariants hold"
             );
         }
     }
@@ -573,7 +612,54 @@ impl SessionRepository for PostgresRepository {
             .await
             .map_err(Self::store_err)?;
 
-        Ok(result.rows_affected())
+        // The sweep also reclaims expired single-use records (space reclamation only —
+        // put/take evaluate `expires_at` themselves), and the returned count covers
+        // both kinds, per the port contract.
+        let single_use = sqlx::query("DELETE FROM single_use WHERE expires_at < NOW()")
+            .execute(&self.pool)
+            .await
+            .map_err(Self::store_err)?;
+
+        Ok(result.rows_affected() + single_use.rows_affected())
+    }
+
+    #[instrument(skip(self, key))]
+    async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        // Insert-if-absent, with a live conflicting row overwritten only when it has
+        // already expired (`WHERE single_use.expires_at < now()`): rows_affected is 1
+        // for exactly the winning claim, 0 when a live record holds the key. The
+        // primary key makes check-and-insert one atomic statement.
+        let result = sqlx::query(
+            "INSERT INTO single_use (key, expires_at) VALUES ($1, $2) \
+             ON CONFLICT (key) DO UPDATE SET expires_at = EXCLUDED.expires_at \
+             WHERE single_use.expires_at < $3",
+        )
+        .bind(key)
+        .bind(expires_at)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await
+        .map_err(Self::store_err)?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    #[instrument(skip(self, key))]
+    async fn take_single_use(&self, key: &str) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        // Remove-and-report in one statement: only a live record (expiry still ahead of
+        // now) matches, so an absent, burned, or expired key deletes zero rows.
+        let row =
+            sqlx::query("DELETE FROM single_use WHERE key = $1 AND expires_at > NOW() RETURNING 1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(Self::store_err)?;
+
+        Ok(row.is_some())
     }
 }
 
@@ -1150,6 +1236,112 @@ mod tests {
     // Denied-DDL degrade classification
     // -----------------------------------------------------------------
 
+    /// The migration-invariant probe must accept precisely the schema that `MIGRATIONS`
+    /// guarantees: both tables, a unique partial identity index, and the optimistic-locking
+    /// `version` column. This test requires a local Postgres service via `DATABASE_URL`.
+    #[tokio::test]
+    async fn migration_invariant_probe_rejects_incomplete_or_wrong_indexes() {
+        let Ok(base_url) = std::env::var("DATABASE_URL") else {
+            eprintln!(
+                "skipping migration_invariant_probe_rejects_incomplete_or_wrong_indexes: \
+                 DATABASE_URL is not set"
+            );
+            return;
+        };
+
+        let schema = "oidc_adapter_test_migration_invariants";
+        reset_schema(&base_url, schema).await;
+        let url = url_with_search_path(&base_url, schema);
+        let pool = create_pool(&url, 1, true)
+            .await
+            .expect("migrate isolated schema");
+
+        assert!(
+            migration_invariants_hold(&pool).await,
+            "the complete migration schema must satisfy the probe"
+        );
+
+        sqlx::query("DROP TABLE sessions")
+            .execute(&pool)
+            .await
+            .expect("drop sessions table");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a missing sessions table must fail the probe"
+        );
+        sqlx::raw_sql(MIGRATIONS)
+            .execute(&pool)
+            .await
+            .expect("restore complete migration schema");
+
+        sqlx::query("DROP TABLE users CASCADE")
+            .execute(&pool)
+            .await
+            .expect("drop users table");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a missing users table must fail the probe"
+        );
+        sqlx::raw_sql(MIGRATIONS)
+            .execute(&pool)
+            .await
+            .expect("restore complete migration schema");
+
+        sqlx::query("DROP INDEX idx_users_external_id_provider")
+            .execute(&pool)
+            .await
+            .expect("drop partial unique index");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a missing identity index must fail the probe"
+        );
+
+        sqlx::query("CREATE INDEX idx_users_external_id_provider ON users (external_id, provider)")
+            .execute(&pool)
+            .await
+            .expect("create non-unique full index");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a non-unique full identity index must fail the probe"
+        );
+
+        sqlx::query("DROP INDEX idx_users_external_id_provider")
+            .execute(&pool)
+            .await
+            .expect("drop non-unique full index");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_users_external_id_provider \
+             ON users (external_id, provider)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create unique full index");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a unique but non-partial identity index must fail the probe"
+        );
+
+        sqlx::query("DROP INDEX idx_users_external_id_provider")
+            .execute(&pool)
+            .await
+            .expect("drop unique full index");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_users_external_id_provider \
+             ON users (external_id, provider) WHERE status != 'deleted'",
+        )
+        .execute(&pool)
+        .await
+        .expect("restore unique partial index");
+        sqlx::query("ALTER TABLE users DROP COLUMN version")
+            .execute(&pool)
+            .await
+            .expect("drop version column");
+        assert!(
+            !migration_invariants_hold(&pool).await,
+            "a schema without users.version must fail the probe"
+        );
+    }
+
     /// [`is_insufficient_privilege_code`] must route on the exact SQLSTATE, not "some error
     /// occurred": the insufficient-privilege code (`42501`) reads `true` (degrade path), a
     /// differently-coded failure (here, `undefined_table`, `42P01`) and the no-code case both
@@ -1277,5 +1469,51 @@ mod tests {
             sessions_reg.is_none(),
             "run_migrations = false must not create the sessions table"
         );
+    }
+
+    // -- Single-use conformance (shared suite in test-utils) --------------------
+
+    use oidc_exchange_test_utils::single_use_conformance as conformance;
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn single_use_first_claim_wins_duplicate_loses() {
+        let repo = create_test_repo().await;
+        conformance::first_claim_wins_duplicate_loses(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn single_use_consume_live_record_exactly_once() {
+        let repo = create_test_repo().await;
+        conformance::consume_live_record_exactly_once(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn single_use_expired_record_is_absent_to_put_and_take() {
+        let repo = create_test_repo().await;
+        conformance::expired_record_is_absent_to_put_and_take(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn single_use_concurrent_put_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_test_repo().await);
+        conformance::concurrent_put_has_exactly_one_winner(repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn single_use_concurrent_take_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_test_repo().await);
+        conformance::concurrent_take_has_exactly_one_winner(repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a live Postgres: see `test_database_url`.
+    async fn single_use_cleanup_sweeps_expired_records_and_counts_both_kinds() {
+        let repo = create_test_repo().await;
+        conformance::cleanup_sweeps_expired_single_use_records(&repo).await;
     }
 }

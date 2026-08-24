@@ -5,7 +5,10 @@ use base64::Engine;
 use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
 use oidc_exchange_core::domain::{
     AccessTokenClaims, AuditEventType, AuditOutcome, Session, UserPatch, UserStatus,
 };
@@ -19,22 +22,47 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
-fn make_config() -> AppConfig {
-    AppConfig {
-        server: ServerConfig {
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
             issuer: "https://auth.test.com".to_string(),
-            ..Default::default()
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
         },
-        token: TokenConfig {
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
             access_token_ttl: "15m".to_string(),
             refresh_token_ttl: "30d".to_string(),
-            audience: Some("https://api.test.com".to_string()),
-            ..Default::default()
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
         },
-        ..Default::default()
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
     }
 }
 
+fn make_config() -> Config {
+    Config::resolve(base_raw_config()).expect("test config should resolve")
+}
 fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -56,7 +84,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
 fn make_service_with_audit(
     repo: MockRepository,
     provider: MockIdentityProvider,
-    config: AppConfig,
+    config: Config,
     audit: MockAuditLog,
 ) -> AppService {
     let provider_id = provider.provider_id().to_string();
@@ -78,6 +106,7 @@ fn make_service_with_audit(
 /// with the service and repo for further testing.
 async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService) -> String {
     let request = ExchangeRequest {
+        provider_access_token: None,
         credential: ExchangeCredential::AuthorizationCode {
             code: "auth-code-123".to_string(),
             redirect_uri: "https://app.test.com/callback".to_string(),
@@ -123,6 +152,18 @@ async fn refresh_happy_path_returns_new_access_token() {
     let parts: Vec<&str> = response.access_token.split('.').collect();
     assert_eq!(parts.len(), 3, "JWT should have 3 parts");
 
+    // Decode and verify the header: refresh mints the same RFC 9068
+    // access-token media type exchange does.
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .expect("header should be valid base64url");
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_bytes).expect("header should deserialize");
+    assert_eq!(
+        header["typ"], "at+jwt",
+        "refreshed tokens must also be at+jwt"
+    );
+
     // Decode and verify the payload claims
     let payload_bytes = URL_SAFE_NO_PAD
         .decode(parts[1])
@@ -137,6 +178,21 @@ async fn refresh_happy_path_returns_new_access_token() {
     let users = repo.get_all_users().await;
     assert_eq!(users.len(), 1);
     assert_eq!(claims.sub, users[0].id);
+
+    // The refreshed token must keep the session binding stable: its `sid`
+    // is still the hash of the original refresh token (refresh does not
+    // rotate), so revocation by access token keeps naming this session.
+    let session_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
+    assert_eq!(
+        claims.sid, session_hash,
+        "a refreshed access token must carry the same session identifier"
+    );
+    let stored = repo
+        .get_session_by_refresh_token(&session_hash)
+        .await
+        .expect("lookup should not error")
+        .expect("the session must remain live after a refresh");
+    assert_eq!(stored.refresh_token_hash, claims.sid);
 }
 
 #[tokio::test]
@@ -284,13 +340,16 @@ async fn refresh_unknown_token_under_default_threshold_emits_nothing() {
 /// the request's ip/ua and a `Failure` outcome.
 #[tokio::test]
 async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
@@ -329,13 +388,16 @@ async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
 /// the session (and therefore the user id) was already resolved.
 #[tokio::test]
 async fn refresh_expired_token_under_debug_threshold_emits_validation_failed_with_actor() {
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");

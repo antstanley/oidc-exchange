@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
 use oidc_exchange_core::domain::{AuditEventType, NewUser, UserPatch, UserStatus};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -13,22 +16,47 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync, UserSyncCall,
 };
 
-fn make_config() -> AppConfig {
-    AppConfig {
-        server: ServerConfig {
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
             issuer: "https://auth.test.com".to_string(),
-            ..Default::default()
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
         },
-        token: TokenConfig {
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
             access_token_ttl: "15m".to_string(),
             refresh_token_ttl: "30d".to_string(),
-            audience: Some("https://api.test.com".to_string()),
-            ..Default::default()
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
         },
-        ..Default::default()
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
     }
 }
 
+fn make_config() -> Config {
+    Config::resolve(base_raw_config()).expect("test config should resolve")
+}
 fn make_service_with_mocks(
     repo: MockRepository,
     user_sync: MockUserSync,
@@ -80,7 +108,7 @@ fn make_service_with_audit(
     repo: MockRepository,
     user_sync: MockUserSync,
     audit: MockAuditLog,
-    config: AppConfig,
+    config: Config,
 ) -> AppService {
     let provider = MockIdentityProvider::new("mock");
     let provider_id = provider.provider_id().to_string();
@@ -373,6 +401,7 @@ async fn admin_delete_user_revokes_sessions() {
 
     // Exchange to create a user + session
     let request = ExchangeRequest {
+        provider_access_token: None,
         credential: ExchangeCredential::AuthorizationCode {
             code: "auth-code".to_string(),
             redirect_uri: "https://app.test.com/callback".to_string(),
@@ -445,6 +474,7 @@ async fn service_with_active_session() -> (AppService, String, MockRepository, M
     let svc = make_service_with_provider(repo, user_sync, provider);
 
     let request = ExchangeRequest {
+        provider_access_token: None,
         credential: ExchangeCredential::AuthorizationCode {
             code: "auth-code".to_string(),
             redirect_uri: "https://app.test.com/callback".to_string(),
@@ -937,13 +967,16 @@ async fn admin_reads_emit_no_audit_events() {
 async fn admin_create_user_blocking_audit_failure_propagates_err_and_skips_sync() {
     // `blocking_threshold: "info"` covers every severity from Emergency down
     // to Info, so the Notice-severity `UserCreated` emission is blocking.
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
             blocking_threshold: "info".to_string(),
-            ..Default::default()
+            emit_threshold: "info".to_string(),
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let user_sync = MockUserSync::new();

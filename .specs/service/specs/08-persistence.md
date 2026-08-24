@@ -1,6 +1,6 @@
 # Persistence
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
 
 How the domain entities ([01-domain-model.md](01-domain-model.md)) are stored by each
 repository adapter. The adapter-agnostic logical model is `schemas/datamodel.schema.json`; the
@@ -93,11 +93,16 @@ SQLite, a fresh database is ready to serve after startup with no external migrat
 With `run_migrations = false`, `create_pool` only connects, leaving DDL to an out-of-band
 process — for locked-down deployments where the app role has no DDL rights. When the migration
 is instead denied by Postgres itself — the connected role lacks DDL rights and the DDL fails
-with SQLSTATE `42501` (`insufficient_privilege`) — `create_pool` degrades rather than failing
-outright: it logs a structured warning and probes `to_regclass('users')` /
-`to_regclass('sessions')`, returning the pool when both already exist (a schema pre-provisioned
-by an out-of-band process) and failing startup with the original migration error when either is
-missing. Every other migration failure still fails fast. Implements both repository traits.
+with SQLSTATE `42501` (`insufficient_privilege`) — `create_pool` degrades only after verifying
+the invariants the migration would have established. It logs a structured warning and probes
+for the `users` and `sessions` tables; the `idx_users_external_id_provider` index, which must
+exist, be **unique**, and be **partial** (`indisunique` and a non-null `indpred` in `pg_index`);
+and the `users.version` column. The pool is returned only when every probe passes. If any is
+missing or the probe itself fails, `create_pool` returns the **original** migration error and
+startup fails — an inconclusive probe must not mask denied DDL. Table presence alone is not
+sufficient: the partial unique index is the only enforcer of one live user per
+`(provider, external_id)`, and the registration path depends on the database raising `23505`.
+Every other migration failure still fails fast. Implements both repository traits.
 
 The `(external_id, provider)` index is a *partial* unique index, `WHERE status !=
 'deleted'`: uniqueness is enforced only among live users, so a soft-deleted row frees its
@@ -125,9 +130,10 @@ single-host option.
 
 ## Session-only stores
 
-- **LMDB (`adapters/lmdb`)** — embedded `heed` store with two named databases, `sessions`
-  (hash → session) and `user_sessions` (user → set of hashes for revoke-all). Constructed with
-  a path and a max map size in MB.
+- **LMDB (`adapters/lmdb`)** — embedded `heed` store with three named databases, `sessions`
+  (hash → session), `user_sessions` (user → set of hashes for revoke-all), and `single_use`
+  (digest key → RFC 3339 expiry). Constructed with a path and a max map size in MB; the
+  environment is opened with `max_dbs(3)` to cover the third database.
 - **Valkey/Redis (`adapters/valkey`)** — `fred` client; keys `{prefix}session:{hash}`, a
   `{prefix}user_sessions:{user_id}` set, and a `{prefix}active_sessions` counter. A session
   write applies the hash, its TTL, the user-set membership, an `INCR` of the counter, and a
@@ -144,12 +150,31 @@ single-host option.
 
 Both implement `SessionRepository` only and are selected via `[session_repository]`.
 
+## Single-use records
+
+Every store holds the [`SingleUseRecord`](01-domain-model.md) entities behind the
+`SessionRepository` single-use pair, using each adapter's natural atomic primitive, so
+`put_single_use` and `take_single_use` are one round trip everywhere:
+
+| Adapter | Layout | `put_single_use` | `take_single_use` |
+|---|---|---|---|
+| DynamoDB | `pk = SINGLEUSE#<key>`, `sk = SINGLEUSE`, numeric `ttl` | `PutItem` conditioned on `attribute_not_exists(pk) OR expires_at < :now` | `DeleteItem` with `ReturnValues=ALL_OLD`, `expires_at` checked on the returned item |
+| Postgres / SQLite | `single_use(key PRIMARY KEY, expires_at)` | `INSERT … ON CONFLICT (key) DO UPDATE … WHERE single_use.expires_at < now()`, rows affected reports the result | `DELETE … WHERE key = $1 AND expires_at > now() RETURNING 1` |
+| Valkey | `{prefix}single_use:{key}` | `SET … NX EX <ttl>` | `GETDEL` |
+| LMDB | `single_use` named DB | one write txn: read, treat an expired value as absent, write | one write txn: read, delete, report whether the value was live |
+
+DynamoDB and Valkey expire records natively; Postgres, SQLite and LMDB rely on the
+`cleanup_expired_sessions` sweep for space reclamation only — both operations already
+evaluate `expires_at`, so an unswept record is never mistaken for a live one. Storage keeps
+only the namespaced digest key and the expiry: no raw nonce or raw assertion material is
+ever written.
+
 ## Logical schema (`schemas/datamodel.schema.json`)
 
-The adapter-agnostic contract every store satisfies, defining `User`, `Session`, and
-`AuditEvent` with their required fields and the `status` / `severity` / `outcome` enums. It is
-the cross-adapter source of truth; the service's typed entities and
-[canonical-types.schema.json](canonical-types.schema.json) mirror it.
+The adapter-agnostic contract every store satisfies, defining `User`, `Session`,
+`AuditEvent`, and `SingleUseRecord` with their required fields and the `status` /
+`severity` / `outcome` enums. It is the cross-adapter source of truth; the service's typed
+entities and [canonical-types.schema.json](canonical-types.schema.json) mirror it.
 
 ## Assumptions and open questions
 

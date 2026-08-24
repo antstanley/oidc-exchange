@@ -3,12 +3,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
 use oidc_exchange_core::domain::{
-    AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch, UserStatus,
-    INITIAL_USER_VERSION,
+    AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, SingleUseRecord, User, UserPatch,
+    UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
@@ -22,6 +22,10 @@ use oidc_exchange_core::ports::{
 struct MockRepositoryState {
     users: HashMap<String, User>,
     sessions: HashMap<String, Session>,
+    /// Single-use records (nonces, assertion-replay markers) keyed by their namespaced
+    /// digest. Shared by every `MockRepository` clone of one instance, so claim
+    /// operations are atomic exactly as against a real store.
+    single_use: HashMap<String, DateTime<Utc>>,
 }
 
 #[derive(Clone)]
@@ -44,6 +48,7 @@ impl MockRepository {
             state: Arc::new(Mutex::new(MockRepositoryState {
                 users: HashMap::new(),
                 sessions: HashMap::new(),
+                single_use: HashMap::new(),
             })),
             session_fail_mode: Arc::new(Mutex::new(false)),
             session_lookup_fail_mode: Arc::new(Mutex::new(false)),
@@ -58,6 +63,17 @@ impl MockRepository {
     pub async fn get_all_sessions(&self) -> Vec<Session> {
         let state = self.state.lock().await;
         state.sessions.values().cloned().collect()
+    }
+
+    /// Observe stored single-use records (test introspection): the live record at
+    /// `key`, or `None` when the key is absent. Expired records may still be physically
+    /// present until a cleanup — the claim operations treat them as absent.
+    pub async fn get_single_use_record(&self, key: &str) -> Option<SingleUseRecord> {
+        let state = self.state.lock().await;
+        state.single_use.get(key).map(|expires_at| SingleUseRecord {
+            key: key.to_string(),
+            expires_at: *expires_at,
+        })
     }
 
     /// Toggle whether `revoke_session` / `revoke_all_user_sessions` fail
@@ -275,7 +291,47 @@ impl SessionRepository for MockRepository {
         let now = Utc::now();
         let before = state.sessions.len();
         state.sessions.retain(|_, s| s.expires_at > now);
-        Ok((before - state.sessions.len()) as u64)
+        let sessions_removed = (before - state.sessions.len()) as u64;
+
+        // The sweep also reclaims expired single-use records (space reclamation only —
+        // the claim operations already treat an expired record as absent), and the
+        // returned count covers both kinds, per the port contract.
+        let single_use_before = state.single_use.len();
+        state.single_use.retain(|_, expires_at| *expires_at > now);
+        let single_use_removed = (single_use_before - state.single_use.len()) as u64;
+
+        debug_assert!(
+            sessions_removed as usize <= before,
+            "removed session count cannot exceed the pre-sweep size"
+        );
+        Ok(sessions_removed + single_use_removed)
+    }
+
+    async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        let mut state = self.state.lock().await;
+        // Expired-is-absent: a record whose expiry has passed never blocks a fresh claim.
+        if state
+            .single_use
+            .get(key)
+            .is_some_and(|live_expires_at| *live_expires_at > Utc::now())
+        {
+            return Ok(false);
+        }
+        state.single_use.insert(key.to_string(), expires_at);
+        Ok(true)
+    }
+
+    async fn take_single_use(&self, key: &str) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        let mut state = self.state.lock().await;
+        match state.single_use.remove(key) {
+            Some(expires_at) if expires_at > Utc::now() => Ok(true),
+            // Absent, already-burned, and expired are indistinguishable: all report false.
+            _ => Ok(false),
+        }
     }
 }
 
@@ -491,12 +547,18 @@ impl UserSync for MockUserSync {
 // MockIdentityProvider
 // ---------------------------------------------------------------------------
 
-/// A deterministic in-memory identity provider. Clone it before handing the
-/// original to a service/router: clones share the response slots and the call
-/// counters through `Arc`, so the clone works as an observation handle.
+/// A stand-in [`IdentityProvider`] whose responses are pinned per test.
+///
+/// `Clone` shares one underlying state (`Arc`), so a test can hold a handle,
+/// move a clone into the service under test, and still re-pin claims or
+/// exchange responses afterwards — and the shared per-method call counters
+/// make the clone work as an observation handle.
 #[derive(Clone)]
 pub struct MockIdentityProvider {
     provider_id: String,
+    /// The audience the mock's claims are pinned to, reported through the port's
+    /// `client_id()`; configurable so binding tests can exercise `azp` mismatches.
+    client_id: String,
     exchange_response: Arc<Mutex<Option<ProviderTokens>>>,
     claims_response: Arc<Mutex<Option<IdentityClaims>>>,
     /// Monotonic counters, one per port method, so tests can prove a request
@@ -515,6 +577,15 @@ pub struct MockIdentityProviderCallCounts {
     pub revoke_token: u32,
 }
 
+/// Default `client_id()` the mock reports; matches the audience used across the
+/// repo's provider test fixtures (`test-client-id`) unless overridden.
+pub const MOCK_CLIENT_ID: &str = "test-client-id";
+
+/// Remaining lifetime stamped into a default mock assertion's `exp` claim
+/// (10 minutes): comfortably inside the default `grants.max_assertion_lifetime`
+/// ceiling of 1h, so exchanges over default-config services bind cleanly.
+pub const MOCK_DEFAULT_ASSERTION_TTL_SECS: u64 = 600;
+
 impl MockIdentityProvider {
     pub fn new(provider_id: &str) -> Self {
         let default_tokens = ProviderTokens {
@@ -523,19 +594,14 @@ impl MockIdentityProvider {
             access_token: Some("mock-access-token".to_string()),
         };
 
-        let default_claims = IdentityClaims {
-            subject: "test-subject".to_string(),
-            email: Some("test@example.com".to_string()),
-            email_verified: Some(true),
-            name: Some("Test User".to_string()),
-            is_private_email: None,
-            raw_claims: HashMap::new(),
-        };
-
         Self {
             provider_id: provider_id.to_string(),
+            client_id: MOCK_CLIENT_ID.to_string(),
             exchange_response: Arc::new(Mutex::new(Some(default_tokens))),
-            claims_response: Arc::new(Mutex::new(Some(default_claims))),
+            // `None` until a test pins explicit claims; `validate_id_token`
+            // then builds fresh defaults per call (unique `jti`, live `exp`)
+            // instead of replaying one frozen template forever.
+            claims_response: Arc::new(Mutex::new(None)),
             exchange_code_calls: Arc::new(AtomicU32::new(0)),
             validate_id_token_calls: Arc::new(AtomicU32::new(0)),
             revoke_token_calls: Arc::new(AtomicU32::new(0)),
@@ -552,12 +618,57 @@ impl MockIdentityProvider {
         }
     }
 
+    /// Default verified claims for callers that never pinned explicit ones.
+    ///
+    /// Built per call, not stored: each exchange gets a fresh `jti` and an
+    /// `exp` relative to now, mirroring what real validators return — every
+    /// code-path exchange is therefore a distinct, unspent assertion. The raw
+    /// claims carry exactly what the core binding controls read (`exp`,
+    /// `jti`, `sub`) and nothing more.
+    pub fn default_claims() -> IdentityClaims {
+        IdentityClaims {
+            subject: "test-subject".to_string(),
+            email: Some("test@example.com".to_string()),
+            email_verified: Some(true),
+            name: Some("Test User".to_string()),
+            is_private_email: None,
+            // A stand-in for the resolved JWK algorithm a real validator would report;
+            // RS256 is the common upstream case and selects SHA-256 for at_hash tests.
+            signing_alg: "RS256".to_string(),
+            raw_claims: Self::default_raw_claims(),
+        }
+    }
+
+    /// Raw claims backing [`Self::default_claims`]: a usable `exp`, a fresh
+    /// per-call `jti`, and the subject echoed as OIDC validators would.
+    fn default_raw_claims() -> std::collections::HashMap<String, serde_json::Value> {
+        use serde_json::json;
+
+        let mut raw = std::collections::HashMap::new();
+        raw.insert("sub".to_string(), json!("test-subject"));
+        raw.insert("jti".to_string(), json!(ulid::Ulid::new().to_string()));
+        raw.insert(
+            "exp".to_string(),
+            json!(chrono::Utc::now().timestamp() + MOCK_DEFAULT_ASSERTION_TTL_SECS as i64),
+        );
+        raw
+    }
+
     pub async fn set_claims(&self, claims: IdentityClaims) {
         *self.claims_response.lock().await = Some(claims);
     }
 
     pub async fn set_exchange_response(&self, tokens: ProviderTokens) {
         *self.exchange_response.lock().await = Some(tokens);
+    }
+
+    /// Override the audience reported through the port's `client_id()`. Consuming
+    /// builder (not a setter): the port hands out `&str` borrowed from this field, so
+    /// it must be fixed before the mock is shared with the service under test.
+    pub fn with_client_id(mut self, client_id: &str) -> Self {
+        assert!(!client_id.is_empty(), "mock client_id must be non-empty");
+        self.client_id = client_id.to_string();
+        self
     }
 }
 
@@ -584,14 +695,9 @@ impl IdentityProvider for MockIdentityProvider {
     async fn validate_id_token(&self, _id_token: &str) -> Result<IdentityClaims> {
         self.validate_id_token_calls.fetch_add(1, Ordering::SeqCst);
         let response = self.claims_response.lock().await;
-        let claims = response.clone().unwrap_or(IdentityClaims {
-            subject: "test-subject".to_string(),
-            email: Some("test@example.com".to_string()),
-            email_verified: Some(true),
-            name: Some("Test User".to_string()),
-            is_private_email: None,
-            raw_claims: HashMap::new(),
-        });
+        let claims = response
+            .clone()
+            .unwrap_or_else(MockIdentityProvider::default_claims);
         assert!(
             !claims.subject.is_empty(),
             "MockIdentityProvider::validate_id_token must never produce an empty subject"
@@ -607,6 +713,262 @@ impl IdentityProvider for MockIdentityProvider {
     fn provider_id(&self) -> &str {
         &self.provider_id
     }
+
+    fn client_id(&self) -> &str {
+        &self.client_id
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single-use repository conformance suite
+// ---------------------------------------------------------------------------
+
+/// Shared conformance scenarios for the `SessionRepository` single-use pair
+/// (`put_single_use` / `take_single_use`). Every store adapter calls these from its own
+/// test module, so the atomic-claim contract is exercised identically across DynamoDB,
+/// Postgres, SQLite, Valkey, LMDB, and `MockRepository` — a reviewer runs one suite and
+/// sees exactly-one-winner semantics hold everywhere.
+///
+/// Scenarios are written against [`SessionRepository`] only (no adapter-specific state),
+/// use collision-proof keys, and leave no live records behind except where noted.
+pub mod single_use_conformance {
+    use std::sync::Arc;
+
+    use chrono::{Duration, Utc};
+
+    use oidc_exchange_core::ports::SessionRepository;
+
+    /// Lifetime of the "short-lived" record used by the expired-is-absent scenario.
+    /// Two seconds (rather than the theoretical one-second floor) tolerates adapters
+    /// that truncate TTLs to whole seconds when writing.
+    pub const SHORT_TTL_SECONDS: i64 = 2;
+
+    /// How long scenarios wait before treating a [`SHORT_TTL_SECONDS`] record as
+    /// expired: half a second past its death so slow CI cannot flake.
+    pub const EXPIRY_WAIT_MS: u64 = 2500;
+
+    /// A collision-proof key for one scenario invocation, safe against shared stores
+    /// and concurrent nextest processes.
+    fn scenario_key(label: &str) -> String {
+        format!(
+            "nonce:{label}:{}",
+            ulid::Ulid::new().to_string().to_lowercase()
+        )
+    }
+
+    /// First `put_single_use` on a fresh key claims it; an immediate second put for the
+    /// same key loses (`false`) while the original expiry stays intact.
+    pub async fn first_claim_wins_duplicate_loses(repo: &dyn SessionRepository) {
+        let key = scenario_key("first_dup");
+        let expires_at = Utc::now() + Duration::minutes(10);
+
+        let first = repo
+            .put_single_use(&key, expires_at)
+            .await
+            .expect("first claim on a fresh key must succeed");
+        assert!(first, "the very first claim of a key must report success");
+
+        let duplicate = repo
+            .put_single_use(&key, Utc::now() + Duration::hours(1))
+            .await
+            .expect("a duplicate claim must not be an error");
+        assert!(
+            !duplicate,
+            "a second claim of a live key must lose, reporting false"
+        );
+
+        // Negative-space guard on state: the loser must not have overwritten the
+        // winner's expiry (checked indirectly via take still working on the original).
+        let consumed = repo
+            .take_single_use(&key)
+            .await
+            .expect("consume after winning claim");
+        assert!(consumed, "the winner's record must remain consumable");
+        let again = repo.take_single_use(&key).await.expect("second consume");
+        assert!(!again, "consuming twice must burn the record exactly once");
+    }
+
+    /// `take_single_use` consumes a live record exactly once: present → true,
+    /// immediately-repeated take → false, never-inserted key → false.
+    pub async fn consume_live_record_exactly_once(repo: &dyn SessionRepository) {
+        let key = scenario_key("consume");
+        let absent = scenario_key("consume_absent");
+
+        let claimed = repo
+            .put_single_use(&key, Utc::now() + Duration::minutes(5))
+            .await
+            .expect("claim before consume");
+        assert!(claimed, "setup claim must succeed");
+
+        let first_take = repo.take_single_use(&key).await.expect("first take");
+        assert!(first_take, "taking a live record must report true");
+
+        let second_take = repo.take_single_use(&key).await.expect("second take");
+        assert!(
+            !second_take,
+            "an already-burned key must be indistinguishable from an absent one"
+        );
+
+        let never_existed = repo.take_single_use(&absent).await.expect("absent take");
+        assert!(
+            !never_existed,
+            "taking a key that was never inserted must report false"
+        );
+    }
+
+    /// An expired record is absent for both operations, without any sweep having run:
+    /// `take` refuses it, and a fresh `put` reclaims the key.
+    pub async fn expired_record_is_absent_to_put_and_take(repo: &dyn SessionRepository) {
+        let key = scenario_key("expiry");
+
+        let claimed = repo
+            .put_single_use(&key, Utc::now() + Duration::seconds(SHORT_TTL_SECONDS))
+            .await
+            .expect("claim with short TTL");
+        assert!(claimed, "setup claim must succeed");
+
+        tokio::time::sleep(std::time::Duration::from_millis(EXPIRY_WAIT_MS)).await;
+
+        let taken = repo.take_single_use(&key).await.expect("take after expiry");
+        assert!(
+            !taken,
+            "an expired record must never satisfy take_single_use"
+        );
+
+        let reclaimed = repo
+            .put_single_use(&key, Utc::now() + Duration::minutes(5))
+            .await
+            .expect("reclaim after expiry");
+        assert!(
+            reclaimed,
+            "an expired marker's key must be reusable without a sweep"
+        );
+    }
+
+    /// N concurrent `put_single_use` calls for one key produce exactly one success.
+    pub async fn concurrent_put_has_exactly_one_winner(repo: Arc<dyn SessionRepository>) {
+        let key = scenario_key("race_put");
+        let expires_at = Utc::now() + Duration::minutes(5);
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let repo = Arc::clone(&repo);
+            let key = key.clone();
+            tasks.spawn(async move { repo.put_single_use(&key, expires_at).await });
+        }
+
+        let mut wins = 0usize;
+        while let Some(joined) = tasks.join_next().await {
+            let result = joined.expect("race task must not panic");
+            if result.expect("put_single_use must not error during the race") {
+                wins += 1;
+            }
+        }
+        assert_eq!(
+            wins, 1,
+            "exactly one concurrent claimant may win one live key"
+        );
+    }
+
+    /// N concurrent `take_single_use` calls for one live record produce exactly one
+    /// success — the whole nonce check-and-burn is one atomic operation.
+    pub async fn concurrent_take_has_exactly_one_winner(repo: Arc<dyn SessionRepository>) {
+        let key = scenario_key("race_take");
+        let claimed = repo
+            .put_single_use(&key, Utc::now() + Duration::minutes(5))
+            .await
+            .expect("setup claim");
+        assert!(claimed, "setup claim must succeed");
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let repo = Arc::clone(&repo);
+            let key = key.clone();
+            tasks.spawn(async move { repo.take_single_use(&key).await });
+        }
+
+        let mut burns = 0usize;
+        while let Some(joined) = tasks.join_next().await {
+            let result = joined.expect("race task must not panic");
+            if result.expect("take_single_use must not error during the race") {
+                burns += 1;
+            }
+        }
+        assert_eq!(
+            burns, 1,
+            "exactly one concurrent consumer may burn one live record"
+        );
+    }
+
+    /// On stores without native expiry, `cleanup_expired_sessions` reclaims expired
+    /// single-use records, counts sessions and records together, and leaves every live
+    /// record and session untouched. Called only by suites whose store needs the sweep
+    /// (Postgres, SQLite, LMDB, Mock); native-expiry stores skip it by contract.
+    pub async fn cleanup_sweeps_expired_single_use_records(repo: &dyn SessionRepository) {
+        use oidc_exchange_core::domain::Session;
+
+        let now = Utc::now();
+        let expired_record = scenario_key("cleanup_dead");
+        let live_record = scenario_key("cleanup_live");
+
+        // Setup claims: one record already past its expiry, one alive. Writing an
+        // already-expired record is legal storage state (it simply reads as absent).
+        let setup_expired = repo.put_single_use(&expired_record, now - Duration::minutes(1));
+        let setup_live = repo.put_single_use(
+            &live_record,
+            now + Duration::seconds(SHORT_TTL_SECONDS * 60),
+        );
+        let _ = tokio::join!(setup_expired, setup_live);
+
+        // One expired and one live session alongside them.
+        let make_session = |hash: &str, expires_at: chrono::DateTime<Utc>| Session {
+            user_id: format!("usr_su_cleanup_{}", ulid::Ulid::new()),
+            refresh_token_hash: hash.to_string(),
+            provider: "mock".to_string(),
+            expires_at,
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            created_at: now,
+        };
+
+        repo.store_refresh_token(&make_session(
+            "su_cleanup_expired",
+            now - Duration::hours(1),
+        ))
+        .await
+        .expect("store expired session");
+        repo.store_refresh_token(&make_session("su_cleanup_live", now + Duration::hours(1)))
+            .await
+            .expect("store live session");
+
+        let removed = repo
+            .cleanup_expired_sessions()
+            .await
+            .expect("cleanup_expired_sessions");
+        assert_eq!(
+            removed, 2,
+            "cleanup must count exactly the expired session plus the expired single-use record"
+        );
+
+        let burned = repo
+            .take_single_use(&live_record)
+            .await
+            .expect("take live record after cleanup");
+        assert!(burned, "cleanup must not touch a live single-use record");
+        let reclaimed = repo
+            .take_single_use(&expired_record)
+            .await
+            .expect("take swept record slot");
+        assert!(
+            !reclaimed,
+            "the expired record must be physically gone after the sweep"
+        );
+
+        // Live-session behaviour is unchanged by the sweep.
+        let active = repo.count_active_sessions().await.expect("count sessions");
+        assert_eq!(active, 1, "exactly the live session survives the sweep");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -615,10 +977,11 @@ impl IdentityProvider for MockIdentityProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::MockRepository;
+    use super::single_use_conformance as conformance;
+    use super::{MockIdentityProvider, MockRepository, MOCK_CLIENT_ID};
     use oidc_exchange_core::domain::{NewUser, UserPatch, INITIAL_USER_VERSION};
     use oidc_exchange_core::error::Error;
-    use oidc_exchange_core::ports::UserRepository;
+    use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
     fn make_new_user(external_id: &str, provider: &str) -> NewUser {
         NewUser {
@@ -731,5 +1094,105 @@ mod tests {
             after_second.status,
             oidc_exchange_core::domain::UserStatus::Suspended
         );
+    }
+
+    /// The shared single-use conformance suite, run against `MockRepository`: the mock
+    /// must satisfy exactly the atomic-claim contract the real adapters do.
+    #[tokio::test]
+    async fn single_use_first_claim_wins_duplicate_loses() {
+        conformance::first_claim_wins_duplicate_loses(&MockRepository::new()).await;
+    }
+
+    /// The mock reports its configured client identity through the port, defaulting to
+    /// the shared fixture audience and honouring the builder override — binding tests
+    /// rely on both behaviours matching the real providers.
+    #[tokio::test]
+    async fn mock_identity_provider_reports_configured_client_id() {
+        use oidc_exchange_core::ports::IdentityProvider;
+
+        let default_provider = MockIdentityProvider::new("mock");
+        assert_eq!(
+            IdentityProvider::client_id(&default_provider),
+            MOCK_CLIENT_ID,
+            "the mock's default client_id must match the documented fixture constant"
+        );
+        assert_eq!(default_provider.provider_id(), "mock");
+
+        let custom_provider = MockIdentityProvider::new("mock").with_client_id("sibling-client");
+        assert_eq!(
+            IdentityProvider::client_id(&custom_provider),
+            "sibling-client",
+            "with_client_id must override the audience the port reports"
+        );
+
+        // The mock's default claims carry a signing_alg a real validator would report,
+        // so core-side consumers never see an empty algorithm from the fixture.
+        let claims = default_provider
+            .validate_id_token("unused")
+            .await
+            .expect("mock validate should succeed");
+        assert_eq!(claims.signing_alg, "RS256");
+    }
+
+    #[tokio::test]
+    async fn single_use_consume_live_record_exactly_once() {
+        conformance::consume_live_record_exactly_once(&MockRepository::new()).await;
+    }
+
+    #[tokio::test]
+    async fn single_use_expired_record_is_absent_to_put_and_take() {
+        conformance::expired_record_is_absent_to_put_and_take(&MockRepository::new()).await;
+    }
+
+    #[tokio::test]
+    async fn single_use_concurrent_put_has_exactly_one_winner() {
+        conformance::concurrent_put_has_exactly_one_winner(std::sync::Arc::new(
+            MockRepository::new(),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn single_use_concurrent_take_has_exactly_one_winner() {
+        conformance::concurrent_take_has_exactly_one_winner(std::sync::Arc::new(
+            MockRepository::new(),
+        ))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn single_use_cleanup_sweeps_expired_records_and_counts_both_kinds() {
+        conformance::cleanup_sweeps_expired_single_use_records(&MockRepository::new()).await;
+    }
+
+    /// A losing duplicate put must not disturb the winner's expiry: after a second put
+    /// loses, the record still expires at the winner's (earlier) instant, observable
+    /// through `get_single_use_record`.
+    #[tokio::test]
+    async fn single_use_duplicate_put_preserves_original_expiry() {
+        let repo = MockRepository::new();
+        let key = "nonce:expiry_guard";
+        let winner_expiry = chrono::Utc::now() + chrono::Duration::minutes(10);
+
+        let first = repo
+            .put_single_use(key, winner_expiry)
+            .await
+            .expect("first");
+        assert!(first);
+        let loser = repo
+            .put_single_use(key, chrono::Utc::now() + chrono::Duration::hours(24))
+            .await
+            .expect("duplicate claim is not an error");
+        assert!(!loser, "the duplicate must lose");
+
+        let stored = repo
+            .get_single_use_record(key)
+            .await
+            .expect("record survives a losing overwrite attempt");
+        assert_eq!(
+            stored.expires_at, winner_expiry,
+            "a losing put must not extend or replace the winner's expiry"
+        );
+        assert_eq!(stored.key, key);
     }
 }

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use oidc_exchange_core::config::{AppConfig, AuditConfig};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
 use oidc_exchange_core::domain::{AuditEventType, AuditOutcome, AuditSeverity};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::{create_audit_event, AppService};
@@ -9,27 +12,71 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
-fn make_config_with_threshold(threshold: &str) -> AppConfig {
-    AppConfig {
-        audit: AuditConfig {
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            issuer: "https://auth.test.com".to_string(),
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
+        },
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
+            access_token_ttl: "15m".to_string(),
+            refresh_token_ttl: "30d".to_string(),
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
+        },
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
+    }
+}
+
+fn make_config_with_threshold(threshold: &str) -> Config {
+    Config::resolve(RawConfig {
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
             blocking_threshold: threshold.to_string(),
-            ..Default::default()
+            emit_threshold: "info".to_string(),
+            sqs: None,
         },
-        ..Default::default()
-    }
+        ..base_raw_config()
+    })
+    .expect("test config should resolve")
 }
 
-fn make_config_with_emit_threshold(emit_threshold: &str) -> AppConfig {
-    AppConfig {
-        audit: AuditConfig {
+fn make_config_with_emit_threshold(emit_threshold: &str) -> Config {
+    Config::resolve(RawConfig {
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: emit_threshold.to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..Default::default()
-    }
+        ..base_raw_config()
+    })
+    .expect("test config should resolve")
 }
 
-fn make_service_with_audit(audit: MockAuditLog, config: AppConfig) -> AppService {
+fn make_service_with_audit(audit: MockAuditLog, config: Config) -> AppService {
     let provider = MockIdentityProvider::new("mock");
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -189,10 +236,10 @@ async fn audit_debug_event_under_default_emit_threshold_is_suppressed() {
     let audit = MockAuditLog::new();
     let audit_clone = audit.clone();
 
-    // Default AppConfig carries the default AuditConfig, whose
+    // Default Config carries the default AuditConfig, whose
     // `emit_threshold` defaults to "info".
-    let config = AppConfig::default();
-    assert_eq!(config.audit.emit_threshold, "info");
+    let config = make_config_with_threshold("warning");
+    assert_eq!(config.audit.emit_threshold, AuditSeverity::Info);
     let svc = make_service_with_audit(audit, config);
 
     let event = create_audit_event(
@@ -227,7 +274,7 @@ async fn audit_info_event_at_default_emit_threshold_is_dispatched() {
     let audit = MockAuditLog::new();
     let audit_clone = audit.clone();
 
-    let config = AppConfig::default();
+    let config = make_config_with_threshold("warning");
     let svc = make_service_with_audit(audit, config);
 
     let event = create_audit_event(
