@@ -312,7 +312,11 @@ mod tests {
         // Stays active for the whole async body below (single-threaded `#[tokio::test]`
         // runtime keeps every poll on this OS thread), so the truncation warn is
         // guaranteed to hit the capturing layer.
+        let _gate = oidc_exchange_test_utils::telemetry::CAPTURE_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         let secret = read_bounded("warn-test-provider", response)
             .await

@@ -34,11 +34,11 @@ use tracing_subscriber::registry::LookupSpan;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use oidc_exchange::middleware::audit_context::audit_context_layer;
+use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
 use oidc_exchange::middleware::request_id::{request_id_layer, MAX_REQUEST_ID_LEN};
 use oidc_exchange::routes::public_routes;
 use oidc_exchange::state::AppState;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, HttpsUrl, RawConfig};
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
@@ -267,6 +267,10 @@ struct FailingValidationProvider {
 
 #[async_trait]
 impl IdentityProvider for FailingValidationProvider {
+    fn client_id(&self) -> &str {
+        "test-client-id"
+    }
+
     async fn exchange_code(&self, _code: &str, _redirect_uri: &str) -> Result<ProviderTokens> {
         Ok(ProviderTokens {
             id_token: "corpus-failing-id-token".to_string(),
@@ -293,8 +297,10 @@ impl IdentityProvider for FailingValidationProvider {
 /// Router with the production middleware order (request-id outermost, audit-context
 /// inside it) over mock backends and the given providers map.
 fn build_app(providers: HashMap<String, Box<dyn IdentityProvider>>) -> Router {
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
+    let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default config deserializes");
+    raw.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw).expect("test config resolves");
 
     let session_repo = MockRepository::new();
     let service = AppService::new(
@@ -303,16 +309,18 @@ fn build_app(providers: HashMap<String, Box<dyn IdentityProvider>>) -> Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config.clone(),
     );
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter: std::sync::Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
     };
 
     public_routes()
-        .layer(from_fn(audit_context_layer))
+        .layer(from_fn(ffi_audit_context_layer))
         .layer(from_fn(request_id_layer))
         .with_state(state)
 }
@@ -589,11 +597,11 @@ async fn hostile_upstream_echo_yields_generic_body_and_redacted_log() {
 
     let config = oidc_exchange_core::domain::OidcProviderConfig {
         provider_id: "corpus-upstream".to_string(),
-        issuer: "https://issuer.example.com".to_string(),
+        issuer: HttpsUrl::parse("https://issuer.example.com").expect("valid url"),
         client_id: "corpus-client".to_string(),
         client_secret: None,
-        jwks_uri: Some(format!("{}/jwks.json", server.uri())),
-        token_endpoint: Some(format!("{}/token", server.uri())),
+        jwks_uri: Some(HttpsUrl::parse_for_test(format!("{}/jwks.json", server.uri())).expect("wiremock url")),
+        token_endpoint: Some(HttpsUrl::parse_for_test(format!("{}/token", server.uri())).expect("wiremock url")),
         revocation_endpoint: None,
         scopes: Vec::new(),
         additional_params: HashMap::new(),

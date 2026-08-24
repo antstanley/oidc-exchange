@@ -30,7 +30,7 @@ heed = "0.22"
 hex.workspace = true
 ulid.workspace = true
 chrono.workspace = true
-fred = { version = "10", features = ["serde-json"] }
+fred = { version = "10", features = ["serde-json", "i-scripts"] }
 futures = "0.3"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "json"] }
 

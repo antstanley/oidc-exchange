@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use oidc_exchange_core::domain::provider::OidcProviderConfig;
+use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
-use oidc_exchange_core::Secret;
 
 use crate::shared::claims::coerce_bool;
 use crate::shared::jwks::JwksCache;
@@ -17,10 +17,10 @@ pub struct OidcProvider {
     provider_id: String,
     client_id: String,
     client_secret: Option<Secret<String>>,
-    token_endpoint: String,
+    token_endpoint: oidc_exchange_core::config::HttpsUrl,
     jwks_cache: JwksCache,
-    revocation_endpoint: Option<String>,
-    issuer: String,
+    revocation_endpoint: Option<oidc_exchange_core::config::HttpsUrl>,
+    issuer: oidc_exchange_core::config::HttpsUrl,
 }
 
 /// Infer the signing algorithm from a JWK that carries no `alg` member.
@@ -105,7 +105,7 @@ impl OidcProvider {
             client_id: config.client_id.clone(),
             client_secret: config.client_secret.clone(),
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri),
+            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string()),
             revocation_endpoint,
             issuer: config.issuer.clone(),
         })
@@ -116,7 +116,7 @@ impl OidcProvider {
 impl IdentityProvider for OidcProvider {
     async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<ProviderTokens> {
         crate::shared::token_endpoint::exchange_code(
-            &self.token_endpoint,
+            self.token_endpoint.as_str(),
             &self.client_id,
             // Reveal only at the outbound form-post boundary.
             self.client_secret.as_ref().map(|s| s.expose().as_str()),
@@ -193,7 +193,7 @@ impl IdentityProvider for OidcProvider {
             .map(Ok)
             .unwrap_or_else(|| infer_alg_from_jwk(&jwk))?;
         let mut validation = Validation::new(jwk_alg);
-        validation.set_issuer(&[&self.issuer]);
+        validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[&self.client_id]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         validation.validate_nbf = true;
@@ -220,6 +220,9 @@ impl IdentityProvider for OidcProvider {
             email_verified: coerce_bool(&claims["email_verified"]),
             name: claims["name"].as_str().map(String::from),
             is_private_email: None,
+            // The algorithm this token actually verified with (explicit in the JWK or
+            // inferred from its key material), surfaced for the core's at_hash check.
+            signing_alg: crate::shared::jwks::jws_alg_name(jwk_alg).to_string(),
             raw_claims: claims
                 .as_object()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -241,7 +244,7 @@ impl IdentityProvider for OidcProvider {
         params.push(("client_id", &client_id_owned));
 
         let response = client
-            .post(endpoint)
+            .post(endpoint.as_str())
             .form(&params)
             .send()
             .await
@@ -271,6 +274,10 @@ impl IdentityProvider for OidcProvider {
 
     fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+
+    fn client_id(&self) -> &str {
+        &self.client_id
     }
 }
 
@@ -368,6 +375,11 @@ mod tests {
             .as_secs()
     }
 
+    fn test_endpoint(value: impl Into<String>) -> oidc_exchange_core::config::HttpsUrl {
+        oidc_exchange_core::config::HttpsUrl::parse_for_test(value)
+            .expect("wiremock test fixture URL")
+    }
+
     fn make_config(
         server_uri: &str,
         token_endpoint: Option<String>,
@@ -376,12 +388,12 @@ mod tests {
     ) -> OidcProviderConfig {
         OidcProviderConfig {
             provider_id: "test-provider".into(),
-            issuer: server_uri.to_string(),
+            issuer: test_endpoint(server_uri),
             client_id: "test-client-id".into(),
             client_secret: Some(Secret::new("test-client-secret".to_string())),
-            jwks_uri,
-            token_endpoint,
-            revocation_endpoint,
+            jwks_uri: jwks_uri.map(test_endpoint),
+            token_endpoint: token_endpoint.map(test_endpoint),
+            revocation_endpoint: revocation_endpoint.map(test_endpoint),
             scopes: vec!["openid".into()],
             additional_params: HashMap::new(),
         }
@@ -496,6 +508,13 @@ mod tests {
         assert_eq!(identity.email.as_deref(), Some("user@example.com"));
         assert_eq!(identity.email_verified, Some(true));
         assert_eq!(identity.name.as_deref(), Some("Test User"));
+        // Core-facing metadata: the JWK's verified algorithm, reported as data.
+        assert_eq!(identity.signing_alg, "RS256");
+        assert_eq!(
+            provider.client_id(),
+            "test-client-id",
+            "the port must report the configured audience"
+        );
         assert!(identity.raw_claims.contains_key("iss"));
     }
 
@@ -733,9 +752,15 @@ mod tests {
             .expect("from_config with discovery should succeed");
 
         assert_eq!(provider.provider_id(), "google");
-        assert_eq!(provider.token_endpoint, format!("{uri}/oauth/token"));
         assert_eq!(
-            provider.revocation_endpoint.as_deref(),
+            provider.token_endpoint.as_str(),
+            format!("{uri}/oauth/token")
+        );
+        assert_eq!(
+            provider
+                .revocation_endpoint
+                .as_ref()
+                .map(oidc_exchange_core::config::HttpsUrl::as_str),
             Some(format!("{uri}/oauth/revoke").as_str())
         );
     }
@@ -935,6 +960,9 @@ mod tests {
             .expect("alg-less RSA JWK should validate as RS256");
 
         assert_eq!(identity.subject, "user-123");
+        // The reported algorithm must be the one the JWK resolved to (explicit here),
+        // not read back from the token header.
+        assert_eq!(identity.signing_alg, "RS256");
         assert!(identity.raw_claims.contains_key("sub"));
     }
 
@@ -988,6 +1016,9 @@ mod tests {
             .expect("alg-less EC P-256 JWK should validate as ES256");
 
         assert_eq!(identity.subject, "user-456");
+        // The JWK carries no `alg`, so this value can only have come from key-material
+        // inference (kty EC + crv P-256 → ES256) — never from the header.
+        assert_eq!(identity.signing_alg, "ES256");
         assert!(identity.raw_claims.contains_key("sub"));
     }
 
@@ -1044,6 +1075,89 @@ mod tests {
             matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
             "unrecognised alg-less key must be reported as InvalidGrant"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 15b: a header alg that disagrees with the JWK is rejected — the
+    // verification (and the reported signing_alg) come from the JWK only
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_rejects_header_alg_mismatching_jwk() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        // The JWKS pins an RSA key declared RS256; the token below is genuinely signed
+        // with an EC key but its header names the RSA JWK's kid, so the lookup resolves
+        // to the RS256 JWK while the header claims ES256.
+        let (_encoding_key, jwks, kid) = generate_rsa_test_keys();
+        let (ec_encoding_key, _ec_jwks, _ec_kid) = generate_es256_test_keys(true);
+        assert_eq!(jwks["keys"][0]["alg"], "RS256");
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &uri,
+            "aud": "test-client-id",
+            "sub": "user-123",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        // Header claims ES256 while the resolved JWK pins RS256: the alg-confusion case.
+        // Validation is configured from the JWK alone, so the decode must reject before
+        // any signature check — the algorithm is never taken from the header.
+        let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(kid);
+        let id_token = encode(&header, &claims, &ec_encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(
+            result.is_err(),
+            "a header alg disagreeing with the JWK must never validate"
+        );
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "alg mismatch must be reported as InvalidGrant"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 15c: client_id reports the configured audience through the port
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn client_id_returns_configured_audience() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        // Explicit endpoints keep this test off the network.
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("my-google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        // The audience validation pins (set_audience) and the port's client_id() must be
+        // the same configured value, so the core's azp check needs no config access.
+        assert_eq!(provider.client_id(), "test-client-id");
+        assert_eq!(provider.provider_id(), "my-google");
     }
 
     fn base64_url_encode(bytes: &[u8]) -> String {

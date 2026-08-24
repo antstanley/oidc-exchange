@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use hmac::{Hmac, Mac};
+use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::domain::User;
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::UserSync;
@@ -33,14 +34,14 @@ fn backoff_delay(attempt: u32) -> std::time::Duration {
 
 /// Sends user lifecycle events as webhook HTTP POST requests with HMAC-SHA256 signatures.
 pub struct WebhookUserSync {
-    url: String,
+    url: HttpsUrl,
     secret: String,
     retries: u32,
     client: reqwest::Client,
 }
 
 impl WebhookUserSync {
-    pub fn new(url: String, secret: String, timeout: std::time::Duration, retries: u32) -> Self {
+    pub fn new(url: HttpsUrl, secret: String, timeout: std::time::Duration, retries: u32) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -78,7 +79,7 @@ impl WebhookUserSync {
 
             match self
                 .client
-                .post(&self.url)
+                .post(self.url.as_str())
                 .header("Content-Type", "application/json")
                 .header("X-Signature-256", &signature)
                 .body(body.clone())
@@ -158,6 +159,7 @@ impl UserSync for WebhookUserSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oidc_exchange_core::config::HttpsUrl;
     use std::collections::HashMap;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -223,7 +225,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             secret.to_string(),
             std::time::Duration::from_secs(5),
             2,
@@ -283,7 +285,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             "secret".to_string(),
             std::time::Duration::from_secs(5),
             2, // 1 initial + 2 retries = 3 attempts total
@@ -311,7 +313,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             "secret".to_string(),
             std::time::Duration::from_secs(5),
             2,
@@ -345,7 +347,7 @@ mod tests {
             .await;
 
         let sync = WebhookUserSync::new(
-            format!("{}/", server.uri()),
+            HttpsUrl::parse_for_test(format!("{}/", server.uri())).expect("wiremock URL"),
             "secret".to_string(),
             std::time::Duration::from_secs(5),
             2,

@@ -5,7 +5,12 @@ use serde_json::Value;
 use crate::domain::User;
 
 /// Reserved JWT claim names that must not be overridden by custom claims.
-const RESERVED_CLAIMS: &[&str] = &["sub", "iss", "aud", "iat", "exp"];
+///
+/// `sub`/`iss`/`aud`/`iat`/`exp` are registered claims the service stamps
+/// itself. `sid` carries revocation authority — it names the one session an
+/// access token may revoke — and `nbf` bounds validity, so neither may come
+/// from a config template or a per-user claim.
+const RESERVED_CLAIMS: &[&str] = &["sub", "iss", "aud", "iat", "exp", "nbf", "sid"];
 
 fn is_reserved(key: &str) -> bool {
     RESERVED_CLAIMS.contains(&key)
@@ -14,8 +19,10 @@ fn is_reserved(key: &str) -> bool {
 /// Resolve custom claims by merging config template claims with per-user claims.
 ///
 /// Per-user claims (`user.claims`) take precedence over config template claims.
-/// Reserved JWT claim names (`sub`, `iss`, `aud`, `iat`, `exp`) are silently ignored
-/// from both sources.
+/// Reserved JWT claim names (`sub`, `iss`, `aud`, `iat`, `exp`, `nbf`, `sid`)
+/// are silently ignored from both sources, because each is either stamped by
+/// [`crate::service::AppService::build_access_token`] or validated against a
+/// value the service controls.
 pub fn resolve_custom_claims(
     config_claims: &Option<HashMap<String, String>>,
     user: &User,

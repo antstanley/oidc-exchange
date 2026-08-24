@@ -110,6 +110,8 @@ terraform apply
 
 Terraform creates all infrastructure: VPC, subnets, NAT gateway, ALB, ECS cluster and service, DynamoDB table, ElastiCache Valkey cluster, KMS key, SQS queue, IAM roles, security groups, and auto-scaling policies.
 
+Because the ALB is the client-facing hop, configure `server.trusted_proxies` with the task-visible ALB/VPC CIDRs and set `trusted_proxy_hops = 1`. When rate limiting is enabled without trusted proxies, startup warns that all clients behind the ALB would otherwise share one proxy-address budget.
+
 ### 4. Verify
 
 ```bash
@@ -120,7 +122,7 @@ curl $ALB_URL/.well-known/openid-configuration
 
 ## Configuration
 
-The TOML config at `examples/ecs-fargate/config/fargate.toml` uses environment variable placeholders. Terraform injects the actual values via the ECS task definition:
+The TOML config at `examples/ecs-fargate/config/fargate.toml` uses environment variable placeholders. Keep `/token` and `/revoke` protected by the configured public budgets; `/health`, discovery, and JWKS remain available for health checks and key discovery and are not charged to authentication-failure budgets. Terraform injects the actual values via the ECS task definition:
 
 ```toml
 [repository]

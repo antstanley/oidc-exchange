@@ -21,6 +21,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use oidc_exchange_core::error::Error;
+use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_test_utils::telemetry::{
     assert_absent_plain_and_encoded, install_span_capture, SharedBuffer,
@@ -44,17 +45,17 @@ fn echo_body() -> String {
 // ---------------------------------------------------------------------------
 
 async fn oidc_provider(
-    revocation_endpoint: Option<String>,
+    revocation_endpoint: Option<HttpsUrl>,
 ) -> oidc_exchange_adapters::oidc::OidcProvider {
     let config = oidc_exchange_core::domain::OidcProviderConfig {
         provider_id: "corpus-oidc".to_string(),
-        issuer: "https://issuer.example.com".to_string(),
+        issuer: HttpsUrl::parse("https://issuer.example.com").expect("valid url"),
         client_id: "corpus-client-id".to_string(),
         client_secret: Some(oidc_exchange_core::Secret::new(
             "sentinel-configured-client-secret".to_string(),
         )),
-        jwks_uri: Some("https://issuer.example.com/jwks.json".to_string()),
-        token_endpoint: Some("https://issuer.example.com/token".to_string()),
+        jwks_uri: Some(HttpsUrl::parse("https://issuer.example.com/jwks.json").expect("valid url")),
+        token_endpoint: Some(HttpsUrl::parse("https://issuer.example.com/token").expect("valid url")),
         revocation_endpoint,
         scopes: Vec::new(),
         additional_params: HashMap::new(),
@@ -76,7 +77,7 @@ async fn oidc_revoke_non_2xx_echo_leaks_nothing_into_error_or_telemetry() {
 
     let capture = install_span_capture(SharedBuffer::default());
     tracing::info!(target: "oidc_exchange_corpus", "corpus-marker: oidc revoke start");
-    let provider = oidc_provider(Some(format!("{}/revoke", server.uri()))).await;
+    let provider = oidc_provider(Some(HttpsUrl::parse_for_test(format!("{}/revoke", server.uri())).expect("wiremock url"))).await;
 
     let err = provider
         .revoke_token(REVOKE_TOKEN_SENTINEL)
@@ -125,7 +126,7 @@ async fn oidc_revoke_structured_error_stays_visible_but_masked() {
         .await;
 
     let capture = install_span_capture(SharedBuffer::default());
-    let provider = oidc_provider(Some(format!("{}/revoke", server.uri()))).await;
+    let provider = oidc_provider(Some(HttpsUrl::parse_for_test(format!("{}/revoke", server.uri())).expect("wiremock url"))).await;
 
     let err = provider
         .revoke_token(REVOKE_TOKEN_SENTINEL)
@@ -161,13 +162,13 @@ async fn exchange_non_2xx_leaks_no_code_or_secret() {
 
     let config = oidc_exchange_core::domain::OidcProviderConfig {
         provider_id: "corpus-exchange".to_string(),
-        issuer: "https://issuer.example.com".to_string(),
+        issuer: HttpsUrl::parse("https://issuer.example.com").expect("valid url"),
         client_id: "corpus-client-id".to_string(),
         client_secret: Some(oidc_exchange_core::Secret::new(
             "sentinel-exchange-client-secret".to_string(),
         )),
-        jwks_uri: Some("https://issuer.example.com/jwks.json".to_string()),
-        token_endpoint: Some(format!("{}/token", server.uri())),
+        jwks_uri: Some(HttpsUrl::parse("https://issuer.example.com/jwks.json").expect("valid url")),
+        token_endpoint: Some(HttpsUrl::parse_for_test(format!("{}/token", server.uri())).expect("wiremock url")),
         revocation_endpoint: None,
         scopes: Vec::new(),
         additional_params: HashMap::new(),
@@ -260,9 +261,20 @@ async fn apple_revoke_non_2xx_leaks_no_token_or_generated_assertion() {
 
     let capture = install_span_capture(SharedBuffer::default());
     tracing::info!(target: "oidc_exchange_corpus", "corpus-marker: apple revoke start");
-    let provider = oidc_exchange_providers::apple::AppleProvider::from_config(&config_map)
-        .await
-        .expect("build Apple provider from config map");
+    let provider = {
+        let pem = std::fs::read(&key_path).expect("read corpus signing key");
+        let signing_key = jsonwebtoken::EncodingKey::from_ec_pem(&pem)
+            .expect("corpus signing key parses");
+        oidc_exchange_providers::apple::AppleProvider::new_for_test(
+            "com.example.corpus".to_string(),
+            "CORPUSTEAM1".to_string(),
+            "corpus-key-1".to_string(),
+            signing_key,
+            HttpsUrl::parse_for_test(format!("{uri}/auth/token")).expect("wiremock url"),
+            HttpsUrl::parse_for_test(format!("{uri}/auth/keys")).expect("wiremock url"),
+            Some(HttpsUrl::parse_for_test(format!("{uri}/auth/revoke")).expect("wiremock url")),
+        )
+    };
 
     assert!(
         provider.revoke_token(REVOKE_TOKEN_SENTINEL).await.is_err(),

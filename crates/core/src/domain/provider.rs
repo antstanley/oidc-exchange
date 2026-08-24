@@ -1,25 +1,25 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use crate::config::HttpsUrl;
 
 use crate::secret::Secret;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct OidcProviderConfig {
     pub provider_id: String,
     /// Required -- used for discovery
-    pub issuer: String,
+    pub issuer: HttpsUrl,
     pub client_id: String,
     /// The provider's client secret, when it uses one. Wrapped so the configured value
     /// cannot be formatted; serde transparency keeps config deserialization and any
     /// serialization of this struct unchanged.
     pub client_secret: Option<Secret<String>>,
     /// Optional -- discovered from issuer if absent
-    pub jwks_uri: Option<String>,
+    pub jwks_uri: Option<HttpsUrl>,
     /// Optional -- discovered from issuer if absent
-    pub token_endpoint: Option<String>,
+    pub token_endpoint: Option<HttpsUrl>,
     /// Optional -- discovered from issuer if absent
-    pub revocation_endpoint: Option<String>,
+    pub revocation_endpoint: Option<HttpsUrl>,
     pub scopes: Vec<String>,
     pub additional_params: HashMap<String, String>,
 }
@@ -52,7 +52,7 @@ mod tests {
     fn sample_config() -> OidcProviderConfig {
         OidcProviderConfig {
             provider_id: "google".to_string(),
-            issuer: "https://accounts.google.com".to_string(),
+            issuer: crate::config::HttpsUrl::parse("https://accounts.google.com").expect("valid https url"),
             client_id: "client-id".to_string(),
             client_secret: Some(Secret::new(SECRET_SENTINEL.to_string())),
             jwks_uri: None,
@@ -76,23 +76,4 @@ mod tests {
         assert!(rendered.contains("google"));
     }
 
-    /// serde transparency: the client secret serializes as a plain string with the same
-    /// field name and shape as before, so config files need no migration.
-    #[test]
-    fn serde_round_trip_keeps_plain_string_shape() {
-        let serialized =
-            serde_json::to_string(&sample_config()).expect("serialize provider config");
-        let value: serde_json::Value = serde_json::from_str(&serialized).expect("valid JSON");
-        assert_eq!(
-            value["client_secret"], SECRET_SENTINEL,
-            "the wrapped secret must serialize exactly as the bare string"
-        );
-
-        let back: OidcProviderConfig =
-            serde_json::from_str(&serialized).expect("deserialize provider config");
-        assert_eq!(
-            back.client_secret.unwrap().expose(),
-            &SECRET_SENTINEL.to_string()
-        );
-    }
 }

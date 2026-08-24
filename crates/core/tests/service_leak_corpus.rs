@@ -21,10 +21,9 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, WebhookConfig};
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
-use oidc_exchange_core::secret::Secret;
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::refresh::RefreshRequest;
 use oidc_exchange_core::service::revoke::RevokeRequest;
 use oidc_exchange_core::service::AppService;
@@ -53,23 +52,24 @@ const PROVENANCE_SENTINELS: [&str; 3] = [
     "192.0.2.77",
 ];
 
-fn corpus_config() -> AppConfig {
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
+fn corpus_config() -> Config {
+    let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default config deserializes");
+    raw.server.issuer = "https://auth.example.com".to_string();
     // The two configured secrets the service holds in memory for its whole lifetime.
-    config.user_sync.webhook = Some(WebhookConfig {
+    raw.user_sync.webhook = Some(oidc_exchange_core::config::RawWebhookConfig {
         url: "https://hooks.example.com/notify".to_string(),
-        secret: Secret::new(WEBHOOK_SECRET_SENTINEL.to_string()),
+        secret: WEBHOOK_SECRET_SENTINEL.to_string(),
         timeout: None,
         retries: None,
     });
-    config.internal_api.shared_secret = Some(Secret::new(SHARED_SECRET_SENTINEL.to_string()));
-    config
+    raw.internal_api.shared_secret = Some(SHARED_SECRET_SENTINEL.to_string());
+    Config::resolve(raw).expect("corpus config resolves")
 }
 
 /// Build a service whose audit adapter is the caller's handle (so fail mode can be
 /// toggled per test), over one shared mock repository backing both ports.
-fn make_service(config: AppConfig, audit: MockAuditLog) -> AppService {
+fn make_service(config: Config, audit: MockAuditLog) -> AppService {
     let provider = MockIdentityProvider::new("test");
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -82,6 +82,7 @@ fn make_service(config: AppConfig, audit: MockAuditLog) -> AppService {
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -107,10 +108,12 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
     let [device, user_agent, ip] = provenance_request_fields();
     let exchange = service
         .exchange(ExchangeRequest {
-            code: Some(CODE_SENTINEL.to_string()),
-            redirect_uri: Some("https://client.example.com/callback".to_string()),
-            id_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: CODE_SENTINEL.to_string(),
+                redirect_uri: "https://client.example.com/callback".to_string(),
+            },
             provider: "test".to_string(),
+            provider_access_token: None,
             ip_address: ip,
             user_agent,
             device_id: device,
@@ -137,17 +140,22 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
         })
         .await
         .expect("refresh");
-    // The refresh flow deliberately does not rotate: the presented token stays valid.
-    assert!(
-        refreshed.refresh_token.is_none(),
-        "refresh must not mint a replacement refresh token"
-    );
+    // Rotation retires the presented generation and mints a replacement; the
+    // replacement is one more credential-derived value the telemetry stream
+    // must never carry.
+    let refresh_token_two = refreshed
+        .refresh_token
+        .as_ref()
+        .expect("rotation must mint a replacement refresh token")
+        .expose()
+        .clone();
+    let hash_two = hex::encode(Sha256::digest(refresh_token_two.as_bytes()));
 
     // --- revoke paths ---
     let [device, user_agent, ip] = provenance_request_fields();
     service
         .revoke(RevokeRequest {
-            token: refresh_token_one.clone(),
+            token: refresh_token_two.clone(),
             token_type_hint: Some("refresh_token".to_string()),
             ip_address: ip,
             user_agent,
@@ -180,6 +188,8 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
     assert_absent_plain_and_encoded(&rendered, CODE_SENTINEL);
     assert_absent_plain_and_encoded(&rendered, &refresh_token_one);
     assert_absent_plain_and_encoded(&rendered, &hash_one);
+    assert_absent_plain_and_encoded(&rendered, &refresh_token_two);
+    assert_absent_plain_and_encoded(&rendered, &hash_two);
     assert_absent_plain_and_encoded(&rendered, WEBHOOK_SECRET_SENTINEL);
     assert_absent_plain_and_encoded(&rendered, SHARED_SECRET_SENTINEL);
 }
@@ -195,8 +205,8 @@ async fn audit_fallback_payloads_carry_no_credentials() {
     let mut config = corpus_config();
     // Syslog-style severities: nothing severe enough to block, everything dispatched
     // (including Debug validation-failure events, which the default emit floor drops).
-    config.audit.blocking_threshold = "emergency".to_string();
-    config.audit.emit_threshold = "debug".to_string();
+    config.audit.blocking_threshold = oidc_exchange_core::domain::AuditSeverity::Emergency;
+    config.audit.emit_threshold = oidc_exchange_core::domain::AuditSeverity::Debug;
 
     let audit = MockAuditLog::new();
     audit.set_fail_mode(true).await;
@@ -205,10 +215,12 @@ async fn audit_fallback_payloads_carry_no_credentials() {
     let [device, user_agent, ip] = provenance_request_fields();
     let exchange = service
         .exchange(ExchangeRequest {
-            code: Some(CODE_SENTINEL.to_string()),
-            redirect_uri: Some("https://client.example.com/callback".to_string()),
-            id_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: CODE_SENTINEL.to_string(),
+                redirect_uri: "https://client.example.com/callback".to_string(),
+            },
             provider: "test".to_string(),
+            provider_access_token: None,
             ip_address: ip,
             user_agent,
             device_id: device,
@@ -263,10 +275,12 @@ async fn configured_secrets_never_render_during_normal_operation() {
 
     service
         .exchange(ExchangeRequest {
-            code: Some("irrelevant-code".to_string()),
-            redirect_uri: Some("https://client.example.com/callback".to_string()),
-            id_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: "irrelevant-code".to_string(),
+                redirect_uri: "https://client.example.com/callback".to_string(),
+            },
             provider: "test".to_string(),
+            provider_access_token: None,
             ip_address: None,
             user_agent: None,
             device_id: None,

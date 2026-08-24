@@ -9,9 +9,9 @@ use crate::secret::Secret;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
-    /// Present on code exchange, absent on refresh. The minted refresh token is wrapped
-    /// so the value that exists only in memory and in this response cannot be formatted;
-    /// serde transparency keeps the wire body a plain string.
+    /// Present on code exchange and on refresh (rotation issues a replacement
+    /// on every redemption). Absent on refresh only when
+    /// `token.refresh_rotation = false`, which restores reusable tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<Secret<String>>,
     /// Always "Bearer"
@@ -42,6 +42,15 @@ pub struct AccessTokenClaims {
     /// This service's issuer URL
     pub iss: String,
     pub aud: String,
+    /// Stable session identity: the `family_id` (`fam_` + lowercase ULID) of
+    /// the session this token was minted for. Rotation never moves it, so the
+    /// `sid` names exactly one revocable token family for the token's whole
+    /// validity however often the refresh token rotates beneath it. Revocation
+    /// acts solely on this claim.
+    ///
+    /// A plain `String` field is required on deserialization: a payload
+    /// without a `sid` fails closed rather than minting an un-revocable token.
+    pub sid: String,
     pub iat: u64,
     pub exp: u64,
     /// Merged: config template claims + user.claims
@@ -84,6 +93,12 @@ pub struct IdentityClaims {
     /// Apple private-relay flag, coerced bool-or-string like `email_verified`;
     /// `None` for non-Apple providers.
     pub is_private_email: Option<bool>,
+    /// The JWS algorithm the resolved JWK actually verified this ID token with
+    /// (e.g. `"RS256"`, `"ES256"`), never the untrusted JWT header's value. The
+    /// core's `at_hash` binding check reads it to select the matching digest
+    /// (SHA-256 for `*256`, SHA-384 for `*384`, SHA-512 for `*512`) without
+    /// re-deciding the algorithm itself.
+    pub signing_alg: String,
     pub raw_claims: HashMap<String, Value>,
 }
 

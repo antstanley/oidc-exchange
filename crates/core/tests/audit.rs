@@ -1,35 +1,112 @@
 use std::collections::HashMap;
 
-use oidc_exchange_core::config::{AppConfig, AuditConfig};
-use oidc_exchange_core::domain::{AuditEventType, AuditOutcome, AuditSeverity};
-use oidc_exchange_core::ports::IdentityProvider;
-use oidc_exchange_core::service::{create_audit_event, AppService};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
+use std::net::{IpAddr, Ipv4Addr};
 
-use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+use oidc_exchange_core::domain::{
+    subject_hash, AdminMutationKind, AuditEventType, AuditFailure, AuditOutcome, AuditSeverity,
+    AuthenticationKind, ClientAddr, ClientAddrSource, RateLimitDecision, RateLimitKey,
+    SecurityEvent, MAX_ASSERTED_CLIENT_ADDR_LEN, MAX_RATE_LIMIT_PROVIDER_LEN,
+};
+use oidc_exchange_core::error::Error;
+use oidc_exchange_core::ports::{IdentityProvider, RateLimiter};
+use oidc_exchange_core::service::{
+    audit_sink_consecutive_failures, audit_sink_degraded, audit_sink_failures_total,
+    create_audit_event, AppService, AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES,
 };
 
-fn make_config_with_threshold(threshold: &str) -> AppConfig {
-    AppConfig {
-        audit: AuditConfig {
+use oidc_exchange_test_utils::{
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
+};
+
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            issuer: "https://auth.test.com".to_string(),
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
+            ..RawServerConfig::default()
+        },
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
+            access_token_ttl: "15m".to_string(),
+            refresh_token_ttl: "30d".to_string(),
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
+            ..RawTokenConfig::default()
+        },
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+            ..RawAuditConfig::default()
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
+    }
+}
+
+fn make_config_with_threshold(threshold: &str) -> Config {
+    Config::resolve(RawConfig {
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
             blocking_threshold: threshold.to_string(),
-            ..Default::default()
+            emit_threshold: "info".to_string(),
+            sqs: None,
+            ..RawAuditConfig::default()
         },
-        ..Default::default()
-    }
+        ..base_raw_config()
+    })
+    .expect("test config should resolve")
 }
 
-fn make_config_with_emit_threshold(emit_threshold: &str) -> AppConfig {
-    AppConfig {
-        audit: AuditConfig {
+fn make_config_with_durability(durability: &str) -> Config {
+    Config::resolve(RawConfig {
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            durability: durability.to_string(),
+            sqs: None,
+        },
+        ..base_raw_config()
+    })
+    .expect("durability test config resolves")
+}
+
+fn make_config_with_emit_threshold(emit_threshold: &str) -> Config {
+    Config::resolve(RawConfig {
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: emit_threshold.to_string(),
-            ..Default::default()
+            sqs: None,
+            ..RawAuditConfig::default()
         },
-        ..Default::default()
-    }
+        ..base_raw_config()
+    })
+    .expect("test config should resolve")
 }
 
-fn make_service_with_audit(audit: MockAuditLog, config: AppConfig) -> AppService {
+fn make_service_with_audit(audit: MockAuditLog, config: Config) -> AppService {
     let provider = MockIdentityProvider::new("mock");
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -41,6 +118,7 @@ fn make_service_with_audit(audit: MockAuditLog, config: AppConfig) -> AppService
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -62,7 +140,7 @@ async fn non_blocking_audit_failure_info_event_warning_threshold() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
-        None,
+        ClientAddr::Unknown,
         None,
     );
 
@@ -89,7 +167,7 @@ async fn blocking_audit_failure_warning_event_warning_threshold() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
-        None,
+        ClientAddr::Unknown,
         None,
     );
 
@@ -113,12 +191,10 @@ async fn blocking_audit_failure_error_event_warning_threshold() {
     let event = create_audit_event(
         AuditEventType::TokenExchange,
         AuditSeverity::Error,
-        AuditOutcome::Failure {
-            reason: "something went wrong".to_string(),
-        },
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
         Some("user-1".to_string()),
         Some("mock".to_string()),
-        None,
+        ClientAddr::Unknown,
         None,
     );
 
@@ -145,7 +221,7 @@ async fn successful_audit_emit_records_event() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
-        Some("203.0.113.5".to_string()),
+        ClientAddr::asserted("203.0.113.5").unwrap(),
         Some("test-agent/1.0".to_string()),
     );
 
@@ -159,6 +235,7 @@ async fn successful_audit_emit_records_event() {
     assert_eq!(events[0].actor.as_deref(), Some("user-1"));
     assert_eq!(events[0].provider.as_deref(), Some("mock"));
     assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.5"));
+    assert_eq!(events[0].ip_address_source, ClientAddrSource::Asserted);
     assert_eq!(events[0].user_agent.as_deref(), Some("test-agent/1.0"));
 }
 
@@ -173,11 +250,12 @@ async fn create_audit_event_with_no_client_context_leaves_fields_none() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
-        None,
+        ClientAddr::Unknown,
         None,
     );
 
     assert_eq!(event.ip_address, None);
+    assert_eq!(event.ip_address_source, ClientAddrSource::Unknown);
     assert_eq!(event.user_agent, None);
 }
 
@@ -189,21 +267,19 @@ async fn audit_debug_event_under_default_emit_threshold_is_suppressed() {
     let audit = MockAuditLog::new();
     let audit_clone = audit.clone();
 
-    // Default AppConfig carries the default AuditConfig, whose
+    // Default Config carries the default AuditConfig, whose
     // `emit_threshold` defaults to "info".
-    let config = AppConfig::default();
-    assert_eq!(config.audit.emit_threshold, "info");
+    let config = make_config_with_threshold("warning");
+    assert_eq!(config.audit.emit_threshold, AuditSeverity::Info);
     let svc = make_service_with_audit(audit, config);
 
     let event = create_audit_event(
         AuditEventType::ValidationFailed,
         AuditSeverity::Debug,
-        AuditOutcome::Failure {
-            reason: "unknown token".to_string(),
-        },
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
         None,
         Some("mock".to_string()),
-        None,
+        ClientAddr::Unknown,
         None,
     );
 
@@ -227,7 +303,7 @@ async fn audit_info_event_at_default_emit_threshold_is_dispatched() {
     let audit = MockAuditLog::new();
     let audit_clone = audit.clone();
 
-    let config = AppConfig::default();
+    let config = make_config_with_threshold("warning");
     let svc = make_service_with_audit(audit, config);
 
     let event = create_audit_event(
@@ -236,7 +312,7 @@ async fn audit_info_event_at_default_emit_threshold_is_dispatched() {
         AuditOutcome::Success,
         Some("user-1".to_string()),
         Some("mock".to_string()),
-        None,
+        ClientAddr::Unknown,
         None,
     );
 
@@ -266,12 +342,10 @@ async fn audit_debug_event_reaches_adapter_when_threshold_lowered_to_debug() {
     let event = create_audit_event(
         AuditEventType::ValidationFailed,
         AuditSeverity::Debug,
-        AuditOutcome::Failure {
-            reason: "unknown token".to_string(),
-        },
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
         None,
         Some("mock".to_string()),
-        None,
+        ClientAddr::Unknown,
         None,
     );
 
@@ -285,4 +359,281 @@ async fn audit_debug_event_reaches_adapter_when_threshold_lowered_to_debug() {
         "lowering emit_threshold to debug must let the debug event through"
     );
     assert_eq!(events[0].severity, AuditSeverity::Debug);
+}
+
+#[tokio::test]
+async fn mandatory_security_audit_health_is_bounded_and_recovers_after_success() {
+    let audit = MockAuditLog::new();
+    audit.set_fail_mode(true).await;
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(audit, make_config_with_durability("observe"));
+
+    // This process-global metric is also incremented by concurrently executing integration
+    // tests. The mandatory path is proved by the sink's own observed call, which is isolated
+    // to this fixture, rather than assuming a stable global counter delta.
+    audit_clone.set_fail_mode(false).await;
+    svc.emit_security_event(
+        SecurityEvent::AuthenticationFailed,
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+        None,
+        None,
+        ClientAddr::Unknown,
+        None,
+    )
+    .await
+    .unwrap();
+    audit_clone.set_fail_mode(true).await;
+    let before = audit_sink_failures_total();
+    assert!(svc
+        .emit_security_event(
+            SecurityEvent::AuthenticationFailed,
+            AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+            None,
+            None,
+            ClientAddr::Unknown,
+            None,
+        )
+        .await
+        .is_ok());
+    assert!(
+        audit_sink_failures_total() > before,
+        "the mandatory failure must increment the process metric even when other tests emit concurrently"
+    );
+    // Process-global counter: concurrently executing tests in this binary
+    // may also fail the sink, so assert the bound rather than an exact value.
+    assert!(audit_sink_consecutive_failures() >= 1);
+
+    for _ in 1..AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES {
+        svc.emit_security_event(
+            SecurityEvent::AuthenticationFailed,
+            AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+            None,
+            None,
+            ClientAddr::Unknown,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(audit_sink_degraded());
+
+    audit_clone.set_fail_mode(false).await;
+    svc.emit_security_event(
+        SecurityEvent::AuthenticationFailed,
+        AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+        None,
+        None,
+        ClientAddr::Unknown,
+        None,
+    )
+    .await
+    .unwrap();
+    // A successful mandatory emission resets the consecutive count; a
+    // concurrent failing test may bump it again immediately, so assert
+    // recovery through the degraded flag's bound instead of an exact zero.
+    assert!(
+        audit_sink_consecutive_failures() < AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES,
+        "a successful mandatory emission must restore health"
+    );
+}
+
+#[tokio::test]
+async fn mandatory_security_audit_returns_typed_durability_error_when_enforced() {
+    let audit = MockAuditLog::new();
+    audit.set_fail_mode(true).await;
+    let svc = make_service_with_audit(audit, make_config_with_durability("enforce"));
+
+    assert!(matches!(
+        svc.emit_security_event(
+            SecurityEvent::AuthenticationFailed,
+            AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+            None,
+            None,
+            ClientAddr::Unknown,
+            None,
+        )
+        .await,
+        Err(Error::SecurityAuditDurability { .. })
+    ));
+}
+
+#[tokio::test]
+async fn mock_rate_limiter_records_safe_keys_and_supports_deny_seam() {
+    let limiter = MockRateLimiter::new();
+    limiter
+        .set_decisions(vec![RateLimitDecision::Deny {
+            retry_after_secs: 30,
+        }])
+        .await;
+    let key = RateLimitKey::ClientAddr(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)));
+    assert_eq!(
+        limiter.check_and_consume(&key).await.unwrap(),
+        RateLimitDecision::Deny {
+            retry_after_secs: 30
+        }
+    );
+    assert_eq!(limiter.keys().await, vec![key]);
+}
+
+#[test]
+fn rate_limit_subject_key_hashes_raw_subject_and_bounds_provider() {
+    let key = RateLimitKey::subject(Some("mock"), "provider-subject").unwrap();
+    let rendered = format!("{key:?}");
+    assert!(rendered.contains(&subject_hash("provider-subject")));
+    assert!(!rendered.contains("provider-subject"));
+    assert!(RateLimitKey::provider("mock").is_some());
+    assert!(RateLimitKey::provider("x".repeat(MAX_RATE_LIMIT_PROVIDER_LEN + 1)).is_none());
+    assert!(RateLimitKey::subject(
+        Some(&"x".repeat(MAX_RATE_LIMIT_PROVIDER_LEN + 1)),
+        "provider-subject"
+    )
+    .is_none());
+}
+
+#[test]
+fn security_events_have_exhaustive_fixed_audit_mappings() {
+    let cases = [
+        (
+            SecurityEvent::AuthenticationSucceeded {
+                kind: AuthenticationKind::Exchange,
+            },
+            AuditEventType::TokenExchange,
+            AuditSeverity::Info,
+        ),
+        (
+            SecurityEvent::AuthenticationSucceeded {
+                kind: AuthenticationKind::Refresh,
+            },
+            AuditEventType::TokenRefresh,
+            AuditSeverity::Info,
+        ),
+        (
+            SecurityEvent::AuthenticationFailed,
+            AuditEventType::ValidationFailed,
+            AuditSeverity::Warning,
+        ),
+        (
+            SecurityEvent::RegistrationDenied,
+            AuditEventType::RegistrationDenied,
+            AuditSeverity::Warning,
+        ),
+        (
+            SecurityEvent::PrincipalSuspended,
+            AuditEventType::UserSuspended,
+            AuditSeverity::Warning,
+        ),
+        (
+            SecurityEvent::PrincipalCreated,
+            AuditEventType::UserCreated,
+            AuditSeverity::Notice,
+        ),
+        (
+            SecurityEvent::SessionRevoked,
+            AuditEventType::TokenRevocation,
+            AuditSeverity::Info,
+        ),
+        (
+            SecurityEvent::SessionsRevoked,
+            AuditEventType::AllSessionsRevoked,
+            AuditSeverity::Notice,
+        ),
+        (
+            SecurityEvent::ProviderRejected,
+            AuditEventType::ProviderError,
+            AuditSeverity::Warning,
+        ),
+        (
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::Created,
+            },
+            AuditEventType::UserCreated,
+            AuditSeverity::Notice,
+        ),
+        (
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::Updated,
+            },
+            AuditEventType::UserUpdated,
+            AuditSeverity::Notice,
+        ),
+        (
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::Deleted,
+            },
+            AuditEventType::UserDeleted,
+            AuditSeverity::Notice,
+        ),
+        (
+            SecurityEvent::ThrottleExceeded,
+            AuditEventType::ThrottleExceeded,
+            AuditSeverity::Warning,
+        ),
+    ];
+
+    for (event, event_type, severity) in cases {
+        assert_eq!(event.event_type(), event_type);
+        assert_eq!(event.severity(), severity);
+    }
+}
+
+#[test]
+fn asserted_client_address_is_bounded_by_the_named_limit() {
+    assert!(ClientAddr::asserted("x".repeat(MAX_ASSERTED_CLIENT_ADDR_LEN - 1)).is_some());
+    assert!(ClientAddr::asserted("x".repeat(MAX_ASSERTED_CLIENT_ADDR_LEN)).is_some());
+    assert!(ClientAddr::asserted("x".repeat(MAX_ASSERTED_CLIENT_ADDR_LEN + 1)).is_none());
+}
+
+#[test]
+fn client_address_preserves_provenance_and_excludes_untrusted_rate_keys() {
+    let peer = ClientAddr::Peer(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)));
+    assert_eq!(peer.source(), ClientAddrSource::Peer);
+    assert_eq!(peer.audit_address().as_deref(), Some("203.0.113.5"));
+    assert_eq!(
+        peer.rate_limit_key(),
+        Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)))
+    );
+
+    let forwarded = ClientAddr::Forwarded(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)));
+    assert_eq!(forwarded.source(), ClientAddrSource::Forwarded);
+    assert_eq!(
+        forwarded.rate_limit_key(),
+        Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+    );
+
+    let asserted = ClientAddr::asserted("forged, 203.0.113.8").unwrap();
+    assert_eq!(asserted.source(), ClientAddrSource::Asserted);
+    assert_eq!(
+        asserted.audit_address().as_deref(),
+        Some("forged, 203.0.113.8")
+    );
+    assert_eq!(asserted.rate_limit_key(), None);
+    assert_eq!(RateLimitKey::client_addr_failure(&asserted), None);
+    assert_eq!(
+        RateLimitKey::client_addr_failure(&peer),
+        Some(RateLimitKey::ClientAddrFailure(IpAddr::V4(Ipv4Addr::new(
+            203, 0, 113, 5
+        ))))
+    );
+    assert_eq!(ClientAddr::Unknown.source(), ClientAddrSource::Unknown);
+    assert_eq!(ClientAddr::Unknown.rate_limit_key(), None);
+}
+
+#[test]
+fn security_event_serialization_keeps_fixed_metadata_and_no_subject() {
+    let event = SecurityEvent::ProviderRejected.into_audit_event(
+        AuditOutcome::Failure(AuditFailure::ProviderRejected),
+        None,
+        Some("mock".to_string()),
+        ClientAddr::Forwarded(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        None,
+    );
+    let json = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["event_type"], "provider_error");
+    assert_eq!(json["severity"], "warning");
+    assert_eq!(json["ip_address_source"], "forwarded");
+    let payload = json.to_string();
+    assert!(!payload.contains("provider-subject"));
+    assert!(!payload.contains("upstream secret response body"));
+    assert_eq!(subject_hash("provider-subject").len(), 64);
+    assert_ne!(subject_hash("provider-subject"), "provider-subject");
 }

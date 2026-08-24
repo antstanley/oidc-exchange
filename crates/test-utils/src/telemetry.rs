@@ -78,6 +78,8 @@ where
 /// rendered telemetry via [`rendered_output`], and assert declared schema via
 /// `declared`.
 pub struct SpanCapture {
+    /// Serializes capture tests process-wide; held for the capture's lifetime.
+    _gate: std::sync::MutexGuard<'static, ()>,
     /// Keeps the thread-local subscriber installed for the whole test body; dropping it
     /// uninstalls the subscriber.
     _guard: tracing::subscriber::DefaultGuard,
@@ -118,6 +120,11 @@ impl SpanCapture {
 /// Keep the returned handle alive for the whole test body. Under a single-threaded
 /// `#[tokio::test]` runtime every poll happens on the installing thread, so the
 /// thread-local default subscriber sees every span open and close.
+/// Process-wide gate serializing span-capture tests: concurrent thread-local
+/// subscriber installs race tracing's callsite interest cache, and a capture
+/// that loses the race records nothing.
+pub static CAPTURE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn install_span_capture(buffer: SharedBuffer) -> SpanCapture {
     let declared: DeclaredFields = Arc::new(Mutex::new(HashSet::new()));
     // The writer closure owns a clone; the capture keeps the original for assertions.
@@ -136,8 +143,14 @@ pub fn install_span_capture(buffer: SharedBuffer) -> SpanCapture {
         .with(DeclaredFieldsLayer {
             declared: declared.clone(),
         });
+    let gate = CAPTURE_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
     SpanCapture {
-        _guard: tracing::subscriber::set_default(subscriber),
+        _gate: gate,
+        _guard: guard,
         buffer,
         declared,
     }

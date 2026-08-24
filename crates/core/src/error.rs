@@ -30,6 +30,9 @@ pub enum Error {
     #[error("not found: {detail}")]
     NotFound { detail: String },
 
+    #[error("too many requests; retry after {retry_after_secs} seconds")]
+    TooManyRequests { retry_after_secs: u64 },
+
     // Provider errors (upstream)
     #[error("provider error ({provider}): {detail}")]
     ProviderError { provider: String, detail: String },
@@ -46,6 +49,9 @@ pub enum Error {
 
     #[error("audit error: {detail}")]
     AuditError { detail: String },
+
+    #[error("mandatory security audit could not be persisted: {detail}")]
+    SecurityAuditDurability { detail: String },
 
     #[error("sync error: {detail}")]
     SyncError { detail: String },
@@ -83,6 +89,9 @@ impl Error {
             Error::Conflict { .. } => "the request conflicts with an existing resource",
             Error::NotFound { .. } => "the requested resource was not found",
 
+            // Throttling.
+            Error::TooManyRequests { .. } => "too many authentication attempts",
+
             // Upstream failures.
             Error::ProviderError { .. } => "upstream provider error",
             Error::ProviderTimeout { .. } => "upstream provider timeout",
@@ -91,6 +100,7 @@ impl Error {
             Error::StoreError { .. }
             | Error::KeyError { .. }
             | Error::AuditError { .. }
+            | Error::SecurityAuditDurability { .. }
             | Error::SyncError { .. }
             | Error::ConfigError { .. } => "internal server error",
         }

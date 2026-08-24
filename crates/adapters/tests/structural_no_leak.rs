@@ -100,11 +100,12 @@ fn token_hash_schema_fields_are_always_paired_with_explicit_skips() {
     let mut paired = 0;
     for (name, source) in &sources {
         for attr in instrument_attrs(source) {
-            if attr.contains("fields(token_hash)") {
+            if attr.contains("fields(token_hash)") || attr.contains("fields(token_hash,") {
                 assert!(
-                    attr.contains("skip(self, token_hash)"),
-                    "{name}: `fields(token_hash)` without an explicit \
-                     `skip(self, token_hash)` relies on a name match a rename defeats: \
+                    attr.contains("skip(self, token_hash)")
+                        || attr.contains("skip(self, live_hash, replacement)"),
+                    "{name}: a token_hash schema field without an explicit skip of its \
+                     digest-bearing arguments relies on a name match a rename defeats: \
                      #[instrument({attr})]"
                 );
                 paired += 1;
@@ -112,8 +113,8 @@ fn token_hash_schema_fields_are_always_paired_with_explicit_skips() {
         }
     }
     assert_eq!(
-        paired, 10,
-        "expected exactly ten token_hash schema fields (5 backends x lookup+revoke)"
+        paired, 20,
+        "expected exactly twenty token_hash schema fields (5 backends x lookup+revoke+resolve+rotate)"
     );
 }
 
@@ -234,16 +235,31 @@ fn session_entity_never_derives_debug() {
     let session_rs = sources
         .get("crates/core/src/domain/session.rs")
         .expect("session domain source present");
-    for (line_no, line) in session_rs.lines().enumerate() {
-        // Only attribute position counts: the hand-written impl's doc comment
-        // legitimately *mentions* `derive(Debug)` when explaining why it is absent.
+    // Only the hash-bearing entities are guarded: `RefreshResolution`'s derived
+    // Debug is safe because it renders through `Session`'s redacting impl.
+    let lines: Vec<&str> = session_rs.lines().collect();
+    for (line_no, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("#[derive(") && trimmed.contains("Debug") {
-            panic!(
-                "crates/core/src/domain/session.rs:{}: Session must keep its \
-                 hand-written redacting Debug, not a derived one",
-                line_no + 1
-            );
+        if !(trimmed.starts_with("pub struct Session")
+            || trimmed.starts_with("pub struct RetiredRefreshToken"))
+        {
+            continue;
+        }
+        for attr_line in lines[..line_no].iter().rev() {
+            let attr = attr_line.trim_start();
+            if attr.starts_with("#[derive(") {
+                assert!(
+                    !attr.contains("Debug"),
+                    "crates/core/src/domain/session.rs:{}: {} must keep its \
+                     hand-written redacting Debug, not a derived one",
+                    line_no + 1,
+                    trimmed
+                );
+                break;
+            }
+            if !attr.starts_with("#[") && !attr.starts_with("///") && !attr.is_empty() {
+                break;
+            }
         }
     }
     // Positive control: the file really declares the entity this guards.

@@ -22,7 +22,6 @@ pub async fn internal_auth_layer(
     // `internal_api.shared_secret`. Treating `Some("")` as unconfigured here
     // means this middleware can never be tricked into accepting an empty
     // `Authorization: Bearer ` header as a match.
-    // Reveal the configured secret only for this comparison; it is never rendered.
     let secret = match state
         .config
         .internal_api

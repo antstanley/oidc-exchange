@@ -5,10 +5,10 @@
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
 
-The core declares six port traits in `crates/core/src/ports/`. Adapters in
-`crates/adapters/` and `crates/providers/` implement them. Every method returns the core's
-`Result<T>`; adapters convert native errors into the domain [`Error`](04-http-api.md) at the
-boundary.
+The core declares seven port traits in `crates/core/src/ports/`. Adapters in
+`crates/adapters/`, `crates/providers/`, and — for the in-process rate limiter —
+`crates/server/` implement them. Every method returns the core's `Result<T>`; adapters
+convert native errors into the domain [`Error`](04-http-api.md) at the boundary.
 
 ## Port traits
 
@@ -40,10 +40,48 @@ nothing for that identity and `create_user` succeeds as a new user.
 async fn store_refresh_token(&self, session: &Session) -> Result<()>;
 async fn get_session_by_refresh_token(&self, token_hash: &Secret<String>) -> Result<Option<Session>>;
 async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()>;
+async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution>;
+async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool>;
+async fn revoke_family(&self, family_id: &str) -> Result<u64>;
 async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
 async fn count_active_sessions(&self) -> Result<u64>;
 async fn cleanup_expired_sessions(&self) -> Result<u64>;  // returns rows deleted
+async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool>;
+async fn take_single_use(&self, key: &str) -> Result<bool>;
 ```
+
+```rust
+pub enum RefreshResolution {
+    /// The hash is the family's live generation.
+    Live(Session),
+    /// The hash is retired and the successor it names is still the family's
+    /// live generation. `live` is that successor.
+    Superseded { live: Session, retired_at: DateTime<Utc> },
+    /// The hash is retired and its successor is no longer live.
+    Retired { family_id: String, user_id: String, retired_at: DateTime<Utc> },
+    /// No live generation and no retained retirement record matches.
+    Unknown,
+}
+```
+
+The port classifies; it does not decide policy. `Superseded` is a storage fact — the
+successor pointer still names the live generation — and the grace window that turns it into
+either a rotation or a reuse alarm is evaluated once in the core against
+`token.refresh_rotation_grace`, not five times across the adapters.
+
+Five obligations attach to the session port. They are contract, not description: an adapter
+either meets them or it does not ship.
+
+| | Obligation |
+|---|---|
+| **SR1** | **Consistency.** `resolve_refresh_token` is strongly consistent with the most recent write. Its negative and retired answers *are* security outcomes — an eventually consistent read turns a revoked token into a live one and a reuse alarm into a silent rejection. |
+| **SR2** | **Atomicity.** `rotate_refresh_token` applies its three effects — delete the live session, write the retirement record, install the replacement — as one atomic unit conditioned on `live_hash` still being live, or applies none of them. A partial application either strands the old generation as still-valid or locks the holder out of a session they legitimately hold. |
+| **SR3** | **Single live generation.** At most one generation of a family is live at any instant, under concurrent redemption. Two callers redeeming the same hash produce exactly one `true` return. |
+| **SR4** | **Retirement durability.** By the time a rotation is observable, the retirement record it wrote is readable. A rotation whose replacement is visible before its retirement record leaves a window in which reuse reads as `Unknown`. |
+| **SR5** | **Revocation completeness.** `revoke_family` removes the family's live generation and every retained retirement record, and returns the count removed, or it errors. `revoke_all_user_sessions` gives the same removal guarantee across all of a user's families (its `Result<()>` signature is unchanged). Neither reports success for work it did not do. |
+
+`store_refresh_token` writes the generation-0 row of a new family. `get_session_by_refresh_token`
+remains for `/revoke`, which needs only liveness.
 
 The token-hash parameters are `&Secret<String>` rather than `&str`, so an adapter that leaves
 them out of its span `skip(...)` fails to compile instead of publishing the session lookup
@@ -53,6 +91,44 @@ builds a store key.
 User and session storage are separate traits so a deployment can back sessions with a fast
 embedded or in-memory store while keeping users in a durable SQL/DynamoDB table. A single
 adapter (DynamoDB, Postgres, SQLite) may implement both.
+
+## Session-store conformance suite
+
+`crates/test-utils/src/session_contract.rs` exports the obligations above as generic
+assertions over any `impl SessionRepository`. Every session adapter — DynamoDB, Postgres,
+SQLite, LMDB, Valkey — and `MockRepository` invoke the same suite from their own test
+module, so the guarantee is a property the project asserts rather than one it assumes. The
+suite covers, at minimum:
+
+- a redemption returns a new generation and the presented one no longer resolves as `Live`;
+- two concurrent `rotate_refresh_token` calls against the same `live_hash` produce exactly
+  one `true` (SR3);
+- a failed compare-and-swap leaves the store byte-identical (SR2);
+- a retirement record is readable the instant its rotation is (SR4);
+- a generation retired more than one rotation ago resolves as `Retired`, not `Unknown`;
+- `revoke_family` removes the live generation and every retirement record, and its count
+  matches (SR5);
+- `resolve_refresh_token` immediately after `revoke_session` returns `Unknown` (SR1);
+- the replacement's `expires_at` equals the retired generation's.
+
+Adapters needing a live backend keep their existing `#[ignore]` gating and environment-variable
+URLs; the suite runs against them in the integration job, and against SQLite, LMDB and
+`MockRepository` on every build.
+
+The single-use pair backs nonces and assertion-replay markers (see
+[01-domain-model.md](01-domain-model.md) → SingleUseRecord). `put_single_use` is an atomic
+insert-if-absent returning `true` when *this* call wrote the record and `false` when a live
+record already held the key; `take_single_use` is an atomic remove-and-report returning
+`true` when a live record was found and is now gone. **Both treat a record whose
+`expires_at` has passed as absent**, so correctness never depends on the reaper having run:
+an expired nonce cannot be taken, and an expired marker's key is reusable.
+`cleanup_expired_sessions` also reclaims expired single-use records where the store has no
+native expiry, and its return count covers sessions and single-use records. Nonces and
+markers are short-lived and high-churn, exactly like sessions, so they live wherever
+sessions live — the `[session_repository]` store when one is configured, otherwise the
+`[repository]` store — with no new configuration surface. `key` is always a namespaced
+digest (`"nonce:<sha256hex>"` or `"assertion:<provider>:[d:]<sha256hex>"`); storage never
+holds raw nonce or raw assertion material.
 
 ### KeyManager (`ports/key_manager.rs`)
 
@@ -64,8 +140,19 @@ fn algorithm(&self) -> &str;     // "EdDSA", "ES256", …
 fn key_id(&self) -> &str;        // JWT kid
 ```
 
-`verify` exists so the revoke flow can authenticate an access token JWT before revoking the
-user's sessions.
+`verify` exists so `AppService::validate_access_token` can authenticate a service-minted
+access token before any of its claims is read. The signature check is the first step of that
+validation, not the whole of it: origin is established here, and validity — type, issuer,
+audience and window — by the claim checks that follow
+([03-service-flows.md](03-service-flows.md)).
+
+`algorithm()` returns the algorithm **derived from the key material the adapter loaded**, not
+the operator's configured string. The local adapter parses an Ed25519 PKCS#8 PEM and reports
+`EdDSA`; the KMS adapter reports the algorithm its configured JWS name maps to, checked against
+the SPKI it fetches for the JWK. Config load compares the declared `key_manager.*.algorithm`
+against this value and fails when they disagree, so the `alg` in every issued JWT header, the
+JWK at `GET /keys`, and `id_token_signing_alg_values_supported` in the discovery document all
+describe the key that actually signs.
 
 `sign` returns signature bytes in the form the JWS serialization uses directly. For the ES\*
 algorithms the KMS adapter converts the DER-encoded `Ecdsa-Sig-Value` returned by KMS Sign
@@ -82,7 +169,35 @@ async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<Provider
 async fn validate_id_token(&self, id_token: &str) -> Result<IdentityClaims>;
 async fn revoke_token(&self, token: &str) -> Result<()>;
 fn provider_id(&self) -> &str;
+fn client_id(&self) -> &str;
 ```
+
+### RateLimiter (`ports/rate_limit.rs`)
+
+```rust
+async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision>;
+
+enum RateLimitKey {
+    ClientAddr(IpAddr),
+    ClientAddrFailure(IpAddr),
+    Subject { provider: Option<String>, subject_hash: String },
+    Provider(String),
+}
+
+enum RateLimitDecision {
+    Allow,
+    Deny { retry_after_secs: u64 },
+}
+```
+
+One call consumes one unit against one key and reports whether the caller may proceed.
+`Subject.subject_hash` is a SHA-256 hex digest of the provider subject, so limiter state never
+holds a raw provider subject. A limiter error is logged and callers proceed; the in-process
+limiter is a backstop, not a global control.
+
+`client_id` reports the audience the provider pins, so the core's `azp` check does not
+have to reach into `[providers.<name>]` config. `validate_id_token`'s signature is
+unchanged — the binding controls read the claims it already returns.
 
 ### AuditLog (`ports/audit.rs`)
 
@@ -102,14 +217,16 @@ async fn notify_user_deleted(&self, user_id: &str) -> Result<()>;
 
 | Port | Adapter | Module | Notes |
 |---|---|---|---|
-| UserRepository + SessionRepository | DynamoDB | `adapters/dynamo` | single-table, GSI1; see [08-persistence.md](08-persistence.md) |
-| UserRepository + SessionRepository | Postgres | `adapters/postgres` | `users` + `sessions` tables, JSONB columns, `sqlx` |
-| UserRepository + SessionRepository | SQLite | `adapters/sqlite` | JSON-as-TEXT, WAL mode, `sqlx` |
-| SessionRepository | LMDB | `adapters/lmdb` | embedded; `heed`; `sessions` + `user_sessions` DBs |
-| SessionRepository | Valkey/Redis | `adapters/valkey` | `fred`; `{prefix}session:{hash}`, `{prefix}user_sessions:{user_id}` set (TTL bumped via `EXPIRE … GT`), `{prefix}active_sessions` counter; atomic pipelined writes; cleanup prunes index sets and reconciles the counter |
+| UserRepository + SessionRepository | DynamoDB | `adapters/dynamo` | single-table, GSI1; sessions, retirement items, single-use records, and a transactionally maintained per-user roster; see [08-persistence.md](08-persistence.md) |
+| UserRepository + SessionRepository | Postgres | `adapters/postgres` | `users` + `sessions` + `retired_refresh_tokens` + `single_use` tables, JSONB columns, `sqlx` |
+| UserRepository + SessionRepository | SQLite | `adapters/sqlite` | JSON-as-TEXT, WAL mode, `sqlx`; same four tables |
+| SessionRepository | LMDB | `adapters/lmdb` | embedded; `heed`; five DBs — `sessions`, `user_sessions`, `retired_tokens`, `family_index`, `single_use`; batched cleanup |
+| SessionRepository | Valkey/Redis | `adapters/valkey` | `fred`; `{prefix}session:{hash}`, `{prefix}retired:{hash}`, `{prefix}family:{family_id}` set, `{prefix}user_sessions:{user_id}` set (TTL bumped via `EXPIRE … GT`), `{prefix}active_sessions` counter, `{prefix}single_use:{digest}` (`SET NX EX` claim / `GETDEL` burn); Lua rotation and pipelined writes; cleanup prunes index sets and reconciles the counter |
 | KeyManager | AWS KMS | `adapters/kms` | RS/PS/ES 256/384/512; ECDSA DER→raw JWS conversion on sign; local verify against the cached public key; JWK cached on `OnceCell`; `Sign`/`GetPublicKey` |
 | KeyManager | Local Ed25519 | `adapters/local_keys` | EdDSA only; PKCS#8 PEM from file or bytes |
 | KeyManager | Noop | `adapters/noop` | every op errors; used in admin-only role |
+| RateLimiter | In-process | `server/middleware/throttle` | fixed window per key, bounded map with expiry eviction; per-process, not global |
+| RateLimiter | Noop | `adapters/noop` | always `Allow`; selected when `rate_limit.enabled = false` |
 | AuditLog | Stdout/stderr | `adapters/stdout_audit` | JSON lines; `Auto` routes error+ to stderr, else stdout |
 | AuditLog | AWS SQS | `adapters/sqs_audit` | JSON message + `severity` attribute; FIFO auto-detected by `.fifo` suffix |
 | AuditLog | Noop | `adapters/noop` | always `Ok(())` |
@@ -147,8 +264,10 @@ payloads are parsed only from 2xx bodies.
   (rate-limited by a 30s minimum refresh interval) before the provider rejects the token, so
   upstream key rotation takes effect immediately instead of at TTL expiry.
 - `discovery::discover(issuer)` — fetches and parses `.well-known/openid-configuration` into
-  `DiscoveryDocument { issuer, token_endpoint, jwks_uri, revocation_endpoint }` and errors if
-  the document's `issuer` does not equal the configured issuer (RFC 8414 §3.3).
+  `DiscoveryDocument { issuer, token_endpoint, jwks_uri, revocation_endpoint }`. A non-success
+  HTTP status is rejected before the body is read (`ProviderError` naming the issuer and status),
+  matching `JwksCache`'s handling of the same failure; the parsed `issuer` must then equal the
+  configured issuer per RFC 8414 §3.3.
 - `token_endpoint::exchange_code(endpoint, client_id, client_secret, code, redirect_uri)` —
   the standard form-encoded `grant_type=authorization_code` POST. Both outcomes read the body
   through `http::read_bounded`; a non-2xx response becomes a `ProviderError` detail via
@@ -171,7 +290,8 @@ payloads are parsed only from 2xx bodies.
 
 ## Mock adapters (`crates/test-utils`)
 
-`MockRepository` (in-memory `HashMap`, implements both repository traits), `MockKeyManager`
+`MockRepository` (in-memory `HashMap`, implements both repository traits, runs the
+session-store conformance suite), `MockKeyManager`
 (deterministic Ed25519 seed), `MockAuditLog` (collects events, `set_fail_mode` to inject
 failures), `MockUserSync` (records calls), `MockIdentityProvider` (configurable exchange and
 claims responses). These back the core unit tests and server E2E tests.

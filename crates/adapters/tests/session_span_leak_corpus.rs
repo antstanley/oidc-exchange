@@ -60,6 +60,9 @@ fn sentinel_session(s: &Sentinels, user_id: &str) -> Session {
     let now = Utc::now();
     Session {
         user_id: user_id.to_string(),
+        family_id: oidc_exchange_core::domain::new_family_id(),
+        generation: 0,
+        rotated_at: None,
         refresh_token_hash: Secret::new(s.hash.to_string()),
         provider: "google".to_string(),
         expires_at: now + Duration::hours(1),
@@ -155,7 +158,7 @@ async fn lmdb_session_spans_never_render_sentinels() {
     let capture = install_span_capture(SharedBuffer::default());
     let dir = tempfile::TempDir::new().expect("temp dir for lmdb environment");
     let path = dir.path().join("data");
-    let repo = LmdbSessionRepository::new(path.to_str().expect("utf-8 temp path"), 16)
+    let repo = LmdbSessionRepository::new(path.to_str().expect("utf-8 temp path"), 16, 3600)
         .expect("open lmdb environment");
 
     drive_lifecycle(&repo, &LMDB, "usr_corpus_lmdb").await;
@@ -184,7 +187,7 @@ async fn sqlite_session_spans_never_render_sentinels() {
     let pool = oidc_exchange_adapters::sqlite::create_pool(db_path.to_str().expect("utf-8 path"))
         .await
         .expect("open migrated sqlite pool");
-    let repo = oidc_exchange_adapters::sqlite::SqliteRepository::new(pool);
+    let repo = oidc_exchange_adapters::sqlite::SqliteRepository::new(pool, 3600);
 
     drive_lifecycle(&repo, &SQLITE, "usr_corpus_sqlite").await;
 
@@ -251,7 +254,7 @@ async fn valkey_session_spans_never_render_sentinels() {
             .expect("system clock before epoch")
             .as_nanos(),
     );
-    let repo = oidc_exchange_adapters::valkey::ValkeySessionRepository::new(&url, prefix)
+    let repo = oidc_exchange_adapters::valkey::ValkeySessionRepository::new(&url, prefix, 3600)
         .await
         .expect("connect to local Valkey (VALKEY_TEST_URL or redis://localhost:6379)");
 
@@ -286,7 +289,7 @@ async fn postgres_session_spans_never_render_sentinels() {
     let pool = oidc_exchange_adapters::postgres::create_pool(&url, 5, true)
         .await
         .expect("connect to live Postgres and ensure schema");
-    let repo = oidc_exchange_adapters::postgres::PostgresRepository::new(pool);
+    let repo = oidc_exchange_adapters::postgres::PostgresRepository::new(pool, 3600);
 
     // `sessions.user_id` carries a foreign key to `users`, so the lifecycle must run
     // against a real user row — the same JIT-provisioning order production uses:
@@ -447,7 +450,7 @@ async fn dynamodb_session_spans_never_render_sentinels() {
         .expect("create leak-corpus table");
 
     let repo =
-        oidc_exchange_adapters::dynamo::DynamoRepository::new(client, "leak-corpus".to_string());
+        oidc_exchange_adapters::dynamo::DynamoRepository::new(client, "leak-corpus".to_string(), 3600);
 
     let capture = install_span_capture(SharedBuffer::default());
     drive_lifecycle(&repo, &DYNAMO, "usr_corpus_dynamo").await;

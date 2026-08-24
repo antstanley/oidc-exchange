@@ -10,25 +10,30 @@ use tower::ServiceExt;
 
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
-use oidc_exchange_core::Secret;
 use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
 const TEST_SECRET: &str = "test-internal-secret-1234";
 
+fn test_config(shared_secret: &str) -> Config {
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    raw_config.internal_api.enabled = true;
+    raw_config.internal_api.shared_secret = Some(shared_secret.to_string());
+    Config::resolve(raw_config).expect("test config should resolve")
+}
+
 fn build_test_app() -> Router {
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(Secret::new(TEST_SECRET.to_string()));
+    let config = test_config(TEST_SECRET);
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -36,13 +41,16 @@ fn build_test_app() -> Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
         providers,
         config.clone(),
     );
 
+    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter,
     };
 
     public_routes()
@@ -142,7 +150,7 @@ async fn internal_auth_passes_with_correct_secret() {
 
 // ---------------------------------------------------------------------------
 // 3b. Internal auth rejection: empty configured secret is never "configured",
-// even against an empty Bearer token (defence in depth — `AppConfig::validate`
+// even against an empty Bearer token (defence in depth — `Config::resolve`
 // already refuses to start a role that serves the internal API with an empty
 // `shared_secret`, so this only guards a config built by hand, e.g. in tests
 // or an embedder).
@@ -154,10 +162,13 @@ async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_to
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(Secret::new(String::new()));
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    raw_config.internal_api.enabled = true;
+    raw_config.internal_api.shared_secret = Some("valid-test-secret".to_string());
+    let mut config = Config::resolve(raw_config).expect("test config should resolve");
+    config.internal_api.shared_secret = None;
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -165,13 +176,16 @@ async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_to
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
         providers,
         config.clone(),
     );
 
+    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter,
     };
 
     let app = public_routes()
@@ -575,4 +589,236 @@ async fn clear_claims_unknown_id_returns_404_not_found() {
 
     let json = body_to_json(response.into_body()).await;
     assert_eq!(json["error"], "not_found");
+}
+
+// ---------------------------------------------------------------------------
+// POST /internal/sessions/cleanup — auth, response shape, and sweep count
+// (`04-http-api.md` → Internal routes; the scheduler-driven equivalent of the
+// bootstrap-spawned session reaper)
+// ---------------------------------------------------------------------------
+
+/// Build the test app over a session store the caller keeps a handle to, so a
+/// test can seed rows and then observe what the endpoint swept.
+fn build_test_app_with_shared_session_store() -> (Router, MockRepository) {
+    let provider = MockIdentityProvider::new("test");
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert("test".to_string(), Box::new(provider));
+
+    let config = test_config(TEST_SECRET);
+
+    let sessions = MockRepository::new();
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(sessions.clone()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+
+    let state = AppState {
+        service: Arc::new(service),
+        config: Arc::new(config),
+        rate_limiter: std::sync::Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+    };
+
+    (
+        public_routes()
+            .merge(internal_routes(state.clone()))
+            .with_state(state),
+        sessions,
+    )
+}
+
+#[tokio::test]
+async fn cleanup_endpoint_rejects_missing_auth() {
+    let (app, _sessions) = build_test_app_with_shared_session_store();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/sessions/cleanup")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the cleanup lever sits behind internal auth like every /internal route"
+    );
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn cleanup_endpoint_rejects_wrong_secret() {
+    let (app, _sessions) = build_test_app_with_shared_session_store();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/sessions/cleanup")
+                .header("authorization", "Bearer not-the-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(json["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn cleanup_endpoint_returns_zero_for_an_empty_store() {
+    let (app, _sessions) = build_test_app_with_shared_session_store();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/sessions/cleanup")
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(
+        json["deleted"], 0,
+        "an empty store reports zero rows deleted — and nothing else"
+    );
+    assert!(
+        json.get("sessions").is_none() && json.get("users").is_none(),
+        "the response must carry no store contents, only the count"
+    );
+}
+
+/// The endpoint sweeps expired sessions *and* expired retirement records in
+/// one call and reports their combined count, leaving live state untouched —
+/// the same semantics the scheduled reaper gets from the shared port method.
+#[tokio::test]
+async fn cleanup_endpoint_sweeps_expired_rows_and_reports_the_combined_count() {
+    use oidc_exchange_core::ports::SessionRepository;
+    use oidc_exchange_test_utils::session_contract as sc;
+
+    let (app, sessions) = build_test_app_with_shared_session_store();
+
+    // Seed: one live generation, one expired session, one expired retirement
+    // record (a past-expiry family rotated once, so its record inherits the
+    // past family deadline).
+    let base = sc::capture_base_instant();
+    let future = base + chrono::Duration::hours(2);
+    let past = base - chrono::Duration::hours(1);
+
+    let live_family = sc::fixture_family_id("cleanup-endpoint:live");
+    let live = sc::generation_session(
+        "usr_cleanup",
+        &live_family,
+        0,
+        sc::fixture_hash("cleanup-endpoint:live:gen0"),
+        future,
+        base,
+        None,
+    );
+    sessions.store_refresh_token(&live).await.unwrap();
+
+    let dead_family = sc::fixture_family_id("cleanup-endpoint:dead");
+    let dead = sc::generation_session(
+        "usr_cleanup",
+        &dead_family,
+        0,
+        sc::fixture_hash("cleanup-endpoint:dead:gen0"),
+        past,
+        base,
+        None,
+    );
+    sessions.store_refresh_token(&dead).await.unwrap();
+
+    let rotting_family = sc::fixture_family_id("cleanup-endpoint:rotting");
+    let gen0 = sc::generation_session(
+        "usr_cleanup",
+        &rotting_family,
+        0,
+        sc::fixture_hash("cleanup-endpoint:rotting:gen0"),
+        past,
+        base,
+        None,
+    );
+    let gen1 = sc::generation_session(
+        "usr_cleanup",
+        &rotting_family,
+        1,
+        sc::fixture_hash("cleanup-endpoint:rotting:gen1"),
+        past,
+        base,
+        Some(base),
+    );
+    sessions.store_refresh_token(&gen0).await.unwrap();
+    assert!(
+        sessions
+            .rotate_refresh_token(gen0.refresh_token_hash.expose(), &gen1)
+            .await
+            .unwrap(),
+        "fixture rotation wins its CAS"
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/sessions/cleanup")
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_to_json(response.into_body()).await;
+    assert_eq!(
+        json["deleted"], 3,
+        "one call deletes the expired session, the expired successor of the rotated \
+         past-expiry family, and its expired retirement record"
+    );
+
+    // Live state survives, visible through the same service surface an
+    // operator would check.
+    assert_eq!(
+        sessions.get_all_sessions().await.len(),
+        1,
+        "only the live generation remains after the sweep"
+    );
+    assert!(
+        sessions.get_all_retired_tokens().await.is_empty(),
+        "expired retirement records are swept together with expired sessions"
+    );
+
+    // A second call is idempotent: zero further deletions.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/sessions/cleanup")
+                .header("authorization", format!("Bearer {}", TEST_SECRET))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_to_json(response.into_body()).await["deleted"], 0);
 }

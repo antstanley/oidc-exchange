@@ -29,12 +29,12 @@ use http_body_util::BodyExt;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 
-use oidc_exchange::middleware::audit_context::audit_context_layer;
+use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
 use oidc_exchange::middleware::request_id::request_id_layer;
 use oidc_exchange::routes::public_routes;
 use oidc_exchange::state::AppState;
 use oidc_exchange_adapters::lmdb::LmdbSessionRepository;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::telemetry::{
@@ -58,7 +58,7 @@ struct CorpusApp {
 async fn build_corpus_app() -> CorpusApp {
     let dir = tempfile::TempDir::new().expect("temp dir for lmdb environment");
     let db_path = dir.path().join("sessions.lmdb");
-    let lmdb = LmdbSessionRepository::new(db_path.to_str().expect("utf-8 temp path"), 16)
+    let lmdb = LmdbSessionRepository::new(db_path.to_str().expect("utf-8 temp path"), 16, 3600)
         .expect("open lmdb session environment");
 
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -67,8 +67,10 @@ async fn build_corpus_app() -> CorpusApp {
         Box::new(MockIdentityProvider::new("corpus-provider")),
     );
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
+    let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default config deserializes");
+    raw.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw).expect("test config resolves");
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -76,6 +78,7 @@ async fn build_corpus_app() -> CorpusApp {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config.clone(),
     );
@@ -83,12 +86,13 @@ async fn build_corpus_app() -> CorpusApp {
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter: std::sync::Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
     };
 
     // Layer order mirrors production: request id outermost so every downstream span —
     // including the LMDB store spans asserted below — sits inside the request span.
     let app = public_routes()
-        .layer(from_fn(audit_context_layer))
+        .layer(from_fn(ffi_audit_context_layer))
         .layer(from_fn(request_id_layer))
         .with_state(state);
 
@@ -185,6 +189,12 @@ async fn token_lifecycle_leaks_nothing_into_telemetry() {
         refreshed["access_token"].is_string(),
         "a refresh must return a fresh access token"
     );
+    // Rotation retires the presented generation; the replacement is the live
+    // credential the revoke below must present.
+    let rotated_refresh_token = refreshed["refresh_token"]
+        .as_str()
+        .expect("rotation returns a replacement refresh token")
+        .to_string();
 
     // --- revoke: an attacker-chosen unknown token must stay silent (RFC 7009) ---
     let hostile_token = "HOSTILE-REVOCATION-TOKEN-SENTINEL";
@@ -211,7 +221,7 @@ async fn token_lifecycle_leaks_nothing_into_telemetry() {
         .app
         .oneshot(form_request(
             "/revoke",
-            format!("token={raw_refresh_token}&token_type_hint=refresh_token"),
+            format!("token={rotated_refresh_token}&token_type_hint=refresh_token"),
         ))
         .await
         .expect("in-flight request");

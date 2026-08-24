@@ -74,7 +74,7 @@ adapter = "kms"
 
 [key_manager.kms]
 key_id = "${KMS_KEY_ARN}"
-algorithm = "ECDSA_SHA256"
+algorithm = "ES256"
 kid = "prod-1"
 
 [repository]
@@ -85,10 +85,20 @@ table_name = "oidc-exchange"
 
 [audit]
 adapter = "sqs"
-blocking_threshold = "error"
+durability = "enforce"
+emit_threshold = "info"
 
 [audit.sqs]
 queue_url = "${AUDIT_QUEUE_URL}"
+
+[rate_limit]
+enabled = true
+store = "in_process"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10
+per_subject = 10
+per_provider = 600
 
 [providers.google]
 adapter = "oidc"
