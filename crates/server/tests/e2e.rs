@@ -14,7 +14,7 @@ use tower::ServiceExt;
 use oidc_exchange::middleware::audit_context::audit_context_layer;
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -23,15 +23,22 @@ use oidc_exchange_test_utils::{
 
 const TEST_SECRET: &str = "test-internal-secret-e2e";
 
+fn test_config(registration_mode: &str) -> Config {
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    raw_config.registration.mode = registration_mode.to_string();
+    raw_config.internal_api.enabled = true;
+    raw_config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    Config::resolve(raw_config).expect("test config should resolve")
+}
+
 fn build_e2e_app() -> Router {
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
+    let config = test_config("open");
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -54,7 +61,7 @@ fn build_e2e_app() -> Router {
         .with_state(state)
 }
 
-fn build_e2e_app_with_config(config: AppConfig) -> Router {
+fn build_e2e_app_with_config(config: Config) -> Router {
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
@@ -293,13 +300,7 @@ async fn e2e_internal_api_custom_claims() {
 
 #[tokio::test]
 async fn e2e_registration_policy_existing_users_only() {
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
-    config.registration.mode = "existing_users_only".to_string();
-    config.internal_api.enabled = true;
-    config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
-
-    let app = build_e2e_app_with_config(config);
+    let app = build_e2e_app_with_config(test_config("existing_users_only"));
 
     // Step 1: POST /token → 403 access_denied (user doesn't exist)
     let exchange_body =

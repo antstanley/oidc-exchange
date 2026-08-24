@@ -43,14 +43,8 @@ pub struct AccessTokenClaims {
     /// Stable session identity: the `family_id` (`fam_` + lowercase ULID) of
     /// the session this token was minted for. Rotation never moves it, so the
     /// `sid` names exactly one revocable token family for the token's whole
-    /// validity however often the refresh token rotates beneath it.
-    ///
-    /// VENDORED SEAM (task 08): this field is the minimal in-branch slice of
-    /// the sibling `2026-08-05-validate_revoke_token_claims` contract (PR
-    /// #19), which is not merged on this branch; that PR's full validator —
-    /// required-field semantics beyond `sid`, `at+jwt` typ-header pinning,
-    /// registered-claim validation order — is deliberately NOT vendored here.
-    /// Reconcile this field and its consumers against PR #19 at merge time.
+    /// validity however often the refresh token rotates beneath it. Revocation
+    /// acts solely on this claim.
     ///
     /// A plain `String` field is required on deserialization: a payload
     /// without a `sid` fails closed rather than minting an un-revocable token.
@@ -97,5 +91,11 @@ pub struct IdentityClaims {
     /// Apple private-relay flag, coerced bool-or-string like `email_verified`;
     /// `None` for non-Apple providers.
     pub is_private_email: Option<bool>,
+    /// The JWS algorithm the resolved JWK actually verified this ID token with
+    /// (e.g. `"RS256"`, `"ES256"`), never the untrusted JWT header's value. The
+    /// core's `at_hash` binding check reads it to select the matching digest
+    /// (SHA-256 for `*256`, SHA-384 for `*384`, SHA-512 for `*512`) without
+    /// re-deciding the algorithm itself.
+    pub signing_alg: String,
     pub raw_claims: HashMap<String, Value>,
 }

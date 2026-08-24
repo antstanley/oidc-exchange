@@ -65,6 +65,16 @@ CREATE TABLE IF NOT EXISTS retired_refresh_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_retired_family ON retired_refresh_tokens (family_id);
 CREATE INDEX IF NOT EXISTS idx_retired_expires_at ON retired_refresh_tokens (expires_at);
+
+-- Single-use records (nonces and assertion-replay markers): a presence-only digest key
+-- plus an expiry. The `expires_at` index serves only the cleanup sweep — both claim
+-- operations are keyed lookups that evaluate expiry themselves.
+CREATE TABLE IF NOT EXISTS single_use (
+    key         TEXT PRIMARY KEY,
+    expires_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_single_use_expires_at ON single_use(expires_at);
 "#;
 
 pub struct SqliteRepository {
@@ -962,8 +972,9 @@ impl SessionRepository for SqliteRepository {
     async fn cleanup_expired_sessions(&self) -> Result<u64> {
         let now_str = Utc::now().to_rfc3339();
 
-        // The sweep covers sessions and retirement records alike, and its
-        // count is the combined number deleted (the port contract).
+        // The sweep covers sessions, retirement records, and expired
+        // single-use records alike, and its count is the combined number
+        // deleted (the port contract).
         let mut tx = self.pool.begin().await.map_err(|e| Error::StoreError {
             detail: e.to_string(),
         })?;
@@ -981,11 +992,62 @@ impl SessionRepository for SqliteRepository {
             .map_err(|e| Error::StoreError {
                 detail: e.to_string(),
             })?;
+        let single_use = sqlx::query("DELETE FROM single_use WHERE expires_at < ?1")
+            .bind(&now_str)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
         tx.commit().await.map_err(|e| Error::StoreError {
             detail: e.to_string(),
         })?;
 
-        Ok(sessions.rows_affected() + retired.rows_affected())
+        Ok(sessions.rows_affected() + retired.rows_affected() + single_use.rows_affected())
+    }
+
+    #[instrument(skip(self, key))]
+    async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        // Insert-if-absent, with a live conflicting row overwritten only when it has
+        // already expired (`WHERE single_use.expires_at < ?now`): rows_affected is 1 for
+        // exactly the winning claim, 0 when a live record holds the key. The unique
+        // primary key makes check-and-insert one atomic statement.
+        let result = sqlx::query(
+            "INSERT INTO single_use (key, expires_at) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET expires_at = excluded.expires_at \
+             WHERE single_use.expires_at < ?3",
+        )
+        .bind(key)
+        .bind(expires_at.to_rfc3339())
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
+    #[instrument(skip(self, key))]
+    async fn take_single_use(&self, key: &str) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        // Remove-and-report in one statement: only a live record (expiry still ahead of
+        // now) matches, so an absent, burned, or expired key deletes zero rows.
+        let row =
+            sqlx::query("DELETE FROM single_use WHERE key = ?1 AND expires_at > ?2 RETURNING 1")
+                .bind(key)
+                .bind(Utc::now().to_rfc3339())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?;
+
+        Ok(row.is_some())
     }
 }
 
@@ -2231,5 +2293,80 @@ mod tests {
         // Cleanup removes it and reports it.
         let removed = repo.cleanup_expired_sessions().await.expect("cleanup");
         assert_eq!(removed, 1, "the sweep must remove exactly the dead record");
+    }
+
+    // -- Single-use conformance (shared suite in test-utils) --------------------
+
+    use oidc_exchange_test_utils::single_use_conformance as conformance;
+
+    #[tokio::test]
+    async fn single_use_first_claim_wins_duplicate_loses() {
+        let repo = create_test_repo().await;
+        conformance::first_claim_wins_duplicate_loses(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn single_use_consume_live_record_exactly_once() {
+        let repo = create_test_repo().await;
+        conformance::consume_live_record_exactly_once(&repo).await;
+    }
+
+    #[tokio::test]
+    async fn single_use_expired_record_is_absent_to_put_and_take() {
+        let repo = create_test_repo().await;
+        conformance::expired_record_is_absent_to_put_and_take(&repo).await;
+    }
+
+    /// Concurrency needs a multi-connection file-backed pool; `:memory:` would
+    /// serialize the racers at the connection level.
+    #[tokio::test]
+    async fn single_use_concurrent_put_has_exactly_one_winner() {
+        let (repo, _dir) = create_racing_test_repo().await;
+        conformance::concurrent_put_has_exactly_one_winner(std::sync::Arc::new(repo)).await;
+    }
+
+    #[tokio::test]
+    async fn single_use_concurrent_take_has_exactly_one_winner() {
+        let (repo, _dir) = create_racing_test_repo().await;
+        conformance::concurrent_take_has_exactly_one_winner(std::sync::Arc::new(repo)).await;
+    }
+
+    #[tokio::test]
+    async fn single_use_cleanup_sweeps_expired_records_and_counts_both_kinds() {
+        let repo = create_test_repo().await;
+        conformance::cleanup_sweeps_expired_single_use_records(&repo).await;
+    }
+
+    /// The `single_use` DDL must be idempotent: re-running the migration statements on
+    /// a database that already has the table (and rows in it) must not error or lose
+    /// data, so startup migrations stay safe to re-run on every boot.
+    #[tokio::test]
+    async fn single_use_ddl_is_idempotent_across_repeated_migrations() {
+        let repo = create_test_repo().await;
+
+        let key = "nonce:ddl_idempotency";
+        let claimed = repo
+            .put_single_use(key, Utc::now() + chrono::Duration::minutes(5))
+            .await
+            .expect("claim before migration replay");
+        assert!(claimed);
+
+        for _ in 0..2 {
+            for statement in MIGRATIONS.split(';') {
+                let trimmed = statement.trim();
+                if !trimmed.is_empty() {
+                    sqlx::query(trimmed)
+                        .execute(&repo.pool)
+                        .await
+                        .expect("re-running a migration statement should not error");
+                }
+            }
+        }
+
+        let consumed = repo.take_single_use(key).await.expect("take after replay");
+        assert!(
+            consumed,
+            "the pre-existing record must survive migration replay"
+        );
     }
 }

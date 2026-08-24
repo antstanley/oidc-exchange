@@ -14,7 +14,7 @@ Choose one of the following methods:
 ### Option 1: Install script (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
 ### Option 2: Docker

@@ -13,6 +13,7 @@ struct ErrorResponse {
 
 /// Wrapper around domain errors and route-level errors that implements
 /// `IntoResponse` for axum handlers.
+#[derive(Debug)]
 pub enum ApiError {
     /// A domain error from the core service.
     Domain(Error),

@@ -1,5 +1,3 @@
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -10,8 +8,8 @@ use crate::error::Result;
 use crate::service::{create_audit_event, AppService};
 
 /// Length in hex characters of a SHA-256 digest (32 bytes -> 64 hex chars).
-/// Named so the `revoke_refresh_token` postcondition assertion documents its
-/// bound instead of embedding a magic number.
+/// Named so the hash postcondition below documents its bound instead of
+/// embedding a magic number.
 const TOKEN_HASH_HEX_LEN: usize = 64;
 
 /// Fixed rejection reason for a validly-signed access token whose `sid`
@@ -19,10 +17,6 @@ const TOKEN_HASH_HEX_LEN: usize = 64;
 /// 64-hex refresh-token hash. Failing closed here is deliberate: passing a
 /// hash-valued `sid` onward would "revoke" a family that does not exist,
 /// audit a removal that removed nothing, and hide the miss.
-///
-/// VENDORED SEAM (task 08): PR #19 (`validate_revoke_token_claims`) replaces
-/// this fixed-string + `ValidationFailed` shape with its full validator and
-/// `AuthenticationFailed` event; only this slice is vendored on this branch.
 const SID_REJECTION_REASON: &str =
     "access token sid claim is not a well-formed session family identifier";
 
@@ -40,21 +34,14 @@ pub struct RevokeRequest {
     pub device_id: Option<String>,
 }
 
-/// What a presented access token resolves to for revocation purposes.
-enum AccessRevokeTarget {
-    /// Signature verified and the claims carry a well-formed family `sid`:
-    /// revoke exactly that family.
-    Family { user_id: String, family_id: String },
-    /// Signature verified but the token cannot name a family (missing sid,
-    /// malformed sid, hash-form pre-rotation sid): fail closed loudly — one
-    /// fixed-reason audit event — while revoking nothing.
-    FailClosed,
-    /// Verification failed outright (malformed shape, bad signature): RFC
-    /// 7009 silence, no audit, no mutation.
-    Unverified,
-}
-
 impl AppService {
+    /// RFC 7009 revocation. Token-state failures always succeed toward the
+    /// client (`Ok(())`); only repository/audit infrastructure failures
+    /// propagate, which the server maps to 503.
+    ///
+    /// Revocation authority comes from the credential presented and reaches
+    /// exactly the session that credential names — never every session of a
+    /// subject, and never on the word of an unvalidated token.
     pub async fn revoke(&self, request: RevokeRequest) -> Result<()> {
         // Precondition: an empty token can never verify or hash to a real
         // session, but a caller-supplied empty string is still a programmer
@@ -62,137 +49,70 @@ impl AppService {
         assert!(!request.token.is_empty(), "revoke: token must not be empty");
 
         match request.token_type_hint.as_deref() {
-            Some("access_token") => self.revoke_access_token(request).await,
-            Some("refresh_token") | None => {
-                self.revoke_refresh_token(&request).await?;
-                Ok(())
-            }
-            Some(_) => {
-                // Unknown hint — treat as refresh_token per spec
-                self.revoke_refresh_token(&request).await?;
-                Ok(())
-            }
+            Some("access_token") => self.revoke_access_token(&request).await,
+            // Unknown hints are treated as refresh tokens per RFC 7009 §2.1.
+            Some("refresh_token") | Some(_) | None => self.revoke_refresh_token(&request).await,
         }
     }
 
-    /// The access-token arm: resolve the token's stable family identity and
-    /// remove precisely that family's live generation and retained retirement
-    /// records.
+    /// Validate once through the first-party validator, then revoke exactly
+    /// the one session family the token's `sid` names. The token's `sub` is
+    /// never consulted for authority: a stateless access token is not a
+    /// session credential for its whole subject.
     ///
-    /// VENDORED SEAM (task 08): this replaces the interim
-    /// `revoke_all_user_sessions(sub)` behaviour per the rotation source
-    /// spec's Revocation block. PR #19's validated-claims contract supersedes
-    /// the hand-rolled extraction in [`Self::verify_revocation_target`] at
-    /// merge time; the client-visible RFC 7009 behaviour below does not
-    /// change there or here — token-state outcomes stay silent 200s, backend
+    /// Reconciled seam (rotation task 08 × validate-revoke-token-claims): the
+    /// first-party validator supersedes the interim hand-rolled extraction,
+    /// and the family-scoped removal supersedes the interim
+    /// `revoke_all_user_sessions(sub)` behaviour. Client-visible RFC 7009
+    /// behaviour is unchanged: token-state outcomes stay silent 200s, backend
     /// failures propagate as errors.
-    async fn revoke_access_token(&self, request: RevokeRequest) -> Result<()> {
-        match self.verify_revocation_target(&request.token).await {
-            AccessRevokeTarget::Unverified => {}
-            AccessRevokeTarget::FailClosed => {
-                // One fixed-reason rejection, emitted like every other
-                // validation failure (Debug severity, dropped under the
-                // default emit threshold). Nothing is revoked.
-                self.emit_audit(create_audit_event(
-                    AuditEventType::ValidationFailed,
-                    AuditSeverity::Debug,
-                    AuditOutcome::Failure {
-                        reason: SID_REJECTION_REASON.to_string(),
-                    },
-                    None,
-                    None,
-                    request.ip_address.clone(),
-                    request.user_agent.clone(),
-                ))
-                .await?;
-            }
-            AccessRevokeTarget::Family { user_id, family_id } => {
-                // Paired boundary check: verify_revocation_target already
-                // enforced the fam_-form; re-asserting keeps this branch safe
-                // independent of that helper's internals.
-                assert!(
-                    is_valid_family_id(&family_id),
-                    "revoke: verified sid must be a well-formed family id"
-                );
-                assert!(
-                    !user_id.is_empty(),
-                    "revoke: verified token sub claim must not be empty"
-                );
-
-                let sessions_revoked = self.session_repo.revoke_family(&family_id).await?;
-
-                let mut event = create_audit_event(
-                    AuditEventType::TokenRevocation,
-                    AuditSeverity::Info,
-                    AuditOutcome::Success,
-                    Some(user_id),
-                    None,
-                    request.ip_address.clone(),
-                    request.user_agent.clone(),
-                );
-                event.detail = HashMap::from([
-                    ("family_id".to_string(), serde_json::Value::from(family_id)),
-                    (
-                        "sessions_revoked".to_string(),
-                        serde_json::Value::from(sessions_revoked),
-                    ),
-                ]);
-                self.emit_audit(event).await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Verify signature and shape, then resolve what the token may revoke.
-    ///
-    /// Only liveness of the *signature* decides silence vs fail-closed: an
-    /// unverifiable token stays fully silent per RFC 7009, while a verifiable
-    /// one whose `sid` cannot name a family is rejected audibly but mutates
-    /// nothing. The typed [`AccessTokenClaims`] deserialization is itself the
-    /// fail-closed gate for payloads missing `sid`.
-    async fn verify_revocation_target(&self, token: &str) -> AccessRevokeTarget {
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 {
-            return AccessRevokeTarget::Unverified;
-        }
-
-        let signing_input = format!("{}.{}", parts[0], parts[1]);
-        let Ok(signature_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) else {
-            return AccessRevokeTarget::Unverified;
-        };
-
-        // Verify signature using the service's key manager; a genuine backend
-        // failure surfaces as `Ok(false)`-equivalent silence here because the
-        // RFC 7009 carve-out treats verification failure as unknown-token.
-        let Ok(valid) = self
-            .keys
-            .verify(signing_input.as_bytes(), &signature_bytes)
-            .await
-        else {
-            return AccessRevokeTarget::Unverified;
-        };
-        if !valid {
-            return AccessRevokeTarget::Unverified;
-        }
-
-        // Signature verified — the payload is ours, so its shape is a
-        // programmer/upgrade-window concern, not an attack: parse it typed
-        // and fail closed on anything that cannot name a family.
-        let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(parts[1]) else {
-            return AccessRevokeTarget::FailClosed;
-        };
-        let claims: AccessTokenClaims = match serde_json::from_slice(&payload_bytes) {
+    async fn revoke_access_token(&self, request: &RevokeRequest) -> Result<()> {
+        let claims = match self.validate_access_token(&request.token).await {
             Ok(claims) => claims,
-            Err(_) => return AccessRevokeTarget::FailClosed,
+            Err(reason) => return self.emit_rejection(request, reason).await,
         };
-        if !is_valid_family_id(&claims.sid) || claims.sub.is_empty() {
-            return AccessRevokeTarget::FailClosed;
+
+        // Postconditions of `validate_access_token` needed at this boundary:
+        // revocation would otherwise target nothing (or worse, an empty key).
+        assert!(
+            !claims.sid.is_empty(),
+            "revoke: validated access token must carry a non-empty sid"
+        );
+
+        // A validated token whose `sid` is not a well-formed family id cannot
+        // name a family (a pre-rotation legacy token whose sentinel family is
+        // empty, or an interim hash-form sid): reject audibly, mutate
+        // nothing.
+        if !is_valid_family_id(&claims.sid) {
+            return self.emit_rejection(request, SID_REJECTION_REASON).await;
         }
 
-        AccessRevokeTarget::Family {
-            user_id: claims.sub,
-            family_id: claims.sid,
-        }
+        let family_id = claims.sid;
+        let user_id = claims.sub;
+        assert!(
+            !user_id.is_empty(),
+            "revoke: verified token sub claim must not be empty"
+        );
+
+        let sessions_revoked = self.session_repo.revoke_family(&family_id).await?;
+
+        let mut event = create_audit_event(
+            AuditEventType::TokenRevocation,
+            AuditSeverity::Info,
+            AuditOutcome::Success,
+            Some(user_id),
+            None,
+            request.ip_address.clone(),
+            request.user_agent.clone(),
+        );
+        event.detail = HashMap::from([
+            ("family_id".to_string(), serde_json::Value::from(family_id)),
+            (
+                "sessions_revoked".to_string(),
+                serde_json::Value::from(sessions_revoked),
+            ),
+        ]);
+        self.emit_audit(event).await
     }
 
     /// Hash and revoke a presented refresh token, emitting `TokenRevocation`
@@ -213,25 +133,35 @@ impl AppService {
             "revoke: SHA-256 hex digest must be {TOKEN_HASH_HEX_LEN} characters"
         );
 
-        // A missing session is `Ok(None)` (unknown/invalid token, handled
-        // below), but a genuine backend failure on this lookup propagates so
-        // the server maps it to 503 instead of a false 200.
+        self.revoke_one_session(&token_hash, request).await
+    }
+
+    /// Shared revocation tail: look the session up by hash, revoke it, and
+    /// audit `TokenRevocation`. A missing session is `Ok` and silent — both
+    /// paths are idempotent deletes per RFC 7009 — while lookup/revoke backend
+    /// errors propagate so the server maps them to 503 instead of a false 200.
+    async fn revoke_one_session(&self, session_hash: &str, request: &RevokeRequest) -> Result<()> {
         let existing = self
             .session_repo
-            .get_session_by_refresh_token(&token_hash)
+            .get_session_by_refresh_token(session_hash)
             .await?;
 
         if let Some(session) = existing {
-            // Invariant: every stored session carries the user it belongs
-            // to — the audit event below needs a real actor, not a blank one.
+            // Invariants at the core-to-adapter boundary: every stored
+            // session carries the user it belongs to (the audit event needs a
+            // real actor, not a blank one), and a keyed lookup returns that
+            // very row rather than some other session's.
             assert!(
                 !session.user_id.is_empty(),
                 "revoke: stored session must have a non-empty user_id"
             );
-            // A missing session is `Ok` (idempotent delete, handled above by
-            // `existing == None`); a genuine backend failure here propagates
-            // so the server maps it to 503 instead of a false 200.
-            self.session_repo.revoke_session(&token_hash).await?;
+            assert_eq!(
+                session.refresh_token_hash, session_hash,
+                "revoke: hash-keyed lookup must return the matching session"
+            );
+            // A genuine backend failure here propagates so the server maps it
+            // to 503 instead of a false 200.
+            self.session_repo.revoke_session(session_hash).await?;
             self.emit_audit(create_audit_event(
                 AuditEventType::TokenRevocation,
                 AuditSeverity::Info,
@@ -244,5 +174,36 @@ impl AppService {
             .await?;
         }
         Ok(())
+    }
+
+    /// Record a rejected credential with exactly one fixed-reason
+    /// `ValidationFailed` event, then succeed toward the client: RFC 7009 §2.2
+    /// makes rejected and accepted tokens indistinguishable at the endpoint,
+    /// but the attempt stays visible to operators. The reason is a fixed
+    /// constant from the validator — never token bytes or decoded content —
+    /// and the actor stays `None` because no claim of an unvalidated token is
+    /// trustworthy enough to record.
+    async fn emit_rejection(&self, request: &RevokeRequest, reason: &'static str) -> Result<()> {
+        assert!(
+            !reason.is_empty(),
+            "revoke: rejection reasons are non-empty constants"
+        );
+
+        // Info severity mirrors the success-path `TokenRevocation` emission,
+        // so success and failure share identical durability semantics under
+        // any audit config — neither branch can become an existence oracle
+        // when the audit sink is degraded.
+        self.emit_audit(create_audit_event(
+            AuditEventType::ValidationFailed,
+            AuditSeverity::Info,
+            AuditOutcome::Failure {
+                reason: reason.to_string(),
+            },
+            None,
+            None,
+            request.ip_address.clone(),
+            request.user_agent.clone(),
+        ))
+        .await
     }
 }

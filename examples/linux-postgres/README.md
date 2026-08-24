@@ -43,7 +43,9 @@ This example shows how to run **oidc-exchange** on a Linux host with PostgreSQL 
    openssl genpkey -algorithm ed25519 -out keys/signing-key.pem
    ```
 
-4. **Set environment variables and run**
+4. **Set environment variables and run.** The shipped config uses
+   `https://auth.example.com` as a valid deployment placeholder for the public issuer; replace
+   it with the HTTPS issuer you publish before deploying.
 
    ```sh
    OIDC_EXCHANGE_ENV=postgres-only \

@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -23,8 +23,10 @@ scopes = ["openid", "email", "profile"]
 ```
 
 `from_config` discovers the `token_endpoint`, `jwks_uri`, and `revocation_endpoint` from the
-issuer's `.well-known/openid-configuration` when they are not given. Adding a Tier 1 provider
-is a new config block — no code.
+issuer's `.well-known/openid-configuration` when they are not given. Every endpoint —
+configured or discovered — is an `https` URL; the config types make any other scheme
+unrepresentable, and discovery rejects a response whose HTTP status is not a success before it
+parses the body. Adding a Tier 1 provider is a new config block — no code.
 
 **Tier 2 — OIDC with quirks (custom module).** `providers/apple::AppleProvider`:
 
@@ -48,7 +50,9 @@ values when mapping to `IdentityClaims.email_verified` and
 `IdentityClaims.is_private_email`, so the registration domain allowlist (which requires
 `email_verified == Some(true)`) works for Apple sign-ins. `is_private_email` is a
 first-class `Option<bool>` field on `IdentityClaims`, populated only by the Apple
-provider; the generic OIDC provider leaves it `None`.
+provider; the generic OIDC provider leaves it `None`. The same `https` endpoint constraint
+applies to Apple's optional `token_endpoint`, `jwks_uri`, and `revocation_endpoint` overrides,
+which take the shared `HttpsUrl` type rather than repeating the check.
 
 **Tier 3 — non-OIDC (e.g. atproto).** *Not implemented.* The `IdentityProvider` doc comment
 and several config/example files name `atproto`, but no `AtprotoProvider` exists in the
@@ -64,6 +68,10 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   and `aud` claims to be **present** (`set_required_spec_claims`) and to match the
   configured issuer and `client_id`; `nbf` is validated when present. A token missing
   `iss` or `aud` — e.g. a provider access token presented as an ID token — is rejected.
+  The returned `IdentityClaims` carries `signing_alg` — the algorithm the JWK actually
+  verified with, not the header's — so the core's `at_hash` check can select the matching
+  digest without re-deciding the algorithm. Both validators report it; neither performs
+  any replay or binding check itself.
 - When the matched JWK carries no `alg`, the algorithm is inferred from the key type:
   `kty: EC` by `crv` (P-256 → ES256, P-384 → ES384), `kty: OKP` → EdDSA, `kty: RSA` →
   RS256. Any other alg-less key is rejected. (Azure-AD-style JWKS omit `alg`.)
@@ -96,6 +104,14 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
 
 - *Algorithm from the JWK.* **ID-token validation uses the signing algorithm declared by the
   matched JWK, not the token header.** Closes the `alg`-confusion class of attacks.
+- *Replay binding is above the provider boundary.* **No `IdentityProvider` implementation
+  checks `nonce`, `azp`, `at_hash` or one-time use; `AppService::exchange` does, for all of
+  them.** Two independent validators omitted the same four controls; adding them twice
+  would leave a third implementation free to omit them again. This is consistent with the
+  direction in `hardening/proposals/provider-response-boundary.md`: whether the two
+  validators later consolidate behind a shared `ProviderTransport`/`VerificationKeySet` or
+  collapse into one profile-driven validator, the binding does not move. `signing_alg` is
+  the same algorithm-as-data that a `VerificationKeySet` would carry, surfaced early.
 - *Apple as a separate crate.* **The Apple provider lives in `crates/providers`, not
   `crates/adapters`.** Provider-specific protocol logic (per-request client JWT) is kept apart
   from infrastructure adapters.

@@ -5,14 +5,17 @@ use base64::Engine;
 use chrono::{Duration, Utc};
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, AuditConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
 use oidc_exchange_core::domain::{
     is_valid_family_id, AccessTokenClaims, AuditEventType, AuditOutcome, AuditSeverity,
     RefreshResolution, Session, UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, SessionRepository, UserRepository};
-use oidc_exchange_core::service::exchange::ExchangeRequest;
+use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest};
 use oidc_exchange_core::service::refresh::RefreshRequest;
 use oidc_exchange_core::service::AppService;
 
@@ -20,22 +23,48 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
-fn make_config() -> AppConfig {
-    AppConfig {
-        server: ServerConfig {
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
             issuer: "https://auth.test.com".to_string(),
-            ..Default::default()
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
         },
-        token: TokenConfig {
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
             access_token_ttl: "15m".to_string(),
             refresh_token_ttl: "30d".to_string(),
-            audience: Some("https://api.test.com".to_string()),
-            ..Default::default()
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
+            ..RawTokenConfig::default()
         },
-        ..Default::default()
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
     }
 }
 
+fn make_config() -> Config {
+    Config::resolve(base_raw_config()).expect("test config should resolve")
+}
 fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -57,7 +86,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
 fn make_service_with_audit(
     repo: MockRepository,
     provider: MockIdentityProvider,
-    config: AppConfig,
+    config: Config,
     audit: MockAuditLog,
 ) -> AppService {
     let provider_id = provider.provider_id().to_string();
@@ -79,11 +108,15 @@ fn make_service_with_audit(
 /// with the service and repo for further testing.
 async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService) -> String {
     let request = ExchangeRequest {
-        code: Some("auth-code-123".to_string()),
-        redirect_uri: Some("https://app.test.com/callback".to_string()),
-        id_token: None,
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "auth-code-123".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
         provider: "mock".to_string(),
-        ..Default::default()
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
     };
     let response = svc
         .exchange(request)
@@ -120,6 +153,22 @@ async fn refresh_happy_path_returns_new_access_token() {
     );
     assert!(!response.access_token.is_empty());
 
+    // Access token should be a valid JWT structure (3 dot-separated parts)
+    let parts: Vec<&str> = response.access_token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT should have 3 parts");
+
+    // Decode and verify the header: refresh mints the same RFC 9068
+    // access-token media type exchange does.
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .expect("header should be valid base64url");
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_bytes).expect("header should deserialize");
+    assert_eq!(
+        header["typ"], "at+jwt",
+        "refreshed tokens must also be at+jwt"
+    );
+
     // Decode and verify the payload claims
     let claims = decode_claims(&response.access_token);
     assert_eq!(claims.iss, "https://auth.test.com");
@@ -149,6 +198,19 @@ async fn refresh_happy_path_returns_new_access_token() {
     assert!(
         matches!(resolution, RefreshResolution::Live(_)),
         "the replacement must be the family's live generation"
+    );
+
+    // The refreshed token must keep the session binding stable: its `sid`
+    // is the family id, which rotation never moves, so revocation by access
+    // token keeps naming this credential chain.
+    let stored = repo
+        .get_session_by_refresh_token(&replacement_hash)
+        .await
+        .expect("lookup should not error")
+        .expect("the replacement generation must be live after a refresh");
+    assert_eq!(
+        claims.sid, stored.family_id,
+        "a refreshed access token must carry the family's stable identifier"
     );
 }
 
@@ -297,13 +359,16 @@ async fn refresh_unknown_token_under_default_threshold_emits_nothing() {
 /// the request's ip/ua and a `Failure` outcome.
 #[tokio::test]
 async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
@@ -342,13 +407,16 @@ async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
 /// the session (and therefore the user id) was already resolved.
 #[tokio::test]
 async fn refresh_expired_token_under_debug_threshold_emits_validation_failed_with_actor() {
-    let config = AppConfig {
-        audit: AuditConfig {
+    let config = Config::resolve(RawConfig {
+        audit: oidc_exchange_core::config::RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
-            ..Default::default()
+            sqs: None,
         },
-        ..make_config()
-    };
+        ..base_raw_config()
+    })
+    .expect("test config should resolve");
 
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
@@ -864,6 +932,12 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
 
     #[async_trait::async_trait]
     impl SessionRepository for LosingCasRepo {
+        async fn put_single_use(&self, key: &str, expires_at: chrono::DateTime<Utc>) -> Result<bool> {
+            self.inner.put_single_use(key, expires_at).await
+        }
+        async fn take_single_use(&self, key: &str) -> Result<bool> {
+            self.inner.take_single_use(key).await
+        }
         async fn store_refresh_token(&self, session: &Session) -> Result<()> {
             self.inner.store_refresh_token(session).await
         }
@@ -1216,6 +1290,12 @@ async fn missing_user_is_refused_before_any_write() {
 
     #[async_trait::async_trait]
     impl SessionRepository for UserlessRepo {
+        async fn put_single_use(&self, key: &str, expires_at: chrono::DateTime<Utc>) -> Result<bool> {
+            self.inner.put_single_use(key, expires_at).await
+        }
+        async fn take_single_use(&self, key: &str) -> Result<bool> {
+            self.inner.take_single_use(key).await
+        }
         async fn store_refresh_token(&self, session: &Session) -> Result<()> {
             self.inner.store_refresh_token(session).await
         }

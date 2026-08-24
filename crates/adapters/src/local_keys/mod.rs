@@ -24,9 +24,19 @@ impl LocalKeyManager {
             detail: format!("failed to parse Ed25519 PKCS#8 PEM: {e}"),
         })?;
 
+        if algorithm != "EdDSA" {
+            return Err(Error::KeyError {
+                detail: format!(
+                    "local Ed25519 key material requires signing algorithm \"EdDSA\", got {algorithm:?}"
+                ),
+            });
+        }
+
         Ok(Self {
             signing_key,
-            algorithm: algorithm.to_owned(),
+            // The Ed25519 parser above establishes this value; never publish
+            // an operator-supplied label as signing metadata.
+            algorithm: "EdDSA".to_owned(),
             kid: kid.to_owned(),
         })
     }
@@ -157,6 +167,21 @@ mod tests {
         assert_eq!(jwk["alg"], "EdDSA");
         assert_eq!(jwk["use"], "sig");
         assert_eq!(jwk["kid"], "my-test-key-42");
+    }
+
+    #[test]
+    fn test_from_pem_rejects_algorithm_mismatching_ed25519_key_material() {
+        let signing_key = SigningKey::generate(&mut rand::rng());
+        let pem_doc = signing_key
+            .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+            .expect("failed to encode signing key as PKCS#8 PEM");
+
+        let err = LocalKeyManager::from_pem(pem_doc.as_bytes(), "ES256", "kid")
+            .expect_err("Ed25519 key must reject an ES256 label");
+        let Error::KeyError { detail } = err else {
+            unreachable!("expected KeyError");
+        };
+        assert!(detail.contains("EdDSA"), "unexpected detail: {detail}");
     }
 
     #[test]

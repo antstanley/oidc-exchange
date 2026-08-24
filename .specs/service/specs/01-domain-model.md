@@ -74,9 +74,12 @@ A `Session` is one **generation** of a token family. The raw refresh token exist
 memory during issuance and in the response to the client; only the hash is stored.
 `family_id` and `created_at` identify the sign-in and survive rotation; `expires_at` is the
 family's absolute deadline and is copied unchanged into every replacement. `device_id`,
-`user_agent`, and `ip_address` are populated `None` by the core at issuance today (the
-audit-context middleware captures them at the HTTP edge but they are not threaded into the
-stored session).
+`user_agent`, and `ip_address` are populated from the request context: the audit-context
+middleware captures them at the HTTP edge and the exchange flow threads them into the
+stored session. `refresh_token_hash` is the *generation's* lookup key — every
+`SessionRepository` lookup takes it — while `family_id` is the *stable* identity minted
+access tokens carry as their `sid` claim, so a presented access token names the one token
+family it belongs to across every rotation.
 
 ### RetiredRefreshToken (`domain/session.rs`)
 
@@ -97,6 +100,19 @@ DynamoDB and Valkey natively, SQL and LMDB through `cleanup_expired_sessions`. A
 presented after its record has expired resolves as `Unknown`: it is refused, but it raises
 no alarm.
 
+### SingleUseRecord (`domain/single_use.rs`)
+
+```rust
+struct SingleUseRecord {
+    key: String,                  // "nonce:<sha256hex>" | "assertion:<provider>:…"
+    expires_at: DateTime<Utc>,
+}
+```
+
+A presence-only record: the key is all the information there is. Nonce values and
+assertions are stored only as SHA-256 hex digests, as refresh tokens are. Records are
+removed by `take_single_use`, by store-native expiry, or by `cleanup_expired_sessions`.
+
 ### Token types (`domain/token.rs`)
 
 - **`TokenResponse`** — the `/token` body: `access_token`, optional `refresh_token`
@@ -110,7 +126,31 @@ no alarm.
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
   `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag; `None`
-  for other providers), and `raw_claims`.
+  for other providers), `signing_alg` (the algorithm the resolved JWK verified with, e.g.
+  `"ES256"`), and `raw_claims`.
+
+### Exchange request types (`service/exchange.rs`)
+
+```rust
+enum ExchangeCredential {
+    AuthorizationCode { code: String, redirect_uri: String },
+    IdTokenAssertion { id_token: String },
+}
+
+struct ExchangeRequest {
+    credential: ExchangeCredential,
+    provider: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    device_id: Option<String>,
+}
+```
+
+`ExchangeCredential` is the typed form of the declared `grant_type`: one variant per exchange
+grant, each owning that grant's required parameters as non-optional fields. The refresh grant
+has its own input type, `RefreshRequest`. `ExchangeRequest` derives no `Default` — a request
+with no credential is not constructible. The three trailing fields are client context captured
+by the audit-context middleware, not grant parameters.
 
 ### AuditEvent (`domain/audit.rs`)
 
@@ -166,23 +206,33 @@ User.provider / external_id ── upstream provider subject
             ▼
         ┌────────┐  admin suspend   ┌───────────┐
         │ Active │ ───────────────► │ Suspended │
-        └───┬────┘ ◄─────────────── └───────────┘
-            │        admin reactivate
-            │ admin delete (soft)
-            ▼
-        ┌─────────┐
-        │ Deleted │  record retained, all sessions revoked
-        └─────────┘
+        └───┬────┘ ◄─────────────── └─────┬─────┘
+            │        admin reactivate     │
+            │ admin delete (soft)         │ admin delete (soft)
+            ▼                             │
+        ┌─────────┐                       │
+        │ Deleted │ ◄─────────────────────┘
+        └─────────┘  record retained, all sessions revoked
 ```
 
 - **Active** — may obtain and refresh tokens.
-- **Suspended** — exchange and refresh are rejected (`UserSuspended`); already-issued access
-  JWTs remain valid until they expire (JWTs are not individually revocable).
-- **Deleted** — soft delete via `UserPatch { status: Deleted }`; the service revokes all the
-  user's sessions on delete. The row is kept, but the identity is freed:
+- **Suspended** — exchange and refresh are rejected (`UserSuspended`); entering `Suspended`
+  revokes all the user's sessions, so reactivation does not restore existing refresh
+  tokens — the user signs in again. Already-issued access JWTs remain valid until they
+  expire (JWTs are not individually revocable).
+- **Deleted** — soft delete via `UserPatch { status: Deleted }` or `admin_delete_user`,
+  permitted from any non-`Deleted` status (`Active` or `Suspended`); the service revokes all
+  the user's sessions on delete. `Deleted` is strictly terminal: any status patch on a deleted
+  user — to any status, including `Deleted` itself — and any other transition not drawn above
+  are rejected with `InvalidRequest`. The row is kept, but the identity is freed:
   `get_user_by_external_id` no longer returns the deleted user, and a later first login
   for the same `(provider, external_id)` re-registers as a brand-new user with no claims
   or sessions carried over.
+
+A status patch equal to the user's current status is not a transition: it is accepted as a
+no-op with no side effects — in particular, a `Suspended → Suspended` patch does not
+re-trigger session revocation. The one exception is `Deleted`, which admits no status
+patch at all (see above): `Deleted → Deleted` is rejected, not a no-op.
 
 ### Session
 
@@ -206,7 +256,8 @@ A family is created on token exchange with `expires_at = now + refresh_token_ttl
 generation 0. Each refresh advances the live generation and retires its predecessor; the
 absolute `expires_at` never moves, so the family dies at the deadline set at sign-in however
 often it rotates. A family ends at that deadline, on explicit revocation (`/revoke`,
-delete-user, revoke-all-user-sessions), or on reuse detection.
+delete-user, revoke-all-user-sessions, or a status change to `Suspended` or `Deleted`), or
+on reuse detection.
 
 ## Required query patterns
 
@@ -222,6 +273,8 @@ delete-user, revoke-all-user-sessions), or on reuse detection.
 | Revoke one / all sessions | `SessionRepository::revoke_session` / `revoke_all_user_sessions` |
 | Count active sessions | `SessionRepository::count_active_sessions` |
 | Reap expired sessions | `SessionRepository::cleanup_expired_sessions` |
+| Claim a single-use key | `SessionRepository::put_single_use(key, expires_at)` |
+| Burn a single-use key | `SessionRepository::take_single_use(key)` |
 
 ## Assumptions and open questions
 
@@ -238,14 +291,12 @@ delete-user, revoke-all-user-sessions), or on reuse detection.
   `create_user`.** Keeps ID creation next to the write that persists it; the trade-off is the
   `usr_` + lowercase-ULID convention is duplicated across three adapters rather than owned by
   the core.
-- *Suspended keeps live tokens valid.* **Suspension blocks new/refreshed tokens but not
-  outstanding access JWTs.** Access JWTs are stateless and short-lived; revoking them would
-  require introspection, which is out of scope.
+- *Suspension keeps outstanding access JWTs valid.* **Suspension revokes the user's stored
+  sessions but not outstanding access JWTs.** Access JWTs are stateless and short-lived;
+  revoking them would require introspection, which is out of scope.
 - *Claims vs metadata split.* **`claims` feeds the JWT, `metadata` feeds templates/sync.**
   Separating the injected claim set from general profile data keeps token contents explicit.
 
 ### Open questions
 
-- `Session.device_id` / `user_agent` / `ip_address` exist on the entity and in the store
-  schemas but are written as `None` at issuance; wiring the audit-context values into the
-  stored session is unresolved.
+- None.

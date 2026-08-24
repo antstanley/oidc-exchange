@@ -339,6 +339,60 @@ pub fn item_to_retired(item: &HashMap<String, AttributeValue>) -> Result<Retired
 }
 
 // ---------------------------------------------------------------------------
+// Single-use record <-> DynamoDB Item
+// ---------------------------------------------------------------------------
+
+/// Sort key value for every single-use-record item (see [`single_use_to_item`]).
+pub const SINGLE_USE_SK: &str = "SINGLEUSE";
+
+/// Partition key for a single-use-record item: `SINGLEUSE#<namespaced digest>`. The key
+/// is the whole state — there is nothing else to store but its expiry.
+pub fn single_use_pk(key: &str) -> String {
+    format!("SINGLEUSE#{key}")
+}
+
+/// Builds the single-use-record item: `pk = SINGLEUSE#<key>`, `sk = SINGLEUSE`, with
+/// `expires_at` as epoch seconds (what the claim condition compares) and the duplicate
+/// numeric `ttl` attribute so DynamoDB's native expiry reaps the item. Storage holds
+/// only the namespaced digest and the expiry — never raw nonce/assertion material.
+pub fn single_use_to_item(key: &str, expires_at: DateTime<Utc>) -> HashMap<String, AttributeValue> {
+    let mut item = HashMap::new();
+    item.insert("pk".to_string(), AttributeValue::S(single_use_pk(key)));
+    item.insert(
+        "sk".to_string(),
+        AttributeValue::S(SINGLE_USE_SK.to_string()),
+    );
+    item.insert(
+        "expires_at".to_string(),
+        AttributeValue::N(expires_at.timestamp().to_string()),
+    );
+    item.insert(
+        "ttl".to_string(),
+        AttributeValue::N(expires_at.timestamp().to_string()),
+    );
+    item
+}
+
+/// Reads back the numeric `expires_at` (epoch seconds) from a returned single-use item,
+/// re-validating stored data rather than trusting it (dev-guidelines §Store read).
+pub fn item_single_use_expiry(item: &HashMap<String, AttributeValue>) -> Result<DateTime<Utc>> {
+    let epoch = item
+        .get("expires_at")
+        .and_then(|v| v.as_n().ok())
+        .ok_or_else(|| Error::StoreError {
+            detail: "missing or invalid attribute: expires_at".to_string(),
+        })?
+        .parse::<i64>()
+        .map_err(|e| Error::StoreError {
+            detail: format!("invalid expires_at epoch seconds: {e}"),
+        })?;
+
+    DateTime::from_timestamp(epoch, 0).ok_or_else(|| Error::StoreError {
+        detail: format!("expires_at epoch seconds out of range: {epoch}"),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1084,5 +1138,75 @@ mod tests {
         let result = UserRoster::from_item(&item);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("member set"));
+    }
+
+    #[test]
+    fn single_use_item_round_trips_expiry_and_keys_on_the_digest() {
+        let expires_at = Utc::now() + chrono::Duration::minutes(10);
+        let key = "nonce:deadbeef01";
+
+        let item = single_use_to_item(key, expires_at);
+
+        assert_eq!(
+            item.get("pk").unwrap().as_s().unwrap(),
+            &format!("SINGLEUSE#{key}"),
+            "the digest key is embedded in the partition key"
+        );
+        assert_eq!(item.get("sk").unwrap().as_s().unwrap(), SINGLE_USE_SK);
+
+        let restored = item_single_use_expiry(&item).expect("expiry parses back");
+        assert_eq!(
+            restored.timestamp(),
+            expires_at.timestamp(),
+            "the stored expiry must round-trip at epoch-second precision"
+        );
+
+        // The ttl attribute (DynamoDB native expiry) carries the same instant.
+        let ttl: i64 = item
+            .get("ttl")
+            .unwrap()
+            .as_n()
+            .unwrap()
+            .parse()
+            .expect("ttl is numeric");
+        assert_eq!(ttl, expires_at.timestamp());
+    }
+
+    /// Negative-space: a missing or malformed `expires_at` must be a typed StoreError,
+    /// not a silently-defaulted instant — a take that misread expiry could admit a replay.
+    #[test]
+    fn item_single_use_expiry_rejects_missing_and_malformed_values() {
+        let empty = HashMap::new();
+        assert!(item_single_use_expiry(&empty).is_err());
+
+        let mut bad = HashMap::new();
+        bad.insert(
+            "expires_at".to_string(),
+            AttributeValue::S("not-a-number".to_string()),
+        );
+        assert!(item_single_use_expiry(&bad).is_err());
+
+        // A well-formed number that is not a representable timestamp is rejected too,
+        // rather than silently saturating into some far-future "live" record.
+        let mut out_of_range = HashMap::new();
+        out_of_range.insert(
+            "expires_at".to_string(),
+            AttributeValue::N(i64::MAX.to_string()),
+        );
+        assert!(
+            item_single_use_expiry(&out_of_range).is_err(),
+            "an unrepresentable epoch value must be rejected, not defaulted"
+        );
+
+        let mut negative = HashMap::new();
+        negative.insert(
+            "expires_at".to_string(),
+            AttributeValue::N("-1".to_string()),
+        );
+        let parsed = item_single_use_expiry(&negative).expect("negative epoch is representable");
+        assert!(
+            parsed < Utc::now(),
+            "a pre-1970-plus-one-second timestamp parses as firmly expired"
+        );
     }
 }

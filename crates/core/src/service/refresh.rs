@@ -126,7 +126,7 @@ impl AppService {
     /// assertions re-check that invariant at the point of use rather than
     /// trusting config that tests may have built by hand.
     fn rotation_grace_secs(&self) -> Result<u64> {
-        let secs = parse_duration_secs(&self.config.token.refresh_rotation_grace)?;
+        let secs = self.config.token.refresh_rotation_grace.as_secs();
         assert!(
             secs > 0 && secs <= MAX_REFRESH_ROTATION_GRACE_SECS,
             "refresh grace {}s must be within (0, {MAX_REFRESH_ROTATION_GRACE_SECS}] after validation",

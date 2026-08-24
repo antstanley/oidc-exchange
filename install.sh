@@ -52,6 +52,16 @@ esac
 
 BINARY_FILENAME="${BINARY_NAME}-${OS_LABEL}-${ARCH_LABEL}"
 
+# Select a checksum verifier before making any network requests.
+if command -v sha256sum >/dev/null 2>&1; then
+    CHECKSUM_VERIFIER="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    CHECKSUM_VERIFIER="shasum"
+else
+    echo "Error: Neither sha256sum nor shasum found; cannot verify checksum." >&2
+    exit 1
+fi
+
 # Resolve version
 if [[ -z "$VERSION" ]]; then
     echo "Fetching latest version..."
@@ -82,12 +92,10 @@ curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "$CHECKSUM_URL"
 # Verify checksum
 echo "Verifying checksum..."
 cd "$TMPDIR"
-if command -v sha256sum &>/dev/null; then
+if [[ "$CHECKSUM_VERIFIER" == "sha256sum" ]]; then
     sha256sum -c "${BINARY_FILENAME}.sha256"
-elif command -v shasum &>/dev/null; then
-    shasum -a 256 -c "${BINARY_FILENAME}.sha256"
 else
-    echo "Warning: Neither sha256sum nor shasum found. Skipping checksum verification."
+    shasum -a 256 -c "${BINARY_FILENAME}.sha256"
 fi
 
 # Determine install directory

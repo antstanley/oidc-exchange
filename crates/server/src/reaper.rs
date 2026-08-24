@@ -31,7 +31,7 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange_core::config::Config;
 use oidc_exchange_core::service::AppService;
 
 use crate::shutdown::ShutdownSignal;
@@ -102,30 +102,15 @@ impl HostRuntime {
 /// Parse the validated `session_repository.cleanup_interval` into the
 /// `Duration` the reaper's interval is built from.
 ///
-/// Every production entry point (`load_config`, `parse_config`) runs
-/// [`AppConfig::validate`] — which parses this same field via
-/// [`oidc_exchange_core::service::parse_duration_secs`] and rejects zero —
-/// before a reaper is ever spawned, so an invalid value fails config loading
-/// closed rather than reaching this function. Reaching it anyway (a
-/// hand-built `AppConfig` in a test or embedder that skipped `validate`) is
-/// treated as a programmer error and panics loudly instead of silently
-/// substituting the default interval: a reaper quietly running at a cadence
-/// nobody configured is worse than a loud startup failure.
-pub fn cleanup_interval_duration(config: &AppConfig) -> Duration {
-    let secs = oidc_exchange_core::service::parse_duration_secs(
-        &config.session_repository.cleanup_interval,
-    )
-    .unwrap_or_else(|err| {
-        panic!(
-            "session_repository.cleanup_interval {:?} is invalid: {err} (AppConfig::validate \
-             should have rejected this before the reaper was spawned)",
-            config.session_repository.cleanup_interval
-        )
-    });
+/// Every production entry point resolves configuration through
+/// `Config::resolve`, which narrows this field to a strictly-positive
+/// duration before a reaper is ever spawned — an invalid value fails config
+/// loading closed rather than reaching this function.
+pub fn cleanup_interval_duration(config: &Config) -> Duration {
+    let secs = config.session_repository.cleanup_interval_secs();
     assert!(
         secs > 0,
-        "parsed cleanup_interval must be non-zero, got {secs}s from {:?}",
-        config.session_repository.cleanup_interval
+        "resolved cleanup_interval must be non-zero, got {secs}s"
     );
     assert!(
         secs <= REAPER_INTERVAL_MAX_SECS,
@@ -231,7 +216,7 @@ pub fn spawn_session_reaper(
 /// tested) here rather than depending on each entry point remembering not to
 /// call [`spawn_session_reaper`] in its Lambda branch.
 pub fn spawn_session_reaper_for_runtime(
-    config: &AppConfig,
+    config: &Config,
     service: &Arc<AppService>,
     shutdown: ShutdownSignal,
     runtime: HostRuntime,
@@ -259,7 +244,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use tokio::sync::watch;
 
-    use oidc_exchange_core::config::AppConfig;
+    use oidc_exchange_core::config::Config;
     use oidc_exchange_core::domain::{RefreshResolution, Session};
     use oidc_exchange_core::error::{Error, Result};
     use oidc_exchange_core::ports::{IdentityProvider, SessionRepository};
@@ -296,7 +281,7 @@ mod tests {
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
             providers_map(),
-            AppConfig::default(),
+            Config::test_default(),
         ));
         (service, sessions)
     }
@@ -445,6 +430,17 @@ mod tests {
 
     #[async_trait]
     impl SessionRepository for FailingSessionStore {
+        async fn put_single_use(
+            &self,
+            _: &str,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> oidc_exchange_core::error::Result<bool> {
+            unreachable!("the reaper never writes single-use records")
+        }
+        async fn take_single_use(&self, _: &str) -> oidc_exchange_core::error::Result<bool> {
+            unreachable!("the reaper never burns single-use records")
+        }
+
         async fn store_refresh_token(&self, _session: &Session) -> Result<()> {
             Err(Error::StoreError {
                 detail: "failing fixture store".into(),
@@ -509,7 +505,7 @@ mod tests {
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
             providers_map(),
-            AppConfig::default(),
+            Config::test_default(),
         ));
 
         let deleted = reap_once(&service).await;
@@ -584,7 +580,7 @@ mod tests {
     /// in-process-interval prohibition), a persistent host yields one.
     #[tokio::test]
     async fn only_persistent_runtimes_get_a_reaper_handle() {
-        let config = AppConfig::default();
+        let config = Config::test_default();
         let (service, _store) = service_with_shared_session_store();
         let (signal, _tx) = controllable_signal();
 
@@ -616,41 +612,48 @@ mod tests {
     /// Interval parsing, positive space: validated config values resolve to
     /// exactly the duration they spell.
     #[test]
-    fn cleanup_interval_duration_parses_the_configured_value() {
-        let mut config = AppConfig::default();
-        config.session_repository.cleanup_interval = "90s".to_string();
+    fn cleanup_interval_duration_uses_the_configured_value() {
+        let mut config = Config::test_default();
+        config.session_repository.cleanup_interval = std::time::Duration::from_secs(90);
 
         assert_eq!(
             cleanup_interval_duration(&config),
             Duration::from_secs(90),
             "the reaper cadence must be exactly the configured interval"
         );
-        config.session_repository.cleanup_interval = "2h".to_string();
+        config.session_repository.cleanup_interval = std::time::Duration::from_secs(7200);
         assert_eq!(
             cleanup_interval_duration(&config),
             Duration::from_secs(7200),
-            "hour-suffixed durations parse through the shared duration parser"
+            "hour-suffixed durations resolve through the shared duration parser"
         );
     }
 
-    /// Negative space: an unparseable interval panics instead of silently
-    /// falling back to the default — config validation should already have
-    /// failed the load, so reaching the parser means validate was skipped.
+    /// Negative space: an unparseable interval fails config resolution — the
+    /// typed config cannot even represent it, so no reaper is ever spawned
+    /// with an interval nobody configured.
     #[test]
-    #[should_panic(expected = "is invalid")]
-    fn cleanup_interval_duration_panics_on_an_unparseable_value() {
-        let mut config = AppConfig::default();
-        config.session_repository.cleanup_interval = "hourly".to_string();
-        let _ = cleanup_interval_duration(&config);
+    fn unparseable_cleanup_interval_fails_config_resolution() {
+        let mut raw: oidc_exchange_core::config::RawConfig =
+            toml::from_str(include_str!("../../../config/default.toml"))
+                .expect("default config deserializes");
+        raw.session_repository.cleanup_interval = "hourly".to_string();
+        let err = oidc_exchange_core::config::Config::resolve(raw)
+            .expect_err("an unparseable cleanup interval must fail resolution");
+        assert!(
+            err.to_string().contains("session_repository.cleanup_interval"),
+            "the error must name the offending field: {err}"
+        );
     }
 
     /// Negative space above the sanity bound: a month-plus "interval" is a
-    /// misconfigured string, not a cadence.
+    /// misconfiguration, not a cadence.
     #[test]
     #[should_panic(expected = "exceeds the sane upper bound")]
     fn cleanup_interval_duration_panics_above_the_sanity_bound() {
-        let mut config = AppConfig::default();
-        config.session_repository.cleanup_interval = "400d".to_string();
+        let mut config = Config::test_default();
+        config.session_repository.cleanup_interval =
+            std::time::Duration::from_secs(400 * 24 * 60 * 60);
         let _ = cleanup_interval_duration(&config);
     }
 }

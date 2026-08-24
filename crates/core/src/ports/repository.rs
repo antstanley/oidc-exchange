@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use crate::domain::{NewUser, RefreshResolution, Session, User, UserPatch};
+use chrono::{DateTime, Utc};
+
 use crate::error::Result;
 
 #[async_trait]
@@ -105,6 +107,35 @@ pub trait SessionRepository: Send + Sync {
 
     /// Delete all expired rows — sessions past their `expires_at` and
     /// retirement records past their retention deadline alike — returning the
-    /// combined number deleted.
+    /// combined number deleted. On stores without native record expiry
+    /// (Postgres, SQLite, LMDB) the sweep also reclaims expired single-use
+    /// records written by [`Self::put_single_use`], and the returned count
+    /// covers those too; on stores with native expiry (DynamoDB TTL, Valkey
+    /// `SET EX`) single-use records need no sweep. Correctness of
+    /// [`Self::put_single_use`] / [`Self::take_single_use`] never depends on
+    /// this having run — both evaluate `expires_at` themselves.
     async fn cleanup_expired_sessions(&self) -> Result<u64>;
+
+    /// Atomically claim a single-use key: insert-if-absent for a nonce or
+    /// assertion-replay marker ([`crate::domain::SingleUseRecord`]).
+    ///
+    /// Returns `Ok(true)` when *this* call wrote the record, and `Ok(false)` when a live
+    /// record already held `key` (someone else claimed it first). A record whose
+    /// `expires_at` has passed counts as absent: it does not block the write, so an
+    /// expired marker's key is reusable without waiting for a sweep. Exactly one of N
+    /// concurrent calls for one live key observes `true`.
+    ///
+    /// `key` must be a namespaced digest (`"nonce:<sha256hex>"` or
+    /// `"assertion:<provider>:[d:]<sha256hex>"`) — storage never holds raw nonce or raw
+    /// assertion material.
+    async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool>;
+
+    /// Atomically burn a single-use key: remove-and-report.
+    ///
+    /// Returns `Ok(true)` when a live record was found and is now gone (this call
+    /// consumed it), `Ok(false)` when no live record existed — an absent key, an
+    /// already-burned key, and an expired one are indistinguishable to the caller. The
+    /// check-and-remove is one atomic operation, so exactly one of N concurrent calls
+    /// for one live key observes `true`.
+    async fn take_single_use(&self, key: &str) -> Result<bool>;
 }

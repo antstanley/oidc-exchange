@@ -20,8 +20,9 @@ use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
 
 use schema::{
-    guard_pk, guard_to_item, item_to_retired, item_to_session, item_to_user, retired_to_item,
-    session_to_item, user_to_item, FamilyRoster, UserRoster, GUARD_SK, RETIRED_SK,
+    guard_pk, guard_to_item, item_single_use_expiry, item_to_retired, item_to_session,
+    item_to_user, retired_to_item, session_to_item, single_use_pk, single_use_to_item,
+    user_to_item, FamilyRoster, UserRoster, GUARD_SK, RETIRED_SK,
 };
 
 /// DynamoDB cancellation-reason code reported for a failed `attribute_not_exists(pk)`
@@ -1726,6 +1727,72 @@ impl SessionRepository for DynamoRepository {
                  ({REVOCATION_MAX_ATTEMPTS} attempts) racing concurrent session mutations"
             ),
         })
+    }
+
+    #[instrument(skip(self, key))]
+    async fn put_single_use(&self, key: &str, expires_at: chrono::DateTime<Utc>) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        let now = Utc::now();
+        let outcome = self
+            .client
+            .put_item()
+            .table_name(&self.table_name)
+            .set_item(Some(single_use_to_item(key, expires_at)))
+            // One conditional PutItem is the whole claim: it succeeds only when no item
+            // exists at the key, or the one that does has already expired — so exactly
+            // one of N racing claims can win, and an expired marker's key stays
+            // reusable without any sweep having run.
+            .condition_expression("attribute_not_exists(pk) OR expires_at < :now")
+            .expression_attribute_values(":now", AttributeValue::N(now.timestamp().to_string()))
+            .send()
+            .await;
+
+        match outcome {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                let lost_race = matches!(
+                    err.as_service_error(),
+                    Some(aws_sdk_dynamodb::operation::put_item::PutItemError::ConditionalCheckFailedException(_))
+                );
+                if lost_race {
+                    Ok(false)
+                } else {
+                    Err(Self::store_err(err))
+                }
+            }
+        }
+    }
+
+    #[instrument(skip(self, key))]
+    async fn take_single_use(&self, key: &str) -> Result<bool> {
+        assert!(!key.is_empty(), "single-use key must be non-empty");
+
+        // Delete-and-inspect in one atomic call: ALL_OLD returns the deleted item, so
+        // liveness of what this call removed is decided from its stored `expires_at`.
+        // An absent key returns no attributes; an expired one (TTL not yet fired)
+        // returns attributes whose expiry has passed — both report false.
+        let result = self
+            .client
+            .delete_item()
+            .table_name(&self.table_name)
+            .key("pk", AttributeValue::S(single_use_pk(key)))
+            .key("sk", AttributeValue::S(schema::SINGLE_USE_SK.to_string()))
+            .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
+            .send()
+            .await
+            .map_err(Self::store_err)?;
+
+        match result.attributes {
+            Some(item) => {
+                // Re-validate the stored expiry (store reads never trust stored data),
+                // then report liveness: an item whose expiry has passed but which TTL
+                // has not yet reaped counts as absent.
+                let expires_at = item_single_use_expiry(&item)?;
+                Ok(expires_at > Utc::now())
+            }
+            None => Ok(false),
+        }
     }
 }
 
@@ -3494,5 +3561,53 @@ mod tests {
 
         // Clean up
         let _ = client.delete_table().table_name(table_name).send().await;
+    }
+
+    // -- Single-use conformance (shared suite in test-utils) --------------------
+    // DynamoDB expires single-use records natively via the numeric `ttl` attribute, so
+    // the cleanup-sweep scenario does not apply and is deliberately not invoked here.
+
+    use oidc_exchange_test_utils::single_use_conformance as conformance;
+
+    async fn create_single_use_test_repo() -> DynamoRepository {
+        let table_name = "oidc-exchange-single-use-test";
+        let client = create_test_client().await;
+        create_test_table(&client, table_name).await;
+        DynamoRepository::new(client, table_name.to_string(), 3600)
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_first_claim_wins_duplicate_loses() {
+        let repo = create_single_use_test_repo().await;
+        conformance::first_claim_wins_duplicate_loses(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_consume_live_record_exactly_once() {
+        let repo = create_single_use_test_repo().await;
+        conformance::consume_live_record_exactly_once(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_expired_record_is_absent_to_put_and_take() {
+        let repo = create_single_use_test_repo().await;
+        conformance::expired_record_is_absent_to_put_and_take(&repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_concurrent_put_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_single_use_test_repo().await);
+        conformance::concurrent_put_has_exactly_one_winner(repo).await;
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires DynamoDB Local: docker run -p 8000:8000 amazon/dynamodb-local
+    async fn single_use_concurrent_take_has_exactly_one_winner() {
+        let repo = std::sync::Arc::new(create_single_use_test_repo().await);
+        conformance::concurrent_take_has_exactly_one_winner(repo).await;
     }
 }

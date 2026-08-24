@@ -78,6 +78,18 @@
         "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "min(retired_at + token.refresh_reuse_retention, family expires_at)." }
       }
     },
+    "SingleUseRecord": {
+      "type": "object",
+      "required": ["key", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+          "description": "Namespaced digest: 'nonce:<sha256hex>' or 'assertion:<provider>:[d:]<sha256hex>'. Never a raw nonce or assertion."
+        },
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
+      }
+    },
     "TokenResponse": {
       "type": "object",
       "required": ["access_token", "token_type", "expires_in"],
@@ -91,18 +103,31 @@
     "AccessTokenClaims": {
       "type": "object",
       "description": "JWT payload. custom claims are flattened alongside the registered claims.",
-      "required": ["sub", "iss", "aud", "sid", "iat", "exp"],
+      "required": ["sub", "iss", "aud", "iat", "exp", "sid"],
       "properties": {
         "sub": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
-        "iss": { "type": "string" },
-        "aud": { "type": "string", "description": "Single audience string (no array)." },
+        "iss": {
+          "type": "string",
+          "minLength": 1,
+          "description": "server.issuer; required non-empty at config load, so an empty iss is unrepresentable."
+        },
+        "aud": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Single audience string (no array). token.audience; required non-empty at config load."
+        },
         "sid": {
           "type": "string",
           "pattern": "^fam_[0-9a-z]{26}$",
           "description": "Session identifier: the family_id of the session this access token was minted for. Stable across refresh-token rotation; names the only session (token family) the token may revoke."
         },
         "iat": { "type": "integer" },
-        "exp": { "type": "integer" }
+        "exp": { "type": "integer" },
+        "sid": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Session identifier: the SHA-256 hex refresh_token_hash of the session this access token was minted for. Names the only session the token may revoke."
+        }
       },
       "additionalProperties": true
     },
@@ -117,7 +142,7 @@
     },
     "IdentityClaims": {
       "type": "object",
-      "required": ["subject", "raw_claims"],
+      "required": ["subject", "signing_alg", "raw_claims"],
       "properties": {
         "subject": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "Provider sub / DID." },
         "email": { "type": ["string", "null"], "format": "email" },
@@ -127,7 +152,50 @@
           "type": ["boolean", "null"],
           "description": "Apple private-relay flag, coerced bool-or-string like email_verified; null for non-Apple providers."
         },
+        "signing_alg": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+          "description": "JWS algorithm the resolved JWK verified the ID token with (never the untrusted header's). Selects the at_hash digest."
+        },
         "raw_claims": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "ExchangeCredential": {
+      "description": "The typed form of the declared grant_type on POST /token. Exactly one variant; each owns its grant's required parameters.",
+      "oneOf": [
+        {
+          "type": "object",
+          "title": "AuthorizationCode",
+          "required": ["grant_type", "code", "redirect_uri"],
+          "additionalProperties": false,
+          "properties": {
+            "grant_type": { "const": "authorization_code" },
+            "code": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+            "redirect_uri": { "$ref": "../../canonical-types.schema.json#/$defs/Url" }
+          }
+        },
+        {
+          "type": "object",
+          "title": "IdTokenAssertion",
+          "required": ["grant_type", "id_token"],
+          "additionalProperties": false,
+          "properties": {
+            "grant_type": { "const": "id_token" },
+            "id_token": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" }
+          }
+        }
+      ]
+    },
+    "ExchangeRequest": {
+      "type": "object",
+      "description": "Input to AppService::exchange. No default construction: credential and provider are always present.",
+      "required": ["credential", "provider"],
+      "additionalProperties": false,
+      "properties": {
+        "credential": { "$ref": "#/$defs/ExchangeCredential" },
+        "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+        "ip_address": { "type": ["string", "null"] },
+        "user_agent": { "type": ["string", "null"] },
+        "device_id": { "type": ["string", "null"] }
       }
     },
     "AuditSeverity": {
