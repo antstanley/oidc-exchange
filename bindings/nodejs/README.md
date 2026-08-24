@@ -77,6 +77,12 @@ Wiring for popular Node servers lives in the main repo's [examples](https://gith
 
 Configuration is TOML — providers, token TTLs, registration policy, key management, and storage. See the [configuration guide](https://github.com/antstanley/oidc-exchange#configuration).
 
+### Behaviour change
+
+Construction now fails when a `${VAR}` placeholder is unresolved, empty, or malformed instead of
+using that placeholder as literal configuration text. Set every referenced environment variable
+before constructing `OidcExchange`.
+
 ## Links
 
 - [Repository & full docs](https://github.com/antstanley/oidc-exchange)

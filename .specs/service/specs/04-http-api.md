@@ -104,11 +104,15 @@ be network-isolated independently from one binary.
 
 ## Bootstrap (`main.rs` + `bootstrap.rs`)
 
-1. Honour `--version` (prints the crate version and exits).
-2. `bootstrap::load_config` — load `config/default.toml`, overlay
-   `config/{OIDC_EXCHANGE_ENV}.toml` if set, apply `OIDC_EXCHANGE__{section}__{key}` env
-   overrides, resolve `${VAR}` placeholders, then validate (role, TTLs, allowlist, internal
-   API secret) ([06-configuration.md](06-configuration.md)).
+1. Handle the CLI surface and exit: `--version` prints the crate version; `config check`
+   layers configuration sources and runs the same resolve as step 2, prints a redacted summary,
+   and exits non-zero on any `ConfigError` without building adapters or binding a socket
+   ([06-configuration.md](06-configuration.md)).
+2. `bootstrap::load_config` — layer `config/default.toml`, the
+   `config/{OIDC_EXCHANGE_ENV}.toml` overlay if set, and `OIDC_EXCHANGE__{section}__{key}` env
+   overrides, then run the shared resolve: fail-closed `${VAR}` placeholder resolution followed
+   by validation (role, TTLs, allowlist, internal-API secret —
+   [06-configuration.md](06-configuration.md)).
 3. `telemetry::init_telemetry` — install the tracing subscriber first so all later spans are
    captured ([07-telemetry-and-audit.md](07-telemetry-and-audit.md)).
 4. `bootstrap::build_service` — construct adapters by role and assemble `AppService`.
@@ -124,8 +128,9 @@ be network-isolated independently from one binary.
    ([06-configuration.md](06-configuration.md)) — covering API Gateway stages and mount
    prefixes.
 
-`crates/ffi` calls the same `build_service` / `build_router` path, so in-process bindings get
-identical routing and middleware.
+`crates/ffi` layers its own sources into the same resolve and then calls the same
+`build_service` / `build_router` path, so in-process bindings get identical configuration
+semantics, routing, and middleware.
 
 ## Error mapping (`error.rs`)
 

@@ -9,9 +9,16 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("oidc-exchange {VERSION}");
         return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("config") {
+        return run_config_command(&args[1..]);
+    }
+    if !args.is_empty() {
+        return Err(format!("unrecognized arguments: {}", args.join(" ")).into());
     }
 
     // 1. Load config
@@ -82,5 +89,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// Run preflight-only configuration commands without initializing telemetry,
+/// building adapters, binding sockets, or writing state.
+fn run_config_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.first().map(String::as_str) != Some("check") {
+        return Err(
+            "usage: oidc-exchange config check [--dir <config-dir>] [--file <path>]".into(),
+        );
+    }
+
+    let mut dir: Option<&str> = None;
+    let mut file: Option<&str> = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dir" => {
+                index += 1;
+                dir = Some(args.get(index).ok_or("--dir requires a path")?);
+            }
+            "--file" => {
+                index += 1;
+                file = Some(args.get(index).ok_or("--file requires a path")?);
+            }
+            value => return Err(format!("unknown config check argument: {value}").into()),
+        }
+        index += 1;
+    }
+    if dir.is_some() && file.is_some() {
+        return Err("--dir and --file are mutually exclusive".into());
+    }
+
+    let config = match (dir, file) {
+        (Some(path), None) => bootstrap::load_config_from_dir(path)?,
+        (None, Some(path)) => bootstrap::load_config_from_file(path)?,
+        (None, None) => bootstrap::load_config()?,
+        (Some(_), Some(_)) => unreachable!("validated mutually exclusive options"),
+    };
+    println!("{config:?}");
     Ok(())
 }
