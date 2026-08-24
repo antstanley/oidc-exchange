@@ -3,11 +3,12 @@ use base64::Engine;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 
+use crate::config::{AsciiDomainPattern, RegistrationMode};
 use crate::domain::{
     AuditEventType, AuditOutcome, AuditSeverity, NewUser, Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
-use crate::service::{create_audit_event, parse_duration_secs, AppService};
+use crate::service::{create_audit_event, AppService};
 
 #[derive(Default)]
 pub struct ExchangeRequest {
@@ -32,7 +33,7 @@ pub struct ExchangeRequest {
 /// - An exact domain, e.g. `example.com` -- matches only `example.com`.
 /// - A wildcard, e.g. `*.example.com` -- matches any subdomain such as
 ///   `sub.example.com` or `a.b.example.com`, but NOT `example.com` itself.
-fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
+fn matches_domain_allowlist(email: &str, allowlist: &[AsciiDomainPattern]) -> bool {
     let domain = match email.rsplit_once('@') {
         Some((_, domain)) => domain,
         None => return false,
@@ -41,7 +42,7 @@ fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
     let domain_lower = domain.to_lowercase();
 
     for entry in allowlist {
-        let entry_lower = entry.to_lowercase();
+        let entry_lower = entry.as_str().to_lowercase();
         if let Some(suffix) = entry_lower.strip_prefix('*') {
             // Wildcard entry like "*.example.com" -> suffix is ".example.com"
             // The email domain must end with the suffix AND be strictly longer
@@ -58,6 +59,30 @@ fn matches_domain_allowlist(email: &str, allowlist: &[String]) -> bool {
     }
 
     false
+}
+
+/// Applies the verified-email and optional domain-allowlist policy to the
+/// current identity assertion. This predicate is shared by new and existing
+/// user paths so a tightened allowlist cannot be bypassed by a prior login.
+fn registration_policy_reason(
+    email: Option<&str>,
+    email_verified: Option<bool>,
+    allowlist: Option<&[AsciiDomainPattern]>,
+) -> Option<&'static str> {
+    let Some(email) = email else {
+        return Some("verified email required for registration");
+    };
+    if email_verified != Some(true) {
+        return Some("verified email required for registration");
+    }
+
+    if let Some(allowlist) = allowlist {
+        if !matches_domain_allowlist(email, allowlist) {
+            return Some("email domain not in allowlist");
+        }
+    }
+
+    None
 }
 
 impl AppService {
@@ -115,74 +140,36 @@ impl AppService {
                     .await?;
                     return Err(Error::UserSuspended { user_id: user.id });
                 }
+                if let Some(reason) = registration_policy_reason(
+                    claims.email.as_deref(),
+                    claims.email_verified,
+                    self.config.registration.domain_allowlist.as_deref(),
+                ) {
+                    let reason = reason.to_string();
+                    self.emit_audit(create_audit_event(
+                        AuditEventType::RegistrationDenied,
+                        AuditSeverity::Warning,
+                        AuditOutcome::Failure {
+                            reason: reason.clone(),
+                        },
+                        Some(user.id.clone()),
+                        Some(request.provider.clone()),
+                        request.ip_address.clone(),
+                        request.user_agent.clone(),
+                    ))
+                    .await?;
+                    return Err(Error::AccessDenied { reason });
+                }
                 user
             }
             None => {
-                // Apply registration policy before creating a new user
-
-                // Check domain allowlist if configured
-                if let Some(ref allowlist) = self.config.registration.domain_allowlist {
-                    match claims.email {
-                        Some(ref email) => {
-                            // Reject unverified emails for allowlist matching
-                            if claims.email_verified != Some(true) {
-                                let reason =
-                                    "verified email required when domain allowlist is configured"
-                                        .to_string();
-                                self.emit_audit(create_audit_event(
-                                    AuditEventType::RegistrationDenied,
-                                    AuditSeverity::Warning,
-                                    AuditOutcome::Failure {
-                                        reason: reason.clone(),
-                                    },
-                                    None,
-                                    Some(request.provider.clone()),
-                                    request.ip_address.clone(),
-                                    request.user_agent.clone(),
-                                ))
-                                .await?;
-                                return Err(Error::AccessDenied { reason });
-                            }
-                            if !matches_domain_allowlist(email, allowlist) {
-                                let reason = "email domain not in allowlist".to_string();
-                                self.emit_audit(create_audit_event(
-                                    AuditEventType::RegistrationDenied,
-                                    AuditSeverity::Warning,
-                                    AuditOutcome::Failure {
-                                        reason: reason.clone(),
-                                    },
-                                    None,
-                                    Some(request.provider.clone()),
-                                    request.ip_address.clone(),
-                                    request.user_agent.clone(),
-                                ))
-                                .await?;
-                                return Err(Error::AccessDenied { reason });
-                            }
-                        }
-                        None => {
-                            let reason =
-                                "email required when domain allowlist is configured".to_string();
-                            self.emit_audit(create_audit_event(
-                                AuditEventType::RegistrationDenied,
-                                AuditSeverity::Warning,
-                                AuditOutcome::Failure {
-                                    reason: reason.clone(),
-                                },
-                                None,
-                                Some(request.provider.clone()),
-                                request.ip_address.clone(),
-                                request.user_agent.clone(),
-                            ))
-                            .await?;
-                            return Err(Error::AccessDenied { reason });
-                        }
-                    }
-                }
-
-                // Check registration mode
-                if self.config.registration.mode == "existing_users_only" {
-                    let reason = "registration is restricted to existing users only".to_string();
+                // Apply registration policy before creating a new user.
+                if let Some(reason) = registration_policy_reason(
+                    claims.email.as_deref(),
+                    claims.email_verified,
+                    self.config.registration.domain_allowlist.as_deref(),
+                ) {
+                    let reason = reason.to_string();
                     self.emit_audit(create_audit_event(
                         AuditEventType::RegistrationDenied,
                         AuditSeverity::Warning,
@@ -196,6 +183,27 @@ impl AppService {
                     ))
                     .await?;
                     return Err(Error::AccessDenied { reason });
+                }
+
+                match self.config.registration.mode {
+                    RegistrationMode::Open => {}
+                    RegistrationMode::ExistingUsersOnly => {
+                        let reason =
+                            "registration is restricted to existing users only".to_string();
+                        self.emit_audit(create_audit_event(
+                            AuditEventType::RegistrationDenied,
+                            AuditSeverity::Warning,
+                            AuditOutcome::Failure {
+                                reason: reason.clone(),
+                            },
+                            None,
+                            Some(request.provider.clone()),
+                            request.ip_address.clone(),
+                            request.user_agent.clone(),
+                        ))
+                        .await?;
+                        return Err(Error::AccessDenied { reason });
+                    }
                 }
 
                 let new_user = NewUser {
@@ -266,6 +274,26 @@ impl AppService {
                                     .await?;
                                     return Err(Error::UserSuspended { user_id: user.id });
                                 }
+                                if let Some(reason) = registration_policy_reason(
+                                    claims.email.as_deref(),
+                                    claims.email_verified,
+                                    self.config.registration.domain_allowlist.as_deref(),
+                                ) {
+                                    let reason = reason.to_string();
+                                    self.emit_audit(create_audit_event(
+                                        AuditEventType::RegistrationDenied,
+                                        AuditSeverity::Warning,
+                                        AuditOutcome::Failure {
+                                            reason: reason.clone(),
+                                        },
+                                        Some(user.id.clone()),
+                                        Some(request.provider.clone()),
+                                        request.ip_address.clone(),
+                                        request.user_agent.clone(),
+                                    ))
+                                    .await?;
+                                    return Err(Error::AccessDenied { reason });
+                                }
                                 user
                             }
                             None => {
@@ -296,7 +324,7 @@ impl AppService {
         let token_hash = hex::encode(Sha256::digest(refresh_token.as_bytes()));
 
         // 7. Compute session expiry from config
-        let refresh_ttl_secs = parse_duration_secs(&self.config.token.refresh_token_ttl)?;
+        let refresh_ttl_secs = self.config.token.refresh_token_ttl.as_secs();
         let expires_at = Utc::now() + chrono::Duration::seconds(refresh_ttl_secs as i64);
 
         // 8. Store session
@@ -349,6 +377,7 @@ impl AppService {
 #[cfg(test)]
 mod tests {
     use super::matches_domain_allowlist;
+    use crate::config::AsciiDomainPattern;
     use crate::service::parse_duration_secs;
 
     #[test]
@@ -364,7 +393,10 @@ mod tests {
 
     #[test]
     fn domain_allowlist_exact_match() {
-        let allowlist = vec!["example.com".to_string()];
+        let allowlist = vec!["example.com".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(!matches_domain_allowlist("user@other.com", &allowlist));
         assert!(!matches_domain_allowlist(
@@ -375,7 +407,10 @@ mod tests {
 
     #[test]
     fn domain_allowlist_wildcard_match() {
-        let allowlist = vec!["*.example.com".to_string()];
+        let allowlist = vec!["*.example.com".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@sub.example.com", &allowlist));
         assert!(matches_domain_allowlist("user@a.b.example.com", &allowlist));
         assert!(
@@ -387,26 +422,35 @@ mod tests {
 
     #[test]
     fn domain_allowlist_case_insensitive() {
-        let allowlist = vec!["Example.COM".to_string()];
+        let allowlist = vec!["Example.COM".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(matches_domain_allowlist("user@EXAMPLE.COM", &allowlist));
     }
 
     #[test]
     fn domain_allowlist_no_at_sign() {
-        let allowlist = vec!["example.com".to_string()];
+        let allowlist = vec!["example.com".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(!matches_domain_allowlist("noemailformat", &allowlist));
     }
 
     #[test]
     fn domain_allowlist_empty_list() {
-        let allowlist: Vec<String> = vec![];
+        let allowlist: Vec<AsciiDomainPattern> = vec![];
         assert!(!matches_domain_allowlist("user@example.com", &allowlist));
     }
 
     #[test]
     fn domain_allowlist_multiple_entries() {
-        let allowlist = vec!["example.com".to_string(), "*.acme.corp".to_string()];
+        let allowlist = vec!["example.com".to_string(), "*.acme.corp".to_string()]
+            .into_iter()
+            .map(|entry| AsciiDomainPattern::parse(entry).unwrap())
+            .collect::<Vec<_>>();
         assert!(matches_domain_allowlist("user@example.com", &allowlist));
         assert!(matches_domain_allowlist("user@dev.acme.corp", &allowlist));
         assert!(!matches_domain_allowlist("user@other.org", &allowlist));

@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
 
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::domain::{
     AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
 };
@@ -26,7 +26,7 @@ pub struct AppService {
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
     pub(crate) providers: HashMap<String, Box<dyn IdentityProvider>>,
-    pub(crate) config: AppConfig,
+    pub(crate) config: Config,
 }
 
 impl AppService {
@@ -37,7 +37,7 @@ impl AppService {
         audit: Box<dyn AuditLog>,
         user_sync: Box<dyn UserSync>,
         providers: HashMap<String, Box<dyn IdentityProvider>>,
-        config: AppConfig,
+        config: Config,
     ) -> Self {
         Self {
             user_repo,
@@ -84,12 +84,12 @@ impl AppService {
         );
 
         let now = Utc::now();
-        let access_ttl_secs = parse_duration_secs(&self.config.token.access_token_ttl)?;
+        let access_ttl_secs = self.config.token.access_token_ttl.as_secs();
 
         let access_claims = AccessTokenClaims {
             sub: user.id.clone(),
-            iss: self.config.server.issuer.clone(),
-            aud: self.config.token.audience.clone().unwrap_or_default(),
+            iss: self.config.server.issuer.as_ref().to_string(),
+            aud: self.config.token.audience.as_ref().to_string(),
             iat: now.timestamp() as u64,
             exp: (now.timestamp() as u64) + access_ttl_secs,
             sid: sid.to_string(),
@@ -190,8 +190,7 @@ impl AppService {
         // Pre-dispatch emit-threshold filter: events strictly less severe
         // than `[audit] emit_threshold` are dropped before any adapter ever
         // sees them, independently of the blocking-threshold decision below.
-        let emit_threshold =
-            parse_severity(&self.config.audit.emit_threshold).unwrap_or(AuditSeverity::Info);
+        let emit_threshold = self.config.audit.emit_threshold;
         if event.severity as u8 > emit_threshold as u8 {
             return Ok(());
         }
@@ -210,8 +209,7 @@ impl AppService {
                 }
 
                 // Parse blocking threshold from config
-                let threshold = parse_severity(&self.config.audit.blocking_threshold)
-                    .unwrap_or(AuditSeverity::Warning);
+                let threshold = self.config.audit.blocking_threshold;
 
                 if event.severity as u8 <= threshold as u8 {
                     // Severity meets blocking threshold — fail the operation
@@ -340,7 +338,7 @@ fn pin_access_token_header(
 fn check_claims(
     claims: &AccessTokenClaims,
     payload_bytes: &[u8],
-    config: &AppConfig,
+    config: &Config,
     now_secs: u64,
 ) -> std::result::Result<(), &'static str> {
     let expected_issuer = config.server.issuer.as_str();
@@ -349,9 +347,10 @@ fn check_claims(
         "server.issuer must be configured before tokens can be validated"
     );
     let skew = CLOCK_SKEW_SECS as u64;
-    // The empty string is exactly what `build_access_token` stamps when
-    // `token.audience` is unset, so mint and validate agree by construction.
-    let expected_audience = config.token.audience.clone().unwrap_or_default();
+    // `token.audience` is a required non-empty configuration value, and it is
+    // exactly what `build_access_token` stamps, so mint and validate agree by
+    // construction.
+    let expected_audience = config.token.audience.as_str();
 
     if claims.iss != expected_issuer {
         return Err(REASON_WRONG_ISSUER);
@@ -608,7 +607,7 @@ mod validate_access_token_tests {
         REASON_MALFORMED, REASON_NOT_YET_VALID, REASON_WRONG_AUDIENCE, REASON_WRONG_ISSUER,
         REASON_WRONG_KEY, REASON_WRONG_TYPE,
     };
-    use crate::config::{AppConfig, ServerConfig, TokenConfig};
+    use crate::config::{Config, RawConfig};
     use crate::domain::{
         AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch,
     };
@@ -737,20 +736,12 @@ mod validate_access_token_tests {
         }
     }
 
-    fn test_config() -> AppConfig {
-        AppConfig {
-            server: ServerConfig {
-                issuer: "https://auth.test.com".to_string(),
-                ..Default::default()
-            },
-            token: TokenConfig {
-                access_token_ttl: "15m".to_string(),
-                refresh_token_ttl: "30d".to_string(),
-                audience: Some("https://api.test.com".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+    fn test_config() -> Config {
+        let mut raw: RawConfig = toml::from_str(include_str!("../../../../config/default.toml"))
+            .expect("default config should deserialize");
+        raw.server.issuer = "https://auth.test.com".to_string();
+        raw.token.audience = "https://api.test.com".to_string();
+        Config::resolve(raw).expect("test config should resolve")
     }
 
     fn test_service() -> AppService {

@@ -20,16 +20,24 @@
      returned `id_token`.
 3. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
    - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
-   - **Found, active** → proceed (existing users bypass registration policy).
-   - **Not found** → apply policy:
-     - If `registration.domain_allowlist` is set: the ID token must carry a **verified**
-       email (`email_verified == Some(true)`) whose domain matches the allowlist — exact
-       (`example.com`) or wildcard (`*.example.com`, at least one subdomain, case-insensitive).
-       A missing/unverified email or non-matching domain → `AccessDenied`
-       (audited `RegistrationDenied`).
-     - If `registration.mode == "existing_users_only"` → `AccessDenied` (`RegistrationDenied`).
-     - Otherwise (`mode == "open"`) → `create_user(NewUser{…})` (audited `UserCreated`);
-       if creation returns `Conflict` (a concurrent first login won the race), re-run
+   - **Found, active** → when `registration.domain_allowlist` is set, re-apply it against the
+     assertion's current claims: `email_verified == Some(true)` and a matching domain, using
+     the same predicate as the Not-found arm. A failure → `AccessDenied` (audited
+     `RegistrationDenied`, naming the user id). The live ID-token claims are used rather than
+     the stored `user.email`, which is frozen at first login. `registration.mode` is not
+     re-evaluated here: it is an admission gate and is trivially satisfied by an existing user.
+   - **Not found** → apply policy. The policy value is a `RegistrationMode`, matched
+     exhaustively; there is no unrecognised case because config load rejected it.
+     - The ID token must carry a **verified** email (`email_verified == Some(true)`) — a
+       requirement of accepting the claim at all, not merely of the allowlist branch. A missing
+       or unverified email → `AccessDenied` (audited `RegistrationDenied`).
+     - If `registration.domain_allowlist` is set, the email's domain must match it — exact
+       (`example.com`) or wildcard (`*.example.com`, at least one subdomain, ASCII
+       case-insensitive). A non-matching domain → `AccessDenied` (audited
+       `RegistrationDenied`).
+     - `RegistrationMode::ExistingUsersOnly` → `AccessDenied` (`RegistrationDenied`).
+     - `RegistrationMode::Open` → `create_user(NewUser{…})` (audited `UserCreated`); if
+       creation returns `Conflict` (a concurrent first login won the race), re-run
        `get_user_by_external_id` and continue with the existing user, re-applying the
        suspended-status check. The losing racer emits no `UserCreated` event — the winning
        create already audited it — and the flow otherwise proceeds as for a found user.
@@ -40,6 +48,14 @@
    the token is minted bound to the session stored in step 5.
 7. **Respond** — `TokenResponse { access_token, refresh_token: Some(opaque), token_type:
    "Bearer", expires_in }`.
+
+`ExchangeRequest` carries the client context (`ip_address`, `user_agent`, `device_id`)
+extracted by the server's audit-context middleware; the stored session records all three,
+and every audit event in the flow records the `ip_address` and `user_agent` (the
+`AuditEvent` shape carries no `device_id`). A suspended user audits `UserSuspended` (warning,
+failure); the registration-policy denials audit `RegistrationDenied` (warning, failure); a
+created user audits `UserCreated` (notice, success); a successful exchange audits
+`TokenExchange` (info, success) after the token response is assembled.
 
 ## Token refresh (`refresh.rs`)
 
@@ -53,6 +69,12 @@
    refresh does not rotate it, so the re-minted token stays bound to that one session.
 6. Respond with `refresh_token: None` — refresh tokens are reusable until expiry; refreshing
    does not rotate them.
+
+`RefreshRequest` carries the same client context; audit events in the flow record its
+`ip_address` and `user_agent`. A suspended user audits `UserSuspended`; a successful refresh
+audits `TokenRefresh` (info, success). Unknown or expired tokens return `InvalidToken` and
+audit `ValidationFailed` (debug, failure) — an abuse-detection signal that the default
+`[audit] emit_threshold` of `info` suppresses; lowering the threshold to `debug` enables it.
 
 ## Revocation (`revoke.rs`)
 
@@ -79,13 +101,20 @@ caller presented no credential for.
   indistinguishable under the current blocking-threshold durability model as well as in
   normal operation.
 
+`RevokeRequest` carries the same client context; audit events in the flow record its
+`ip_address` and `user_agent`. The access-token path audits `AllSessionsRevoked` when
+signature verification succeeds; the refresh-token path audits `TokenRevocation` when a
+session was actually revoked. Failed verification and unknown tokens emit nothing, matching
+RFC 7009's silence.
+
 ## Build access token (`service/mod.rs::build_access_token`)
 
 1. Parse `token.access_token_ttl` to seconds (`parse_duration_secs`).
-2. Assemble `AccessTokenClaims { sub: user.id, iss: server.issuer, aud: token.audience or "",
+2. Assemble `AccessTokenClaims { sub: user.id, iss: server.issuer, aud: token.audience,
    iat, exp, sid, custom }`, where `sid` is the `refresh_token_hash` of the session this
    token is minted for — supplied by the caller, from the session `exchange` has just stored
    or the one `refresh` has just read — and `custom` comes from `resolve_custom_claims`.
+   `iss` and `aud` are required non-empty configuration values.
 3. Header `{ alg: keys.algorithm(), typ: "at+jwt", kid: keys.key_id() }` — the RFC 9068 media
    type for a JWT access token, which `validate_access_token` requires.
 4. base64url(header).base64url(payload), `keys.sign` the signing input, append
@@ -164,14 +193,21 @@ via `tracing` and never fail the admin call.
 |---|---|
 | `admin_create_user` | `create_user`, then `notify_user_created` |
 | `admin_get_user` | `get_user_by_id` |
-| `admin_update_user` | `update_user`, diff changed fields, `notify_user_updated` |
-| `admin_delete_user` | patch `status=Deleted`, `revoke_all_user_sessions`, `notify_user_deleted` |
-| `admin_get_claims` | return `user.claims` (missing user → `InvalidRequest`) |
+| `admin_update_user` | load the user (missing → `NotFound`), validate any status change against the [user lifecycle](01-domain-model.md) (`Deleted` is strictly terminal — any status patch on a deleted user, including `Deleted → Deleted`, is rejected; a patch to the current status is otherwise an accepted no-op; invalid transition → `InvalidRequest`), `update_user`, revoke all sessions when the patch changed the status to `Suspended` or `Deleted`, diff changed fields, `notify_user_updated` |
+| `admin_delete_user` | patch `status=Deleted` via the same validated path (valid from `Active` or `Suspended`), `revoke_all_user_sessions`, `notify_user_deleted`; unknown id → `NotFound` |
+| `admin_get_claims` | return `user.claims` (missing user → `NotFound`; `admin_set_claims` / `admin_merge_claims` / `admin_clear_claims` return the same on an unknown id) |
 | `admin_set_claims` | replace the whole claims map |
 | `admin_merge_claims` | merge new keys over existing (new wins) |
 | `admin_clear_claims` | set claims to empty |
 | `admin_stats` | `count_by_status` + `count_active_sessions` → `AdminStats` |
 | `admin_list_users` | `list_users(offset, limit)` |
+
+Admin mutations are audited: `admin_create_user` → `UserCreated`, `admin_update_user` →
+`UserUpdated` (and `UserSuspended` when the patch sets `status = Suspended`),
+`admin_delete_user` → `UserDeleted`, and the claims mutations → `UserUpdated` with the
+operation in `detail`. Read-only operations (get, list, stats, get-claims) are not audited.
+Audit failures follow `emit_audit`'s blocking rules, unlike best-effort user sync. Admin
+operations carry no client `ip_address`/`user_agent` context.
 
 ## Assumptions and open questions
 
@@ -194,10 +230,18 @@ via `tracing` and never fail the admin call.
 
 - *Refresh does not rotate.* **A successful refresh returns no new refresh token.** Reusable
   refresh tokens match common client libraries; rotation is not implemented.
-- *Domain allowlist demands a verified email.* **New-user registration under an allowlist
-  requires `email_verified == true`.** Prevents allowlist bypass via an unverified address.
-- *Existing users bypass policy.* **Registration policy applies only when no user exists.**
-  Tightening the allowlist later does not lock out already-registered users.
+- *Registration demands a verified email.* **Every just-in-time user creation requires
+  `email_verified == true`, whether or not an allowlist is configured.** The requirement is a
+  property of accepting the email claim, not of the allowlist; nesting it inside an optional
+  feature's branch meant turning the allowlist off turned identity verification off with it.
+- *The allowlist is an authorization predicate; the mode is an admission gate.* **The domain
+  allowlist is re-evaluated on every exchange, for existing users as well as new ones;
+  `registration.mode` applies only at creation.** An operator who tightens the allowlist is
+  trying to contain accounts that already exist. Re-evaluating the mode for an existing user is
+  not coherent without recording provisioning provenance; the refresh path likewise has no
+  fresh claims to evaluate the allowlist against. For both, containment remains suspending or
+  deleting the user — honored immediately on every path — and the refresh-side residual window
+  is bounded by `token.refresh_token_ttl`.
 - *Best-effort user sync.* **Sync notifications never fail an admin or exchange operation.**
   Sync is a downstream convenience, not a correctness dependency.
 - *Audit fallback always records.* **On backend failure the event is still written to a
@@ -248,5 +292,4 @@ via `tracing` and never fail the admin call.
 
 ### Open questions
 
-- Suspended-user exchange is rejected, but whether an audit `Unauthorized` vs `UserSuspended`
-  event type is emitted in every rejection branch is worth confirming against the handlers.
+- None.

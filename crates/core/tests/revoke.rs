@@ -4,7 +4,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-use oidc_exchange_core::config::{AppConfig, ServerConfig, TokenConfig};
+use oidc_exchange_core::config::{
+    Config, RawAuditConfig, RawConfig, RawRegistrationConfig, RawServerConfig, RawTelemetryConfig,
+    RawTokenConfig,
+};
 use oidc_exchange_core::domain::{AccessTokenClaims, AuditEventType, AuditOutcome};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, KeyManager, SessionRepository};
@@ -16,22 +19,47 @@ use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
 };
 
-fn make_config() -> AppConfig {
-    AppConfig {
-        server: ServerConfig {
+fn base_raw_config() -> RawConfig {
+    RawConfig {
+        server: RawServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8080,
             issuer: "https://auth.test.com".to_string(),
-            ..Default::default()
+            role: "all".to_string(),
+            request_timeout: "30s".to_string(),
+            base_path: None,
         },
-        token: TokenConfig {
+        registration: RawRegistrationConfig {
+            mode: "open".to_string(),
+            domain_allowlist: None,
+        },
+        token: RawTokenConfig {
             access_token_ttl: "15m".to_string(),
             refresh_token_ttl: "30d".to_string(),
-            audience: Some("https://api.test.com".to_string()),
-            ..Default::default()
+            audience: "https://api.test.com".to_string(),
+            custom_claims: None,
         },
-        ..Default::default()
+        audit: RawAuditConfig {
+            adapter: "noop".to_string(),
+            blocking_threshold: "warning".to_string(),
+            emit_threshold: "info".to_string(),
+            sqs: None,
+        },
+        telemetry: RawTelemetryConfig {
+            enabled: false,
+            exporter: "none".to_string(),
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
+        },
+        ..RawConfig::default()
     }
 }
 
+fn make_config() -> Config {
+    Config::resolve(base_raw_config()).expect("test config should resolve")
+}
 fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
