@@ -9,18 +9,18 @@
 
 ## Steps
 
-- [ ] Regenerate `bindings/nodejs/pnpm-lock.yaml` from the declared `@napi-rs/cli` major and add a committed `bindings/lambda/pnpm-lock.yaml` that resolves its workspace dependency reproducibly.
-- [ ] Set `minimumReleaseAge` explicitly in `pnpm-workspace.yaml` and preserve the first-party `@oidc-exchange/*` exclusion required for self-referential platform packages.
-- [ ] Replace the named Node and Lambda workflow installs with `pnpm install --frozen-lockfile`, including the release Node build, Lambda staging path, CI binding checks, and glibc-floor workflow.
-- [ ] Add a focused workflow/lockfile regression harness that proves frozen installs succeed for both packages and rejects lockfile/package-manifest drift without resolving a new graph.
+- [x] Regenerate `bindings/nodejs/pnpm-lock.yaml` from the declared `@napi-rs/cli` major and add a committed `bindings/lambda/pnpm-lock.yaml` that resolves its workspace dependency reproducibly.
+- [x] Set `minimumReleaseAge` explicitly in `pnpm-workspace.yaml` and preserve the first-party `@oidc-exchange/*` exclusion required for self-referential platform packages.
+- [x] Replace the named Node and Lambda workflow installs with `pnpm install --frozen-lockfile`, including the release Node build, Lambda staging path, CI binding checks, and glibc-floor workflow.
+- [x] Add a focused workflow/lockfile regression harness that proves frozen installs succeed for both packages and rejects lockfile/package-manifest drift without resolving a new graph. Evidence: `scripts/__tests__/supply-chain.test.mjs` runs both frozen installs green and asserts manifest drift fails with `ERR_PNPM_OUTDATED_LOCKFILE` leaving the lock unrewritten.
 
 ## Definition of done
 
-- [ ] Node and Lambda each have an in-scope committed lockfile, and each listed CI/release install is frozen.
-- [ ] Positive tests run `pnpm install --frozen-lockfile` for both packages; negative tests demonstrate stale manifest/lockfile input is rejected.
-- [ ] The release-age setting and first-party exclusion are explicit and tested or statically asserted.
-- [ ] Meets the repo definition of done (tests, lint/format, named-constant limits — see plan.md baseline).
-- [ ] Reviewable: a reviewer can inspect the committed lockfiles and run the two frozen installs without a dependency rewrite.
+- [x] Node and Lambda each have an in-scope committed lockfile, and each listed CI/release install is frozen.
+- [x] Positive tests run `pnpm install --frozen-lockfile` for both packages; negative tests demonstrate stale manifest/lockfile input is rejected.
+- [x] The release-age setting and first-party exclusion are explicit and tested or statically asserted.
+- [x] Meets the repo definition of done (tests, lint/format, named-constant limits — see plan.md baseline).
+- [x] Reviewable: a reviewer can inspect the committed lockfiles and run the two frozen installs without a dependency rewrite.
 
 ## Sibling boundaries
 

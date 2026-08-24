@@ -9,19 +9,19 @@
 
 ## Steps
 
-- [ ] Remove workflow-level permissions and assign every release, CI, and glibc-floor job only the scopes it requires; retain `contents: read` where checkout runs and set `persist-credentials: false` for non-pushing checkout jobs.
-- [ ] Move npm package validation into `validate-npm-package` with read-only permissions, add it to `publish-npm` needs, and keep publishing credentials isolated from validation tooling.
-- [ ] Replace global/unpinned napi CLI, npm upgrade, `npx --yes publint`, and `npx --yes @arethetypeswrong/cli` resolution with exact versions or workspace-locked dev dependencies; remove the npm upgrade if bundled npm satisfies staged publishing.
-- [ ] Add static workflow tests that derive write/publishing jobs from their `permissions:` blocks and reject dynamic fetch patterns, insufficient checkout scope, persisted credentials in non-pushing jobs, or a publish path that bypasses validation.
+- [x] Remove workflow-level permissions and assign every release, CI, and glibc-floor job only the scopes it requires; retain `contents: read` where checkout runs and set `persist-credentials: false` for non-pushing checkout jobs.
+- [x] Move npm package validation into `validate-npm-package` with read-only permissions, add it to `publish-npm` needs, and keep publishing credentials isolated from validation tooling.
+- [x] Replace global/unpinned napi CLI, npm upgrade, `npx --yes publint`, and `npx --yes @arethetypeswrong/cli` resolution with exact versions or workspace-locked dev dependencies; remove the npm upgrade if bundled npm satisfies staged publishing.
+- [x] Add static workflow tests that derive write/publishing jobs from their `permissions:` blocks and reject dynamic fetch patterns, insufficient checkout scope, persisted credentials in non-pushing jobs, or a publish path that bypasses validation. Evidence: `scripts/workflow-policy.mjs` plus `workflow-policy.test.mjs` pass all four real workflows and reject 23 injected violations (authority, pinning, checkout, frozen-install, publish-bypass).
 
 ## Definition of done
 
-- [ ] No workflow-level permission grant remains; every job has an explicit least-privilege block consistent with its actions.
-- [ ] A job with `id-token: write`, `contents: write`, `packages: write`, or attestation authority contains no `@latest`, `npx --yes`, unversioned global add, or non-frozen install.
-- [ ] Package validation runs separately with `contents: read`, and `publish-npm` cannot start without it and Node artifacts.
-- [ ] Positive and negative workflow-invariant tests cover existing and injected violating examples without publishing.
-- [ ] Meets the repo definition of done (tests, lint/format, named-constant limits — see plan.md baseline).
-- [ ] Reviewable: a reviewer can trace each job’s permissions and prove dynamic package resolution cannot run beside publishing authority.
+- [x] No workflow-level permission grant remains; every job has an explicit least-privilege block consistent with its actions.
+- [x] A job with `id-token: write`, `contents: write`, `packages: write`, or attestation authority contains no `@latest`, `npx --yes`, unversioned global add, or non-frozen install.
+- [x] Package validation runs separately with `contents: read`, and `publish-npm` cannot start without it and Node artifacts.
+- [x] Positive and negative workflow-invariant tests cover existing and injected violating examples without publishing.
+- [x] Meets the repo definition of done (tests, lint/format, named-constant limits — see plan.md baseline).
+- [x] Reviewable: a reviewer can trace each job’s permissions and prove dynamic package resolution cannot run beside publishing authority.
 
 ## Sibling boundaries
 
