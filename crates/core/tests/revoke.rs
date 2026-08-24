@@ -9,7 +9,7 @@ use oidc_exchange_core::config::{
     RawTokenConfig,
 };
 use oidc_exchange_core::domain::{
-    is_valid_family_id, AccessTokenClaims, AuditEventType, AuditOutcome,
+    is_valid_family_id, AccessTokenClaims, AuditEventType, AuditFailure, AuditOutcome,
 };
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{IdentityProvider, KeyManager, SessionRepository};
@@ -31,6 +31,7 @@ fn base_raw_config() -> RawConfig {
             role: "all".to_string(),
             request_timeout: "30s".to_string(),
             base_path: None,
+            ..RawServerConfig::default()
         },
         registration: RawRegistrationConfig {
             mode: "open".to_string(),
@@ -48,6 +49,7 @@ fn base_raw_config() -> RawConfig {
             blocking_threshold: "warning".to_string(),
             emit_threshold: "info".to_string(),
             sqs: None,
+            ..RawAuditConfig::default()
         },
         telemetry: RawTelemetryConfig {
             enabled: false,
@@ -75,6 +77,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     )
@@ -82,10 +85,11 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
 
 /// Builds a service whose `AuditLog` is a caller-supplied `MockAuditLog`, so
 /// the test can inspect recorded events after the revoke call.
-fn make_service_with_audit(
+fn make_service_with_audit_and_config(
     repo: MockRepository,
     provider: MockIdentityProvider,
     audit: MockAuditLog,
+    config: Config,
 ) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -97,9 +101,18 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
-        make_config(),
+        config,
     )
+}
+
+fn make_service_with_audit(
+    repo: MockRepository,
+    provider: MockIdentityProvider,
+    audit: MockAuditLog,
+) -> AppService {
+    make_service_with_audit_and_config(repo, provider, audit, make_config())
 }
 
 /// Helper: perform an exchange and return the full token response.
@@ -393,6 +406,59 @@ async fn revoke_forged_access_token_does_not_revoke_sessions() {
 }
 
 #[tokio::test]
+async fn revoke_enforce_audit_failure_is_indistinguishable_for_existing_and_unknown_refresh_tokens()
+{
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let config = {
+        let mut raw = base_raw_config();
+        raw.audit.durability = "enforce".to_string();
+        Config::resolve(raw).expect("enforce config resolves")
+    };
+    let repo = MockRepository::new();
+    let svc = make_service_with_audit_and_config(
+        repo.clone(),
+        MockIdentityProvider::new("mock"),
+        audit,
+        config,
+    );
+
+    let existing_token = do_exchange(&svc)
+        .await
+        .refresh_token
+        .expect("exchange returns refresh token");
+    audit_clone.set_fail_mode(true).await;
+
+    let existing = svc
+        .revoke(RevokeRequest {
+            token: existing_token,
+            token_type_hint: Some("refresh_token".to_string()),
+            ..Default::default()
+        })
+        .await;
+    let unknown = svc
+        .revoke(RevokeRequest {
+            token: "never-issued-refresh-token".to_string(),
+            token_type_hint: Some("refresh_token".to_string()),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(matches!(
+        existing,
+        Err(oidc_exchange_core::error::Error::SecurityAuditDurability { .. })
+    ));
+    assert!(matches!(
+        unknown,
+        Err(oidc_exchange_core::error::Error::SecurityAuditDurability { .. })
+    ));
+    assert!(
+        repo.get_all_sessions().await.is_empty(),
+        "existing session is still revoked"
+    );
+}
+
+#[tokio::test]
 async fn revoke_valid_access_token_emits_token_revocation_with_family_count() {
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
@@ -445,6 +511,8 @@ async fn revoke_valid_access_token_emits_token_revocation_with_family_count() {
     assert_eq!(revoke_event.ip_address, Some("203.0.113.5".to_string()));
     assert_eq!(revoke_event.user_agent, Some("test-agent/1.0".to_string()));
 }
+
+#[tokio::test]
 async fn revoke_valid_refresh_token_emits_token_revocation() {
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
@@ -590,13 +658,11 @@ async fn revoke_claim_and_header_negatives_revoke_nothing_and_emit_one_failure_e
             AuditEventType::ValidationFailed,
             "case {label}"
         );
-        match &event.outcome {
-            AuditOutcome::Failure { reason } => assert!(
-                !reason.is_empty(),
-                "case {label}: the fixed reason must be non-empty"
-            ),
-            other => panic!("case {label}: expected a Failure outcome, got {other:?}"),
-        }
+        assert_eq!(
+            event.outcome,
+            AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+            "case {label}: the rejection must carry the fixed failure class"
+        );
 
         // And the session store is untouched by every rejected credential.
         assert_eq!(
@@ -653,7 +719,7 @@ async fn revoke_access_token_store_failures_propagate() {
 }
 
 #[tokio::test]
-async fn revoke_unknown_refresh_token_emits_nothing() {
+async fn revoke_unknown_refresh_token_emits_authentication_failure() {
     let repo = MockRepository::new();
     let provider = MockIdentityProvider::new("mock");
     let audit = MockAuditLog::new();
@@ -676,8 +742,14 @@ async fn revoke_unknown_refresh_token_emits_nothing() {
     let events = audit_clone.events().await;
     assert_eq!(
         events.len(),
-        0,
-        "an unknown refresh token must not emit any audit event"
+        1,
+        "an unknown refresh token must emit exactly one terminal audit event"
+    );
+    let event = events.last().expect("a terminal event was just recorded");
+    assert_eq!(event.event_type, AuditEventType::ValidationFailed);
+    assert_eq!(
+        event.outcome,
+        AuditOutcome::Failure(oidc_exchange_core::domain::AuditFailure::AuthenticationFailed)
     );
 }
 
@@ -715,6 +787,7 @@ fn make_debug_audit_service(
         Box::new(MockKeyManager::new()),
         Box::new(audit.clone()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     );
@@ -786,29 +859,12 @@ async fn unusable_sids_fail_closed_before_any_mutation() {
         .collect();
     for (event_type, outcome) in &rejections {
         assert_eq!(*event_type, AuditEventType::ValidationFailed);
-        match outcome {
-            AuditOutcome::Failure { reason } => {
-                assert!(!reason.is_empty());
-                // The fixed reason must not echo the offending sid value.
-                assert!(
-                    !reason.contains(LEGACY_HASH_SID),
-                    "rejection reason must not echo the sid value: {reason}"
-                );
-            }
-            other => panic!("expected Failure outcomes, got {other:?}"),
-        }
-    }
-    let reasons: Vec<_> = rejections
-        .iter()
-        .map(|(_, o)| match o {
-            AuditOutcome::Failure { reason } => reason.clone(),
-            AuditOutcome::Success => String::new(),
-        })
-        .collect();
-    for pair in reasons.windows(2) {
+        // The closed failure classification can never echo the offending sid
+        // value — every unusable-sid rejection carries the identical class.
         assert_eq!(
-            pair[0], pair[1],
-            "every unusable-sid rejection carries the same fixed reason"
+            *outcome,
+            AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+            "every unusable-sid rejection carries the same fixed classification"
         );
     }
 }

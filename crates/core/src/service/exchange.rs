@@ -5,12 +5,12 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{AsciiDomainPattern, RegistrationMode};
 use crate::domain::{
-    is_valid_family_id, new_family_id, AuditEventType, AuditOutcome, AuditSeverity, NewUser,
-    Session, TokenResponse, UserStatus,
+    is_valid_family_id, new_family_id, AuditFailure, AuditOutcome, AuthenticationKind, ClientAddr,
+    NewUser, RateLimitDecision, RateLimitKey, SecurityEvent, Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::assertion::{AssertionBindError, AssertionContext};
-use crate::service::{create_audit_event, AppService};
+use crate::service::AppService;
 
 /// The typed form of the declared `grant_type`: one variant per exchange
 /// grant, each owning that grant's required parameters as non-optional
@@ -112,7 +112,118 @@ fn registration_policy_reason(
 }
 
 impl AppService {
+    /// Exchanges provider credentials for local tokens and emits exactly one
+    /// terminal security event for every result that reaches this core flow.
+    /// Principal creation remains a separate state-change event emitted only
+    /// by the successful creator, and assertion-binding rejections keep their
+    /// detailed `ValidationFailed` record alongside the terminal event.
     pub async fn exchange(&self, request: ExchangeRequest) -> Result<TokenResponse> {
+        let client_addr = request
+            .ip_address
+            .clone()
+            .and_then(ClientAddr::asserted)
+            .unwrap_or(ClientAddr::Unknown);
+        let result = match self.exchange_inner(&request, &client_addr).await {
+            Ok(success) => Ok(success),
+            // A binding rejection's detailed `ValidationFailed` record *is*
+            // its terminal security event — same class and severity the
+            // generic mapping would produce, plus the failed control's name —
+            // emitted here through the mandatory path so exactly one terminal
+            // record exists per exchange.
+            Err(ExchangeFlowError::Binding(rejection)) => {
+                let mut event = SecurityEvent::AuthenticationFailed.into_audit_event(
+                    AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
+                    None,
+                    Some(request.provider.clone()),
+                    client_addr,
+                    request.user_agent.clone(),
+                );
+                event.detail.insert(
+                    "check".to_string(),
+                    serde_json::Value::String(rejection.check.to_string()),
+                );
+                event.detail.insert(
+                    "reason".to_string(),
+                    serde_json::Value::String(rejection.reason.clone()),
+                );
+                let emitted = self.emit_mandatory_audit_event(event).await;
+                return match emitted {
+                    Ok(()) => Err(Error::InvalidGrant {
+                        reason: rejection.reason,
+                    }),
+                    Err(audit_error) => Err(audit_error),
+                };
+            }
+            // Infrastructure failures are not client-attributable outcomes:
+            // they surface as 5xx and are not recorded as authentication
+            // failures (the failing store may be the audit dependency
+            // itself). Infrastructure ≠ client fault.
+            Err(ExchangeFlowError::Other(error @ Error::StoreError { .. })) => return Err(error),
+            Err(ExchangeFlowError::Attributed { error, actor }) => {
+                let (event, outcome, _) = exchange_terminal_event(&error);
+                let emitted = self
+                    .emit_security_event(
+                        event,
+                        outcome,
+                        Some(actor),
+                        Some(request.provider.clone()),
+                        client_addr,
+                        request.user_agent.clone(),
+                    )
+                    .await;
+                return match emitted {
+                    Ok(()) => Err(error),
+                    Err(audit_error) => Err(audit_error),
+                };
+            }
+            Err(ExchangeFlowError::Other(error)) => Err(error),
+        };
+
+        let (event, outcome, actor) = match &result {
+            Ok(success) => (
+                SecurityEvent::AuthenticationSucceeded {
+                    kind: AuthenticationKind::Exchange,
+                },
+                AuditOutcome::Success,
+                success.user_id.clone(),
+            ),
+            Err(error) => exchange_terminal_event(error),
+        };
+
+        let emitted = self
+            .emit_security_event(
+                event,
+                outcome,
+                actor,
+                Some(request.provider.clone()),
+                client_addr,
+                request.user_agent.clone(),
+            )
+            .await;
+
+        match (result, emitted) {
+            (Ok(success), Ok(())) => Ok(success.response),
+            (Ok(success), Err(error)) => {
+                // The terminal success record is mandatory. Do not leave a
+                // session live if the caller receives no tokens because
+                // enforcing durability rejected the outcome.
+                if self.config.audit.durability.is_enforce() {
+                    self.session_repo
+                        .revoke_session(&success.refresh_token_hash)
+                        .await?;
+                }
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(_), Err(audit_error)) => Err(audit_error),
+        }
+    }
+
+    async fn exchange_inner(
+        &self,
+        request: &ExchangeRequest,
+        client_addr: &ClientAddr,
+    ) -> std::result::Result<ExchangeSuccess, ExchangeFlowError> {
         // 1. Resolve provider
         let provider =
             self.providers
@@ -120,6 +231,10 @@ impl AppService {
                 .ok_or_else(|| Error::UnknownProvider {
                     provider: request.provider.clone(),
                 })?;
+
+        // Bound all outbound code and JWKS-backed validation work by provider.
+        self.consume_limit(RateLimitKey::provider(request.provider.clone()), request)
+            .await?;
 
         // 2. Get validated claims — the typed credential names the grant, so
         //    selection is an exhaustive match over variants rather than a
@@ -132,11 +247,8 @@ impl AppService {
             request.credential,
             ExchangeCredential::IdTokenAssertion { .. }
         );
-        let (claims, compact_jwt, binding_access_token) = match request.credential {
-            ExchangeCredential::AuthorizationCode {
-                ref code,
-                ref redirect_uri,
-            } => {
+        let (claims, compact_jwt, binding_access_token) = match &request.credential {
+            ExchangeCredential::AuthorizationCode { code, redirect_uri } => {
                 // Postcondition on the port contract: every code exchange must
                 // return the ID token the flow validates next — an adapter
                 // that returned an empty one would be a contract violation,
@@ -156,7 +268,7 @@ impl AppService {
                     tokens.access_token.as_deref().map(str::to_string),
                 )
             }
-            ExchangeCredential::IdTokenAssertion { ref id_token } => {
+            ExchangeCredential::IdTokenAssertion { id_token } => {
                 // Direct assertion: no code redemption happens on this path —
                 // which is exactly why the grant/field binding is enforced at
                 // the HTTP boundary before this type can be constructed.
@@ -176,6 +288,14 @@ impl AppService {
             "exchange: IdentityProvider::validate_id_token returned an empty subject, violating the port contract"
         );
 
+        // A subject becomes available only after validated claims; retain
+        // only its hash in the limiter key.
+        self.consume_limit(
+            RateLimitKey::subject(Some(&request.provider), &claims.subject),
+            request,
+        )
+        .await?;
+
         // 3. Bind the assertion — lifetime ceiling, `azp`, applicable `at_hash`,
         // direct-grant nonce burn, then the single-use marker — exactly once,
         // before any user lookup or registration side effect can run.
@@ -189,7 +309,6 @@ impl AppService {
                 require_nonce: is_direct_grant,
                 max_assertion_secs: self.config.grants.max_assertion_lifetime.as_secs(),
             },
-            &request,
         )
         .await?;
 
@@ -200,84 +319,47 @@ impl AppService {
             .await?
         {
             Some(user) => {
+                // Denials return typed errors; the exchange wrapper emits the
+                // single terminal security event for them, naming the known
+                // principal as `actor`.
                 if user.status != UserStatus::Active {
-                    self.emit_audit(create_audit_event(
-                        AuditEventType::UserSuspended,
-                        AuditSeverity::Warning,
-                        AuditOutcome::Failure {
-                            reason: format!("user status is {:?}, not active", user.status),
-                        },
-                        Some(user.id.clone()),
-                        Some(request.provider.clone()),
-                        request.ip_address.clone(),
-                        request.user_agent.clone(),
-                    ))
-                    .await?;
-                    return Err(Error::UserSuspended { user_id: user.id });
+                    return Err(ExchangeFlowError::from(Error::UserSuspended { user_id: user.id }));
                 }
                 if let Some(reason) = registration_policy_reason(
                     claims.email.as_deref(),
                     claims.email_verified,
                     self.config.registration.domain_allowlist.as_deref(),
                 ) {
-                    let reason = reason.to_string();
-                    self.emit_audit(create_audit_event(
-                        AuditEventType::RegistrationDenied,
-                        AuditSeverity::Warning,
-                        AuditOutcome::Failure {
-                            reason: reason.clone(),
+                    return Err(ExchangeFlowError::Attributed {
+                        error: Error::AccessDenied {
+                            reason: reason.to_string(),
                         },
-                        Some(user.id.clone()),
-                        Some(request.provider.clone()),
-                        request.ip_address.clone(),
-                        request.user_agent.clone(),
-                    ))
-                    .await?;
-                    return Err(Error::AccessDenied { reason });
+                        actor: user.id,
+                    });
                 }
                 user
             }
             None => {
-                // Apply registration policy before creating a new user.
+                // Apply registration policy before creating a new user. The
+                // exchange wrapper emits the terminal RegistrationDenied
+                // security event for these typed errors.
                 if let Some(reason) = registration_policy_reason(
                     claims.email.as_deref(),
                     claims.email_verified,
                     self.config.registration.domain_allowlist.as_deref(),
                 ) {
-                    let reason = reason.to_string();
-                    self.emit_audit(create_audit_event(
-                        AuditEventType::RegistrationDenied,
-                        AuditSeverity::Warning,
-                        AuditOutcome::Failure {
-                            reason: reason.clone(),
-                        },
-                        None,
-                        Some(request.provider.clone()),
-                        request.ip_address.clone(),
-                        request.user_agent.clone(),
-                    ))
-                    .await?;
-                    return Err(Error::AccessDenied { reason });
+                    return Err(ExchangeFlowError::from(Error::AccessDenied {
+                        reason: reason.to_string(),
+                    }));
                 }
 
                 match self.config.registration.mode {
                     RegistrationMode::Open => {}
                     RegistrationMode::ExistingUsersOnly => {
-                        let reason =
-                            "registration is restricted to existing users only".to_string();
-                        self.emit_audit(create_audit_event(
-                            AuditEventType::RegistrationDenied,
-                            AuditSeverity::Warning,
-                            AuditOutcome::Failure {
-                                reason: reason.clone(),
-                            },
-                            None,
-                            Some(request.provider.clone()),
-                            request.ip_address.clone(),
-                            request.user_agent.clone(),
-                        ))
-                        .await?;
-                        return Err(Error::AccessDenied { reason });
+                        return Err(ExchangeFlowError::from(Error::AccessDenied {
+                            reason: "registration is restricted to existing users only"
+                                .to_string(),
+                        }));
                     }
                 }
 
@@ -289,15 +371,17 @@ impl AppService {
                 };
                 match self.user_repo.create_user(&new_user).await {
                     Ok(created) => {
-                        self.emit_audit(create_audit_event(
-                            AuditEventType::UserCreated,
-                            AuditSeverity::Notice,
+                        // Principal creation is a state-change security event
+                        // emitted only by the successful creator, through the
+                        // mandatory (durability-governed) path.
+                        self.emit_security_event(
+                            SecurityEvent::PrincipalCreated,
                             AuditOutcome::Success,
                             Some(created.id.clone()),
                             Some(request.provider.clone()),
-                            request.ip_address.clone(),
+                            client_addr.clone(),
                             request.user_agent.clone(),
-                        ))
+                        )
                         .await?;
 
                         // Best-effort JIT user-sync notify, mirroring
@@ -332,42 +416,19 @@ impl AppService {
                                 debug_assert_eq!(user.provider, request.provider);
                                 debug_assert_eq!(user.external_id, claims.subject);
                                 if user.status != UserStatus::Active {
-                                    self.emit_audit(create_audit_event(
-                                        AuditEventType::UserSuspended,
-                                        AuditSeverity::Warning,
-                                        AuditOutcome::Failure {
-                                            reason: format!(
-                                                "user status is {:?}, not active",
-                                                user.status
-                                            ),
-                                        },
-                                        Some(user.id.clone()),
-                                        Some(request.provider.clone()),
-                                        request.ip_address.clone(),
-                                        request.user_agent.clone(),
-                                    ))
-                                    .await?;
-                                    return Err(Error::UserSuspended { user_id: user.id });
+                                    return Err(ExchangeFlowError::from(Error::UserSuspended { user_id: user.id }));
                                 }
                                 if let Some(reason) = registration_policy_reason(
                                     claims.email.as_deref(),
                                     claims.email_verified,
                                     self.config.registration.domain_allowlist.as_deref(),
                                 ) {
-                                    let reason = reason.to_string();
-                                    self.emit_audit(create_audit_event(
-                                        AuditEventType::RegistrationDenied,
-                                        AuditSeverity::Warning,
-                                        AuditOutcome::Failure {
-                                            reason: reason.clone(),
+                                    return Err(ExchangeFlowError::Attributed {
+                                        error: Error::AccessDenied {
+                                            reason: reason.to_string(),
                                         },
-                                        Some(user.id.clone()),
-                                        Some(request.provider.clone()),
-                                        request.ip_address.clone(),
-                                        request.user_agent.clone(),
-                                    ))
-                                    .await?;
-                                    return Err(Error::AccessDenied { reason });
+                                        actor: user.id,
+                                    });
                                 }
                                 user
                             }
@@ -377,16 +438,16 @@ impl AppService {
                                 // reported — an adapter invariant violation.
                                 // Surface a distinct error rather than
                                 // panicking so the branch stays total.
-                                return Err(Error::StoreError {
+                                return Err(ExchangeFlowError::from(Error::StoreError {
                                     detail: format!(
                                         "create_user conflicted for provider={} external_id={} but re-lookup found no user",
                                         request.provider, claims.subject
                                     ),
-                                });
+                                }));
                             }
                         }
                     }
-                    Err(other) => return Err(other),
+                    Err(other) => return Err(ExchangeFlowError::from(other)),
                 }
             }
         };
@@ -450,50 +511,117 @@ impl AppService {
             response.expires_in
         );
 
-        // 10. Audit the successful exchange, after the token response is
-        // fully assembled.
-        self.emit_audit(create_audit_event(
-            AuditEventType::TokenExchange,
-            AuditSeverity::Info,
-            AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(request.provider.clone()),
-            request.ip_address.clone(),
-            request.user_agent.clone(),
-        ))
-        .await?;
+        // 10. The terminal success audit is emitted by the `exchange`
+        // wrapper, through the mandatory (durability-governed) path.
+        Ok(ExchangeSuccess {
+            refresh_token_hash: session.refresh_token_hash.clone(),
+            user_id: Some(user.id.clone()),
+            response,
+        })
+    }
 
-        Ok(response)
+    /// Consume one budgeted unit of the given limiter scope. A limiter
+    /// infrastructure failure is logged and allowed through (fail-open for
+    /// availability); a `Deny` maps to `TooManyRequests`, which the wrapper
+    /// records as a `ThrottleExceeded` terminal event.
+    async fn consume_limit(&self, key: Option<RateLimitKey>, request: &ExchangeRequest) -> Result<()> {
+        let Some(key) = key else {
+            tracing::error!(
+                provider_length = request.provider.len(),
+                "provider identifier exceeded the bounded rate-limit key size"
+            );
+            return Err(Error::InvalidRequest {
+                reason: "invalid provider identifier".to_string(),
+            });
+        };
+        match self.rate_limiter.check_and_consume(&key).await {
+            Ok(RateLimitDecision::Allow) => Ok(()),
+            Ok(RateLimitDecision::Deny { retry_after_secs }) => {
+                Err(Error::TooManyRequests { retry_after_secs })
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, provider = %request.provider, "rate limiter unavailable; allowing exchange");
+                Ok(())
+            }
+        }
     }
 
     /// Run the shared assertion-binding controls and translate their outcome:
-    /// a control rejection is audited as `ValidationFailed`/`Warning` with the
-    /// failed control named in `detail.check`, then returned as `InvalidGrant`
-    /// (the OAuth error class for a bad assertion); a single-use store failure
-    /// propagates untouched so it maps to `5xx`, never to a client fault.
+    /// a control rejection surfaces to the `exchange` wrapper, which emits the
+    /// single detail-enriched terminal `ValidationFailed` record and answers
+    /// `InvalidGrant` (the OAuth error class for a bad assertion); a
+    /// single-use store failure propagates untouched so it maps to `5xx`,
+    /// never to a client fault.
     async fn enforce_assertion_binding(
         &self,
         claims: &crate::domain::IdentityClaims,
         ctx: &AssertionContext<'_>,
-        request: &ExchangeRequest,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), ExchangeFlowError> {
         match crate::service::assertion::bind(self.session_repo.as_ref(), claims, ctx).await {
             Ok(()) => Ok(()),
-            Err(AssertionBindError::Store(err)) => Err(err),
+            Err(AssertionBindError::Store(err)) => Err(ExchangeFlowError::Other(err)),
             Err(AssertionBindError::Rejected(rejection)) => {
-                self.audit_binding_rejection(
-                    &rejection,
-                    Some(&request.provider),
-                    request.ip_address.as_deref(),
-                    request.user_agent.as_deref(),
-                )
-                .await?;
-                Err(Error::InvalidGrant {
-                    reason: rejection.reason,
-                })
+                Err(ExchangeFlowError::Binding(rejection))
             }
         }
     }
+}
+
+struct ExchangeSuccess {
+    response: TokenResponse,
+    user_id: Option<String>,
+    refresh_token_hash: String,
+}
+
+/// Internal error split for [`AppService::exchange_inner`]: a binding
+/// rejection carries its control name so the wrapper can emit the one
+/// detail-enriched terminal event; everything else flows to the generic
+/// terminal mapping.
+enum ExchangeFlowError {
+    Binding(crate::service::assertion::AssertionRejection),
+    /// A denial attributable to a known principal — the terminal event names
+    /// them as `actor` (e.g. an existing user denied by registration policy).
+    Attributed { error: Error, actor: String },
+    Other(Error),
+}
+
+impl From<Error> for ExchangeFlowError {
+    fn from(error: Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+/// Maps every exchange error to a fixed, safe terminal event classification.
+/// It intentionally never consumes `Display`, as provider errors may include
+/// upstream response bodies.
+fn exchange_terminal_event(error: &Error) -> (SecurityEvent, AuditOutcome, Option<String>) {
+    let (event, failure) = match error {
+        Error::AccessDenied { .. } => (
+            SecurityEvent::RegistrationDenied,
+            AuditFailure::RegistrationDenied,
+        ),
+        Error::UserSuspended { .. } => (
+            SecurityEvent::PrincipalSuspended,
+            AuditFailure::PrincipalSuspended,
+        ),
+        Error::ProviderError { .. } | Error::ProviderTimeout { .. } => (
+            SecurityEvent::ProviderRejected,
+            AuditFailure::ProviderRejected,
+        ),
+        Error::TooManyRequests { .. } => (
+            SecurityEvent::ThrottleExceeded,
+            AuditFailure::ThrottleExceeded,
+        ),
+        _ => (
+            SecurityEvent::AuthenticationFailed,
+            AuditFailure::AuthenticationFailed,
+        ),
+    };
+    let actor = match error {
+        Error::UserSuspended { user_id } => Some(user_id.clone()),
+        _ => None,
+    };
+    (event, AuditOutcome::Failure(failure), actor)
 }
 
 /// Parse a duration string like "15m", "1h", "30d" into seconds. Exposed for

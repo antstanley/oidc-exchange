@@ -34,15 +34,19 @@ subtly wrong when rolled by hand.
   domain/subdomain allowlist.
 - Expose an internal admin API for user CRUD, per-user claims, and aggregate stats.
 - Run as an axum server or an AWS Lambda from one binary, optionally split by `role`.
-- Emit structured audit events with syslog severities and a configurable blocking threshold,
-  plus OpenTelemetry-style tracing.
+- Emit structured audit events with syslog severities: security outcomes on a mandatory
+  channel no configured threshold can filter, operational events on a best-effort channel
+  behind `emit_threshold` and `blocking_threshold` — plus OpenTelemetry-style tracing.
 
 ## Non-goals
 
 - Hosting login pages, managing passwords, or running a full OAuth 2.0 authorization server.
   Authentication is delegated entirely to upstream providers.
-- Rate limiting (expected from an upstream gateway/proxy), config hot-reload (restart to
-  apply), and a token introspection endpoint (downstream verifies via JWKS).
+- Config hot-reload (restart to apply) and a token introspection endpoint (downstream
+  verifies via JWKS).
+- A globally coordinated rate limit. The service bounds attempts per process; a shared
+  budget across instances needs the `RateLimiter` port backed by a shared store, or an
+  edge gateway.
 - Multi-tenancy, RBAC beyond a single admin claim check, or SCIM provisioning.
 
 ## System shape
@@ -65,7 +69,7 @@ operator ──Bearer secret──► /internal/* (user CRUD, claims, stats)  �
 | Page | Covers |
 |---|---|
 | [01-domain-model.md](01-domain-model.md) | Entities, IDs, lifecycles: User, Session, AuditEvent, token/claims types |
-| [02-ports-and-adapters.md](02-ports-and-adapters.md) | The six port traits and every adapter that implements them |
+| [02-ports-and-adapters.md](02-ports-and-adapters.md) | The seven port traits and every adapter that implements them |
 | [03-service-flows.md](03-service-flows.md) | Exchange, refresh, revoke, admin, custom-claims and audit-blocking logic |
 | [04-http-api.md](04-http-api.md) | Routes, middleware, roles, bootstrap, error mapping |
 | [05-provider-system.md](05-provider-system.md) | Provider tiers, the OIDC and Apple providers, the registry |
@@ -78,7 +82,7 @@ operator ──Bearer secret──► /internal/* (user CRUD, claims, stats)  �
 
 | Crate | Role |
 |---|---|
-| `crates/core` | Domain types, the six port traits, `AppService` orchestration, config, errors |
+| `crates/core` | Domain types, the seven port traits, `AppService` orchestration, config, errors |
 | `crates/adapters` | DynamoDB / Postgres / SQLite / LMDB / Valkey storage, KMS / local / noop keys, stdout / SQS / noop audit, standard OIDC provider, webhook sync, shared OIDC utilities |
 | `crates/providers` | Apple identity provider |
 | `crates/server` | axum routes, middleware, telemetry init, bootstrap (config + adapter wiring + Lambda detection) |
@@ -96,7 +100,8 @@ operator ──Bearer secret──► /internal/* (user CRUD, claims, stats)  �
 | Service roles (`all`/`exchange`/`admin`) | Yes | conditional route + adapter wiring |
 | Standard OIDC provider, Apple provider | Yes | `crates/adapters/oidc`, `crates/providers/apple` |
 | atproto / non-OIDC provider | No | named in docs and the `IdentityProvider` doc comment only; no implementation exists |
-| Rate limiting, key rotation, config hot-reload, introspection | No | out of scope (see Non-goals) |
+| Rate limiting (per-IP / per-subject / per-provider, in-process) | Yes | `crates/server/src/middleware/throttle.rs`; per process, not global |
+| Key rotation, config hot-reload, introspection | No | out of scope (see Non-goals) |
 
 ## Assumptions and open questions
 

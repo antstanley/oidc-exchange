@@ -61,15 +61,16 @@
     },
     "AuditEvent": {
       "type": "object",
-      "required": ["id", "timestamp", "severity", "event_type", "outcome"],
+      "required": ["id", "timestamp", "severity", "event_type", "ip_address_source", "outcome"],
       "properties": {
         "id": { "type": "string", "description": "ULID" },
         "timestamp": { "type": "string", "format": "date-time" },
         "severity": { "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"] },
-        "event_type": { "type": "string" },
+        "event_type": { "enum": ["token_exchange", "token_refresh", "token_revocation", "session_revoked", "all_sessions_revoked", "user_created", "user_updated", "user_suspended", "user_deleted", "validation_failed", "registration_denied", "provider_error", "unauthorized", "throttle_exceeded"] },
         "actor": { "type": ["string", "null"], "description": "User ID if known" },
         "provider": { "type": ["string", "null"] },
         "ip_address": { "type": ["string", "null"] },
+        "ip_address_source": { "enum": ["peer", "forwarded", "asserted", "unknown"] },
         "user_agent": { "type": ["string", "null"] },
         "detail": { "type": "object", "additionalProperties": true },
         "outcome": {
@@ -77,7 +78,7 @@
           "required": ["status"],
           "properties": {
             "status": { "enum": ["success", "failure"] },
-            "reason": { "type": ["string", "null"] }
+            "reason": { "enum": ["authentication_failed", "registration_denied", "principal_suspended", "provider_rejected", "throttle_exceeded", null] }
           }
         }
       }

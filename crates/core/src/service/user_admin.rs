@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::domain::{
-    AuditEventType, AuditOutcome, AuditSeverity, NewUser, User, UserPatch, UserStatus,
+    AdminMutationKind, AuditOutcome, ClientAddr, NewUser, SecurityEvent, User, UserPatch,
+    UserStatus,
 };
 use crate::error::{Error, Result};
-use crate::service::{create_audit_event, AppService};
+use crate::service::AppService;
 
 /// Key under which the claims-mutation operation name (`set_claims` /
 /// `merge_claims` / `clear_claims`) is recorded in a `UserUpdated` audit
@@ -22,15 +23,11 @@ impl AppService {
     pub async fn admin_create_user(&self, new_user: &NewUser) -> Result<User> {
         let user = self.user_repo.create_user(new_user).await?;
 
-        self.emit_audit(create_audit_event(
-            AuditEventType::UserCreated,
-            AuditSeverity::Notice,
+        self.emit_admin_mutation_audit_event(
+            AdminMutationKind::Created,
+            &user,
             AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(user.provider.clone()),
-            None,
-            None,
-        ))
+        )
         .await?;
 
         if let Err(e) = self.user_sync.notify_user_created(&user).await {
@@ -116,21 +113,13 @@ impl AppService {
             changed_fields.push("status");
         }
 
-        let event_type = if patch.status == Some(UserStatus::Suspended) {
-            AuditEventType::UserSuspended
+        let mutation_kind = if patch.status == Some(UserStatus::Suspended) {
+            AdminMutationKind::Suspended
         } else {
-            AuditEventType::UserUpdated
+            AdminMutationKind::Updated
         };
-        self.emit_audit(create_audit_event(
-            event_type,
-            AuditSeverity::Notice,
-            AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(user.provider.clone()),
-            None,
-            None,
-        ))
-        .await?;
+        self.emit_admin_mutation_audit_event(mutation_kind, &user, AuditOutcome::Success)
+            .await?;
 
         if let Err(e) = self
             .user_sync
@@ -161,15 +150,11 @@ impl AppService {
         };
         let user = self.apply_validated_patch(user_id, &patch).await?;
 
-        self.emit_audit(create_audit_event(
-            AuditEventType::UserDeleted,
-            AuditSeverity::Notice,
+        self.emit_admin_mutation_audit_event(
+            AdminMutationKind::Deleted,
+            &user,
             AuditOutcome::Success,
-            Some(user.id.clone()),
-            Some(user.provider.clone()),
-            None,
-            None,
-        ))
+        )
         .await?;
 
         if let Err(e) = self.user_sync.notify_user_deleted(user_id).await {
@@ -298,20 +283,66 @@ impl AppService {
     /// `clear_claims` are distinguishable in the audit trail. Admin
     /// operations carry no client `ip`/`user_agent` context.
     async fn emit_claims_audit_event(&self, user: &User, operation: &str) -> Result<()> {
-        let mut event = create_audit_event(
-            AuditEventType::UserUpdated,
-            AuditSeverity::Notice,
+        // Claims mutations add operation detail, so use the mandatory
+        // security event emitter and retain the operation-specific detail.
+        let mut event = SecurityEvent::AdminMutation {
+            kind: AdminMutationKind::Updated,
+        }
+        .into_audit_event(
             AuditOutcome::Success,
             Some(user.id.clone()),
             Some(user.provider.clone()),
-            None,
+            ClientAddr::Unknown,
             None,
         );
         event.detail.insert(
             CLAIMS_OPERATION_DETAIL_KEY.to_string(),
             Value::String(operation.to_string()),
         );
-        self.emit_audit(event).await
+        self.emit_admin_mutation_with_detail(event).await
+    }
+
+    /// Emits a detailed admin mutation through the mandatory durability path.
+    async fn emit_admin_mutation_with_detail(
+        &self,
+        event: crate::domain::AuditEvent,
+    ) -> Result<()> {
+        match self.audit.emit(&event).await {
+            Ok(()) => {
+                crate::service::record_mandatory_audit_success();
+                Ok(())
+            }
+            Err(error) => {
+                crate::service::record_mandatory_audit_failure();
+                self.log_audit_fallback(&event);
+                if self.config.audit.durability.is_enforce() {
+                    Err(Error::SecurityAuditDurability {
+                        detail: error.to_string(),
+                    })
+                } else {
+                    tracing::error!(error = %error, audit_durability_degraded = true, "mandatory admin audit provider down");
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Emits an admin mutation through the mandatory durability path.
+    async fn emit_admin_mutation_audit_event(
+        &self,
+        kind: AdminMutationKind,
+        user: &User,
+        outcome: AuditOutcome,
+    ) -> Result<()> {
+        self.emit_security_event(
+            SecurityEvent::AdminMutation { kind },
+            outcome,
+            Some(user.id.clone()),
+            Some(user.provider.clone()),
+            ClientAddr::Unknown,
+            None,
+        )
+        .await
     }
 
     /// Get aggregate stats for the dashboard.

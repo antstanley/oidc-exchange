@@ -8,11 +8,11 @@ use sha2::{Digest, Sha256};
 
 use crate::config::MAX_REFRESH_ROTATION_GRACE_SECS;
 use crate::domain::{
-    is_valid_family_id, new_family_id, AuditEventType, AuditOutcome, AuditSeverity,
-    RefreshResolution, Session, TokenResponse, UserStatus,
+    is_valid_family_id, new_family_id, AuditEventType, AuditFailure, AuditOutcome,
+    AuditSeverity, ClientAddr, RefreshResolution, Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
-use crate::service::{create_audit_event, parse_duration_secs, AppService};
+use crate::service::{create_audit_event, AppService};
 
 /// Reason string carried by every unknown-token refusal — and, deliberately,
 /// by the reuse refusal too: telling a presenter that they tripped the reuse
@@ -161,12 +161,14 @@ impl AppService {
         self.emit_audit(create_audit_event(
             AuditEventType::ValidationFailed,
             AuditSeverity::Debug,
-            AuditOutcome::Failure {
-                reason: reason.to_string(),
-            },
+            AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
             actor,
             None,
-            request.ip_address.clone(),
+            request
+                .ip_address
+                .clone()
+                .and_then(ClientAddr::asserted)
+                .unwrap_or(ClientAddr::Unknown),
             request.user_agent.clone(),
         ))
         .await?;
@@ -203,7 +205,11 @@ impl AppService {
             AuditOutcome::Success,
             Some(user_id.to_string()),
             None,
-            request.ip_address.clone(),
+            request
+                .ip_address
+                .clone()
+                .and_then(ClientAddr::asserted)
+                .unwrap_or(ClientAddr::Unknown),
             request.user_agent.clone(),
         );
         // Detail carries correlation data only — never a token hash or digest.
@@ -340,12 +346,14 @@ impl AppService {
             self.emit_audit(create_audit_event(
                 AuditEventType::UserSuspended,
                 AuditSeverity::Warning,
-                AuditOutcome::Failure {
-                    reason: format!("user status is {:?}, not active", user.status),
-                },
+                AuditOutcome::Failure(AuditFailure::PrincipalSuspended),
                 Some(user.id.clone()),
                 None,
-                request.ip_address.clone(),
+                request
+                    .ip_address
+                    .clone()
+                    .and_then(ClientAddr::asserted)
+                    .unwrap_or(ClientAddr::Unknown),
                 request.user_agent.clone(),
             ))
             .await?;
@@ -446,12 +454,14 @@ impl AppService {
             self.emit_audit(create_audit_event(
                 AuditEventType::UserSuspended,
                 AuditSeverity::Warning,
-                AuditOutcome::Failure {
-                    reason: format!("user status is {:?}, not active", user.status),
-                },
+                AuditOutcome::Failure(AuditFailure::PrincipalSuspended),
                 Some(user.id.clone()),
                 None,
-                request.ip_address.clone(),
+                request
+                    .ip_address
+                    .clone()
+                    .and_then(ClientAddr::asserted)
+                    .unwrap_or(ClientAddr::Unknown),
                 request.user_agent.clone(),
             ))
             .await?;
@@ -507,7 +517,11 @@ impl AppService {
             AuditOutcome::Success,
             Some(user_id.to_string()),
             None,
-            request.ip_address.clone(),
+            request
+                .ip_address
+                .clone()
+                .and_then(ClientAddr::asserted)
+                .unwrap_or(ClientAddr::Unknown),
             request.user_agent.clone(),
         );
         event.detail = HashMap::from([

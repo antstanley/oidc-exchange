@@ -5,6 +5,13 @@ use serde::Serialize;
 
 use oidc_exchange_core::error::Error;
 
+/// Safe, rendered OAuth protocol error classification for response-side consumers.
+///
+/// This intentionally contains only the public OAuth error code—not an error description,
+/// token, or domain error detail—so middleware can record it without inspecting the body.
+#[derive(Clone, Copy, Debug)]
+pub struct RenderedOAuthErrorCode(pub &'static str);
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -35,18 +42,55 @@ impl IntoResponse for ApiError {
                     error: "unsupported_grant_type".to_string(),
                     error_description: "The grant_type parameter is not supported".to_string(),
                 };
-                (StatusCode::BAD_REQUEST, Json(body)).into_response()
+                oauth_error_response(StatusCode::BAD_REQUEST, body, "unsupported_grant_type")
             }
             ApiError::Domain(err) => {
-                let (status, error_code, description) = map_domain_error(&err);
-                let body = ErrorResponse {
-                    error: error_code,
-                    error_description: description,
+                let retry_after = match &err {
+                    Error::TooManyRequests { retry_after_secs } => Some(*retry_after_secs),
+                    _ => None,
                 };
-                (status, Json(body)).into_response()
+                let (status, error_code, description) = map_domain_error(&err);
+                let mut response = oauth_error_response(
+                    status,
+                    ErrorResponse {
+                        error: error_code.clone(),
+                        error_description: description,
+                    },
+                    &error_code,
+                );
+                if let Some(retry_after_secs) = retry_after {
+                    let value =
+                        axum::http::HeaderValue::from_str(&retry_after_secs.max(1).to_string())
+                            .expect(
+                                "positive retry-after seconds always form a valid header value",
+                            );
+                    response
+                        .headers_mut()
+                        .insert(axum::http::header::RETRY_AFTER, value);
+                }
+                response
             }
         }
     }
+}
+
+fn oauth_error_response(status: StatusCode, body: ErrorResponse, error_code: &str) -> Response {
+    let mut response = (status, Json(body)).into_response();
+    response
+        .extensions_mut()
+        .insert(RenderedOAuthErrorCode(match error_code {
+            "invalid_request" => "invalid_request",
+            "invalid_grant" => "invalid_grant",
+            "invalid_token" => "invalid_token",
+            "unsupported_grant_type" => "unsupported_grant_type",
+            "access_denied" => "access_denied",
+            "not_found" => "not_found",
+            "conflict" => "conflict",
+            "server_error" => "server_error",
+            "slow_down" => "slow_down",
+            _ => unreachable!("map_domain_error emits a closed OAuth error code set"),
+        }));
+    response
 }
 
 fn map_domain_error(err: &Error) -> (StatusCode, String, String) {
@@ -123,6 +167,13 @@ fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
             "not_found".to_string(),
             detail.clone(),
         ),
+        Error::TooManyRequests {
+            retry_after_secs: _,
+        } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "slow_down".to_string(),
+            "too many authentication attempts".to_string(),
+        ),
         Error::ProviderError { .. } => (
             StatusCode::BAD_GATEWAY,
             "server_error".to_string(),
@@ -136,6 +187,7 @@ fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
         Error::StoreError { .. }
         | Error::KeyError { .. }
         | Error::AuditError { .. }
+        | Error::SecurityAuditDurability { .. }
         | Error::SyncError { .. }
         | Error::ConfigError { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,

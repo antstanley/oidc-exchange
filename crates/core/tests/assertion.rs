@@ -91,6 +91,7 @@ fn make_auditing_service(
         Box::new(MockKeyManager::new()),
         Box::new(audit.clone()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     );
@@ -909,6 +910,7 @@ fn service_with_failing_store(
         Box::new(MockKeyManager::new()),
         Box::new(audit.clone()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     );

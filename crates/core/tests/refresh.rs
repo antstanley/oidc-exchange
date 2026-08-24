@@ -32,6 +32,7 @@ fn base_raw_config() -> RawConfig {
             role: "all".to_string(),
             request_timeout: "30s".to_string(),
             base_path: None,
+            ..RawServerConfig::default()
         },
         registration: RawRegistrationConfig {
             mode: "open".to_string(),
@@ -49,6 +50,7 @@ fn base_raw_config() -> RawConfig {
             blocking_threshold: "warning".to_string(),
             emit_threshold: "info".to_string(),
             sqs: None,
+            ..RawAuditConfig::default()
         },
         telemetry: RawTelemetryConfig {
             enabled: false,
@@ -76,6 +78,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     )
@@ -99,6 +102,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -365,6 +369,7 @@ async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
             blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
             sqs: None,
+            ..RawAuditConfig::default()
         },
         ..base_raw_config()
     })
@@ -395,7 +400,7 @@ async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
     );
     assert_eq!(events[0].event_type, AuditEventType::ValidationFailed);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.21"));
@@ -413,6 +418,7 @@ async fn refresh_expired_token_under_debug_threshold_emits_validation_failed_wit
             blocking_threshold: "warning".to_string(),
             emit_threshold: "debug".to_string(),
             sqs: None,
+            ..RawAuditConfig::default()
         },
         ..base_raw_config()
     })
@@ -512,7 +518,7 @@ async fn refresh_suspended_user_emits_user_suspended_event() {
     );
     assert_eq!(events[0].event_type, AuditEventType::UserSuspended);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
@@ -980,6 +986,7 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
             Box::new(MockKeyManager::new()),
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
+            Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
             providers,
             make_config(),
         )
@@ -1344,6 +1351,7 @@ async fn missing_user_is_refused_before_any_write() {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         HashMap::new(),
         make_config(),
     );

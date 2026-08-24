@@ -1,3 +1,4 @@
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -17,6 +18,7 @@ pub struct RawConfig {
     pub repository: RawRepositoryConfig,
     #[serde(default)]
     pub session_repository: RawSessionRepositoryConfig,
+    pub rate_limit: RawRateLimitConfig,
     pub user_sync: RawUserSyncConfig,
     pub telemetry: RawTelemetryConfig,
     pub internal_api: RawInternalApiConfig,
@@ -34,6 +36,7 @@ pub struct Config {
     pub key_manager: KeyManagerConfig,
     pub repository: RepositoryConfig,
     pub session_repository: SessionRepositoryConfig,
+    pub rate_limit: RateLimitConfig,
     pub user_sync: UserSyncConfig,
     pub telemetry: TelemetryConfig,
     pub internal_api: InternalApiConfig,
@@ -58,6 +61,7 @@ impl Config {
         let key_manager = KeyManagerConfig::resolve(raw.key_manager)?;
         let repository = RepositoryConfig::resolve(raw.repository)?;
         let session_repository = SessionRepositoryConfig::resolve(raw.session_repository)?;
+        let rate_limit = RateLimitConfig::resolve(raw.rate_limit)?;
         let user_sync = UserSyncConfig::resolve(raw.user_sync)?;
         let telemetry = TelemetryConfig::resolve(raw.telemetry)?;
         let internal_api = InternalApiConfig::resolve(raw.internal_api)?;
@@ -79,6 +83,7 @@ impl Config {
             key_manager,
             repository,
             session_repository,
+            rate_limit,
             user_sync,
             telemetry,
             internal_api,
@@ -105,7 +110,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawServerConfig {
     pub host: String,
@@ -114,7 +119,31 @@ pub struct RawServerConfig {
     pub role: String,
     pub request_timeout: String,
     pub base_path: Option<String>,
+    /// CIDR blocks of reverse proxies whose `X-Forwarded-For` may be trusted.
+    pub trusted_proxies: Vec<String>,
+    /// How many proxy hops to strip when resolving the client address.
+    pub trusted_proxy_hops: usize,
 }
+
+impl Default for RawServerConfig {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 0,
+            issuer: String::new(),
+            role: String::new(),
+            request_timeout: String::new(),
+            base_path: None,
+            trusted_proxies: Vec::new(),
+            trusted_proxy_hops: DEFAULT_TRUSTED_PROXY_HOPS,
+        }
+    }
+}
+
+/// Default for `server.trusted_proxy_hops`: one reverse proxy in front.
+pub const DEFAULT_TRUSTED_PROXY_HOPS: usize = 1;
+/// Upper bound on `server.trusted_proxy_hops`.
+pub const MAX_TRUSTED_PROXY_HOPS: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -124,6 +153,12 @@ pub struct ServerConfig {
     pub role: ServerRole,
     pub request_timeout: std::time::Duration,
     pub base_path: Option<String>,
+    /// CIDR blocks of reverse proxies whose forwarded-address headers may be
+    /// trusted; parsed at load so the middleware never re-parses per request.
+    pub trusted_proxies: Vec<IpNet>,
+    /// How many proxy hops to strip when resolving the client address.
+    /// Narrowed at load to `1..=MAX_TRUSTED_PROXY_HOPS`.
+    pub trusted_proxy_hops: usize,
 }
 
 impl ServerConfig {
@@ -135,6 +170,25 @@ impl ServerConfig {
             role: ServerRole::parse_field("server.role", raw.role)?,
             request_timeout: parse_duration_field("server.request_timeout", &raw.request_timeout)?,
             base_path: raw.base_path,
+            trusted_proxies: raw
+                .trusted_proxies
+                .iter()
+                .map(|cidr| {
+                    cidr.parse::<IpNet>().map_err(|_| Error::ConfigError {
+                        detail: format!("server.trusted_proxies entry {cidr:?} must be a CIDR"),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            trusted_proxy_hops: {
+                if !(1..=MAX_TRUSTED_PROXY_HOPS).contains(&raw.trusted_proxy_hops) {
+                    return Err(Error::ConfigError {
+                        detail: format!(
+                            "server.trusted_proxy_hops must be between 1 and {MAX_TRUSTED_PROXY_HOPS}"
+                        ),
+                    });
+                }
+                raw.trusted_proxy_hops
+            },
         })
     }
 }
@@ -349,13 +403,27 @@ impl GrantsConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawAuditConfig {
     pub adapter: String,
     pub blocking_threshold: String,
     pub emit_threshold: String,
+    /// Mandatory security audit failure policy: `observe` or `enforce`.
+    pub durability: String,
     pub sqs: Option<RawSqsAuditConfig>,
+}
+
+impl Default for RawAuditConfig {
+    fn default() -> Self {
+        Self {
+            adapter: String::new(),
+            blocking_threshold: String::new(),
+            emit_threshold: String::new(),
+            durability: "observe".to_string(),
+            sqs: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -363,7 +431,33 @@ pub struct AuditConfig {
     pub adapter: AuditAdapter,
     pub blocking_threshold: AuditSeverity,
     pub emit_threshold: AuditSeverity,
+    /// Mandatory security audit failure policy: whether a failed mandatory
+    /// emission is observed (logged, counted) or enforced (the request fails).
+    pub durability: AuditDurability,
     pub sqs: Option<SqsAuditConfig>,
+}
+
+/// Closed domain for `audit.durability`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditDurability {
+    Observe,
+    Enforce,
+}
+
+impl AuditDurability {
+    pub fn is_enforce(self) -> bool {
+        matches!(self, Self::Enforce)
+    }
+
+    fn parse_field(field: &str, value: String) -> Result<Self, Error> {
+        match value.as_str() {
+            "observe" => Ok(Self::Observe),
+            "enforce" => Ok(Self::Enforce),
+            other => Err(Error::ConfigError {
+                detail: format!("{field} {other:?} must be \"observe\" or \"enforce\""),
+            }),
+        }
+    }
 }
 
 impl AuditConfig {
@@ -375,6 +469,7 @@ impl AuditConfig {
                 raw.blocking_threshold,
             )?,
             emit_threshold: parse_audit_severity_field("audit.emit_threshold", raw.emit_threshold)?,
+            durability: AuditDurability::parse_field("audit.durability", raw.durability)?,
             sqs: raw.sqs.map(SqsAuditConfig::resolve).transpose()?,
         })
     }
@@ -592,6 +687,142 @@ impl SessionRepositoryConfig {
     /// The cleanup interval in seconds, for the reaper's tick arithmetic.
     pub fn cleanup_interval_secs(&self) -> u64 {
         self.cleanup_interval.as_secs()
+    }
+}
+
+pub const DEFAULT_RATE_LIMIT_MAX_ENTRIES: usize = 10_000;
+pub const MIN_RATE_LIMIT_MAX_ENTRIES: usize = 1;
+pub const MAX_RATE_LIMIT_MAX_ENTRIES: usize = 100_000;
+pub const MIN_RATE_LIMIT_WINDOW_SECS: u64 = 1;
+pub const MAX_RATE_LIMIT_WINDOW_SECS: u64 = 24 * 60 * 60;
+pub const MIN_RATE_LIMIT_MAX_CONCURRENT_REQUESTS: usize = 1;
+pub const MAX_RATE_LIMIT_MAX_CONCURRENT_REQUESTS: usize = 4_096;
+pub const MAX_RATE_LIMIT_BUDGET: u64 = 1_000_000;
+
+/// Serde mirror of `[rate_limit]`, resolved into [`RateLimitConfig`].
+/// A scope budget of zero intentionally disables that scope.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RawRateLimitConfig {
+    pub enabled: bool,
+    pub store: String,
+    pub window: String,
+    pub per_ip: u64,
+    pub per_ip_failures: u64,
+    pub per_subject: u64,
+    pub per_provider: u64,
+    pub max_concurrent_requests: usize,
+    pub max_entries: usize,
+}
+
+impl Default for RawRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            store: "in_process".to_string(),
+            window: "1m".to_string(),
+            per_ip: 60,
+            per_ip_failures: 10,
+            per_subject: 10,
+            per_provider: 600,
+            max_concurrent_requests: 256,
+            max_entries: DEFAULT_RATE_LIMIT_MAX_ENTRIES,
+        }
+    }
+}
+
+/// Closed domain for `rate_limit.store`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitStore {
+    InProcess,
+    None,
+}
+
+impl RateLimitStore {
+    fn parse_field(field: &str, value: String) -> Result<Self, Error> {
+        match value.as_str() {
+            "in_process" => Ok(Self::InProcess),
+            "none" => Ok(Self::None),
+            other => Err(Error::ConfigError {
+                detail: format!("{field} {other:?} must be \"in_process\" or \"none\""),
+            }),
+        }
+    }
+}
+
+/// Fixed-window rate-limit settings, narrowed at load. A scope budget of zero
+/// intentionally disables that scope.
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub enabled: bool,
+    pub store: RateLimitStore,
+    pub window: std::time::Duration,
+    pub per_ip: u64,
+    pub per_ip_failures: u64,
+    pub per_subject: u64,
+    pub per_provider: u64,
+    pub max_concurrent_requests: usize,
+    pub max_entries: usize,
+}
+
+impl RateLimitConfig {
+    fn resolve(raw: RawRateLimitConfig) -> Result<Self, Error> {
+        let store = RateLimitStore::parse_field("rate_limit.store", raw.store)?;
+        if raw.enabled && store == RateLimitStore::None {
+            return Err(Error::ConfigError {
+                detail: "rate_limit.store must be \"in_process\" when rate_limit.enabled is true"
+                    .to_string(),
+            });
+        }
+        let window = parse_duration_field("rate_limit.window", &raw.window)?;
+        if !(MIN_RATE_LIMIT_WINDOW_SECS..=MAX_RATE_LIMIT_WINDOW_SECS).contains(&window.as_secs()) {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "rate_limit.window must be between {MIN_RATE_LIMIT_WINDOW_SECS}s and {MAX_RATE_LIMIT_WINDOW_SECS}s"
+                ),
+            });
+        }
+        if !(MIN_RATE_LIMIT_MAX_ENTRIES..=MAX_RATE_LIMIT_MAX_ENTRIES).contains(&raw.max_entries) {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "rate_limit.max_entries must be between {MIN_RATE_LIMIT_MAX_ENTRIES} and {MAX_RATE_LIMIT_MAX_ENTRIES}"
+                ),
+            });
+        }
+        if !(MIN_RATE_LIMIT_MAX_CONCURRENT_REQUESTS..=MAX_RATE_LIMIT_MAX_CONCURRENT_REQUESTS)
+            .contains(&raw.max_concurrent_requests)
+        {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "rate_limit.max_concurrent_requests must be between {MIN_RATE_LIMIT_MAX_CONCURRENT_REQUESTS} and {MAX_RATE_LIMIT_MAX_CONCURRENT_REQUESTS}"
+                ),
+            });
+        }
+        for (field, budget) in [
+            ("rate_limit.per_ip", raw.per_ip),
+            ("rate_limit.per_ip_failures", raw.per_ip_failures),
+            ("rate_limit.per_subject", raw.per_subject),
+            ("rate_limit.per_provider", raw.per_provider),
+        ] {
+            if budget > MAX_RATE_LIMIT_BUDGET {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "{field} must be between 0 (disabled) and {MAX_RATE_LIMIT_BUDGET}"
+                    ),
+                });
+            }
+        }
+        Ok(Self {
+            enabled: raw.enabled,
+            store,
+            window,
+            per_ip: raw.per_ip,
+            per_ip_failures: raw.per_ip_failures,
+            per_subject: raw.per_subject,
+            per_provider: raw.per_provider,
+            max_concurrent_requests: raw.max_concurrent_requests,
+            max_entries: raw.max_entries,
+        })
     }
 }
 
@@ -1089,12 +1320,19 @@ impl SigningAlgorithm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditAdapter {
     Noop,
+    Stdout,
+    Stderr,
+    /// `stdout` under a detected Lambda runtime, `stderr` elsewhere.
+    Auto,
     Sqs,
 }
 impl AuditAdapter {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Noop => "noop",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Auto => "auto",
             Self::Sqs => "sqs",
         }
     }
@@ -1102,6 +1340,9 @@ impl AuditAdapter {
     fn parse_field(field: &str, value: String) -> Result<Self, Error> {
         match value.as_str() {
             "noop" => Ok(Self::Noop),
+            "stdout" => Ok(Self::Stdout),
+            "stderr" => Ok(Self::Stderr),
+            "auto" => Ok(Self::Auto),
             "sqs" => Ok(Self::Sqs),
             _ => Err(Error::ConfigError {
                 detail: format!("{field}: invalid audit adapter {value:?}"),
@@ -1502,7 +1743,7 @@ mod tests {
             ("registration.mode", "existing_users"),
             ("key_manager.adapter", ""),
             ("repository.adapter", ""),
-            ("audit.adapter", "stdout"),
+            ("audit.adapter", "syslog"),
             ("telemetry.exporter", "xray"),
         ];
 

@@ -25,6 +25,7 @@ fn base_raw_config() -> RawConfig {
             role: "all".to_string(),
             request_timeout: "30s".to_string(),
             base_path: None,
+            ..RawServerConfig::default()
         },
         registration: RawRegistrationConfig {
             mode: "open".to_string(),
@@ -42,6 +43,7 @@ fn base_raw_config() -> RawConfig {
             blocking_threshold: "warning".to_string(),
             emit_threshold: "info".to_string(),
             sqs: None,
+            ..RawAuditConfig::default()
         },
         telemetry: RawTelemetryConfig {
             enabled: false,
@@ -76,6 +78,7 @@ fn make_service_with_mocks(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     );
@@ -98,6 +101,7 @@ fn make_service_with_provider(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     )
@@ -122,6 +126,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -960,22 +965,20 @@ async fn admin_reads_emit_no_audit_events() {
     );
 }
 
-// ─── Blocking audit rules distinguish admin audit from best-effort sync ────
+// ─── Mandatory audit durability for admin mutations ────────────────────────
 
-/// A blocking-threshold audit failure on an admin mutation propagates as
-/// `Err`, and — because the emission happens before the best-effort
-/// user-sync notify — the notify call never fires. This is the contrast
-/// with `notify_user_created`/`updated`/`deleted`, which only warn-and-log on
-/// failure and never abort the operation.
+/// Admin mutation auditing bypasses threshold filtering and fails closed when
+/// its mandatory audit sink is configured to enforce durability.
 #[tokio::test]
-async fn admin_create_user_blocking_audit_failure_propagates_err_and_skips_sync() {
-    // `blocking_threshold: "info"` covers every severity from Emergency down
-    // to Info, so the Notice-severity `UserCreated` emission is blocking.
+async fn admin_create_user_enforced_audit_failure_propagates_durability_error_and_skips_sync() {
     let config = Config::resolve(RawConfig {
         audit: oidc_exchange_core::config::RawAuditConfig {
             adapter: "noop".to_string(),
-            blocking_threshold: "info".to_string(),
-            emit_threshold: "info".to_string(),
+            durability: "enforce".to_string(),
+            // This intentionally excludes Notice from threshold-filtered
+            // best-effort emission; admin auditing must still be attempted.
+            emit_threshold: "warning".to_string(),
+            blocking_threshold: "emergency".to_string(),
             sqs: None,
         },
         ..base_raw_config()
@@ -993,15 +996,15 @@ async fn admin_create_user_blocking_audit_failure_propagates_err_and_skips_sync(
     let err = svc
         .admin_create_user(&nu)
         .await
-        .expect_err("a blocking audit failure must propagate as Err");
+        .expect_err("an enforced mandatory audit failure must propagate as Err");
 
     match err {
-        Error::AuditError { .. } => {}
-        other => panic!("expected AuditError to propagate, got: {:?}", other),
+        Error::SecurityAuditDurability { .. } => {}
+        other => panic!("expected SecurityAuditDurability, got: {:?}", other),
     }
 
     assert!(
         sync_clone.calls().await.is_empty(),
-        "a blocking audit failure must short-circuit before the best-effort sync notify runs"
+        "a mandatory audit failure must short-circuit before the best-effort sync notify runs"
     );
 }

@@ -41,13 +41,16 @@ fn build_test_app() -> Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
         providers,
         config.clone(),
     );
 
+    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter,
     };
 
     public_routes()
@@ -173,13 +176,16 @@ async fn internal_auth_rejects_empty_configured_secret_even_with_empty_bearer_to
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
         providers,
         config.clone(),
     );
 
+    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter,
     };
 
     let app = public_routes()
@@ -607,6 +613,7 @@ fn build_test_app_with_shared_session_store() -> (Router, MockRepository) {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config.clone(),
     );
@@ -614,6 +621,7 @@ fn build_test_app_with_shared_session_store() -> (Router, MockRepository) {
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter: std::sync::Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
     };
 
     (

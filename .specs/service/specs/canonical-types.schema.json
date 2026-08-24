@@ -6,44 +6,144 @@
   "$defs": {
     "UserStatus": {
       "type": "string",
-      "enum": ["active", "suspended", "deleted"]
+      "enum": [
+        "active",
+        "suspended",
+        "deleted"
+      ]
     },
     "User": {
       "type": "object",
-      "required": ["id", "external_id", "provider", "metadata", "claims", "status", "version", "created_at", "updated_at"],
+      "required": [
+        "id",
+        "external_id",
+        "provider",
+        "metadata",
+        "claims",
+        "status",
+        "version",
+        "created_at",
+        "updated_at"
+      ],
       "properties": {
-        "id": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
-        "external_id": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "Provider sub claim or DID." },
-        "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
-        "email": { "type": ["string", "null"], "format": "email" },
-        "display_name": { "type": ["string", "null"] },
-        "metadata": { "type": "object", "additionalProperties": true, "description": "Extensible sync/profile data; readable by claim templates." },
-        "claims": { "type": "object", "additionalProperties": true, "description": "Per-user private claims merged into the access token JWT." },
-        "status": { "$ref": "#/$defs/UserStatus" },
-        "version": { "type": "integer", "minimum": 1, "description": "Optimistic-concurrency counter; starts at 1 on create, incremented by every update_user." },
-        "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
-        "updated_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
+        "id": {
+          "$ref": "../../canonical-types.schema.json#/$defs/Id"
+        },
+        "external_id": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+          "description": "Provider sub claim or DID."
+        },
+        "provider": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString"
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Extensible sync/profile data; readable by claim templates."
+        },
+        "claims": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Per-user private claims merged into the access token JWT."
+        },
+        "status": {
+          "$ref": "#/$defs/UserStatus"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optimistic-concurrency counter; starts at 1 on create, incremented by every update_user."
+        },
+        "created_at": {
+          "$ref": "../../canonical-types.schema.json#/$defs/Timestamp"
+        },
+        "updated_at": {
+          "$ref": "../../canonical-types.schema.json#/$defs/Timestamp"
+        }
       }
     },
     "NewUser": {
       "type": "object",
-      "required": ["external_id", "provider"],
+      "required": [
+        "external_id",
+        "provider"
+      ],
       "properties": {
-        "external_id": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
-        "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
-        "email": { "type": ["string", "null"], "format": "email" },
-        "display_name": { "type": ["string", "null"] }
+        "external_id": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString"
+        },
+        "provider": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString"
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "UserPatch": {
       "type": "object",
       "description": "All fields optional; a present claims map REPLACES the whole claims set.",
       "properties": {
-        "email": { "type": ["string", "null"], "format": "email" },
-        "display_name": { "type": ["string", "null"] },
-        "metadata": { "type": ["object", "null"], "additionalProperties": true },
-        "claims": { "type": ["object", "null"], "additionalProperties": true },
-        "status": { "oneOf": [{ "$ref": "#/$defs/UserStatus" }, { "type": "null" }] }
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "claims": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "status": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/UserStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
       }
     },
     "Session": {
@@ -92,18 +192,44 @@
     },
     "TokenResponse": {
       "type": "object",
-      "required": ["access_token", "token_type", "expires_in"],
+      "required": [
+        "access_token",
+        "token_type",
+        "expires_in"
+      ],
       "properties": {
-        "access_token": { "type": "string" },
-        "refresh_token": { "type": ["string", "null"], "description": "Present on exchange and on refresh; null on refresh only when token.refresh_rotation is false." },
-        "token_type": { "type": "string", "const": "Bearer" },
-        "expires_in": { "type": "integer", "minimum": 0, "description": "Seconds until the access token expires." }
+        "access_token": {
+          "type": "string"
+        },
+        "refresh_token": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Present on exchange and on refresh; null on refresh only when token.refresh_rotation is false."
+        },
+        "token_type": {
+          "type": "string",
+          "const": "Bearer"
+        },
+        "expires_in": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds until the access token expires."
+        }
       }
     },
     "AccessTokenClaims": {
       "type": "object",
       "description": "JWT payload. custom claims are flattened alongside the registered claims.",
-      "required": ["sub", "iss", "aud", "iat", "exp", "sid"],
+      "required": [
+        "sub",
+        "iss",
+        "aud",
+        "iat",
+        "exp",
+        "sid"
+      ],
       "properties": {
         "sub": { "$ref": "../../canonical-types.schema.json#/$defs/Id" },
         "iss": {
@@ -122,34 +248,69 @@
           "description": "Session identifier: the family_id of the session this access token was minted for. Stable across refresh-token rotation; names the only session (token family) the token may revoke."
         },
         "iat": { "type": "integer" },
-        "exp": { "type": "integer" },
-        "sid": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "description": "Session identifier: the SHA-256 hex refresh_token_hash of the session this access token was minted for. Names the only session the token may revoke."
-        }
+        "exp": { "type": "integer" }
       },
       "additionalProperties": true
     },
     "ProviderTokens": {
       "type": "object",
-      "required": ["id_token"],
+      "required": [
+        "id_token"
+      ],
       "properties": {
-        "id_token": { "type": "string" },
-        "refresh_token": { "type": ["string", "null"] },
-        "access_token": { "type": ["string", "null"] }
+        "id_token": {
+          "type": "string"
+        },
+        "refresh_token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "access_token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "IdentityClaims": {
       "type": "object",
-      "required": ["subject", "signing_alg", "raw_claims"],
+      "required": [
+        "subject",
+        "signing_alg",
+        "raw_claims"
+      ],
       "properties": {
-        "subject": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString", "description": "Provider sub / DID." },
-        "email": { "type": ["string", "null"], "format": "email" },
-        "email_verified": { "type": ["boolean", "null"] },
-        "name": { "type": ["string", "null"] },
+        "subject": {
+          "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+          "description": "Provider sub / DID."
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "email"
+        },
+        "email_verified": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "is_private_email": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "Apple private-relay flag, coerced bool-or-string like email_verified; null for non-Apple providers."
         },
         "signing_alg": {
@@ -200,79 +361,234 @@
     },
     "AuditSeverity": {
       "type": "string",
-      "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"],
+      "enum": [
+        "emergency",
+        "alert",
+        "critical",
+        "error",
+        "warning",
+        "notice",
+        "info",
+        "debug"
+      ],
       "description": "RFC 5424 syslog levels; emergency is most severe."
     },
     "AuditEventType": {
       "type": "string",
       "enum": [
-        "token_exchange", "token_refresh", "token_revocation", "session_revoked",
-        "all_sessions_revoked", "user_created", "user_updated", "user_suspended",
-        "user_deleted", "validation_failed", "registration_denied", "provider_error",
-        "unauthorized", "refresh_token_reuse"
+        "token_exchange",
+        "token_refresh",
+        "token_revocation",
+        "session_revoked",
+        "all_sessions_revoked",
+        "user_created",
+        "user_updated",
+        "user_suspended",
+        "user_deleted",
+        "validation_failed",
+        "registration_denied",
+        "provider_error",
+        "unauthorized",
+        "throttle_exceeded",
+        "refresh_token_reuse"
       ]
     },
     "AuditOutcome": {
       "type": "object",
-      "required": ["status"],
+      "required": [
+        "status"
+      ],
       "properties": {
-        "status": { "type": "string", "enum": ["success", "failure"] },
-        "reason": { "type": ["string", "null"] }
+        "status": {
+          "type": "string",
+          "enum": [
+            "success",
+            "failure"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "AuditEvent": {
       "type": "object",
-      "required": ["id", "timestamp", "severity", "event_type", "detail", "outcome"],
+      "required": [
+        "id",
+        "timestamp",
+        "severity",
+        "event_type",
+        "ip_address_source",
+        "detail",
+        "outcome"
+      ],
       "properties": {
-        "id": { "$ref": "../../canonical-types.schema.json#/$defs/Ulid" },
-        "timestamp": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
-        "severity": { "$ref": "#/$defs/AuditSeverity" },
-        "event_type": { "$ref": "#/$defs/AuditEventType" },
-        "actor": { "type": ["string", "null"], "description": "User id if known." },
-        "provider": { "type": ["string", "null"] },
-        "ip_address": { "type": ["string", "null"] },
-        "user_agent": { "type": ["string", "null"] },
-        "detail": { "type": "object", "additionalProperties": true },
-        "outcome": { "$ref": "#/$defs/AuditOutcome" }
+        "id": {
+          "$ref": "../../canonical-types.schema.json#/$defs/Ulid"
+        },
+        "timestamp": {
+          "$ref": "../../canonical-types.schema.json#/$defs/Timestamp"
+        },
+        "severity": {
+          "$ref": "#/$defs/AuditSeverity"
+        },
+        "event_type": {
+          "$ref": "#/$defs/AuditEventType"
+        },
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "User id if known."
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ip_address": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_agent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detail": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "outcome": {
+          "$ref": "#/$defs/AuditOutcome"
+        },
+        "ip_address_source": {
+          "$ref": "#/$defs/ClientAddrSource"
+        }
       }
     },
     "OidcProviderConfig": {
       "type": "object",
-      "required": ["provider_id", "issuer", "client_id", "scopes"],
+      "required": [
+        "provider_id",
+        "issuer",
+        "client_id",
+        "scopes"
+      ],
       "properties": {
-        "provider_id": { "type": "string" },
-        "issuer": { "type": "string", "description": "Used for OIDC discovery." },
-        "client_id": { "type": "string" },
-        "client_secret": { "type": ["string", "null"] },
-        "jwks_uri": { "type": ["string", "null"] },
-        "token_endpoint": { "type": ["string", "null"] },
-        "revocation_endpoint": { "type": ["string", "null"] },
-        "scopes": { "type": "array", "items": { "type": "string" } },
-        "additional_params": { "type": "object", "additionalProperties": { "type": "string" } }
+        "provider_id": {
+          "type": "string"
+        },
+        "issuer": {
+          "type": "string",
+          "description": "Used for OIDC discovery."
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "client_secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jwks_uri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revocation_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "additional_params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
       }
     },
     "AdminStats": {
       "type": "object",
-      "required": ["users", "sessions"],
+      "required": [
+        "users",
+        "sessions"
+      ],
       "properties": {
         "users": {
           "type": "object",
-          "required": ["total", "active", "suspended", "deleted"],
+          "required": [
+            "total",
+            "active",
+            "suspended",
+            "deleted"
+          ],
           "properties": {
-            "total": { "type": "integer", "minimum": 0 },
-            "active": { "type": "integer", "minimum": 0 },
-            "suspended": { "type": "integer", "minimum": 0 },
-            "deleted": { "type": "integer", "minimum": 0 }
+            "total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "active": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "suspended": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "deleted": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "sessions": {
           "type": "object",
-          "required": ["active"],
+          "required": [
+            "active"
+          ],
           "properties": {
-            "active": { "type": "integer", "minimum": 0 }
+            "active": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       }
+    },
+    "ClientAddrSource": {
+      "type": "string",
+      "enum": [
+        "peer",
+        "forwarded",
+        "asserted",
+        "unknown"
+      ],
+      "description": "Provenance of AuditEvent.ip_address. peer is observed by the server or runtime platform; forwarded is selected from X-Forwarded-For only behind server.trusted_proxies; asserted is client-controlled and never a rate-limit key; unknown has no usable address."
     }
   }
 }

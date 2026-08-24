@@ -30,6 +30,9 @@ pub enum Error {
     #[error("not found: {detail}")]
     NotFound { detail: String },
 
+    #[error("too many requests; retry after {retry_after_secs} seconds")]
+    TooManyRequests { retry_after_secs: u64 },
+
     // Provider errors (upstream)
     #[error("provider error ({provider}): {detail}")]
     ProviderError { provider: String, detail: String },
@@ -46,6 +49,9 @@ pub enum Error {
 
     #[error("audit error: {detail}")]
     AuditError { detail: String },
+
+    #[error("mandatory security audit could not be persisted: {detail}")]
+    SecurityAuditDurability { detail: String },
 
     #[error("sync error: {detail}")]
     SyncError { detail: String },

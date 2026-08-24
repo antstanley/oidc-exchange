@@ -50,7 +50,9 @@ table_name = "oidc-exchange"
 region = "us-east-1"
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
+durability = "enforce"
+emit_threshold = "info"
 
 [telemetry]
 enabled = true

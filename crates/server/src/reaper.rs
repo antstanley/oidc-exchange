@@ -280,6 +280,7 @@ mod tests {
             Box::new(MockKeyManager::new()),
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
+            Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
             providers_map(),
             Config::test_default(),
         ));
@@ -504,6 +505,7 @@ mod tests {
             Box::new(MockKeyManager::new()),
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
+            Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
             providers_map(),
             Config::test_default(),
         ));

@@ -8,13 +8,14 @@ use tokio::sync::Mutex;
 
 use oidc_exchange_core::config::DEFAULT_REFRESH_REUSE_RETENTION;
 use oidc_exchange_core::domain::{
-    is_valid_family_id, AuditEvent, IdentityClaims, NewUser, ProviderTokens, RefreshResolution,
-    RetiredRefreshToken, Session, SingleUseRecord, User, UserPatch, UserStatus,
-    INITIAL_USER_VERSION,
+    is_valid_family_id, AuditEvent, IdentityClaims, NewUser, ProviderTokens,
+    RateLimitDecision, RateLimitKey, RefreshResolution, RetiredRefreshToken, Session,
+    SingleUseRecord, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 
 pub mod session_contract;
@@ -721,6 +722,63 @@ impl AuditLog for MockAuditLog {
 }
 
 // ---------------------------------------------------------------------------
+// MockRateLimiter
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct MockRateLimiter {
+    decisions: Arc<Mutex<Vec<RateLimitDecision>>>,
+    keys: Arc<Mutex<Vec<RateLimitKey>>>,
+    fail_mode: Arc<Mutex<bool>>,
+}
+
+impl MockRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            decisions: Arc::new(Mutex::new(Vec::new())),
+            keys: Arc::new(Mutex::new(Vec::new())),
+            fail_mode: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    pub async fn set_decisions(&self, decisions: Vec<RateLimitDecision>) {
+        *self.decisions.lock().await = decisions;
+    }
+
+    pub async fn keys(&self) -> Vec<RateLimitKey> {
+        self.keys.lock().await.clone()
+    }
+
+    pub async fn set_fail_mode(&self, fail: bool) {
+        *self.fail_mode.lock().await = fail;
+    }
+}
+
+impl Default for MockRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl RateLimiter for MockRateLimiter {
+    async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
+        if *self.fail_mode.lock().await {
+            return Err(Error::StoreError {
+                detail: "mock rate limiter failure".into(),
+            });
+        }
+        self.keys.lock().await.push(key.clone());
+        Ok(self
+            .decisions
+            .lock()
+            .await
+            .pop()
+            .unwrap_or(RateLimitDecision::Allow))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MockUserSync
 // ---------------------------------------------------------------------------
 
@@ -826,6 +884,8 @@ pub struct MockIdentityProvider {
     /// `client_id()`; configurable so binding tests can exercise `azp` mismatches.
     client_id: String,
     exchange_response: Arc<Mutex<Option<ProviderTokens>>>,
+    exchange_error: Arc<Mutex<Option<String>>>,
+    exchange_timeout: Arc<Mutex<bool>>,
     claims_response: Arc<Mutex<Option<IdentityClaims>>>,
     /// Monotonic counters, one per port method, so tests can prove a request
     /// path never reached the provider (e.g. grant-confusion rejections must
@@ -868,6 +928,8 @@ impl MockIdentityProvider {
             // then builds fresh defaults per call (unique `jti`, live `exp`)
             // instead of replaying one frozen template forever.
             claims_response: Arc::new(Mutex::new(None)),
+            exchange_error: Arc::new(Mutex::new(None)),
+            exchange_timeout: Arc::new(Mutex::new(false)),
             exchange_code_calls: Arc::new(AtomicU32::new(0)),
             validate_id_token_calls: Arc::new(AtomicU32::new(0)),
             revoke_token_calls: Arc::new(AtomicU32::new(0)),
@@ -928,6 +990,28 @@ impl MockIdentityProvider {
         *self.exchange_response.lock().await = Some(tokens);
     }
 
+    pub async fn set_exchange_error(&self, detail: impl Into<String>) {
+        *self.exchange_error.lock().await = Some(detail.into());
+    }
+
+    /// Make the next exchange fail as an OAuth invalid_grant credential rejection.
+    pub async fn set_invalid_grant(&self) {
+        *self.exchange_error.lock().await = Some("invalid_grant".into());
+    }
+
+    /// Toggle a typed upstream timeout for exchange-code test paths.
+    pub async fn set_exchange_timeout(&self, timeout: bool) {
+        *self.exchange_timeout.lock().await = timeout;
+    }
+
+    pub async fn exchange_code_call_count(&self) -> usize {
+        self.exchange_code_calls.load(Ordering::SeqCst) as usize
+    }
+
+    pub async fn validate_id_token_call_count(&self) -> usize {
+        self.validate_id_token_calls.load(Ordering::SeqCst) as usize
+    }
+
     /// Override the audience reported through the port's `client_id()`. Consuming
     /// builder (not a setter): the port hands out `&str` borrowed from this field, so
     /// it must be fixed before the mock is shared with the service under test.
@@ -942,6 +1026,22 @@ impl MockIdentityProvider {
 impl IdentityProvider for MockIdentityProvider {
     async fn exchange_code(&self, _code: &str, _redirect_uri: &str) -> Result<ProviderTokens> {
         self.exchange_code_calls.fetch_add(1, Ordering::SeqCst);
+        if *self.exchange_timeout.lock().await {
+            return Err(Error::ProviderTimeout {
+                provider: self.provider_id.clone(),
+            });
+        }
+        if let Some(detail) = self.exchange_error.lock().await.clone() {
+            if detail == "invalid_grant" {
+                return Err(Error::InvalidGrant {
+                    reason: "provider rejected credentials".into(),
+                });
+            }
+            return Err(Error::ProviderError {
+                provider: self.provider_id.clone(),
+                detail,
+            });
+        }
         let response = self.exchange_response.lock().await;
         // Port-contract postcondition on the double itself: an empty id_token
         // here would silently invalidate every downstream assertion about

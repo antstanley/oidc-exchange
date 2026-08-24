@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
-use crate::domain::{AuditEventType, AuditOutcome, AuditSeverity, IdentityClaims};
+use crate::domain::{AuditEventType, AuditFailure, AuditOutcome, AuditSeverity, ClientAddr, IdentityClaims};
 use crate::error::{Error, Result};
 use crate::ports::SessionRepository;
 use crate::service::{create_audit_event, AppService};
@@ -467,35 +467,6 @@ impl AppService {
             nonce,
             expires_in: ttl_secs,
         })
-    }
-
-    /// Emit the canonical `ValidationFailed`/`Warning` audit event for a
-    /// binding rejection, tagging the failed control in `detail.check`, then
-    /// translate the rejection into the domain error callers map to
-    /// `invalid_grant`. Store failures never reach this method.
-    pub(crate) async fn audit_binding_rejection(
-        &self,
-        rejection: &AssertionRejection,
-        provider: Option<&str>,
-        ip_address: Option<&str>,
-        user_agent: Option<&str>,
-    ) -> Result<()> {
-        let mut event = create_audit_event(
-            AuditEventType::ValidationFailed,
-            AuditSeverity::Warning,
-            AuditOutcome::Failure {
-                reason: rejection.reason.clone(),
-            },
-            None,
-            provider.map(str::to_string),
-            ip_address.map(str::to_string),
-            user_agent.map(str::to_string),
-        );
-        event.detail.insert(
-            "check".to_string(),
-            serde_json::Value::String(rejection.check.to_string()),
-        );
-        self.emit_audit(event).await
     }
 }
 

@@ -10,8 +10,8 @@ use oidc_exchange_core::config::{
     RawTokenConfig,
 };
 use oidc_exchange_core::domain::{
-    is_valid_family_id, AccessTokenClaims, AuditEventType, AuditOutcome, AuditSeverity,
-    IdentityClaims, NewUser, User, UserPatch, UserStatus,
+    is_valid_family_id, AccessTokenClaims, AuditEventType, AuditFailure, AuditOutcome,
+    AuditSeverity, IdentityClaims, NewUser, User, UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -31,6 +31,7 @@ fn base_raw_config() -> RawConfig {
             role: "all".to_string(),
             request_timeout: "30s".to_string(),
             base_path: None,
+            ..RawServerConfig::default()
         },
         registration: RawRegistrationConfig {
             mode: "open".to_string(),
@@ -48,6 +49,7 @@ fn base_raw_config() -> RawConfig {
             blocking_threshold: "warning".to_string(),
             emit_threshold: "info".to_string(),
             sqs: None,
+            ..RawAuditConfig::default()
         },
         telemetry: RawTelemetryConfig {
             enabled: false,
@@ -104,6 +106,7 @@ fn make_service_with_config(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -118,6 +121,22 @@ fn make_service_with_user_repo(
     provider: MockIdentityProvider,
     config: Config,
 ) -> AppService {
+    make_service_with_user_repo_and_audit(
+        user_repo,
+        session_repo,
+        provider,
+        config,
+        MockAuditLog::new(),
+    )
+}
+
+fn make_service_with_user_repo_and_audit(
+    user_repo: Box<dyn UserRepository>,
+    session_repo: MockRepository,
+    provider: MockIdentityProvider,
+    config: Config,
+    audit: MockAuditLog,
+) -> AppService {
     let provider_id = provider.provider_id().to_string();
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert(provider_id, Box::new(provider));
@@ -126,8 +145,9 @@ fn make_service_with_user_repo(
         user_repo,
         Box::new(session_repo),
         Box::new(MockKeyManager::new()),
-        Box::new(MockAuditLog::new()),
+        Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -152,6 +172,7 @@ fn make_service_with_user_sync(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -175,6 +196,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config,
     )
@@ -1089,6 +1111,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         Box::new(MockKeyManager::new()),
         Box::new(audit_b),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         make_config(),
     );
@@ -1215,11 +1238,14 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
     // real infrastructure failure); the exchange must propagate it directly
     // rather than treating it as a race and silently re-looking up.
     let (failing_repo, lookup_calls) = FailingCreateUserRepository::new(repo.clone());
-    let svc = make_service_with_user_repo(
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_user_repo_and_audit(
         Box::new(failing_repo),
         repo.clone(),
         provider,
         make_config(),
+        audit,
     );
 
     let request = ExchangeRequest {
@@ -1243,6 +1269,16 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         other => panic!("expected StoreError to propagate, got: {:?}", other),
     }
 
+    // Infrastructure failures are not client-attributable outcomes: they are
+    // not recorded as authentication failures (the failing store may be the
+    // audit dependency itself), so no terminal event is emitted at all.
+    let events = audit_clone.events().await;
+    assert!(
+        events.is_empty(),
+        "an infrastructure failure must not be recorded as an authentication outcome: {:?}",
+        events.iter().map(|e| e.event_type.clone()).collect::<Vec<_>>()
+    );
+
     // No user or session was created, and the flow did not swallow the
     // infra error to attempt a silent re-lookup.
     assert_eq!(repo.get_all_users().await.len(), 0);
@@ -1254,6 +1290,41 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         lookup_calls.load(Ordering::SeqCst),
         1,
         "a non-Conflict create_user error must not trigger a re-lookup"
+    );
+}
+
+#[tokio::test]
+async fn exchange_provider_timeout_emits_exactly_one_typed_terminal_event() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    provider.set_exchange_timeout(true).await;
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_audit(repo, provider, make_config(), audit);
+
+    let request = ExchangeRequest {
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
+        provider: "mock".to_string(),
+        provider_access_token: None,
+        ip_address: None,
+        user_agent: None,
+        device_id: None,
+    };
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("provider must reject");
+    assert!(matches!(err, Error::ProviderTimeout { .. }));
+
+    let events = audit_clone.events().await;
+    assert_eq!(events.len(), 1, "must emit exactly one terminal event");
+    assert_eq!(events[0].event_type, AuditEventType::ProviderError);
+    assert_eq!(
+        events[0].outcome,
+        AuditOutcome::Failure(AuditFailure::ProviderRejected)
     );
 }
 
@@ -1513,7 +1584,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
     );
     assert_eq!(events[0].event_type, AuditEventType::UserSuspended);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
@@ -1680,7 +1751,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
     assert_eq!(events[0].event_type, AuditEventType::RegistrationDenied);
     assert_eq!(events[0].severity, AuditSeverity::Warning);
     match &events[0].outcome {
-        AuditOutcome::Failure { .. } => {}
+        AuditOutcome::Failure(_) => {}
         other => panic!("expected Failure outcome, got: {:?}", other),
     }
     assert_eq!(events[0].ip_address.as_deref(), Some("203.0.113.12"));
@@ -1693,21 +1764,15 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
     );
 }
 
-/// A blocking audit failure on the success-path emission (`TokenExchange`)
-/// propagates as `Err` from `exchange`, even though the session was already
-/// stored — `emit_audit`'s blocking-threshold semantics apply to the flow.
-/// Uses a pre-existing (not newly created) user so the only audit emission
-/// on the success path is `TokenExchange` itself, isolating this case from
-/// the earlier `UserCreated` emission.
+/// An enforcing terminal audit failure revokes the newly stored session before
+/// propagating. The existing user isolates terminal success from `UserCreated`.
 #[tokio::test]
-async fn exchange_success_audit_failure_under_blocking_threshold_propagates_err() {
-    // `blocking_threshold: "info"` covers every severity from Emergency down
-    // to Info, so the `TokenExchange` (info) emission on this success path
-    // is blocking: a failing adapter must propagate.
+async fn exchange_enforce_audit_failure_revokes_new_session() {
     let config = Config::resolve(RawConfig {
         audit: oidc_exchange_core::config::RawAuditConfig {
             adapter: "noop".to_string(),
-            blocking_threshold: "info".to_string(),
+            durability: "enforce".to_string(),
+            blocking_threshold: "warning".to_string(),
             emit_threshold: "info".to_string(),
             sqs: None,
         },
@@ -1752,17 +1817,13 @@ async fn exchange_success_audit_failure_under_blocking_threshold_propagates_err(
         .expect_err("a blocking audit failure must propagate as Err");
 
     match err {
-        Error::AuditError { .. } => {}
-        other => panic!("expected AuditError to propagate, got: {:?}", other),
+        Error::SecurityAuditDurability { .. } => {}
+        other => panic!("expected SecurityAuditDurability, got: {:?}", other),
     }
 
-    // The session was already stored before the blocking audit failure was
-    // observed on the success-path `TokenExchange` event — the flow's
-    // blocking semantics do not retroactively undo prior writes.
-    assert_eq!(
-        repo.get_all_sessions().await.len(),
-        1,
-        "session write happens before the TokenExchange audit emission"
+    assert!(
+        repo.get_all_sessions().await.is_empty(),
+        "an enforcing terminal audit failure must revoke the newly stored session"
     );
 }
 

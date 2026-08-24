@@ -7,6 +7,7 @@ pub mod revoke;
 pub mod user_admin;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -14,12 +15,46 @@ use chrono::Utc;
 
 use crate::config::Config;
 use crate::domain::{
-    is_valid_family_id, AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity,
-    User,
+    is_valid_family_id, AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome,
+    AuditSeverity, ClientAddr, SecurityEvent, User,
 };
+
+/// Total mandatory audit sink failures observed by this process.
+pub(crate) static AUDIT_SINK_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Current run of consecutive mandatory audit sink failures. Any successful mandatory
+/// emission resets it, so readiness can recover after a transient sink outage.
+pub(crate) static AUDIT_SINK_CONSECUTIVE_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// A single transient failure is observable but does not fail readiness.
+pub const AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES: u64 = 3;
+
+pub fn audit_sink_failures_total() -> u64 {
+    AUDIT_SINK_FAILURES_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn audit_sink_consecutive_failures() -> u64 {
+    AUDIT_SINK_CONSECUTIVE_FAILURES.load(Ordering::Acquire)
+}
+
+pub fn audit_sink_degraded() -> bool {
+    audit_sink_consecutive_failures() >= AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES
+}
+
+pub(crate) fn record_mandatory_audit_success() {
+    AUDIT_SINK_CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+}
+
+pub(crate) fn record_mandatory_audit_failure() {
+    AUDIT_SINK_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let _ = AUDIT_SINK_CONSECUTIVE_FAILURES.fetch_update(
+        Ordering::AcqRel,
+        Ordering::Acquire,
+        |value| Some(value.saturating_add(1)),
+    );
+}
 use crate::error::{Error, Result};
 use crate::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 
 pub struct AppService {
@@ -28,17 +63,20 @@ pub struct AppService {
     pub(crate) keys: Box<dyn KeyManager>,
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
+    pub(crate) rate_limiter: Box<dyn RateLimiter>,
     pub(crate) providers: HashMap<String, Box<dyn IdentityProvider>>,
     pub(crate) config: Config,
 }
 
 impl AppService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_repo: Box<dyn UserRepository>,
         session_repo: Box<dyn SessionRepository>,
         keys: Box<dyn KeyManager>,
         audit: Box<dyn AuditLog>,
         user_sync: Box<dyn UserSync>,
+        rate_limiter: Box<dyn RateLimiter>,
         providers: HashMap<String, Box<dyn IdentityProvider>>,
         config: Config,
     ) -> Self {
@@ -48,6 +86,7 @@ impl AppService {
             keys,
             audit,
             user_sync,
+            rate_limiter,
             providers,
             config,
         }
@@ -199,10 +238,8 @@ impl AppService {
         Ok(claims)
     }
 
+    /// Emits an operational audit event through the threshold-filtered, best-effort path.
     pub async fn emit_audit(&self, event: AuditEvent) -> Result<()> {
-        // Pre-dispatch emit-threshold filter: events strictly less severe
-        // than `[audit] emit_threshold` are dropped before any adapter ever
-        // sees them, independently of the blocking-threshold decision below.
         let emit_threshold = self.config.audit.emit_threshold;
         if event.severity as u8 > emit_threshold as u8 {
             return Ok(());
@@ -210,36 +247,76 @@ impl AppService {
 
         match self.audit.emit(&event).await {
             Ok(()) => Ok(()),
-            Err(e) => {
-                // Always emit via tracing as fallback (captured by Lambda, CloudWatch, etc.)
-                let serialized =
-                    serde_json::to_string(&event).unwrap_or_else(|_| format!("{:?}", event));
-
-                if event.severity as u8 <= AuditSeverity::Error as u8 {
-                    tracing::error!(audit_fallback = true, "{serialized}");
-                } else {
-                    tracing::info!(audit_fallback = true, "{serialized}");
-                }
-
-                // Parse blocking threshold from config
+            Err(error) => {
+                self.log_audit_fallback(&event);
                 let threshold = self.config.audit.blocking_threshold;
-
                 if event.severity as u8 <= threshold as u8 {
-                    // Severity meets blocking threshold — fail the operation
-                    Err(e)
+                    Err(error)
                 } else {
-                    tracing::warn!(error = %e, "audit provider down, event emitted to std stream");
+                    tracing::warn!(error = %error, "best-effort audit provider down");
                     Ok(())
                 }
             }
         }
     }
+
+    /// Emits a security event through the mandatory path, bypassing audit thresholds.
+    ///
+    /// The event classification is closed by [`SecurityEvent`]; callers can only supply
+    /// the safe context used to construct its fixed durable representation.
+    pub async fn emit_security_event(
+        &self,
+        event: SecurityEvent,
+        outcome: AuditOutcome,
+        actor: Option<String>,
+        provider: Option<String>,
+        client_addr: ClientAddr,
+        user_agent: Option<String>,
+    ) -> Result<()> {
+        let event = event.into_audit_event(outcome, actor, provider, client_addr, user_agent);
+        self.emit_mandatory_audit_event(event).await
+    }
+
+    /// The mandatory emission path for an already-assembled event (e.g. one
+    /// enriched with correlation `detail`): bypasses audit thresholds and
+    /// applies the `audit.durability` policy.
+    pub(crate) async fn emit_mandatory_audit_event(&self, event: AuditEvent) -> Result<()> {
+        match self.audit.emit(&event).await {
+            Ok(()) => {
+                record_mandatory_audit_success();
+                Ok(())
+            }
+            Err(error) => {
+                record_mandatory_audit_failure();
+                self.log_audit_fallback(&event);
+                if self.config.audit.durability.is_enforce() {
+                    Err(Error::SecurityAuditDurability {
+                        detail: error.to_string(),
+                    })
+                } else {
+                    tracing::error!(
+                        error = %error,
+                        audit_durability_degraded = true,
+                        "mandatory security audit provider down"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    pub(crate) fn log_audit_fallback(&self, event: &AuditEvent) {
+        let serialized = serde_json::to_string(event).unwrap_or_else(|_| format!("{:?}", event));
+        if event.severity as u8 <= AuditSeverity::Error as u8 {
+            tracing::error!(audit_fallback = true, "{serialized}");
+        } else {
+            tracing::info!(audit_fallback = true, "{serialized}");
+        }
+    }
 }
 
-/// Build an [`AuditEvent`]. `ip_address` and `user_agent` come from the
-/// caller's client context (the `AuditContext` middleware at the HTTP edge);
-/// the `AuditEvent` shape has no `device_id` field, so device identifiers are
-/// recorded on the `Session` only, never on audit events.
+/// Build a best-effort [`AuditEvent`]. The address is rendered with its provenance;
+/// device identifiers remain session-only data and are never included in audit records.
 #[allow(clippy::too_many_arguments)]
 pub fn create_audit_event(
     event_type: AuditEventType,
@@ -247,7 +324,7 @@ pub fn create_audit_event(
     outcome: AuditOutcome,
     actor: Option<String>,
     provider: Option<String>,
-    ip_address: Option<String>,
+    client_addr: ClientAddr,
     user_agent: Option<String>,
 ) -> AuditEvent {
     AuditEvent {
@@ -257,7 +334,8 @@ pub fn create_audit_event(
         event_type,
         actor,
         provider,
-        ip_address,
+        ip_address: client_addr.audit_address(),
+        ip_address_source: client_addr.source(),
         user_agent,
         detail: HashMap::new(),
         outcome,
@@ -746,6 +824,18 @@ mod validate_access_token_tests {
         }
     }
 
+    struct NeverTouchedRateLimiter;
+
+    #[async_trait]
+    impl crate::ports::RateLimiter for NeverTouchedRateLimiter {
+        async fn check_and_consume(
+            &self,
+            _: &crate::domain::RateLimitKey,
+        ) -> Result<crate::domain::RateLimitDecision> {
+            unreachable!("validate_access_token must not consult the rate limiter")
+        }
+    }
+
     struct NeverTouchedProvider;
 
     #[async_trait]
@@ -782,6 +872,7 @@ mod validate_access_token_tests {
             Box::new(ToyKeyManager),
             Box::new(NeverTouchedAuditLog),
             Box::new(NeverTouchedUserSync),
+            Box::new(NeverTouchedRateLimiter),
             HashMap::from([("never".to_string(), Box::new(NeverTouchedProvider) as _)]),
             test_config(),
         )

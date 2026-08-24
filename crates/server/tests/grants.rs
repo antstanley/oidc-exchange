@@ -70,6 +70,7 @@ fn build_app(config: Config) -> (Router, MockIdentityProvider) {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
         providers,
         config.clone(),
     );

@@ -3,20 +3,25 @@ use std::sync::Arc;
 
 use axum::Router;
 use config::{Config, Environment, File, FileFormat, Value, ValueKind};
+use tokio::sync::Semaphore;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use oidc_exchange_core::config::{Config as AppConfig, ProviderConfig, RawConfig};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 use oidc_exchange_core::service::AppService;
 
+use crate::middleware::access_log::access_log_layer;
 use crate::middleware::audit_context::audit_context_layer;
 use crate::middleware::base_path::with_base_path_strip;
 use crate::middleware::error_handler::panic_handler;
+use crate::middleware::public_throttle::public_concurrency_layer;
 use crate::middleware::request_id::request_id_layer;
+use crate::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets};
 use crate::routes;
 use crate::state::AppState;
 
@@ -415,6 +420,7 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
         keys,
         audit,
         user_sync,
+        build_rate_limiter(config)?,
         providers,
         config.clone(),
     ))
@@ -469,24 +475,72 @@ pub fn build_router(config: &AppConfig, service: AppService) -> Router {
 /// router's `AppState`, so both observe one store/audit/provider set;
 /// `build_router` itself is just this plus the wrapping.
 pub fn build_router_shared(config: &AppConfig, service: Arc<AppService>) -> Router {
+    let rate_limiter = Arc::from(
+        build_rate_limiter(config).expect("validated rate-limit config at router construction"),
+    );
+    build_router_shared_with_rate_limiter(config, service, rate_limiter)
+}
+
+/// Builds the production router with the supplied retained public limiter. This is separate
+/// from [`build_router`] so service construction can pass the same concrete limiter to both
+/// core provider/subject enforcement and public address throttling.
+pub fn build_router_with_rate_limiter(
+    config: &AppConfig,
+    service: AppService,
+    rate_limiter: Arc<dyn RateLimiter>,
+) -> Router {
+    build_router_shared_with_rate_limiter(config, Arc::new(service), rate_limiter)
+}
+
+fn build_router_shared_with_rate_limiter(
+    config: &AppConfig,
+    service: Arc<AppService>,
+    rate_limiter: Arc<dyn RateLimiter>,
+) -> Router {
     let role = config.server.role.as_str();
+
+    if config.rate_limit.enabled
+        && config.server.trusted_proxies.is_empty()
+        && matches!(role, "exchange" | "all")
+    {
+        tracing::warn!(
+            "public rate limiting is enabled with no trusted proxies; direct clients are safe, but deployments behind a reverse proxy must configure server.trusted_proxies and trusted_proxy_hops or all clients will share the proxy address"
+        );
+    }
 
     let state = AppState {
         service,
         config: Arc::new(config.clone()),
+        rate_limiter,
     };
 
     let mut app: Router<AppState> = Router::new();
 
     if role == "exchange" || role == "all" {
-        app = app.merge(routes::public_routes());
         // The nonce route is part of the direct ID-token grant's surface, so
         // it mounts exactly when the grant does: an exchange-serving role with
         // `grants.id_token` enabled. The shared router is the single mounting
-        // point — server, Lambda, and FFI cannot diverge.
+        // point — server, Lambda, and FFI cannot diverge — and it joins the
+        // public group *before* the throttle/access-log layers so every public
+        // route shares one concurrency bound, one access log, and one address
+        // throttle.
+        let mut public = routes::public_routes();
         if config.grants.id_token {
-            app = app.merge(routes::nonce_routes());
+            public = public.merge(routes::nonce_routes());
         }
+        app = app.merge(
+            public
+                // This semaphore is shared by every public route and checked before handler
+                // work. Saturation returns 503 instead of waiting in an unbounded queue.
+                .route_layer(axum::middleware::from_fn(public_concurrency_layer(
+                    Arc::new(Semaphore::new(config.rate_limit.max_concurrent_requests)),
+                )))
+                .route_layer(axum::middleware::from_fn(access_log_layer))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::public_throttle::public_throttle_layer,
+                )),
+        );
     }
     if (role == "admin" || role == "all") && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
@@ -503,7 +557,10 @@ pub fn build_router_shared(config: &AppConfig, service: Arc<AppService>) -> Rout
 
     let router = app
         .layer(CatchPanicLayer::custom(panic_handler))
-        .layer(axum::middleware::from_fn(audit_context_layer))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit_context_layer,
+        ))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             request_timeout_duration(config),
@@ -789,11 +846,35 @@ fn build_key_manager(
     }
 }
 
+/// Select a limiter at the server construction boundary. The resulting port is
+/// retained in `AppState` for future core/router consumers.
+fn build_rate_limiter(
+    config: &AppConfig,
+) -> Result<Box<dyn RateLimiter>, Box<dyn std::error::Error>> {
+    if !config.rate_limit.enabled
+        || config.rate_limit.store == oidc_exchange_core::config::RateLimitStore::None
+    {
+        return Ok(Box::new(
+            oidc_exchange_adapters::noop::NoopRateLimiter::new(),
+        ));
+    }
+    Ok(Box::new(FixedWindowRateLimiter::new(
+        config.rate_limit.window,
+        RateLimitBudgets {
+            per_ip: config.rate_limit.per_ip,
+            per_ip_failures: config.rate_limit.per_ip_failures,
+            per_subject: config.rate_limit.per_subject,
+            per_provider: config.rate_limit.per_provider,
+        },
+        config.rate_limit.max_entries,
+    )?))
+}
+
 async fn build_audit_log(
     config: &AppConfig,
 ) -> Result<Box<dyn AuditLog>, Box<dyn std::error::Error>> {
     match config.audit.adapter.as_str() {
-        "noop" | "" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
+        "noop" => Ok(Box::new(oidc_exchange_adapters::noop::NoopAuditLog::new())),
         "stdout" | "stderr" | "auto" => {
             use oidc_exchange_adapters::stdout_audit::{OutputTarget, StdoutAuditLog};
             let target = match config.audit.adapter.as_str() {
@@ -1459,6 +1540,20 @@ mod load_config_tests {
         );
     }
 
+    #[test]
+    fn rate_limit_budget_errors_name_the_offending_field() {
+        let _env_lock = lock_test_environment();
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            dir.path(),
+            "default",
+            "[rate_limit]\nper_subject = 1000001\n",
+        );
+
+        let err = load_config_from_dir(dir_str(dir.path())).expect_err("invalid budget rejected");
+        assert!(err.to_string().contains("rate_limit.per_subject"));
+    }
+
     // -----------------------------------------------------------------
     // Validation wiring
     // -----------------------------------------------------------------
@@ -1720,7 +1815,8 @@ mod build_router_tests {
 
     use oidc_exchange_core::ports::IdentityProvider;
     use oidc_exchange_test_utils::{
-        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+        MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+        MockUserSync,
     };
 
     const TEST_SECRET: &str = "test-internal-secret-build-router";
@@ -1769,6 +1865,7 @@ enabled = {internal_enabled}
             Box::new(MockKeyManager::new()),
             Box::new(MockAuditLog::new()),
             Box::new(MockUserSync::new()),
+            Box::new(MockRateLimiter::new()),
             providers,
             config.clone(),
         )
@@ -1964,7 +2061,9 @@ mod request_timeout_tests {
             .route("/fast", get(fast_handler))
             .route("/slow", get(slow_handler))
             .layer(CatchPanicLayer::custom(panic_handler))
-            .layer(axum::middleware::from_fn(audit_context_layer))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::audit_context::ffi_audit_context_layer,
+            ))
             .layer(TimeoutLayer::with_status_code(
                 StatusCode::REQUEST_TIMEOUT,
                 timeout,

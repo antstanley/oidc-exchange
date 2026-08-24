@@ -3,19 +3,29 @@
 **Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
-`user_sync`, a `providers` map, and `config`. The flows below live in
-`crates/core/src/service/{exchange,refresh,revoke,user_admin,claims,maintenance}.rs` and the
-helpers in `service/mod.rs`.
+`user_sync`, the configured retained `rate_limiter`, a `providers` map, and `config`. The
+retained limiter enforces provider and subject budgets across service-flow calls; the server
+retains a configured public limiter in `AppState` for per-IP HTTP throttling. The flows below
+live in `crates/core/src/service/{exchange,refresh,revoke,user_admin,claims,maintenance}.rs`
+and the helpers in `service/mod.rs`.
 
 ## Token exchange (`exchange.rs`)
 
 `POST /token` with `grant_type=authorization_code` or `grant_type=id_token`. The handler has
 already parsed the form into a `TokenGrant`, so `AppService::exchange` receives an
 `ExchangeRequest` whose `credential` names the grant that was declared
-([04-http-api.md](04-http-api.md)).
+([04-http-api.md](04-http-api.md)). Emission is terminal and single: the flow maps its result
+to exactly one `SecurityEvent`, with fixed classification strings rather than upstream error
+text (an assertion-binding rejection's detail-enriched `ValidationFailed` record is that
+terminal event, and infrastructure store failures are 5xx conditions, not recorded
+authentication outcomes). Success is emitted after storing the session and signing the access
+token; under `audit.durability = "enforce"`, a failed terminal emit revokes that just-stored
+session before returning the error. Principal creation is a separate state-change event, so a
+losing JIT-registration racer emits none.
 
 1. **Resolve provider** — look up `request.provider` in the `providers` map; missing →
-   `UnknownProvider`.
+   `UnknownProvider`. Then consume one unit of the per-provider rate budget — a `Deny` is
+   `TooManyRequests` before any outbound provider work.
 2. **Obtain verified claims** — match on `request.credential`:
    - `ExchangeCredential::AuthorizationCode { code, redirect_uri }` → `provider.exchange_code`
      to get `ProviderTokens`, then `validate_id_token` on the returned `id_token`.
@@ -24,7 +34,8 @@ already parsed the form into a `TokenGrant`, so `AppService::exchange` receives 
    Both fields of the authorization-code variant are non-optional, so the `redirect_uri`
    binding is a property of the type rather than a runtime check: there is no field
    combination that reaches this step carrying a credential for one grant while executing
-   another.
+   another. After validation, one unit of the per-subject budget (keyed by provider plus a
+   hash of the subject — never the raw subject) is consumed before any store side effect.
 3. **Bind the assertion** — every accepted ID token, on both grant paths, passes
    `service::assertion::bind`, which runs in this order and rejects with `InvalidGrant` at
    the first failure (each rejection audited as `ValidationFailed`/`Warning` with a
@@ -184,12 +195,15 @@ audit `ValidationFailed` (debug, failure) — an abuse-detection signal that the
 `POST /revoke` (RFC 7009 — token-state failures still succeed toward the client; backend
 failures propagate). Revocation authority comes from the credential the caller presents, and
 reaches exactly the token family that credential names. `/revoke` never removes a session
-the caller presented no credential for.
+the caller presented no credential for. Every resolved terminal path emits exactly one
+mandatory, fixed-classification audit outcome, so even under `audit.durability = "enforce"`
+an audit sink failure cannot make token existence observable.
 
 - hint `refresh_token`, absent, or unknown → SHA-256 hex the token,
   `get_session_by_refresh_token(hash)`, and on a match `revoke_session(hash)` (audited
-  `TokenRevocation`). A missing session is `Ok` (idempotent delete, 200) and emits nothing;
-  a store error propagates, and the server maps it to 503.
+  `TokenRevocation`). A missing session is `Ok` toward the client (idempotent delete, 200)
+  and records one fixed-classification `ValidationFailed` outcome; a store error propagates,
+  and the server maps it to 503.
 - hint `access_token` → `validate_access_token(token)` (below). The returned claims carry
   `sid`, the `family_id` of the session the token was minted for, which must additionally
   be a well-formed family identifier (`fam_` + lowercase ULID) — a validated token whose
@@ -279,25 +293,38 @@ Template language (config values only):
 Resolvable paths: `user.id`, `user.email`, `user.display_name`, `user.provider`,
 `user.external_id`, `user.metadata.<key>`, `user.claims.<key>`. No loops or conditionals.
 
-## Audit emission and blocking (`service/mod.rs::emit_audit`)
+## Audit emission (`service/mod.rs`)
+
+Two channels have different guarantees:
 
 ```
-audit.emit(event)
-   Ok  → done
-   Err → serialize event to a tracing log (fallback record)
-         if severity ≤ audit.blocking_threshold → propagate Err (fail the operation)
-         else → tracing::warn! "audit provider down", return Ok
+emit_security_event(SecurityEvent)          — mandatory
+   render to AuditEvent (severity derived from the variant)
+   audit.emit(event)
+      Err → tracing fallback with audit_fallback = true
+            durability = "enforce" → fail the operation
+            durability = "observe" → log audit_durability_degraded = true, continue
+   No threshold is consulted.
+
+emit_audit(AuditEvent)                      — best-effort
+   severity less severe than emit_threshold → drop before dispatch
+   audit.emit(event)
+      Err → tracing fallback; blocking_threshold decides as before
 ```
 
-Severity follows RFC 5424 (emergency 0 … debug 7); lower number = more severe.
-`blocking_threshold` is a severity name parsed by `parse_severity`. So with the default
-`warning` threshold, an audit-backend failure on a warning-or-more-severe event fails the
-request, while a notice/info event is logged and the request continues.
+Severity follows RFC 5424 (emergency 0 … debug 7); lower is more severe. Every shipped flow
+uses the mandatory channel. The HTTP public per-IP throttle also emits `ThrottleExceeded`
+through this same API before returning its terminal `429`; the middleware
+logs an enforce-mode emission error but preserves the `429`, so audit-sink behavior cannot make
+the denial unsafe. `emit_audit` remains available for operational events supplied by embedders,
+and only that best-effort channel is governed by `emit_threshold` and `blocking_threshold`.
 
 ## Admin operations (`user_admin.rs`)
 
 All under `/internal/*`. User-sync notifications are **best-effort** — failures are logged
-via `tracing` and never fail the admin call.
+via `tracing` and never fail the admin call. Admin mutations use the mandatory audit channel,
+so an audit write failure follows `audit.durability`; their events have
+`ip_address_source = "unknown"`.
 
 | Method | Behaviour |
 |---|---|
@@ -396,8 +423,9 @@ operations carry no client `ip_address`/`user_agent` context.
   is bounded by `token.refresh_token_ttl`.
 - *Best-effort user sync.* **Sync notifications never fail an admin or exchange operation.**
   Sync is a downstream convenience, not a correctness dependency.
-- *Audit fallback always records.* **On backend failure the event is still written to a
-  tracing log before the blocking decision.** No audited event is silently lost.
+- *Audit durability is unconditional on the mandatory channel.* **A mandatory-channel write
+  failure follows `audit.durability`, independent of severity.** A tracing fallback line is
+  still written first, but it is not a substitute for the configured durable trail.
 - *One validator for first-party tokens.* **Every read of a claim from a JWT this service
   minted goes through `AppService::validate_access_token`.** `exchange` delegates JWT
   validation to the provider adapters and `refresh` validates an opaque token against the
@@ -415,20 +443,6 @@ operations carry no client `ip_address`/`user_agent` context.
   authenticated admin path — `apply_validated_patch` revokes every session when a status
   patch moves a user into `Suspended` or `Deleted`, on behalf of both `admin_update_user`
   and `admin_delete_user`.
-- *`sid` is the session's refresh-token hash.* **The access token carries the session's
-  existing primary key rather than a new identifier.** `revoke_session` already takes that
-  hash, so no `Session` field, port method or store migration is needed. The digest becomes
-  visible to any holder of the access token; it cannot be replayed as a refresh token (both
-  the refresh and the refresh-revoke paths hash the *presented* value before lookup), and it
-  is a SHA-256 of 256 CSPRNG bits, so the authority it confers is exactly the authority the
-  access token already implies. What `sid` *means* is fixed independently of what it
-  *contains*: it denotes **the current session identifier** — whatever value names the one
-  session the token was minted for — and the hash is merely the value that identifier takes
-  while refresh does not rotate. The proposed
-  `2026-08-05-rotate_refresh_tokens_with_reuse_detection` change merges later and supersedes
-  this binding with the rotation-independent `family_id`; `/revoke`'s access-token arm must
-  resolve whichever identifier is current — the hash before that sibling lands, the
-  `family_id` after.
 - *Failed revocation is recorded, not silent.* **A rejected `/revoke` emits one
   `ValidationFailed` event and still returns 200.** RFC 7009 §2.2 constrains what the caller
   observes, not what the operator records — and an unauthenticated endpoint that answers 200

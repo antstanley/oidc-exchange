@@ -111,6 +111,10 @@ deployment file in isolation.
 host = "0.0.0.0"
 port = 8080
 issuer = "https://auth.example.com"
+role = "all"
+request_timeout = "30s"
+trusted_proxies = []
+trusted_proxy_hops = 1
 
 [registration]
 mode = "open"
@@ -127,19 +131,33 @@ refresh_reuse_retention = "24h"
 cleanup_interval = "1h"
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
 blocking_threshold = "warning"
+emit_threshold = "info"
+durability = "observe"
+
+[rate_limit]
+enabled = true
+store = "in_process"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10
+per_subject = 10
+per_provider = 600
+max_concurrent_requests = 256
+max_entries = 10000
 
 [telemetry]
 enabled = false
 exporter = "none"
 ```
 
-The default is deliberately minimal — no key manager, no repository, no providers — but its
-HTTPS issuer and audience are deliberately documentation placeholders, not production identity
-values. A deployment must replace them with its own non-empty values before it can issue tokens
-for its namespace. A service that would sign tokens carrying `iss: ""` and `aud: ""` is not
-usefully runnable, and empty values are not representable in `AppConfig`.
+The default is deliberately minimal — no key manager, no repository, no providers — but it
+is no longer silent: audit events go to stdout by default. Its HTTPS issuer and audience are
+deliberately documentation placeholders, not production identity values. A deployment must
+replace them with its own non-empty values before it can issue tokens for its namespace. A
+service that would sign tokens carrying `iss: ""` and `aud: ""` is not usefully runnable, and
+empty values are not representable in `AppConfig`.
 
 ## Sections
 
@@ -151,7 +169,10 @@ issuer; an absolute `https` URL, no default), `role` (`all` | `exchange` | `admi
 the per-request timeout the server's timeout layer enforces — and `base_path` (optional, default
 unset — a leading prefix such as `/prod` stripped from incoming request paths before routing;
 honored in both Lambda and server mode, though it exists chiefly for API Gateway stages and
-mount prefixes).
+mount prefixes). `trusted_proxies` (CIDR list, default empty) and `trusted_proxy_hops`
+(default `1`, at most `16`) govern client-address resolution: the hop is counted from the
+right of `X-Forwarded-For` only when the observed peer is in `trusted_proxies`; with the
+default empty list, forwarding headers are not trusted.
 
 ### `[registration]`
 
@@ -186,12 +207,19 @@ are always served and have no switch. Both durations are validated at startup by
 `AppConfig::validate`, so an unparseable value fails config load.
 
 ### `[audit]`
-
-`adapter` (`noop` | `stdout` | `stderr` | `auto` | `sqs`, default `noop`),
+`adapter` (`noop` | `stdout` | `stderr` | `auto` | `sqs`, default `stdout`),
 `blocking_threshold` (syslog severity name, default `warning`), `emit_threshold` (syslog
 severity name, default `info`) — events with a severity strictly less severe than the
-threshold are not emitted at all, independently of the blocking decision — and optional
-`[audit.sqs] { queue_url, region }`.
+threshold are not emitted at all, independently of the blocking decision — and `durability`
+(`observe` | `enforce`, default `observe`) for mandatory security-event write failures;
+optional `[audit.sqs] { queue_url, region }`.
+
+### `[rate_limit]`
+`enabled` (default `true`), `store` (`in_process` | `none`, default `in_process`), `window`
+(default `"1m"`), per-window budgets `per_ip` (60), `per_ip_failures` (10), `per_subject`
+(10), `per_provider` (600), `max_concurrent_requests` (256), and `max_entries` (10000).
+Budgets are per key and per process; zero disables a scope. `per_ip_failures` is consumed only
+for authentication failures, preserving the normal IP allowance for legitimate requests.
 
 ### `[key_manager]`
 
@@ -295,13 +323,16 @@ string through the FFI bindings (`bootstrap::parse_config`).
 |---|---|
 | `server.host` / `port` / `role` / `request_timeout` | `0.0.0.0` / `8080` / `all` / `"30s"` |
 | `server.issuer`, `token.audience` | `https://auth.example.com` / `https://api.example.com` *(replace for deployment)* |
+| `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `registration.mode` | `open` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
 | `grants.id_token` | `false` |
 | `grants.nonce_ttl` / `max_assertion_lifetime` | `10m` / `1h` |
 | `token.refresh_rotation` / `refresh_rotation_grace` / `refresh_reuse_retention` | `true` / `"10s"` / `"24h"` |
 | `session_repository.cleanup_interval` | `"1h"` |
-| `audit.adapter` / `blocking_threshold` / `emit_threshold` | `noop` / `warning` / `info` |
+| `audit.adapter` / `blocking_threshold` / `emit_threshold` / `durability` | `stdout` / `warning` / `info` / `observe` |
+| `rate_limit.enabled` / `store` / `window` / `max_concurrent_requests` | `true` / `in_process` / `"1m"` / `256` |
+| `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
 | `telemetry.enabled` / `exporter` / `sample_rate` | `false` / `none` / `1.0` |
 | `user_sync.enabled`, `internal_api.enabled` | `false`, `false` |
 
@@ -312,6 +343,12 @@ string through the FFI bindings (`bootstrap::parse_config`).
 - Secrets and per-deployment values are supplied through the environment and referenced via
   `${VAR}`; secrets are never committed to a TOML file.
 - Config is read once at startup; changing it requires a restart.
+- `audit.adapter` must be a known non-empty adapter, `audit.durability` must be `observe` or
+  `enforce`, trusted proxies must be CIDRs, `trusted_proxy_hops` must be 1–16, and the
+  rate-limit window, store, budgets, entry bound, and concurrency bound are validated at load
+  time. `rate_limit.enabled = true` requires `store = "in_process"`.
+- Where a rate limit must hold globally (Lambda or horizontally scaled servers), an edge
+  gateway/WAF provides it; the in-process limiter is a per-process backstop.
 
 ### Decisions
 

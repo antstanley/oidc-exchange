@@ -56,7 +56,24 @@ table_name = "oidc-exchange"
 region = "us-east-1"
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
+durability = "observe"
+
+# Trust nginx's loopback connection before reading its forwarding chain.
+[server]
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
+trusted_proxy_hops = 1
+
+[rate_limit]
+enabled = true
+store = "in_process"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10
+per_subject = 10
+per_provider = 600
+max_concurrent_requests = 256
+max_entries = 10000
 
 [telemetry]
 enabled = true
@@ -144,16 +161,26 @@ server {
     location / {
         proxy_pass http://oidc_exchange;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Replace inbound forwarding data. oidc-exchange selects trusted hops from the
+        # right, so nginx supplies the peer it observed as the rightmost (and only) value.
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
 
+## Trusted forwarding
+
+The `trusted_proxies` CIDRs must contain the address nginx uses to connect to the service. Enabled rate limiting with an empty trusted-proxy list emits a startup warning: that topology is safe for direct clients, but behind nginx it collapses every client into nginx's address budget. Health, discovery, and JWKS requests are excluded from authentication throttles; `/token` and `/revoke` retain both public and security budgets.
+Only then does oidc-exchange accept `X-Forwarded-For`; it counts `trusted_proxy_hops` from the
+right. Do not append an inbound client-supplied chain or rely on `X-Real-IP`: the service does
+not use `X-Real-IP`, and a direct/untrusted forwarding header remains client-asserted rather
+than a rate-limit key. Add one trusted hop and proxy CIDR for each proxy that appends a value.
+
 ## Log management
 
-With `exporter = "stdout"`, oidc-exchange writes structured JSON logs to stdout. Systemd captures these in the journal:
+With `audit.adapter = "stdout"`, oidc-exchange writes structured audit JSON to stdout.
+Systemd captures it in the journal; `telemetry.exporter = "stdout"` also writes tracing JSON:
 
 ```bash
 journalctl -u oidc-exchange -f

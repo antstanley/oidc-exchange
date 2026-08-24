@@ -8,8 +8,8 @@ use axum::Router;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use oidc_exchange::middleware::audit_context::audit_context_layer;
-use oidc_exchange::routes::{public_routes, nonce_routes};
+use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
+use oidc_exchange::routes::{nonce_routes, public_routes};
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
@@ -64,20 +64,25 @@ fn build_test_app_with_provider_impl(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
         providers,
         config.clone(),
     );
 
+    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        rate_limiter,
     };
 
     let mut app = public_routes();
     if grants_id_token {
         app = app.merge(nonce_routes());
     }
-    let app = app.layer(from_fn(audit_context_layer)).with_state(state);
+    let app = app
+        .layer(from_fn(ffi_audit_context_layer))
+        .with_state(state);
 
     (app, session_repo, observer)
 }
@@ -687,7 +692,11 @@ async fn token_exchange_with_audit_headers_stores_session_context() {
     let sessions = session_repo.get_all_sessions().await;
     assert_eq!(sessions.len(), 1, "expected exactly one stored session");
     let session = &sessions[0];
-    assert_eq!(session.ip_address.as_deref(), Some("203.0.113.7"));
+    assert_eq!(
+        session.ip_address.as_deref(),
+        None,
+        "FFI-style in-process requests have no transport peer, so a client-supplied forwarding header is never persisted as a trusted address"
+    );
     assert_eq!(session.user_agent.as_deref(), Some("audit-test-client/1.0"));
     assert_eq!(session.device_id.as_deref(), Some("device-42"));
 }
