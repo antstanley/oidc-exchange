@@ -8,7 +8,9 @@ use tower::Layer;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use oidc_exchange_core::config::{Config as AppConfig, ProviderConfig, RawConfig, ServerRole};
+use oidc_exchange_core::config::{
+    Config as AppConfig, IdentityProviderAdapter, ProviderConfig, RawConfig, ServerRole,
+};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
@@ -64,14 +66,20 @@ const REQUEST_TIMEOUT_MAX_SECS: u64 = 60 * 60;
 /// string) can never force an unbounded scan.
 const PLACEHOLDER_NAME_LEN_MAX: usize = 256;
 
-fn merge_raw_defaults(
-    defaults: RawConfig,
-    override_config: RawConfig,
-) -> Result<RawConfig, Box<dyn std::error::Error>> {
-    let mut base = toml::Value::try_from(defaults)?;
-    let mut override_value = toml::Value::try_from(override_config)?;
-    remove_empty_values(&mut override_value);
-
+/// Deep-merge a deployment override tree onto the committed defaults as raw
+/// [`toml::Value`] trees: tables merge recursively, scalars and arrays replace.
+///
+/// Merging at the raw-value level — rather than round-tripping the override
+/// through `RawConfig` first — is deliberate. Because `RawConfig` is
+/// `#[serde(default)]` throughout, deserializing an override into it materializes
+/// every unset field as its Rust default (`""`, `0`, `false`, …), at which point
+/// "unset" and "explicitly set to a falsy value" are indistinguishable. Keeping
+/// the override as a `toml::Value` preserves that distinction: a key the operator
+/// never wrote is genuinely absent from the tree and inherits the default, while
+/// an explicit `false`/`0`/`""` is a present value that survives the merge and
+/// reaches the domain resolvers (where, e.g., an empty duration fails loudly
+/// instead of silently reverting to the committed default).
+fn merge_raw_defaults(defaults: toml::Value, override_value: toml::Value) -> toml::Value {
     fn merge(base: &mut toml::Value, override_value: toml::Value) {
         match (base, override_value) {
             (toml::Value::Table(base), toml::Value::Table(override_table)) => {
@@ -87,27 +95,9 @@ fn merge_raw_defaults(
             (base, value) => *base = value,
         }
     }
+    let mut base = defaults;
     merge(&mut base, override_value);
-    Ok(base.try_into()?)
-}
-
-fn remove_empty_values(value: &mut toml::Value) {
-    match value {
-        toml::Value::Table(table) => {
-            table.retain(|_, value| {
-                remove_empty_values(value);
-                !matches!(value, toml::Value::String(string) if string.is_empty())
-                    && !matches!(value, toml::Value::Integer(0))
-                    && !matches!(value, toml::Value::Boolean(false))
-            });
-        }
-        toml::Value::Array(items) => {
-            for item in items {
-                remove_empty_values(item);
-            }
-        }
-        _ => {}
-    }
+    base
 }
 
 /// Load configuration from config files on disk, using the `OIDC_EXCHANGE_ENV`
@@ -190,9 +180,10 @@ fn resolve_builder(
 ) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let mut merged = builder.build()?;
     resolve_placeholders(&mut merged.cache, "<root>")?;
-    let raw: RawConfig = merged.try_deserialize()?;
-    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))?;
-    AppConfig::resolve(merge_raw_defaults(defaults, raw)?).map_err(Into::into)
+    let raw: toml::Value = merged.try_deserialize()?;
+    let defaults: toml::Value = toml::from_str(include_str!("../../../config/default.toml"))?;
+    let config: RawConfig = merge_raw_defaults(defaults, raw).try_into()?;
+    AppConfig::resolve(config).map_err(Into::into)
 }
 
 /// Parse raw TOML, merge it onto the committed defaults, and resolve the
@@ -200,18 +191,19 @@ fn resolve_builder(
 /// callers that only need validation never build adapters, telemetry, routers,
 /// or listeners, and no environment source is consulted.
 pub fn resolve_config_toml(toml_str: &str) -> Result<AppConfig, Error> {
-    let raw: RawConfig = toml::from_str(toml_str).map_err(|err| Error::ConfigError {
+    let raw: toml::Value = toml::from_str(toml_str).map_err(|err| Error::ConfigError {
         detail: format!("config TOML is invalid: {err}"),
     })?;
-    let defaults: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+    let defaults: toml::Value = toml::from_str(include_str!("../../../config/default.toml"))
         .map_err(|err| Error::ConfigError {
             detail: format!("committed default config is invalid: {err}"),
         })?;
-    AppConfig::resolve(
-        merge_raw_defaults(defaults, raw).map_err(|err| Error::ConfigError {
-            detail: format!("config defaults cannot be merged: {err}"),
-        })?,
-    )
+    let config: RawConfig = merge_raw_defaults(defaults, raw)
+        .try_into()
+        .map_err(|err| Error::ConfigError {
+            detail: format!("config is invalid: {err}"),
+        })?;
+    AppConfig::resolve(config)
 }
 
 /// Parse a TOML string with structural `OIDC_EXCHANGE__{section}__{key}`
@@ -1597,21 +1589,21 @@ async fn build_single_provider(
     name: &str,
     config: &ProviderConfig,
 ) -> Result<Box<dyn IdentityProvider>, Box<dyn std::error::Error>> {
-    match config.adapter.as_str() {
-        "oidc" => {
+    // `adapter` is the closed two-value `IdentityProviderAdapter`, already parsed
+    // and validated during `Config::resolve`, so every value that reaches here
+    // names a constructor — there is no unknown-adapter arm.
+    match config.adapter {
+        IdentityProviderAdapter::Oidc => {
             let oidc_config = provider_config_to_oidc(name, config)?;
             let provider =
                 oidc_exchange_adapters::oidc::OidcProvider::from_config(name, &oidc_config).await?;
             Ok(Box::new(provider))
         }
-        "apple" => {
+        IdentityProviderAdapter::Apple => {
             let provider =
                 oidc_exchange_providers::apple::AppleProvider::from_config(&config.extra).await?;
             Ok(Box::new(provider))
         }
-        other => Err(Box::new(Error::ConfigError {
-            detail: format!("unknown provider adapter for '{name}': {other}"),
-        })),
     }
 }
 
@@ -1728,7 +1720,7 @@ fn provider_config_to_oidc(
 #[cfg(test)]
 mod provider_config_to_oidc_tests {
     use super::*;
-    use oidc_exchange_core::config::{HttpsUrl, ProviderAdapter};
+    use oidc_exchange_core::config::HttpsUrl;
 
     /// Build a minimal valid OIDC `ProviderConfig`, with optional extra keys
     /// merged in (e.g. an `endpoint_origins` array).
@@ -1749,7 +1741,7 @@ mod provider_config_to_oidc_tests {
         }
         ProviderConfig {
             provider_id: "google".to_string(),
-            adapter: ProviderAdapter::Oidc,
+            adapter: IdentityProviderAdapter::Oidc,
             issuer: Some(HttpsUrl::parse("https://accounts.google.com").expect("fixture issuer")),
             jwks_uri: None,
             token_endpoint: None,
@@ -1910,6 +1902,119 @@ mod provider_config_to_oidc_tests {
         .expect("exactly MAX_ENDPOINT_ORIGINS entries must be accepted");
 
         assert_eq!(converted.endpoint_origins.len(), MAX_ENDPOINT_ORIGINS);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S1 — provider adapter is the closed two-value IdentityProviderAdapter domain,
+// parsed during Config::resolve. `adapter = "apple"` now resolves (making the
+// shipped AppleProvider reachable), a storage/key value on a provider block is
+// rejected at config load rather than at registry build, and the OIDC-only
+// issuer requirement neither leaks onto Apple nor is lost from Oidc.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod provider_adapter_resolution_tests {
+    use super::*;
+    use oidc_exchange_core::config::IdentityProviderAdapter;
+
+    /// A minimal deployment override that adds a single provider block, merged
+    /// onto the committed defaults through the side-effect-free resolver.
+    fn resolve_with_provider_block(block: &str) -> Result<AppConfig, Error> {
+        resolve_config_toml(&format!("[providers.myidp]\n{block}"))
+    }
+
+    /// `adapter = "apple"` resolves — the Apple provider is reachable from
+    /// configuration — and requires no `issuer` (Apple pins its own issuer
+    /// internally and reads its settings from `extra`).
+    #[test]
+    fn apple_adapter_resolves_without_an_issuer() {
+        let config = resolve_with_provider_block(
+            "adapter = \"apple\"\nclient_id = \"com.example.app\"\nteam_id = \"TEAMID\"\nkey_id = \"KEYID\"\nprivate_key = \"pem\"",
+        )
+        .expect("an apple provider block must resolve");
+        let provider = config
+            .providers
+            .get("myidp")
+            .expect("the apple provider must be present after resolution");
+        assert_eq!(
+            provider.adapter,
+            IdentityProviderAdapter::Apple,
+            "the resolved provider adapter must be Apple"
+        );
+        assert!(
+            provider.issuer.is_none(),
+            "the apple adapter must not require an issuer at config load"
+        );
+    }
+
+    /// An unknown provider adapter value fails resolution with a `ConfigError`
+    /// naming `providers.adapter` — the failure point moved to config load.
+    #[test]
+    fn unknown_provider_adapter_is_rejected_at_config_load() {
+        let err = resolve_with_provider_block(
+            "adapter = \"atproto\"\nissuer = \"https://idp.example.com\"",
+        )
+        .expect_err("an unknown provider adapter must be rejected at config load");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("providers.adapter"),
+                    "the error must name providers.adapter, got: {detail}"
+                );
+                assert!(
+                    detail.contains("atproto"),
+                    "the error must echo the offending value, got: {detail}"
+                );
+            }
+            other => panic!("expected a ConfigError, got: {other:?}"),
+        }
+    }
+
+    /// A storage/key adapter value the *shared* `ProviderAdapter` enum used to
+    /// admit (e.g. `postgres`) is now rejected at config load on a provider
+    /// block, pinning the failure point S1 moves earlier — previously this
+    /// passed `Config::resolve` and failed only at registry build.
+    #[test]
+    fn storage_adapter_value_on_a_provider_block_is_rejected_at_config_load() {
+        let err = resolve_with_provider_block(
+            "adapter = \"postgres\"\nissuer = \"https://idp.example.com\"",
+        )
+        .expect_err("a storage adapter value on a provider block must be rejected at config load");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("providers.adapter"),
+                    "the error must name providers.adapter, got: {detail}"
+                );
+                assert!(
+                    detail.contains("postgres"),
+                    "the error must echo the offending value, got: {detail}"
+                );
+            }
+            other => panic!("expected a ConfigError, got: {other:?}"),
+        }
+    }
+
+    /// The OIDC-only issuer requirement is not lost from `Oidc`: an
+    /// `adapter = "oidc"` block without `issuer` fails resolution with the
+    /// documented missing-HTTPS-URL error. Paired with the Apple boot test
+    /// above, this pins that the requirement neither leaks onto `Apple` nor is
+    /// dropped from `Oidc`.
+    #[test]
+    fn oidc_adapter_without_issuer_is_rejected() {
+        let err = resolve_with_provider_block("adapter = \"oidc\"\nclient_id = \"c\"")
+            .expect_err("an oidc provider block without issuer must be rejected");
+        match err {
+            Error::ConfigError { detail } => {
+                assert!(
+                    detail.contains("providers.myidp.issuer")
+                        && detail.contains("missing required HTTPS URL"),
+                    "the error must be the Oidc-only missing-issuer error, got: {detail}"
+                );
+            }
+            other => panic!("expected a ConfigError, got: {other:?}"),
+        }
     }
 }
 
@@ -2670,6 +2775,110 @@ mod load_config_tests {
             .expect_err("malformed placeholders must fail closed");
             assert!(err.to_string().contains("internal_api.shared_secret"));
         }
+    }
+
+    // -----------------------------------------------------------------
+    // S2 — the defaults merge preserves explicit falsy overrides
+    //
+    // Before the fix, `remove_empty_values` stripped every `false`, `0`,
+    // and `""` from the deployment overlay before it merged onto
+    // `config/default.toml`, so an operator's explicit falsy value
+    // silently reverted to the committed default. Each of these cases was
+    // empirically confirmed broken against that code (the overlay value
+    // was dropped and the resolved config carried the default instead);
+    // they now hold because the merge is value-level and never round-trips
+    // the overlay through `#[serde(default)]` `RawConfig`.
+    // -----------------------------------------------------------------
+
+    /// `token.refresh_rotation = false` — the documented rotation off-switch —
+    /// survives resolution instead of reverting to the committed `true`.
+    #[test]
+    fn explicit_refresh_rotation_false_survives_resolution() {
+        let config = resolve_config_toml("[token]\nrefresh_rotation = false")
+            .expect("a config setting only refresh_rotation = false must resolve");
+        assert!(
+            !config.token.refresh_rotation,
+            "an explicit refresh_rotation = false must survive the defaults merge, \
+             not revert to the committed default of true"
+        );
+    }
+
+    /// `rate_limit.per_subject = 0` — "zero disables a scope" — survives
+    /// resolution instead of reverting to the committed `10`.
+    #[test]
+    fn explicit_zero_rate_limit_budget_survives_resolution() {
+        let config = resolve_config_toml("[rate_limit]\nper_subject = 0")
+            .expect("a config setting only per_subject = 0 must resolve");
+        assert_eq!(
+            config.rate_limit.per_subject, 0,
+            "an explicit per_subject = 0 must survive the defaults merge \
+             (zero disables the scope), not revert to the committed default of 10"
+        );
+    }
+
+    /// `rate_limit.enabled = false` survives resolution instead of reverting
+    /// to the committed `true`.
+    #[test]
+    fn explicit_rate_limit_enabled_false_survives_resolution() {
+        let config = resolve_config_toml("[rate_limit]\nenabled = false")
+            .expect("a config setting only rate_limit.enabled = false must resolve");
+        assert!(
+            !config.rate_limit.enabled,
+            "an explicit rate_limit.enabled = false must survive the defaults merge, \
+             not revert to the committed default of true"
+        );
+    }
+
+    /// Preservation: a config that omits the falsy switches still inherits the
+    /// committed defaults (`refresh_rotation = true`, `per_subject = 10`,
+    /// `rate_limit.enabled = true`) — the merge fills genuinely-absent keys.
+    #[test]
+    fn omitted_switches_still_inherit_committed_defaults() {
+        let config = resolve_config_toml("[server]\nhost = \"0.0.0.0\"")
+            .expect("a minimal override must resolve against the committed defaults");
+        assert!(
+            config.token.refresh_rotation,
+            "an omitted refresh_rotation must inherit the committed default true"
+        );
+        assert_eq!(
+            config.rate_limit.per_subject, 10,
+            "an omitted per_subject must inherit the committed default 10"
+        );
+        assert!(
+            config.rate_limit.enabled,
+            "an omitted rate_limit.enabled must inherit the committed default true"
+        );
+    }
+
+    /// Negative space: an explicit empty string now reaches its domain resolver
+    /// and fails loudly, rather than being stripped and silently reverting to
+    /// the committed default TTL. `access_token_ttl = ""` is an invalid
+    /// duration, so resolution must return a `ConfigError`.
+    #[test]
+    fn explicit_empty_duration_fails_resolution_loudly() {
+        let result = resolve_config_toml("[token]\naccess_token_ttl = \"\"");
+        let err =
+            result.expect_err("an explicitly empty access_token_ttl must fail resolution loudly");
+        // A duration-parse failure, not a silent revert to the committed "15m".
+        assert!(
+            matches!(err, Error::ConfigError { .. }),
+            "an empty duration must surface as a ConfigError, got: {err:?}"
+        );
+    }
+
+    /// The structural env-override channel (`OIDC_EXCHANGE__…` through
+    /// `parse_config`) flows through the same value-level merge, so an explicit
+    /// `false` set via the environment also survives.
+    #[test]
+    fn env_override_refresh_rotation_false_survives_resolution() {
+        let _env_lock = lock_test_environment();
+        let _guard = EnvVarGuard::set(&[("OIDC_EXCHANGE__TOKEN__REFRESH_ROTATION", "false")]);
+        let config = parse_config("[server]\nrole = \"all\"")
+            .expect("an env-set refresh_rotation = false must resolve");
+        assert!(
+            !config.token.refresh_rotation,
+            "OIDC_EXCHANGE__TOKEN__REFRESH_ROTATION=false must survive the defaults merge"
+        );
     }
 }
 

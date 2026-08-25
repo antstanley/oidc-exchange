@@ -125,7 +125,7 @@ async fn do_exchange(svc: &AppService) -> oidc_exchange_core::domain::TokenRespo
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -494,7 +494,7 @@ async fn revoke_valid_access_token_emits_token_revocation_with_family_count() {
     let revoke_req = RevokeRequest {
         token: response.access_token.clone(),
         token_type_hint: Some("access_token".to_string()),
-        ip_address: Some("203.0.113.5".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.5".parse().unwrap()),
         user_agent: Some("test-agent/1.0".to_string()),
         ..Default::default()
     };
@@ -545,7 +545,7 @@ async fn revoke_valid_refresh_token_emits_token_revocation() {
     let revoke_req = RevokeRequest {
         token: refresh_token,
         token_type_hint: Some("refresh_token".to_string()),
-        ip_address: Some("198.51.100.7".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("198.51.100.7".parse().unwrap()),
         user_agent: Some("test-agent/2.0".to_string()),
         ..Default::default()
     };
@@ -650,7 +650,9 @@ async fn revoke_claim_and_header_negatives_revoke_nothing_and_emit_one_failure_e
         let revoke_req = RevokeRequest {
             token,
             token_type_hint: Some("access_token".to_string()),
-            ip_address: Some("203.0.113.9".to_string()),
+            client_addr: oidc_exchange_core::domain::ClientAddr::Peer(
+                "203.0.113.9".parse().unwrap(),
+            ),
             user_agent: Some("test-agent/3.0".to_string()),
             ..Default::default()
         };
@@ -744,7 +746,7 @@ async fn revoke_unknown_refresh_token_emits_authentication_failure() {
     let revoke_req = RevokeRequest {
         token: "this-refresh-token-was-never-issued".to_string(),
         token_type_hint: Some("refresh_token".to_string()),
-        ip_address: Some("203.0.113.11".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.11".parse().unwrap()),
         user_agent: Some("test-agent/4.0".to_string()),
         ..Default::default()
     };
@@ -849,7 +851,9 @@ async fn unusable_sids_fail_closed_before_any_mutation() {
         svc.revoke(RevokeRequest {
             token: jwt,
             token_type_hint: Some("access_token".to_string()),
-            ip_address: Some("203.0.113.41".to_string()),
+            client_addr: oidc_exchange_core::domain::ClientAddr::Peer(
+                "203.0.113.41".parse().unwrap(),
+            ),
             ..Default::default()
         })
         .await

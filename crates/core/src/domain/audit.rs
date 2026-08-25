@@ -119,6 +119,16 @@ impl AssertedClientAddr {
     }
 }
 
+/// Fail-closed default: with no usable address, provenance is `Unknown` — an
+/// address that is never eligible as a rate-limit key. This lets the core
+/// request structs (`RefreshRequest`, `RevokeRequest`) keep their
+/// `#[derive(Default)]` while carrying the resolved provenance directly.
+impl Default for ClientAddr {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 impl ClientAddr {
     /// Builds a bounded client-authored address for audit-only use.
     pub fn asserted(value: impl Into<String>) -> Option<Self> {
@@ -172,6 +182,10 @@ pub enum SecurityEvent {
     OperatorAuthenticationFailed {
         reason: crate::domain::operator::OperatorAuthFailureReason,
     },
+    /// A refresh-token family revoked because a retired generation was
+    /// re-presented. A security outcome on the mandatory channel: an attack
+    /// signal no configured `emit_threshold` may drop.
+    RefreshTokenReuse,
     ThrottleExceeded,
 }
 
@@ -198,6 +212,7 @@ impl SecurityEvent {
             | Self::PrincipalSuspended
             | Self::ProviderRejected
             | Self::OperatorAuthenticationFailed { .. }
+            | Self::RefreshTokenReuse
             | Self::ThrottleExceeded => AuditSeverity::Warning,
             Self::PrincipalCreated | Self::SessionsRevoked | Self::AdminMutation { .. } => {
                 AuditSeverity::Notice
@@ -233,6 +248,7 @@ impl SecurityEvent {
                 kind: AdminMutationKind::Deleted,
             } => AuditEventType::UserDeleted,
             Self::OperatorAuthenticationFailed { .. } => AuditEventType::Unauthorized,
+            Self::RefreshTokenReuse => AuditEventType::RefreshTokenReuse,
             Self::ThrottleExceeded => AuditEventType::ThrottleExceeded,
         }
     }

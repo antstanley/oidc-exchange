@@ -1725,7 +1725,7 @@ pub struct RawProviderConfig {
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
     pub provider_id: String,
-    pub adapter: ProviderAdapter,
+    pub adapter: IdentityProviderAdapter,
     pub extra: HashMap<String, toml::Value>,
     pub issuer: Option<HttpsUrl>,
     pub jwks_uri: Option<HttpsUrl>,
@@ -1753,11 +1753,12 @@ impl ProviderConfig {
         let token_endpoint = endpoint("token_endpoint")?;
         let revocation_endpoint = endpoint("revocation_endpoint")?;
 
-        if matches!(
-            ProviderAdapter::parse_field("providers.adapter", raw.adapter.clone())?,
-            ProviderAdapter::Oidc
-        ) && issuer.is_none()
-        {
+        let adapter = IdentityProviderAdapter::parse_field("providers.adapter", raw.adapter)?;
+
+        // The issuer is required only for the generic OIDC adapter; the Apple
+        // adapter pins its issuer to `https://appleid.apple.com` internally and
+        // takes its settings from `extra`.
+        if matches!(adapter, IdentityProviderAdapter::Oidc) && issuer.is_none() {
             return Err(Error::ConfigError {
                 detail: format!("providers.{provider_id}.issuer: missing required HTTPS URL"),
             });
@@ -1765,7 +1766,7 @@ impl ProviderConfig {
 
         Ok(Self {
             provider_id,
-            adapter: ProviderAdapter::parse_field("providers.adapter", raw.adapter)?,
+            adapter,
             issuer,
             jwks_uri,
             token_endpoint,
@@ -2033,6 +2034,38 @@ impl ProviderAdapter {
             "valkey" => Ok(Self::Valkey),
             "lmdb" => Ok(Self::Lmdb),
             "webhook" => Ok(Self::Webhook),
+            _ => Err(Error::ConfigError {
+                detail: format!("{field}: invalid provider adapter {value:?}"),
+            }),
+        }
+    }
+}
+
+/// The closed domain for `providers.<name>.adapter`. Deliberately *not*
+/// [`ProviderAdapter`]: that enum is shared by the four storage/key fields
+/// (`key_manager`/`repository`/`session_repository`/`user_sync`), and widening it
+/// with an `Apple` value would also make `repository.adapter = "apple"` parse.
+/// A provider block selects only an identity provider, so its adapter has its own
+/// two-value domain, parsed during `Config::resolve` — a storage/key value on a
+/// provider block is therefore rejected at config load rather than at registry
+/// build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityProviderAdapter {
+    Oidc,
+    Apple,
+}
+impl IdentityProviderAdapter {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Oidc => "oidc",
+            Self::Apple => "apple",
+        }
+    }
+
+    fn parse_field(field: &str, value: String) -> Result<Self, Error> {
+        match value.as_str() {
+            "oidc" => Ok(Self::Oidc),
+            "apple" => Ok(Self::Apple),
             _ => Err(Error::ConfigError {
                 detail: format!("{field}: invalid provider adapter {value:?}"),
             }),

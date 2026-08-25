@@ -54,7 +54,7 @@ fn request() -> ExchangeRequest {
         },
         provider: "mock".into(),
         provider_access_token: None,
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     }

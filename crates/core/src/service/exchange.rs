@@ -42,9 +42,12 @@ pub struct ExchangeRequest {
     /// On the authorization-code path this field is ignored — the access
     /// token from `ProviderTokens` takes the same slot instead.
     pub provider_access_token: Option<String>,
-    /// Client IP address extracted by the server's audit-context middleware
-    /// (e.g. from `X-Forwarded-For`). Stored on the resulting session.
-    pub ip_address: Option<String>,
+    /// Client address together with the provenance the server's audit-context
+    /// middleware resolved it from (`Peer`/`Forwarded`/`Unknown`). Carried as a
+    /// `ClientAddr` so the flow's audit events record the true
+    /// `ip_address_source` rather than a flattened `asserted`; the stored
+    /// session keeps the address string via [`ClientAddr::audit_address`].
+    pub client_addr: ClientAddr,
     /// Client `User-Agent` header, extracted by the server's audit-context
     /// middleware. Stored on the resulting session.
     pub user_agent: Option<String>,
@@ -118,11 +121,9 @@ impl AppService {
     /// by the successful creator, and assertion-binding rejections keep their
     /// detailed `ValidationFailed` record alongside the terminal event.
     pub async fn exchange(&self, request: ExchangeRequest) -> Result<TokenResponse> {
-        let client_addr = request
-            .ip_address
-            .clone()
-            .and_then(ClientAddr::asserted)
-            .unwrap_or(ClientAddr::Unknown);
+        // The middleware already resolved provenance; carry it through unchanged
+        // instead of flattening it back to an `Asserted` string.
+        let client_addr = request.client_addr.clone();
         let result = match self.exchange_inner(&request, &client_addr).await {
             Ok(success) => Ok(success),
             // A binding rejection's detailed `ValidationFailed` record *is*
@@ -488,7 +489,7 @@ impl AppService {
             rotated_at: None,
             device_id: request.device_id.clone(),
             user_agent: request.user_agent.clone(),
-            ip_address: request.ip_address.clone(),
+            ip_address: request.client_addr.audit_address(),
             created_at: Utc::now(),
         };
         self.session_repo.store_refresh_token(&session).await?;

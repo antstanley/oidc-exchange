@@ -14,8 +14,10 @@ const TOKEN_HASH_HEX_LEN: usize = 64;
 pub struct RevokeRequest {
     pub token: String,
     pub token_type_hint: Option<String>, // "refresh_token" or "access_token"
-    /// Client IP address extracted by the server's audit-context middleware.
-    pub ip_address: Option<String>,
+    /// Client address with the provenance the server's audit-context middleware
+    /// resolved it from (`Peer`/`Forwarded`/`Unknown`), carried so the flow's
+    /// audit events record the true `ip_address_source`. Defaults to `Unknown`.
+    pub client_addr: ClientAddr,
     /// Client `User-Agent` header, extracted by the server's audit-context
     /// middleware.
     pub user_agent: Option<String>,
@@ -41,11 +43,9 @@ impl AppService {
         // error further up the stack (the HTTP form field is required).
         assert!(!request.token.is_empty(), "revoke: token must not be empty");
 
-        let client_addr = request
-            .ip_address
-            .clone()
-            .and_then(ClientAddr::asserted)
-            .unwrap_or(ClientAddr::Unknown);
+        // The middleware already resolved provenance; carry it through unchanged
+        // instead of flattening it back to an `Asserted` string.
+        let client_addr = request.client_addr.clone();
         let user_agent = request.user_agent.clone();
 
         match request.token_type_hint.as_deref() {

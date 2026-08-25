@@ -66,9 +66,13 @@
         "id": { "type": "string", "description": "ULID" },
         "timestamp": { "type": "string", "format": "date-time" },
         "severity": { "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"] },
-        "event_type": { "enum": ["token_exchange", "token_refresh", "token_revocation", "session_revoked", "all_sessions_revoked", "user_created", "user_updated", "user_suspended", "user_deleted", "validation_failed", "registration_denied", "provider_error", "unauthorized", "throttle_exceeded"] },
+        "event_type": { "enum": ["token_exchange", "token_refresh", "token_revocation", "session_revoked", "all_sessions_revoked", "user_created", "user_updated", "user_suspended", "user_deleted", "validation_failed", "registration_denied", "provider_error", "unauthorized", "throttle_exceeded", "refresh_token_reuse", "missing_credential", "invalid_credential", "not_configured"] },
         "actor": { "type": ["string", "null"], "description": "User ID if known" },
         "provider": { "type": ["string", "null"] },
+        "operator": {
+          "description": "The authenticated operator behind an /internal/* admin mutation; absent (None) on the exchange plane.",
+          "anyOf": [{ "$ref": "#/definitions/OperatorPrincipal" }, { "type": "null" }]
+        },
         "ip_address": { "type": ["string", "null"] },
         "ip_address_source": { "enum": ["peer", "forwarded", "asserted", "unknown"] },
         "user_agent": { "type": ["string", "null"] },
@@ -78,9 +82,23 @@
           "required": ["status"],
           "properties": {
             "status": { "enum": ["success", "failure"] },
-            "reason": { "enum": ["authentication_failed", "registration_denied", "principal_suspended", "provider_rejected", "throttle_exceeded", null] }
+            "reason": { "enum": ["authentication_failed", "registration_denied", "principal_suspended", "provider_rejected", "throttle_exceeded", "refresh_token_reuse", "missing_credential", "invalid_credential", "not_configured", null] }
           }
         }
+      }
+    },
+    "OperatorAuthMechanism": {
+      "type": "string",
+      "enum": ["mtls", "operator_token", "shared_secret"],
+      "description": "How an /internal/* request was authenticated."
+    },
+    "OperatorPrincipal": {
+      "type": "object",
+      "description": "The authenticated identity behind an /internal/* request, recorded on admin audit events. Never carries credential material.",
+      "required": ["id", "mechanism"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "description": "Certificate subject, operator-token sub, or the reserved literal 'unattributed'" },
+        "mechanism": { "$ref": "#/definitions/OperatorAuthMechanism" }
       }
     },
     "SingleUseRecord": {
