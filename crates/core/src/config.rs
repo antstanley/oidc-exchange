@@ -1934,6 +1934,7 @@ pub enum TelemetryExporter {
     None,
     Otlp,
     Stdout,
+    Xray,
     Prometheus,
 }
 impl TelemetryExporter {
@@ -1942,6 +1943,7 @@ impl TelemetryExporter {
             Self::None => "none",
             Self::Otlp => "otlp",
             Self::Stdout => "stdout",
+            Self::Xray => "xray",
             Self::Prometheus => "prometheus",
         }
     }
@@ -1951,6 +1953,7 @@ impl TelemetryExporter {
             "none" => Ok(Self::None),
             "otlp" => Ok(Self::Otlp),
             "stdout" => Ok(Self::Stdout),
+            "xray" => Ok(Self::Xray),
             "prometheus" => Ok(Self::Prometheus),
             _ => Err(Error::ConfigError {
                 detail: format!("{field}: invalid telemetry exporter {value:?}"),
@@ -2356,7 +2359,7 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
             ("key_manager.adapter", ""),
             ("repository.adapter", ""),
             ("audit.adapter", "syslog"),
-            ("telemetry.exporter", "xray"),
+            ("telemetry.exporter", "zipkin"),
         ];
 
         for (field, value) in cases {

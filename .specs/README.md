@@ -96,6 +96,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-runtime_parity_across_interfaces/plan.md](plans/2026-08-05-runtime_parity_across_interfaces/plan.md) | Draft | [changes/2026-08-05-runtime_parity_across_interfaces.md](changes/2026-08-05-runtime_parity_across_interfaces.md) |
 | [plans/2026-08-05-harden_release_supply_chain/plan.md](plans/2026-08-05-harden_release_supply_chain/plan.md) | Done | [changes/merged/2026-08-05-harden_release_supply_chain.md](changes/merged/2026-08-05-harden_release_supply_chain.md) |
 | [plans/2026-08-15-verify_admin_ui_session_jwt/plan.md](plans/2026-08-15-verify_admin_ui_session_jwt/plan.md) | Draft | [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) |
+| [plans/2026-08-05-baseline_reference_deployments/plan.md](plans/2026-08-05-baseline_reference_deployments/plan.md) | Draft | [changes/2026-08-05-baseline_reference_deployments.md](changes/2026-08-05-baseline_reference_deployments.md) |
 
 ## Conventions
 

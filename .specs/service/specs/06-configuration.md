@@ -256,7 +256,7 @@ retries? }`. `url` must be `https` because the payload carries the full user rec
 
 ### `[telemetry]`
 
-`enabled` (false), `exporter` (`none` | `stdout` | `otlp` | `xray`), optional `endpoint`,
+`enabled` (false), `exporter` (`none` | `stdout` | `otlp` | `xray` | `prometheus`), optional `endpoint`,
 `service_name`, `sample_rate` (default 1.0), and `protocol`.
 
 ### `[internal_api]`
@@ -306,7 +306,7 @@ The closed domains:
 | `key_manager.kms.algorithm` | `SigningAlgorithm` | `RS256` \| `RS384` \| `RS512` \| `PS256` \| `PS384` \| `PS512` \| `ES256` \| `ES384` \| `ES512` (JWS names, RFC 7518 §3.1 — not AWS `SigningAlgorithmSpec` names) |
 | `audit.adapter` | `AuditAdapter` | `noop` \| `stdout` \| `stderr` \| `auto` \| `sqs` |
 | `audit.blocking_threshold`, `audit.emit_threshold` | `AuditSeverity` | syslog severity name |
-| `telemetry.exporter` | `TelemetryExporter` | `none` \| `stdout` \| `otlp` \| `xray` |
+| `telemetry.exporter` | `TelemetryExporter` | `none` \| `stdout` \| `otlp` \| `xray` \| `prometheus` |
 | `internal_api.auth_method` | `InternalAuthMethod` | `shared_secret` |
 | `user_sync.webhook.url` | `HttpsUrl` | `https` only |
 | `providers.<name>.{issuer,jwks_uri,token_endpoint,revocation_endpoint}` | `HttpsUrl` | `https` only |
