@@ -1,58 +1,49 @@
-import { redirect, fail } from "@sveltejs/kit";
-import { decodeJwtPayload, hasAdminClaim, isExpired } from "$lib/auth";
+import { fail, redirect } from "@sveltejs/kit";
+import { hasAdminClaim, verifyAccessToken } from "$lib/auth";
 import type { Actions, PageServerLoad } from "./$types";
 
+const SESSION_COOKIE = "__Host-admin_session";
+const MAX_COOKIE_AGE_SECONDS = 3_600;
+const COOKIE_OPTIONS = {
+  path: "/",
+  secure: true,
+  httpOnly: true,
+  sameSite: "strict" as const,
+};
+
 export const load: PageServerLoad = async ({ cookies }) => {
-  const token = cookies.get("access_token");
-  if (token) {
-    try {
-      const payload = decodeJwtPayload(token);
-      if (!isExpired(payload) && hasAdminClaim(payload)) {
-        throw redirect(303, "/");
-      }
-    } catch (e) {
-      if (e && typeof e === "object" && "status" in e) throw e;
-    }
+  const token = cookies.get(SESSION_COOKIE);
+  if (!token) return {};
+  try {
+    const claims = await verifyAccessToken(token);
+    if (hasAdminClaim(claims)) throw redirect(303, "/");
+    throw redirect(303, "/denied");
+  } catch (error) {
+    if (error && typeof error === "object" && "status" in error) throw error;
+    cookies.delete(SESSION_COOKIE, COOKIE_OPTIONS);
+    return {};
   }
-  return {};
 };
 
 export const actions: Actions = {
   default: async ({ request, cookies }) => {
     const data = await request.formData();
-    const token = data.get("token")?.toString();
-
-    if (!token) {
+    const tokenValue = data.get("token");
+    if (typeof tokenValue !== "string" || tokenValue.length === 0) {
       return fail(400, { error: "Token is required" });
     }
 
     try {
-      const payload = decodeJwtPayload(token);
-
-      if (isExpired(payload)) {
-        return fail(401, { error: "Token is expired" });
-      }
-
-      if (!hasAdminClaim(payload)) {
-        throw redirect(303, "/denied");
-      }
-
-      // Set httpOnly cookie
-      const exp = payload.exp as number;
-      const maxAge = exp - Math.floor(Date.now() / 1000);
-
-      cookies.set("access_token", token, {
-        path: "/",
-        httpOnly: true,
-        secure: false, // set to true in production
-        sameSite: "lax",
-        maxAge: maxAge > 0 ? maxAge : 3600,
-      });
-
+      const claims = await verifyAccessToken(tokenValue);
+      if (!hasAdminClaim(claims)) throw redirect(303, "/denied");
+      const remainingAge = claims.exp! - Math.floor(Date.now() / 1000);
+      const maxAge = Math.min(remainingAge, MAX_COOKIE_AGE_SECONDS);
+      if (maxAge <= 0) return fail(401, { error: "Invalid token" });
+      cookies.set(SESSION_COOKIE, tokenValue, { ...COOKIE_OPTIONS, maxAge });
       throw redirect(303, "/");
-    } catch (e) {
-      if (e && typeof e === "object" && "status" in e) throw e;
-      return fail(400, { error: "Invalid token" });
+    } catch (error) {
+      if (error && typeof error === "object" && "status" in error) throw error;
+      return fail(401, { error: "Invalid token" });
     }
   },
 };

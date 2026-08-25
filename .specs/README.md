@@ -33,6 +33,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | Change spec | Status | Targets |
 |---|---|---|
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
+| [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) | Merged | admin UI: verified discovery/JWKS session JWTs, hardened host cookie, security tests and CI gate |
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
 | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) | Merged | repo-wide: closed config domains, HTTPS URLs, verified key metadata, migration probes, and mandatory installer checks |
 | [changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md) | Merged | service: rotating refresh tokens, reuse detection, session-family persistence, and owned cleanup |
@@ -94,6 +95,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-own_outbound_http_boundary/plan.md](plans/2026-08-05-own_outbound_http_boundary/plan.md) | Review | [changes/2026-08-05-own_outbound_http_boundary.md](changes/2026-08-05-own_outbound_http_boundary.md) |
 | [plans/2026-08-05-runtime_parity_across_interfaces/plan.md](plans/2026-08-05-runtime_parity_across_interfaces/plan.md) | Draft | [changes/2026-08-05-runtime_parity_across_interfaces.md](changes/2026-08-05-runtime_parity_across_interfaces.md) |
 | [plans/2026-08-05-harden_release_supply_chain/plan.md](plans/2026-08-05-harden_release_supply_chain/plan.md) | Done | [changes/merged/2026-08-05-harden_release_supply_chain.md](changes/merged/2026-08-05-harden_release_supply_chain.md) |
+| [plans/2026-08-15-verify_admin_ui_session_jwt/plan.md](plans/2026-08-15-verify_admin_ui_session_jwt/plan.md) | Draft | [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) |
 
 ## Conventions
 

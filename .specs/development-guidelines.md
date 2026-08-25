@@ -18,7 +18,7 @@ in the global spec layer.
 | clippy | latest | `cargo clippy --workspace -- -D warnings` (zero warnings) |
 | cargo-nextest | latest | `cargo nextest run --workspace`; config in `.config/nextest.toml` |
 | TypeScript | strict mode, `.ts` only | every package is ESM (`"type": "module"`) |
-| pnpm | 11.9.0 | exact Corepack version; frozen committed lockfiles are records of resolved inputs |
+| pnpm | 11.9.0 | exact Corepack version (`corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts`); frozen committed lockfiles are records of resolved inputs |
 | oxfmt | latest | `pnpm format` / `pnpm format:check` |
 | oxlint | latest | `pnpm lint` |
 | tsc / astro check / svelte-check | latest | `pnpm typecheck` per TS workspace (`tsc --noEmit` for the bindings; `astro check` / `svelte-check` for the apps) |
@@ -380,7 +380,8 @@ A change is done when:
 - *Three toolchains, one CI.* **Rust (rustfmt/clippy/nextest), TS (oxfmt/oxlint/tsc/vitest+pnpm),
   Python (ruff/pyright/pytest+uv) run as CI jobs.** Each language uses its idiomatic tools; one
   workflow enforces them. The Astro/SvelteKit apps add a `web-apps` job (oxlint/oxfmt + `astro
-  check`/`svelte-check`).
+  check`/`svelte-check`), and that job runs `pnpm test` for `apps/admin-ui`, whose session
+  verification boundary is security-critical.
 - *jj as the front end.* **Jujutsu is the sole VCS interface over the Git backend.** Avoids the
   index/working-copy mismatch of mixing `git` commands into a jj working copy.
 - *Manual version parity, machine-checked.* **Versions are bumped by hand in three manifests

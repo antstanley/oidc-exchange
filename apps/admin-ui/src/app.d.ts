@@ -3,7 +3,7 @@ declare global {
   namespace App {
     interface Locals {
       userId: string;
-      token: string;
+      claims: Readonly<Record<string, unknown>>;
     }
   }
 }

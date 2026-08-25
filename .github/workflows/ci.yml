@@ -174,7 +174,7 @@ jobs:
         run: node conformance/report.mjs
 
   web-apps:
-    name: Web Apps (lint, format, typecheck)
+    name: Web Apps (lint, format, typecheck, test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -205,5 +205,8 @@ jobs:
       - name: Admin UI — type-check
         working-directory: apps/admin-ui
         run: pnpm typecheck
+      - name: Admin UI — test
+        working-directory: apps/admin-ui
+        run: pnpm test
     permissions:
       contents: read
