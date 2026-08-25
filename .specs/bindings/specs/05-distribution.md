@@ -66,7 +66,8 @@ have `id-token: write` for trusted publishing. The binary attestation consumes t
 attestation consumes the digest resolved after composing the two platform subjects.
 
 `build-nodejs` installs with exact pnpm 11.9.0 and a frozen lockfile, then executes the locked napi
-CLI offline. A separate read-only `validate-npm-package` job runs locked `publint` and
+CLI through the pinned corepack pnpm — the tool comes from the frozen install, and
+dynamic runners (dlx/npx/@latest) are policy-rejected. A separate read-only `validate-npm-package` job runs locked `publint` and
 `@arethetypeswrong/cli`, distributes artifacts, and proves all four platform binaries exist before
 uploading a validated package tree. Only then does `publish-npm` receive OIDC identity and stage
 platform, root Node, and Lambda packages with provenance and ignored lifecycle scripts. Lambda uses

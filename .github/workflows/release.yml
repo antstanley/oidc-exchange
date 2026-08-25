@@ -357,7 +357,7 @@ jobs:
         run: corepack pnpm@11.9.0 install --frozen-lockfile
       - name: Build
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec --offline napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
+        run: corepack pnpm@11.9.0 exec napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -605,7 +605,7 @@ jobs:
         run: corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
       - name: Sync platform package versions to the release version
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec --offline napi version
+        run: corepack pnpm@11.9.0 exec napi version
       - name: Download Node.js artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -614,7 +614,7 @@ jobs:
           merge-multiple: true
       - name: Distribute binaries into platform packages
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec --offline napi artifacts
+        run: corepack pnpm@11.9.0 exec napi artifacts
       - name: Verify every platform binary is present
         working-directory: bindings/nodejs
         run: |
@@ -635,10 +635,10 @@ jobs:
           fi
       - name: Validate package metadata (publint)
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec --offline publint
+        run: corepack pnpm@11.9.0 exec publint
       - name: Validate type definitions (arethetypeswrong)
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec --offline attw --pack --profile esm-only
+        run: corepack pnpm@11.9.0 exec attw --pack --profile esm-only
       - name: Upload validated npm package tree
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

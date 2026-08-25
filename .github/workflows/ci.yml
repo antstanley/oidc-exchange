@@ -95,7 +95,7 @@ jobs:
         run: pnpm typecheck
       - name: Build native module
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec --offline napi build --release --dts index.generated.d.ts
+        run: corepack pnpm@11.9.0 exec napi build --release --dts index.generated.d.ts
       - name: Run tests
         working-directory: bindings/nodejs
         run: pnpm test
