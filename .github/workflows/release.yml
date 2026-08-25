@@ -348,7 +348,12 @@ jobs:
         with:
           node-version: 24.18.0
       - name: Activate pnpm 11.9.0
-        run: corepack pnpm@11.9.0 --version
+        run: |
+          # Enable the corepack shims so tools that spawn a bare `pnpm` resolve
+          # through the repo's packageManager pin (pnpm@11.9.0); the explicit
+          # pinned invocation below proves the exact version is provisioned.
+          corepack enable
+          corepack pnpm@11.9.0 --version
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --version 0.2.5 --locked
@@ -385,6 +390,12 @@ jobs:
         with:
           node-version: 24.18.0
           registry-url: https://registry.npmjs.org
+      - name: Activate pnpm 11.9.0
+        run: |
+          # Enable the corepack shims so package scripts that spawn a bare
+          # `pnpm` resolve through the repo's packageManager pin (pnpm@11.9.0).
+          corepack enable
+          corepack pnpm@11.9.0 --version
       - name: Download validated npm package tree
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -599,7 +610,12 @@ jobs:
       - *a1
       - *a2
       - name: Activate pnpm 11.9.0
-        run: corepack pnpm@11.9.0 --version
+        run: |
+          # Enable the corepack shims: publint packs via a bare `pnpm pack`
+          # child process, which resolves through the repo's packageManager pin
+          # (pnpm@11.9.0) only when the shims are on PATH.
+          corepack enable
+          corepack pnpm@11.9.0 --version
       - name: Install locked package tooling
         working-directory: bindings/nodejs
         run: corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
