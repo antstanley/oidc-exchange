@@ -195,8 +195,12 @@ fn oidc_config(server_uri: &str) -> OidcProviderConfig {
         issuer: HttpsUrl::parse_for_test(server_uri).expect("wiremock url"),
         client_id: OIDC_CLIENT_ID.into(),
         client_secret: None,
-        jwks_uri: Some(HttpsUrl::parse_for_test(format!("{server_uri}/jwks.json")).expect("wiremock url")),
-        token_endpoint: Some(HttpsUrl::parse_for_test(format!("{server_uri}/token")).expect("wiremock url")),
+        jwks_uri: Some(
+            HttpsUrl::parse_for_test(format!("{server_uri}/jwks.json")).expect("wiremock url"),
+        ),
+        token_endpoint: Some(
+            HttpsUrl::parse_for_test(format!("{server_uri}/token")).expect("wiremock url"),
+        ),
         revocation_endpoint: None,
         endpoint_origins: Vec::new(),
         scopes: vec!["openid".into()],

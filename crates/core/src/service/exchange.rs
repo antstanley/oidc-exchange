@@ -323,7 +323,9 @@ impl AppService {
                 // single terminal security event for them, naming the known
                 // principal as `actor`.
                 if user.status != UserStatus::Active {
-                    return Err(ExchangeFlowError::from(Error::UserSuspended { user_id: user.id }));
+                    return Err(ExchangeFlowError::from(Error::UserSuspended {
+                        user_id: user.id,
+                    }));
                 }
                 if let Some(reason) = registration_policy_reason(
                     claims.email.as_deref(),
@@ -357,8 +359,7 @@ impl AppService {
                     RegistrationMode::Open => {}
                     RegistrationMode::ExistingUsersOnly => {
                         return Err(ExchangeFlowError::from(Error::AccessDenied {
-                            reason: "registration is restricted to existing users only"
-                                .to_string(),
+                            reason: "registration is restricted to existing users only".to_string(),
                         }));
                     }
                 }
@@ -416,7 +417,9 @@ impl AppService {
                                 debug_assert_eq!(user.provider, request.provider);
                                 debug_assert_eq!(user.external_id, claims.subject);
                                 if user.status != UserStatus::Active {
-                                    return Err(ExchangeFlowError::from(Error::UserSuspended { user_id: user.id }));
+                                    return Err(ExchangeFlowError::from(Error::UserSuspended {
+                                        user_id: user.id,
+                                    }));
                                 }
                                 if let Some(reason) = registration_policy_reason(
                                     claims.email.as_deref(),
@@ -528,7 +531,11 @@ impl AppService {
     /// infrastructure failure is logged and allowed through (fail-open for
     /// availability); a `Deny` maps to `TooManyRequests`, which the wrapper
     /// records as a `ThrottleExceeded` terminal event.
-    async fn consume_limit(&self, key: Option<RateLimitKey>, request: &ExchangeRequest) -> Result<()> {
+    async fn consume_limit(
+        &self,
+        key: Option<RateLimitKey>,
+        request: &ExchangeRequest,
+    ) -> Result<()> {
         let Some(key) = key else {
             tracing::error!(
                 provider_length = request.provider.len(),
@@ -585,7 +592,10 @@ enum ExchangeFlowError {
     Binding(crate::service::assertion::AssertionRejection),
     /// A denial attributable to a known principal — the terminal event names
     /// them as `actor` (e.g. an existing user denied by registration policy).
-    Attributed { error: Error, actor: String },
+    Attributed {
+        error: Error,
+        actor: String,
+    },
     Other(Error),
 }
 

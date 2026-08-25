@@ -116,9 +116,7 @@ impl OperatorAuthFailureReason {
             OperatorAuthFailureReason::InvalidCredential => {
                 crate::domain::AuditFailure::InvalidCredential
             }
-            OperatorAuthFailureReason::NotConfigured => {
-                crate::domain::AuditFailure::NotConfigured
-            }
+            OperatorAuthFailureReason::NotConfigured => crate::domain::AuditFailure::NotConfigured,
         }
     }
 }
@@ -165,13 +163,22 @@ mod tests {
     #[test]
     fn failure_reasons_use_the_fixed_vocabulary() {
         let cases = [
-            (OperatorAuthFailureReason::MissingCredential, "\"missing_credential\""),
-            (OperatorAuthFailureReason::InvalidCredential, "\"invalid_credential\""),
-            (OperatorAuthFailureReason::NotConfigured, "\"not_configured\""),
+            (
+                OperatorAuthFailureReason::MissingCredential,
+                "\"missing_credential\"",
+            ),
+            (
+                OperatorAuthFailureReason::InvalidCredential,
+                "\"invalid_credential\"",
+            ),
+            (
+                OperatorAuthFailureReason::NotConfigured,
+                "\"not_configured\"",
+            ),
         ];
         for (reason, wire) in cases {
-            let json = serde_json::to_string(&reason.audit_failure())
-                .expect("audit failure serializes");
+            let json =
+                serde_json::to_string(&reason.audit_failure()).expect("audit failure serializes");
             assert_eq!(json, wire);
         }
     }

@@ -729,7 +729,10 @@ async fn defective_operator_tokens_are_rejected_with_invalid_credential() {
     let events = audit.events().await;
     assert_eq!(events.len(), 4, "one event per rejected attempt");
     for event in &events {
-        assert_eq!(outcome_reason(&event.outcome), Some("invalid_credential".to_string()));
+        assert_eq!(
+            outcome_reason(&event.outcome),
+            Some("invalid_credential".to_string())
+        );
     }
     let rendered = format!("{events:?}");
     assert!(

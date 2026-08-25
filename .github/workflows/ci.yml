@@ -75,7 +75,12 @@ jobs:
         with:
           node-version: 24.18.0
       - name: Activate pnpm 11.9.0
-        run: corepack pnpm@11.9.0 --version
+        run: |
+          # Enable the corepack shims so later bare `pnpm` script steps resolve
+          # through the repo's packageManager pin (pnpm@11.9.0); the explicit
+          # pinned invocation below proves the exact version is provisioned.
+          corepack enable
+          corepack pnpm@11.9.0 --version
       - name: Install dependencies
         working-directory: bindings/nodejs
         run: corepack pnpm@11.9.0 install --frozen-lockfile
@@ -131,7 +136,8 @@ jobs:
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
       - name: Install dependencies
         working-directory: bindings/python
-        run: uv sync
+        # --group build adds the pinned maturin the develop/build steps invoke.
+        run: uv sync --group build
       - name: Lint
         working-directory: bindings/python
         run: uv run ruff check .
@@ -169,7 +175,7 @@ jobs:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - run: corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
-      - run: uv sync --project bindings/python
+      - run: uv sync --project bindings/python --group build
       - name: Require executable cross-runtime parity
         run: node conformance/report.mjs
 
@@ -184,7 +190,12 @@ jobs:
         with:
           node-version: 24.18.0
       - name: Activate pnpm 11.9.0
-        run: corepack pnpm@11.9.0 --version
+        run: |
+          # Enable the corepack shims so later bare `pnpm` script steps resolve
+          # through the repo's packageManager pin (pnpm@11.9.0); the explicit
+          # pinned invocation below proves the exact version is provisioned.
+          corepack enable
+          corepack pnpm@11.9.0 --version
       - name: Install dependencies
         run: corepack pnpm@11.9.0 install --frozen-lockfile
       - name: Website — lint

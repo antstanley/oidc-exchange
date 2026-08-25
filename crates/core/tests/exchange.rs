@@ -1283,7 +1283,10 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
     assert!(
         events.is_empty(),
         "an infrastructure failure must not be recorded as an authentication outcome: {:?}",
-        events.iter().map(|e| e.event_type.clone()).collect::<Vec<_>>()
+        events
+            .iter()
+            .map(|e| e.event_type.clone())
+            .collect::<Vec<_>>()
     );
 
     // No user or session was created, and the flow did not swallow the

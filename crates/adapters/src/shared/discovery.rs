@@ -150,8 +150,8 @@ mod tests {
             &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
             &issuer_only_origins(&server.uri()),
         )
-            .await
-            .expect("discovery should succeed");
+        .await
+        .expect("discovery should succeed");
 
         assert_eq!(doc.issuer.as_str(), server.uri());
         assert_eq!(
@@ -188,8 +188,8 @@ mod tests {
             &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
             &issuer_only_origins(&server.uri()),
         )
-            .await
-            .expect("discovery should succeed");
+        .await
+        .expect("discovery should succeed");
 
         assert_eq!(doc.issuer.as_str(), server.uri());
         assert!(doc.revocation_endpoint.is_none());
@@ -287,8 +287,8 @@ mod tests {
             &HttpsUrl::parse_for_test(url_with_slash).expect("wiremock URL"),
             &issuer_only_origins(&server.uri()),
         )
-            .await
-            .expect("discovery should succeed with trailing slash");
+        .await
+        .expect("discovery should succeed with trailing slash");
 
         assert_eq!(doc.issuer.as_str(), server.uri());
     }
@@ -335,9 +335,10 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                "x".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES + 1),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("x".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES + 1)),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -346,8 +347,8 @@ mod tests {
             &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
             &issuer_only_origins(&server.uri()),
         )
-            .await
-            .expect_err("an oversized discovery document must not be accepted");
+        .await
+        .expect_err("an oversized discovery document must not be accepted");
 
         let message = err.to_string();
         assert!(
@@ -382,8 +383,8 @@ mod tests {
             &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
             &issuer_only_origins(&server.uri()),
         )
-            .await
-            .expect_err("a 404 discovery response must be an error");
+        .await
+        .expect_err("a 404 discovery response must be an error");
 
         let message = err.to_string();
         assert!(
@@ -427,9 +428,12 @@ mod tests {
             &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
             &issuer_only_origins(&server.uri()),
         )
-            .await
-            .expect("warning mode must not reject the same deployment it warns about");
-        assert_eq!(doc.jwks_uri.as_str(), "https://undeclared.example/jwks.json");
+        .await
+        .expect("warning mode must not reject the same deployment it warns about");
+        assert_eq!(
+            doc.jwks_uri.as_str(),
+            "https://undeclared.example/jwks.json"
+        );
     }
 
     #[tokio::test]
@@ -462,9 +466,12 @@ mod tests {
             &HttpsUrl::parse_for_test(server.uri()).expect("wiremock URL"),
             &permitted,
         )
-            .await
-            .expect("declared cross-origin endpoints must be accepted");
-        assert_eq!(doc.jwks_uri.as_str(), "https://www.googleapis.com/jwks.json");
+        .await
+        .expect("declared cross-origin endpoints must be accepted");
+        assert_eq!(
+            doc.jwks_uri.as_str(),
+            "https://www.googleapis.com/jwks.json"
+        );
         assert_eq!(
             doc.revocation_endpoint.as_ref().map(HttpsUrl::as_str),
             Some("https://oauth2.googleapis.com/revoke")

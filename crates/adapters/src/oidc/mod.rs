@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use oidc_exchange_core::domain::provider::OidcProviderConfig;
-use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
+use oidc_exchange_core::secret::Secret;
 
 use crate::shared::claims::coerce_bool;
 use crate::shared::jwks::JwksCache;

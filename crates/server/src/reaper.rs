@@ -469,7 +469,10 @@ mod tests {
                 detail: "failing fixture store".into(),
             })
         }
-        async fn revoke_session(&self, _token_hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
+        async fn revoke_session(
+            &self,
+            _token_hash: &oidc_exchange_core::secret::Secret<String>,
+        ) -> Result<()> {
             Err(Error::StoreError {
                 detail: "failing fixture store".into(),
             })
@@ -646,7 +649,8 @@ mod tests {
         let err = oidc_exchange_core::config::Config::resolve(raw)
             .expect_err("an unparseable cleanup interval must fail resolution");
         assert!(
-            err.to_string().contains("session_repository.cleanup_interval"),
+            err.to_string()
+                .contains("session_repository.cleanup_interval"),
             "the error must name the offending field: {err}"
         );
     }

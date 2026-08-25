@@ -213,7 +213,9 @@ async fn refresh_happy_path_returns_new_access_token() {
     // is the family id, which rotation never moves, so revocation by access
     // token keeps naming this credential chain.
     let stored = repo
-        .get_session_by_refresh_token(&oidc_exchange_core::secret::Secret::new(replacement_hash.clone()))
+        .get_session_by_refresh_token(&oidc_exchange_core::secret::Secret::new(
+            replacement_hash.clone(),
+        ))
         .await
         .expect("lookup should not error")
         .expect("the replacement generation must be live after a refresh");
@@ -637,7 +639,7 @@ async fn rotation_replaces_generation_and_inherits_family_metadata() {
             .refresh_token
             .as_ref()
             .expect("rotation returns a replacement"),
-        );
+    );
     assert!(
         replacement_hash != *original.refresh_token_hash.expose(),
         "replacement must be a new generation"
@@ -951,7 +953,11 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
 
     #[async_trait::async_trait]
     impl SessionRepository for LosingCasRepo {
-        async fn put_single_use(&self, key: &str, expires_at: chrono::DateTime<Utc>) -> Result<bool> {
+        async fn put_single_use(
+            &self,
+            key: &str,
+            expires_at: chrono::DateTime<Utc>,
+        ) -> Result<bool> {
             self.inner.put_single_use(key, expires_at).await
         }
         async fn take_single_use(&self, key: &str) -> Result<bool> {
@@ -973,7 +979,10 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
             // Deterministic race loss: another redemption won the CAS.
             Ok(false)
         }
-        async fn revoke_session(&self, hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
+        async fn revoke_session(
+            &self,
+            hash: &oidc_exchange_core::secret::Secret<String>,
+        ) -> Result<()> {
             self.inner.revoke_session(hash).await
         }
         async fn revoke_family(&self, family_id: &str) -> Result<u64> {
@@ -1186,10 +1195,10 @@ async fn legacy_row_first_redemption_mints_family_without_retirement_record() {
     assert!(
         *replacement.refresh_token_hash.expose()
             == hash_of_secret(
-            response
-                .refresh_token
-                .as_ref()
-                .expect("enabled rotation returns a replacement"),
+                response
+                    .refresh_token
+                    .as_ref()
+                    .expect("enabled rotation returns a replacement"),
             )
     );
     assert!(replacement.refresh_token_hash != legacy.refresh_token_hash);
@@ -1313,7 +1322,11 @@ async fn missing_user_is_refused_before_any_write() {
 
     #[async_trait::async_trait]
     impl SessionRepository for UserlessRepo {
-        async fn put_single_use(&self, key: &str, expires_at: chrono::DateTime<Utc>) -> Result<bool> {
+        async fn put_single_use(
+            &self,
+            key: &str,
+            expires_at: chrono::DateTime<Utc>,
+        ) -> Result<bool> {
             self.inner.put_single_use(key, expires_at).await
         }
         async fn take_single_use(&self, key: &str) -> Result<bool> {
@@ -1334,7 +1347,10 @@ async fn missing_user_is_refused_before_any_write() {
         async fn rotate_refresh_token(&self, live: &str, repl: &Session) -> Result<bool> {
             self.inner.rotate_refresh_token(live, repl).await
         }
-        async fn revoke_session(&self, hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
+        async fn revoke_session(
+            &self,
+            hash: &oidc_exchange_core::secret::Secret<String>,
+        ) -> Result<()> {
             self.inner.revoke_session(hash).await
         }
         async fn revoke_family(&self, family_id: &str) -> Result<u64> {

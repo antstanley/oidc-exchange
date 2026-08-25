@@ -154,7 +154,9 @@ impl ClientAddr {
 /// The authentication and authorization outcomes that always carry fixed audit metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityEvent {
-    AuthenticationSucceeded { kind: AuthenticationKind },
+    AuthenticationSucceeded {
+        kind: AuthenticationKind,
+    },
     AuthenticationFailed,
     RegistrationDenied,
     PrincipalSuspended,
@@ -162,7 +164,9 @@ pub enum SecurityEvent {
     SessionRevoked,
     SessionsRevoked,
     ProviderRejected,
-    AdminMutation { kind: AdminMutationKind },
+    AdminMutation {
+        kind: AdminMutationKind,
+    },
     /// A rejected `/internal/*` operator authentication, with its closed
     /// failure reason. Renders as [`AuditEventType::Unauthorized`].
     OperatorAuthenticationFailed {

@@ -6,8 +6,8 @@ use oidc_exchange_core::domain::{
     is_valid_family_id, RefreshResolution, RetiredRefreshToken, Session,
 };
 use oidc_exchange_core::error::{Error, Result};
-use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::SessionRepository;
+use oidc_exchange_core::secret::Secret;
 use tracing::instrument;
 
 /// The minimum TTL, in seconds, a session may be stored with. `store_refresh_token` computes
@@ -493,7 +493,10 @@ impl SessionRepository for ValkeySessionRepository {
             !token_hash.is_empty(),
             "resolve_refresh_token: token_hash must not be empty"
         );
-        if let Some(session) = self.get_session_by_refresh_token(&Secret::new(token_hash.to_string())).await? {
+        if let Some(session) = self
+            .get_session_by_refresh_token(&Secret::new(token_hash.to_string()))
+            .await?
+        {
             return Ok(RefreshResolution::Live(session));
         }
 

@@ -1,9 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-use crate::domain::{
-    is_valid_family_id, AuditFailure, AuditOutcome, ClientAddr, SecurityEvent,
-};
+use crate::domain::{is_valid_family_id, AuditFailure, AuditOutcome, ClientAddr, SecurityEvent};
 use crate::error::Result;
 use crate::service::AppService;
 
@@ -76,9 +74,7 @@ impl AppService {
         let claims = match self.validate_access_token(&request.token).await {
             Ok(claims) => claims,
             Err(_reason) => {
-                return self
-                    .emit_revoke_rejection(client_addr, user_agent)
-                    .await;
+                return self.emit_revoke_rejection(client_addr, user_agent).await;
             }
         };
 

@@ -188,9 +188,7 @@ impl UpstreamBody {
             // tokens, never raw upstream text.
             detail: upstream::error_detail(
                 self.status,
-                oidc_exchange_core::Secret::new(
-                    String::from_utf8_lossy(&self.bytes).into_owned(),
-                ),
+                oidc_exchange_core::Secret::new(String::from_utf8_lossy(&self.bytes).into_owned()),
             ),
         }
     }
