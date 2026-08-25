@@ -1,6 +1,6 @@
 {
   "name": "@oidc-exchange/node",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Node.js bindings for oidc-exchange - OIDC token exchange service",
   "license": "MIT",
   "repository": {
@@ -38,10 +38,10 @@
     "vitest": "4.1.9"
   },
   "optionalDependencies": {
-    "@oidc-exchange/darwin-arm64": "0.3.0",
-    "@oidc-exchange/linux-arm64-gnu": "0.3.0",
-    "@oidc-exchange/linux-x64-gnu": "0.3.0",
-    "@oidc-exchange/win32-x64-msvc": "0.3.0"
+    "@oidc-exchange/darwin-arm64": "0.4.0",
+    "@oidc-exchange/linux-arm64-gnu": "0.4.0",
+    "@oidc-exchange/linux-x64-gnu": "0.4.0",
+    "@oidc-exchange/win32-x64-msvc": "0.4.0"
   },
   "napi": {
     "binaryName": "oidc-exchange",
