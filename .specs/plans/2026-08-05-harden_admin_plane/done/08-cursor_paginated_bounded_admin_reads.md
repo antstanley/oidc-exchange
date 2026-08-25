@@ -1,7 +1,7 @@
 # 08 · Cursor-paginated bounded admin reads
 
 **Status:** Done (audited against this DoD; no new code changes were required)  
-**Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 8; [02-ports-and-adapters](../../../service/specs/02-ports-and-adapters.md), [08-persistence](../../../service/specs/08-persistence.md), [01-domain-model](../../../service/specs/01-domain-model.md), [03-service-flows](../../../service/specs/03-service-flows.md), and [04-http-api](../../../service/specs/04-http-api.md) targets  
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 8; [02-ports-and-adapters](../../../service/specs/02-ports-and-adapters.md), [08-persistence](../../../service/specs/08-persistence.md), [01-domain-model](../../../service/specs/01-domain-model.md), [03-service-flows](../../../service/specs/03-service-flows.md), and [04-http-api](../../../service/specs/04-http-api.md) targets  
 **Depends on:** 06 · generated internal API client; 07 · closed reserved-claim enforcement  
 **Produces:** `GET /internal/users` returns bounded cursor `UserPage`s and adapter-specific bounded reads/counters/cache replace full-table admin work.
 

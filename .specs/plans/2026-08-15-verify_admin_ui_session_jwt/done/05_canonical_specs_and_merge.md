@@ -5,7 +5,7 @@
 **Implements:** [change spec §Affected spec pages](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#affected-spec-pages), [§Proposed changes](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#proposed-changes), and [§Merge plan](../../../changes/merged/2026-08-05-verify_admin_ui_session_jwt.md#merge-plan)
 **Depends on:** 02, 03, 04
 **Produces:** canonical admin-UI and development-guidelines pages accurately document the merged verified-session behavior, while change-spec and README bookkeeping make the completed change discoverable.
-**Pointers:** `.specs/admin-ui/specs/00-overview.md:25-87`; `.specs/development-guidelines.md:330-369`; `.specs/README.md:28-80`; `.specs/changes/merged/2026-08-05-verify_admin_ui_session_jwt.md:52-62`; `.specs/changes/2026-08-05-harden_admin_plane.md`; `.specs/changes/2026-08-05-fail_closed_across_config_and_adapters.md`
+**Pointers:** `.specs/admin-ui/specs/00-overview.md:25-87`; `.specs/development-guidelines.md:330-369`; `.specs/README.md:28-80`; `.specs/changes/merged/2026-08-05-verify_admin_ui_session_jwt.md:52-62`; `.specs/changes/merged/2026-08-05-harden_admin_plane.md`; `.specs/changes/2026-08-05-fail_closed_across_config_and_adapters.md`
 
 ## Steps
 

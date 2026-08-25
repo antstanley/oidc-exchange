@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [.specs/changes/2026-08-05-validate_revoke_token_claims.md](../../../changes/2026-08-05-validate_revoke_token_claims.md) §Revocation (`revoke.rs`) and implementation notes 5–8; its decisions *A credential revokes only its own session* and *Failed revocation is recorded, not silent*.
+**Implements:** [.specs/changes/merged/2026-08-05-validate_revoke_token_claims.md](../../../changes/merged/2026-08-05-validate_revoke_token_claims.md) §Revocation (`revoke.rs`) and implementation notes 5–8; its decisions *A credential revokes only its own session* and *Failed revocation is recorded, not silent*.
 **Depends on:** 01 (build — valid access tokens carry the session `sid`); 02 (build — only `validate_access_token` may release typed claims)
 **Produces:** an access-token revoke validates once, revokes only `claims.sid`, emits the required success/failure audit outcome, returns 200 for token-state failures, and still propagates repository/audit infrastructure failures.
 **Pointers:** `crates/core/src/service/revoke.rs:28-155`; `crates/core/src/service/mod.rs:102-138`; `crates/core/src/domain/audit.rs:37-59`; `crates/core/tests/revoke.rs:128-440`; `crates/server/tests/routes.rs:307-380`.

@@ -1,6 +1,6 @@
 # Bind `grant_type` at the token endpoint — implementation plan
 
-**Status:** Ready · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-08-05-bind_grant_type_at_token_endpoint.md](../../changes/2026-08-05-bind_grant_type_at_token_endpoint.md)
+**Status:** Ready · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md](../../changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md)
 
 This unstacked-on-`main` plan fixes the token-endpoint grant-confusion vulnerability by making the declared `grant_type` the only selector of the executed flow. It first makes exchange credentials unrepresentable as a mixture of optional fields, then parses the wire form into that type at the HTTP boundary, protects credential-bearing responses with route-scoped cache directives, and finally synchronizes the canonical service specification and binding examples. The plan does not implement the separately proposed id-token grant gate/replay protection or revoke-claim validation; those are external proposed changes and are not prerequisites for this scoped security fix.
 
@@ -10,7 +10,7 @@ No done certificates will be created. The user explicitly forbade certificate fi
 
 ## Source and definition-of-done baseline
 
-- **Source change spec:** [2026-08-05-bind_grant_type_at_token_endpoint.md](../../changes/2026-08-05-bind_grant_type_at_token_endpoint.md), specifically its affected canonical pages, implementation notes, compatibility section, and decisions.
+- **Source change spec:** [2026-08-05-bind_grant_type_at_token_endpoint.md](../../changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md), specifically its affected canonical pages, implementation notes, compatibility section, and decisions.
 - **Canonical targets:** [00-overview.md](../../service/specs/00-overview.md), [01-domain-model.md](../../service/specs/01-domain-model.md), [03-service-flows.md](../../service/specs/03-service-flows.md), [04-http-api.md](../../service/specs/04-http-api.md), and [service canonical-types.schema.json](../../service/specs/canonical-types.schema.json).
 - **Guidelines:** [.specs/development-guidelines.md](../../development-guidelines.md), especially HTTP-boundary validation, invalid-state prevention, handler/core separation, negative-space testing, canonical-schema synchronization, and the Rust format/clippy/test gates.
 - **Current implementation facts:** `ExchangeRequest` is `Default` and exposes optional `code`, `redirect_uri`, and `id_token` fields; `AppService::exchange` selects the direct-token path by `id_token` field presence; `TokenForm` has a required `String` `grant_type`; `public_routes` mounts `/token` and `/revoke` with the cacheable public endpoints; `MockIdentityProvider` does not currently record calls.

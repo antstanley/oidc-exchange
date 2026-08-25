@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [.specs/changes/2026-08-05-validate_revoke_token_claims.md](../../../changes/2026-08-05-validate_revoke_token_claims.md) §Affected spec pages, Proposed changes, Type changes, and merge plan steps 1–4.
+**Implements:** [.specs/changes/merged/2026-08-05-validate_revoke_token_claims.md](../../../changes/merged/2026-08-05-validate_revoke_token_claims.md) §Affected spec pages, Proposed changes, Type changes, and merge plan steps 1–4.
 **Depends on:** 01, 02, 03 (review — canonical artifacts must describe the implemented session-bound minting, strict validation, and narrowed revoke behavior)
 **Produces:** all five affected canonical artifacts accurately describe the merged code and `AccessTokenClaims.sid` schema, while change-spec status/move/README merge bookkeeping remains with the orchestrator.
 **Pointers:** `.specs/service/specs/01-domain-model.md:54-84`; `.specs/service/specs/02-ports-and-adapters.md:52-71`; `.specs/service/specs/03-service-flows.md:55-88,141-153`; `.specs/service/specs/04-http-api.md:10-18,146-157`; `.specs/service/specs/canonical-types.schema.json:73-85`; source spec merge plan lines 295-313.
@@ -96,6 +96,6 @@
   fmt clean, clippy `-D warnings` clean, `cargo nextest run --workspace --no-fail-fast` →
   401 passed / 27 skipped, matching the post-task-03 state.
 - Merge bookkeeping deliberately NOT performed (per task steps): change spec remains
-  **Proposed** at `.specs/changes/2026-08-05-validate_revoke_token_claims.md` with no
+  **Proposed** at `.specs/changes/merged/2026-08-05-validate_revoke_token_claims.md` with no
   `Merged:` date; not moved to `changes/merged/`; `.specs/README.md` untouched. No
   certificate file of any kind exists under the plan folder.

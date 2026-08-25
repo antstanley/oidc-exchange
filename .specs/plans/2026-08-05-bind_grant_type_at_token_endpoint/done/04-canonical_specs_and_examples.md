@@ -1,6 +1,6 @@
 # 04 · Canonical specs and binding examples
 
-**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/2026-08-05-bind_grant_type_at_token_endpoint.md)
+**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md)
 
 **Implements:** all affected canonical pages and the source-spec compatibility/documentation requirements.
 

@@ -2,7 +2,7 @@
 
 **Status:** Done · **Plan:** [plan.md](../plan.md) · **Certificate:** forbidden and intentionally omitted
 
-**Implements:** [source spec §04-http-api — Error mapping](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs04-http-apimd--error-mapping-modify); [§Implementation notes step 5](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`04-http-api.md` Error mapping](../../../service/specs/04-http-api.md)
+**Implements:** [source spec §04-http-api — Error mapping](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs04-http-apimd--error-mapping-modify); [§Implementation notes step 5](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`04-http-api.md` Error mapping](../../../service/specs/04-http-api.md)
 **Depends on:** 03
 **Produces:** `Error::client_description()` supplies stable static public text for every domain variant; server mapping logs full internal `Display` for all mapped classes, under the request span, without publishing diagnostics.
 **Pointers:** `crates/core/src/error.rs`; `crates/server/src/error.rs`; `crates/server/tests/routes.rs:148`; existing `invalid_grant_emits_no_server_error_detail_log` test.

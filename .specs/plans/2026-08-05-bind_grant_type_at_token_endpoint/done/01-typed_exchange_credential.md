@@ -1,6 +1,6 @@
 # 01 · Typed exchange credential
 
-**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/2026-08-05-bind_grant_type_at_token_endpoint.md)
+**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md)
 
 **Implements:** source-spec implementation notes 1–2 and 6; the structural portion of [03-service-flows.md](../../../service/specs/03-service-flows.md) and [01-domain-model.md](../../../service/specs/01-domain-model.md).
 

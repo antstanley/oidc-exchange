@@ -2,7 +2,7 @@
 
 **Status:** Done · **Plan:** [plan.md](../plan.md) · **Certificate:** forbidden and intentionally omitted
 
-**Implements:** [source spec §05-provider-system](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs05-provider-systemmd--oidcprovider-behaviour-modify); [§Implementation notes step 4](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`05-provider-system.md`](../../../service/specs/05-provider-system.md)
+**Implements:** [source spec §05-provider-system](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs05-provider-systemmd--oidcprovider-behaviour-modify); [§Implementation notes step 4](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`05-provider-system.md`](../../../service/specs/05-provider-system.md)
 **Depends on:** 03, 04
 **Produces:** all three upstream non-2xx paths use `read_bounded` and `upstream::error_detail`; OIDC credentials and Apple-generated assertions remain unprintable through request construction.
 **Pointers:** `crates/adapters/src/shared/token_endpoint.rs`; `crates/adapters/src/oidc/mod.rs`; `crates/providers/src/apple.rs`; their existing token-exchange/revocation tests.

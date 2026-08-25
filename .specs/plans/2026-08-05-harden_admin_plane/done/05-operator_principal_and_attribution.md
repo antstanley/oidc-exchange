@@ -1,7 +1,7 @@
 # 05 · Operator principal and attribution
 
 **Status:** Done (commits `84189272`, `032e195a`, plus the server wiring; task 03's sibling primitives are vendored behind `VENDORED SEAM (task 03)` markers naming PR #24 for merge-time replacement)  
-**Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 5 and Type changes; [01-domain-model](../../../service/specs/01-domain-model.md), [03-service-flows](../../../service/specs/03-service-flows.md), [04-http-api](../../../service/specs/04-http-api.md), [07-telemetry-and-audit](../../../service/specs/07-telemetry-and-audit.md), and [canonical types](../../../service/specs/canonical-types.schema.json) targets  
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 5 and Type changes; [01-domain-model](../../../service/specs/01-domain-model.md), [03-service-flows](../../../service/specs/03-service-flows.md), [04-http-api](../../../service/specs/04-http-api.md), [07-telemetry-and-audit](../../../service/specs/07-telemetry-and-audit.md), and [canonical types](../../../service/specs/canonical-types.schema.json) targets  
 **Depends on:** 03 · admin authentication throttle and audit; 04 · separate public and admin listeners  
 **Produces:** `OperatorPrincipal` is authenticated by configured mechanisms, attached to internal requests, and recorded on successful admin mutations.
 

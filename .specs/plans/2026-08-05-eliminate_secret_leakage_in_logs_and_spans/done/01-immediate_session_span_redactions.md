@@ -2,7 +2,7 @@
 
 **Status:** Done · **Plan:** [plan.md](../plan.md) · **Certificate:** forbidden and intentionally omitted
 
-**Implements:** [source spec §Implementation notes step 1](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`08-persistence.md` Session-only stores](../../../service/specs/08-persistence.md)
+**Implements:** [source spec §Implementation notes step 1](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`08-persistence.md` Session-only stores](../../../service/specs/08-persistence.md)
 **Depends on:** —
 **Produces:** LMDB and Valkey session methods explicitly skip sensitive arguments and record only the permitted schema fields before the broad `Secret<T>` migration.
 **Pointers:** `crates/adapters/src/lmdb/mod.rs:55,102,140`; `crates/adapters/src/valkey/mod.rs:52,141,211`; sibling patterns in Dynamo/Postgres/SQLite.

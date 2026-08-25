@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [.specs/changes/2026-08-05-validate_revoke_token_claims.md](../../../changes/2026-08-05-validate_revoke_token_claims.md) §Type changes and implementation notes 1–3 and 7; the code portion of its `Build access token` and `Custom claims` deltas.
+**Implements:** [.specs/changes/merged/2026-08-05-validate_revoke_token_claims.md](../../../changes/merged/2026-08-05-validate_revoke_token_claims.md) §Type changes and implementation notes 1–3 and 7; the code portion of its `Build access token` and `Custom claims` deltas.
 **Depends on:** —
 **Produces:** every newly minted access token has a required `sid` naming its current session, has a pinned `typ: "at+jwt"` header, and cannot have `sid` overridden by custom claims.
 **Pointers:** `crates/core/src/domain/token.rs:35-46`; `crates/core/src/service/mod.rs:63-100`; `crates/core/src/service/exchange.rs:291-316`; `crates/core/src/service/refresh.rs:22-128`; `crates/core/src/service/claims.rs:7-45`; `crates/core/tests/exchange.rs:263-372,1479-1487`; `crates/core/tests/refresh.rs:94-137`; `crates/core/tests/claims.rs:89-127`.

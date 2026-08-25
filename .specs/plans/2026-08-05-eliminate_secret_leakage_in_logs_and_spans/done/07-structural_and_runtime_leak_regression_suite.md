@@ -2,7 +2,7 @@
 
 **Status:** Done · **Plan:** [plan.md](../plan.md) · **Certificate:** forbidden and intentionally omitted
 
-**Implements:** [source spec §Implementation notes step 7](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`07-telemetry-and-audit.md` Telemetry hygiene](../../../service/specs/07-telemetry-and-audit.md)
+**Implements:** [source spec §Implementation notes step 7](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`07-telemetry-and-audit.md` Telemetry hygiene](../../../service/specs/07-telemetry-and-audit.md)
 **Depends on:** 01, 02, 05, 06
 **Produces:** compile-fail proof that `Secret<T>` cannot be formatted and a cross-boundary capture corpus proving sensitive sentinels never reach logs, span fields, or public error bodies.
 **Pointers:** core/adapters/providers/server test manifests; session repository implementations; request-ID module tests; provider wiremock tests; server error/routes tests.

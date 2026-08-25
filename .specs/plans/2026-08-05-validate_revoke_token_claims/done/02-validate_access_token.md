@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md)
 
-**Implements:** [.specs/changes/2026-08-05-validate_revoke_token_claims.md](../../../changes/2026-08-05-validate_revoke_token_claims.md) §`Validate access token` and implementation note 4; its decisions *One validator for first-party tokens*, *Required claims are parse-enforced*, *No `jsonwebtoken` dependency*, and *60 seconds of clock skew*.
+**Implements:** [.specs/changes/merged/2026-08-05-validate_revoke_token_claims.md](../../../changes/merged/2026-08-05-validate_revoke_token_claims.md) §`Validate access token` and implementation note 4; its decisions *One validator for first-party tokens*, *Required claims are parse-enforced*, *No `jsonwebtoken` dependency*, and *60 seconds of clock skew*.
 **Depends on:** 01 (contract — validator deserializes required `AccessTokenClaims.sid` and pins the `at+jwt` header task 01 mints)
 **Produces:** `AppService::validate_access_token(&str) -> Result<AccessTokenClaims, &'static str>` validates a service-minted access JWT in the specified order and returns only fixed, non-attacker-derived rejection reasons.
 **Pointers:** `crates/core/src/service/mod.rs:7-100`; `crates/core/src/service/revoke.rs:129-155` (replaceable parsing pattern only; task 03 removes it); `crates/core/src/ports/key_manager.rs`; `crates/core/tests/revoke.rs:250-413`; `crates/test-utils` `MockKeyManager` implementation.

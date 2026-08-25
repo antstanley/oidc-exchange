@@ -1,7 +1,7 @@
 # 02 · Exchange-only default and config validation
 
 **Status:** Done  
-**Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 3; [04-http-api](../../../service/specs/04-http-api.md) Service roles target; [06-configuration](../../../service/specs/06-configuration.md) target  
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 3; [04-http-api](../../../service/specs/04-http-api.md) Service roles target; [06-configuration](../../../service/specs/06-configuration.md) target  
 **Depends on:** —  
 **Produces:** An omitted `server.role` defaults to `exchange`, with migration documentation and tests that make implicit-admin exposure impossible.
 

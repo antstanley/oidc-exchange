@@ -1,6 +1,6 @@
 # Plan: Bind the direct ID-token grant to replay protection
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-08-15 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/2026-08-05-bind_id_token_grant_replay_protection.md`](../../changes/2026-08-05-bind_id_token_grant_replay_protection.md)
+**Status:** Draft · **Layout:** kanban · **Date:** 2026-08-15 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md`](../../changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md)
 
 Implement the replay-protected direct ID-token grant as a reviewable spine: establish typed configuration and portable atomic single-use storage, extend the provider-to-core contract, then bind verified assertions once in core before exposing the opt-in HTTP surface. The repository contract and all five store implementations lead because the binding flow cannot be reviewed safely without atomic consume/claim semantics; the core flow then becomes independently testable before server wiring exposes it.
 
@@ -85,6 +85,6 @@ The dependency table is the **source of truth**; the Mermaid graph visualizes it
 **Open questions**
 
 - *EdDSA compatibility.* Does any deployment configure a provider that emits both an EdDSA-signed ID token and `at_hash`? The proposed global rejection needs a per-provider exception if this occurs.
-- *Scope boundary.* The implementation tasks should not require edits to `.specs/changes/2026-08-05-bind_id_token_grant_replay_protection.md` or any source code; they are limited to the plan folder and `.specs/README.md` only.
+- *Scope boundary.* The implementation tasks should not require edits to `.specs/changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md` or any source code; they are limited to the plan folder and `.specs/README.md` only.
 - *Nonce endpoint discovery.* Should a custom discovery member publish `POST /nonce`, or should direct-grant clients learn it through deployment documentation? This does not block the scoped implementation because the source spec intentionally leaves it out of discovery.
 - *Sibling integration.* When the grant-type endpoint and refresh-rotation specs merge, which merge order reconciles their overlapping `ExchangeRequest`, `SessionRepository`, flow, and canonical-spec changes? This PR must not implement either sibling's work.

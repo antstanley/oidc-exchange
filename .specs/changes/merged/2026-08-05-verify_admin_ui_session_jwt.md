@@ -334,7 +334,7 @@ Findings: `g4-admin-console-unverified-jwt-session-gate`,
 - The console still holds `INTERNAL_API_SECRET` and spends it on behalf of whoever its gate
   admits. This change locks the front door and leaves the confused-deputy shape intact. Whether
   to scope the console's credential down to the operations it needs is open and belongs to
-  [2026-08-05-harden_admin_plane.md](../2026-08-05-harden_admin_plane.md). Merge order: that
+  [2026-08-05-harden_admin_plane.md](2026-08-05-harden_admin_plane.md). Merge order: that
   sibling names this spec a prerequisite, and its Environment and Decisions blocks for the same
   admin-ui page are written against the text this spec leaves behind — so this spec merges
   strictly first, and any change to those two blocks here means re-checking that sibling's.

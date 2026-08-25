@@ -1,7 +1,7 @@
 # 06 · Generated internal API client
 
 **Status:** Done (change `lrmyvnqr`, audited against this DoD)  
-**Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 6; [admin-ui overview](../../../admin-ui/specs/00-overview.md) Internal API client/Environment/Decisions targets  
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 6; [admin-ui overview](../../../admin-ui/specs/00-overview.md) Internal API client/Environment/Decisions targets  
 **Depends on:** 01 · tactical console path/status fixes; 04 · separate public and admin listeners; 05 · operator principal and attribution  
 **Produces:** `schemas/internal-api.schema.json` is the published contract and build generation produces the admin client/types with encoded paths, service wire enums, operator credentials, and cursor paging.
 

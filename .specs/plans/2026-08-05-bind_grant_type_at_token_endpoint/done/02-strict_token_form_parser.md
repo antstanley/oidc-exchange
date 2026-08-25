@@ -1,6 +1,6 @@
 # 02 · Strict token form parser
 
-**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/2026-08-05-bind_grant_type_at_token_endpoint.md)
+**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md)
 
 **Implements:** source-spec `POST /token request` table and errors, implementation notes 3–8, and grant-boundary behavior for [04-http-api.md](../../../service/specs/04-http-api.md).
 

@@ -1,6 +1,6 @@
 # Validate revoke-token claims — implementation plan
 
-**Status:** Planned · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [../../changes/2026-08-05-validate_revoke_token_claims.md](../../changes/2026-08-05-validate_revoke_token_claims.md)
+**Status:** Planned · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [../../changes/merged/2026-08-05-validate_revoke_token_claims.md](../../changes/merged/2026-08-05-validate_revoke_token_claims.md)
 
 This plan closes the first-party JWT revocation vulnerability in `crates/core`. It changes the
 access-token authority presented to `POST /revoke` from “all sessions for a verified `sub`” to

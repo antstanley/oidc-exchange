@@ -1,6 +1,6 @@
 # Plan: Runtime parity across interfaces
 
-**Status:** Review · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [2026-08-05-runtime_parity_across_interfaces.md](../../changes/2026-08-05-runtime_parity_across_interfaces.md)
+**Status:** Review · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [2026-08-05-runtime_parity_across_interfaces.md](../../changes/merged/2026-08-05-runtime_parity_across_interfaces.md)
 
 **Verdict:** Complete. The plan/index package is internally consistent, source-covered, and merge-ready for the scoped unstacked PR.
 

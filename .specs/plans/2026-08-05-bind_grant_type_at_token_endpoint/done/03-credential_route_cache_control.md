@@ -1,6 +1,6 @@
 # 03 · Credential route cache control
 
-**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/2026-08-05-bind_grant_type_at_token_endpoint.md)
+**Plan:** [plan.md](../plan.md) · **Source:** [.specs/changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md](../../../changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md)
 
 **Implements:** source-spec `POST /token response headers` section and implementation note 9; the cache-directive portion of [04-http-api.md](../../../service/specs/04-http-api.md).
 

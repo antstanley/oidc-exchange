@@ -1,7 +1,7 @@
 # 03 · Admin authentication throttle and audit
 
 **Status:** Done — reconciled against the merged audit/throttle primitives  
-**Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 2; [04-http-api](../../../service/specs/04-http-api.md) internal-auth target; [06-configuration](../../../service/specs/06-configuration.md) validation target; [07-telemetry-and-audit](../../../service/specs/07-telemetry-and-audit.md) target  
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 2; [04-http-api](../../../service/specs/04-http-api.md) internal-auth target; [06-configuration](../../../service/specs/06-configuration.md) validation target; [07-telemetry-and-audit](../../../service/specs/07-telemetry-and-audit.md) target  
 **Depends on:** `2026-08-05-audit_and_throttle_authentication_failures` (merged)  
 **Produces:** Internal-auth failures consume an `OperatorAuth` budget and emit required security/audit records without logging credentials; enabled shared secrets have a 32-byte floor.
 

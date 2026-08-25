@@ -2,7 +2,7 @@
 
 **Status:** Done · **Plan:** [plan.md](../plan.md) · **Certificate:** forbidden and intentionally omitted
 
-**Implements:** [source spec §04-http-api — Middleware stack](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs04-http-apimd--middleware-stack-item-1-modify); [§Implementation notes step 2](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`04-http-api.md` Middleware stack](../../../service/specs/04-http-api.md)
+**Implements:** [source spec §04-http-api — Middleware stack](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs04-http-apimd--middleware-stack-item-1-modify); [§Implementation notes step 2](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`04-http-api.md` Middleware stack](../../../service/specs/04-http-api.md)
 **Depends on:** —
 **Produces:** a named 128-byte request-ID limit and predicate that preserves acceptable correlation IDs and silently replaces all other inbound values with UUIDv4 IDs.
 **Pointers:** `crates/server/src/middleware/request_id.rs`; its module tests and existing `preserves_existing_request_id` test.

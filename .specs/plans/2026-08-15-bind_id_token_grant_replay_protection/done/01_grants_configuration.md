@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** intentionally omitted at user request
 
-**Implements:** [`.specs/changes/2026-08-05-bind_id_token_grant_replay_protection.md` §Proposed changes → `06-configuration.md`](../../../changes/2026-08-05-bind_id_token_grant_replay_protection.md), [§Implementation notes 1](../../../changes/2026-08-05-bind_id_token_grant_replay_protection.md); [06-configuration.md §Sections and §Defaults summary](../../../service/specs/06-configuration.md)
+**Implements:** [`.specs/changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md` §Proposed changes → `06-configuration.md`](../../../changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md), [§Implementation notes 1](../../../changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md); [06-configuration.md §Sections and §Defaults summary](../../../service/specs/06-configuration.md)
 **Depends on:** —
 **Produces:** Startup accepts an opt-in `grants.id_token` switch and validated nonce/assertion-lifetime durations with compiled defaults that keep the direct grant disabled.
 **Pointers:** `crates/core/src/config.rs:9-23`, `crates/core/src/config.rs:45-93`, `crates/core/src/service/mod.rs` (`parse_duration_secs`), `config/default.toml`

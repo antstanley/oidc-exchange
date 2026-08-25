@@ -1,6 +1,6 @@
 # Plan: Own the outbound HTTP boundary
 
-**Status:** Done · **Layout:** indexed kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/2026-08-05-own_outbound_http_boundary.md`](../../changes/2026-08-05-own_outbound_http_boundary.md)
+**Status:** Done · **Layout:** indexed kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/merged/2026-08-05-own_outbound_http_boundary.md`](../../changes/merged/2026-08-05-own_outbound_http_boundary.md)
 **Review:** spec-reviewer · verdict: changes needed
 **Outbound boundary owner:** @-
 

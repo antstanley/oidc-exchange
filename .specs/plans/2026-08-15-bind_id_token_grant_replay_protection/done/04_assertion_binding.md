@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** intentionally omitted at user request
 
-**Implements:** [`.specs/changes/2026-08-05-bind_id_token_grant_replay_protection.md` §Proposed changes → `03-service-flows.md`](../../../changes/2026-08-05-bind_id_token_grant_replay_protection.md), [§Implementation notes 5–6](../../../changes/2026-08-05-bind_id_token_grant_replay_protection.md); [03-service-flows.md §Token exchange and §Audit emission and blocking](../../../service/specs/03-service-flows.md), [01-domain-model.md §Token types](../../../service/specs/01-domain-model.md)
+**Implements:** [`.specs/changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md` §Proposed changes → `03-service-flows.md`](../../../changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md), [§Implementation notes 5–6](../../../changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md); [03-service-flows.md §Token exchange and §Audit emission and blocking](../../../service/specs/03-service-flows.md), [01-domain-model.md §Token types](../../../service/specs/01-domain-model.md)
 **Depends on:** 01 (build), 02 (data), 03 (contract)
 **Produces:** The core binds each verified ID token once: it enforces lifetime, `azp`, applicable `at_hash`, direct-grant nonce consumption, and assertion replay prevention before user lookup on both exchange paths.
 **Pointers:** `crates/core/src/service/exchange.rs:13-94`, `crates/core/src/service/mod.rs`, new `crates/core/src/service/assertion.rs`, `crates/core/src/domain/token.rs:72-84`, `crates/core/tests/exchange.rs`, `crates/test-utils/src/lib.rs:493-562`

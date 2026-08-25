@@ -1,7 +1,7 @@
 # 01 · Tactical console path/status fixes
 
 **Status:** Done  
-**Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 1; [admin-ui overview](../../../admin-ui/specs/00-overview.md) target  
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 1; [admin-ui overview](../../../admin-ui/specs/00-overview.md) target  
 **Depends on:** — (external integration gate: `2026-08-05-verify_admin_ui_session_jwt` owns session/login changes)  
 **Produces:** The existing server-only admin client encodes every user-id path segment; UI types and status controls use `active | suspended | deleted`.
 

@@ -1,7 +1,7 @@
 # 04 · Separate public and admin listeners
 
 **Status:** Done (commit `32adeca2`, audited against this DoD)  
-**Implements:** [source spec](../../../changes/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 4; [04-http-api](../../../service/specs/04-http-api.md) Routes/Service roles/Bootstrap targets; [06-configuration](../../../service/specs/06-configuration.md) target  
+**Implements:** [source spec](../../../changes/merged/2026-08-05-harden_admin_plane.md) §"Implementation notes" step 4; [04-http-api](../../../service/specs/04-http-api.md) Routes/Service roles/Bootstrap targets; [06-configuration](../../../service/specs/06-configuration.md) target  
 **Depends on:** 02 · exchange-only default and config validation  
 **Produces:** Public and admin route sets bind separate sockets, share state/middleware correctly, and native/Lambda/FFI enforce the single-plane runtime rule.
 

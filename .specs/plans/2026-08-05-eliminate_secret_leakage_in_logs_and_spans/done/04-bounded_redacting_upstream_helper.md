@@ -2,7 +2,7 @@
 
 **Status:** Done · **Plan:** [plan.md](../plan.md) · **Certificate:** forbidden and intentionally omitted
 
-**Implements:** [source spec §02-ports-and-adapters — Shared OIDC utilities](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs02-ports-and-adaptersmd--shared-oidc-utilities-modify); [§Implementation notes step 3](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`02-ports-and-adapters.md` Shared OIDC utilities](../../../service/specs/02-ports-and-adapters.md)
+**Implements:** [source spec §02-ports-and-adapters — Shared OIDC utilities](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#specsservicespecs02-ports-and-adaptersmd--shared-oidc-utilities-modify); [§Implementation notes step 3](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`02-ports-and-adapters.md` Shared OIDC utilities](../../../service/specs/02-ports-and-adapters.md)
 **Depends on:** 03
 **Produces:** shared bounded HTTP body read returning `Secret<String>` and a single `upstream::error_detail(status, body)` constructor that produces bounded, percent-decoded redacted diagnostics.
 **Pointers:** `crates/adapters/src/shared/http.rs`, new `shared/upstream.rs`, `shared/mod.rs`, `shared/token_endpoint.rs`; adapter test utilities/wiremock fixtures.

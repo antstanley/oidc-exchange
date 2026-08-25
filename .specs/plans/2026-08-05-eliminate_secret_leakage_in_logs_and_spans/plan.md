@@ -1,6 +1,6 @@
 # Plan: Eliminate secret leakage in logs, spans, and error responses
 
-**Status:** In Progress · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md`](../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md)
+**Status:** In Progress · **Layout:** kanban · **Date:** 2026-08-05 · **Owner:** Ant Stanley · **Source spec:** [`.specs/changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md`](../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md)
 
 This independent PR makes credential-derived values unprintable, closes the immediately known span leaks, bounds and redacts provider error bodies, genericizes public OAuth descriptions while retaining internal diagnostics, and bounds client-selected request IDs. It changes Rust only, across `core`, `adapters`, `providers`, and `server`; persisted and wire shapes remain unchanged.
 

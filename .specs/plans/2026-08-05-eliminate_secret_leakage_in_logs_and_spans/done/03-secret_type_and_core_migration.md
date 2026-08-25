@@ -2,7 +2,7 @@
 
 **Status:** Done · **Plan:** [plan.md](../plan.md) · **Certificate:** forbidden and intentionally omitted
 
-**Implements:** [source spec §Type changes](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#type-changes); [§Implementation notes step 6](../../../changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`01-domain-model.md` Session](../../../service/specs/01-domain-model.md), [`02-ports-and-adapters.md` SessionRepository](../../../service/specs/02-ports-and-adapters.md), [`06-configuration.md`](../../../service/specs/06-configuration.md)
+**Implements:** [source spec §Type changes](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#type-changes); [§Implementation notes step 6](../../../changes/merged/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md#implementation-notes); [`01-domain-model.md` Session](../../../service/specs/01-domain-model.md), [`02-ports-and-adapters.md` SessionRepository](../../../service/specs/02-ports-and-adapters.md), [`06-configuration.md`](../../../service/specs/06-configuration.md)
 **Depends on:** —
 **Produces:** core-owned serde-transparent `Secret<T>` with deliberate exposure APIs, constant-time `Secret<String>` equality, and compiler-enforced migration of the enumerated credential-derived core/config/session/repository values.
 **Pointers:** `crates/core/src/lib.rs`, new `secret.rs`, `error.rs`, `config.rs`, `domain/session.rs`, `domain/token.rs`, `domain/provider.rs`, `ports/repository.rs`, `service/exchange.rs`; every SessionRepository adapter and test fixture.
