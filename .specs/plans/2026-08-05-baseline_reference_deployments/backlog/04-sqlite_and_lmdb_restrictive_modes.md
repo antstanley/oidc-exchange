@@ -5,7 +5,7 @@
 **Implements:** [change spec §Implementation notes — A.6 SQLite file mode and bootstrap transaction](../../../changes/2026-08-05-baseline_reference_deployments.md#implementation-notes), [change spec §Regression tests](../../../changes/2026-08-05-baseline_reference_deployments.md#regression-tests), [service persistence §SQLite](../../../service/specs/08-persistence.md#sqlite), [service persistence §Session-only stores](../../../service/specs/08-persistence.md#session-only-stores)
 **Depends on:** —
 **Produces:** owner-only SQLite and LMDB state under varied umasks, with SQLite migrations protected by a single bootstrap transaction and a restrictive local setup key.
-**Pointers:** `crates/adapters/src/sqlite/mod.rs:17-110,789-...`; `crates/adapters/src/lmdb/mod.rs:24-...`; `examples/linux-sqlite/setup.sh:9-30`; `docs/deployment/linux-sqlite.md`
+**Pointers:** `crates/adapters/src/sqlite/mod.rs:106-125` (pool bootstrap) and its `MIGRATIONS`; `crates/adapters/src/lmdb/mod.rs:24-...`; `examples/linux-sqlite/setup.sh:9-30`; `docs/deployment/linux-sqlite.md`
 
 ## Steps
 

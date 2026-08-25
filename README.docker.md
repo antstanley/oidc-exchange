@@ -11,6 +11,17 @@ Multi-arch (`linux/amd64`, `linux/arm64`), published to both registries:
 
 Tags: `latest`, `X.Y.Z`, `X.Y`, `X`.
 
+The GHCR multi-arch tag has build provenance for its immutable final manifest digest (in addition to each platform digest). Verify the final GHCR manifest before running it:
+
+```bash
+gh attestation verify oci://ghcr.io/antstanley/oidc-exchange:latest \
+  --repo antstanley/oidc-exchange \
+  --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
+docker pull ghcr.io/antstanley/oidc-exchange:latest
+```
+
+This is GitHub build provenance, not a registry signature. The release is also copied to Docker Hub, but the workflow does not attach or promise a Docker Hub-verifiable attestation; use GHCR for this verification path.
+
 ## Run
 
 ```bash
@@ -36,7 +47,11 @@ adapter = "oidc"
 issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
+# Origins Google's discovery document may name beyond the issuer's origin:
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
+
+`endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered.
 
 See the [full configuration guide](https://github.com/antstanley/oidc-exchange#configuration) and the [deployment guides](https://github.com/antstanley/oidc-exchange/tree/main/docs/integration) (ECS Fargate, generic container / Kubernetes, …).
 

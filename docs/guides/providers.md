@@ -18,9 +18,14 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
 
 At startup, the adapter fetches `https://accounts.google.com/.well-known/openid-configuration` to discover the token endpoint, JWKS URI, and revocation endpoint. JWKS keys are cached with TTL-based automatic refresh.
+
+#### Why `endpoint_origins` is there
+
+Google publishes its endpoints off its issuer's origin: the token and revocation endpoints live on `oauth2.googleapis.com` and the JWKS URI on `www.googleapis.com`. The service pins, per provider, the set of origins a discovery document is permitted to name — the issuer's own origin, plus the origins of any endpoint you configure explicitly, plus every origin listed in `endpoint_origins` (each a bare `https://host[:port]`). The set is fixed when configuration loads: discovery can confirm which origins this service talks to but can never widen them, so a compromised or hostile discovery document cannot relocate where verification keys are fetched from or where the client secret is posted. If your provider serves an endpoint from an origin that is not pinned, add it to `endpoint_origins`; while the check runs in warning mode (the shipped default) an undeclared origin logs a structured warning naming the endpoint, the observed origin, and the permitted set, and rejecting such origins outright becomes a later release's decision. See the [configuration reference](/guides/configuration/) for the exact syntax.
 
 ### Adding any standard OIDC provider
 
@@ -36,9 +41,10 @@ To add a new provider, create a `[providers.<name>]` block with the following fi
 | `jwks_uri` | No | Override discovered JWKS URI |
 | `token_endpoint` | No | Override discovered token endpoint |
 | `revocation_endpoint` | No | Override discovered revocation endpoint |
+| `endpoint_origins` | No | Extra origins (bare `https://host[:port]`) the provider's discovery document may name beyond the issuer's origin and configured-endpoint origins; defaults to empty |
 | `additional_params` | No | Extra parameters to include in token requests |
 
-For Tier 1 providers, only `issuer`, `client_id`, and `client_secret` are required. Endpoint fields are populated from the issuer's `.well-known/openid-configuration` at startup. If provided in config, they override the discovered values.
+For Tier 1 providers, only `issuer`, `client_id`, and `client_secret` are required. Endpoint fields are populated from the issuer's `.well-known/openid-configuration` at startup. If provided in config, they override the discovered values. If you override an endpoint onto another host, its origin joins the pinned set automatically; use `endpoint_origins` for extra origins only the *discovered* document names.
 
 ### Examples
 
@@ -88,6 +94,9 @@ private_key_path = "/secrets/apple.p8"
 | `team_id` | Yes | Your Apple Developer Team ID |
 | `key_id` | Yes | The Key ID from your Apple Developer account |
 | `private_key_path` | Yes | Path to the `.p8` private key file (P-256/ES256) |
+| `endpoint_origins` | No | Extra origins (bare `https://host[:port]`) an override endpoint may use beyond `appleid.apple.com` |
+
+Apple's endpoint overrides follow the same origin pinning as standard providers. The defaults all live on `appleid.apple.com`, so an override onto another origin must be declared in `endpoint_origins`; the issuer itself stays pinned to `https://appleid.apple.com` regardless.
 
 ### How the ES256 client JWT works
 

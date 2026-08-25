@@ -33,8 +33,13 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | Change spec | Status | Targets |
 |---|---|---|
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
+| [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) | Merged | admin UI: verified discovery/JWKS session JWTs, hardened host cookie, security tests and CI gate |
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
+| [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) | Merged | repo-wide: closed config domains, HTTPS URLs, verified key metadata, migration probes, and mandatory installer checks |
+| [changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md) | Merged | service: rotating refresh tokens, reuse detection, session-family persistence, and owned cleanup |
+| [changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md](changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md) | Merged | service: audit, authentication-failure visibility, trusted client provenance, public-route throttling |
 | [changes/merged/2026-07-01-complete_config_loading.md](changes/merged/2026-07-01-complete_config_loading.md) | Merged | service: config overlay merge, env overrides, fail-closed `${VAR}` placeholders, startup validation |
+| [changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md](changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md) | Merged | service/bindings: one shared config resolve, fail-closed placeholders, FFI parity, and `config check` |
 | [changes/merged/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md](changes/merged/2026-07-01-fix_kms_ecdsa_and_jwk_encoding.md) | Merged | service: KMS ES* DER→raw JWS signatures, RFC 7518 JWK `n`/`e`, ES512 JWK |
 | [changes/merged/2026-07-01-valkey_session_store_conformance.md](changes/merged/2026-07-01-valkey_session_store_conformance.md) | Merged | service: Valkey session count, atomic TTL'd writes, expired-index cleanup |
 | [changes/merged/2026-07-01-release_gil_in_python_binding.md](changes/merged/2026-07-01-release_gil_in_python_binding.md) | Merged | bindings: release the GIL around the blocking FFI call |
@@ -52,6 +57,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | [changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md](changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md) | Merged | tooling: lefthook hook, pyright, TS workspace lint/format/typecheck |
 | [changes/merged/2026-06-29-add_npm_trusted_publishing.md](changes/merged/2026-06-29-add_npm_trusted_publishing.md) | Merged | distribution: npm publish job, platform packages, OIDC trusted publishing |
 | [changes/merged/2026-06-29-add_pypi_trusted_publishing.md](changes/merged/2026-06-29-add_pypi_trusted_publishing.md) | Merged | distribution: PyPI publish job, abi3/manylinux wheels, OIDC trusted publishing |
+| [changes/merged/2026-08-05-harden_release_supply_chain.md](changes/merged/2026-08-05-harden_release_supply_chain.md) | Merged | distribution: frozen least-privilege releases, provenance, installer verification, advisory/signing-path policy |
 
 ## Plans
 
@@ -78,6 +84,18 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-07-02-webhook_user_sync_conformance/plan.md](plans/2026-07-02-webhook_user_sync_conformance/plan.md) | Done | [changes/merged/2026-07-01-webhook_user_sync_conformance.md](changes/merged/2026-07-01-webhook_user_sync_conformance.md) |
 | [plans/2026-07-02-server_error_handling_and_shutdown/plan.md](plans/2026-07-02-server_error_handling_and_shutdown/plan.md) | Done | [changes/merged/2026-07-01-server_error_handling_and_shutdown.md](changes/merged/2026-07-01-server_error_handling_and_shutdown.md) |
 | [plans/2026-07-02-implement_lambda_runtime/plan.md](plans/2026-07-02-implement_lambda_runtime/plan.md) | Done | [changes/merged/2026-07-01-implement_lambda_runtime.md](changes/merged/2026-07-01-implement_lambda_runtime.md) |
+| [plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md](plans/2026-08-05-resolve_config_placeholders_all_channels/plan.md) | Done | [changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md](changes/merged/2026-08-05-resolve_config_placeholders_all_channels.md) |
+| [plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md](plans/2026-08-05-fail_closed_across_config_and_adapters/plan.md) | Done | [changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md](changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) |
+| [plans/2026-08-05-validate_revoke_token_claims/plan.md](plans/2026-08-05-validate_revoke_token_claims/plan.md) | Done | [changes/2026-08-05-validate_revoke_token_claims.md](changes/2026-08-05-validate_revoke_token_claims.md) |
+| [plans/2026-08-15-bind_id_token_grant_replay_protection/plan.md](plans/2026-08-15-bind_id_token_grant_replay_protection/plan.md) | Done | [changes/2026-08-05-bind_id_token_grant_replay_protection.md](changes/2026-08-05-bind_id_token_grant_replay_protection.md) |
+| [plans/2026-08-05-bind_grant_type_at_token_endpoint/plan.md](plans/2026-08-05-bind_grant_type_at_token_endpoint/plan.md) | Done | [changes/2026-08-05-bind_grant_type_at_token_endpoint.md](changes/2026-08-05-bind_grant_type_at_token_endpoint.md) |
+| [plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md](plans/2026-08-05-rotate_refresh_tokens_with_reuse_detection/plan.md) | Done | [changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md](changes/merged/2026-08-05-rotate_refresh_tokens_with_reuse_detection.md) |
+| [plans/2026-08-05-audit_and_throttle_authentication_failures/plan.md](plans/2026-08-05-audit_and_throttle_authentication_failures/plan.md) | Draft | [changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md](changes/merged/2026-08-05-audit_and_throttle_authentication_failures.md) |
+| [plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md](plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md) | Review | [changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md](changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md) |
+| [plans/2026-08-05-own_outbound_http_boundary/plan.md](plans/2026-08-05-own_outbound_http_boundary/plan.md) | Review | [changes/2026-08-05-own_outbound_http_boundary.md](changes/2026-08-05-own_outbound_http_boundary.md) |
+| [plans/2026-08-05-runtime_parity_across_interfaces/plan.md](plans/2026-08-05-runtime_parity_across_interfaces/plan.md) | Draft | [changes/2026-08-05-runtime_parity_across_interfaces.md](changes/2026-08-05-runtime_parity_across_interfaces.md) |
+| [plans/2026-08-05-harden_release_supply_chain/plan.md](plans/2026-08-05-harden_release_supply_chain/plan.md) | Done | [changes/merged/2026-08-05-harden_release_supply_chain.md](changes/merged/2026-08-05-harden_release_supply_chain.md) |
+| [plans/2026-08-15-verify_admin_ui_session_jwt/plan.md](plans/2026-08-15-verify_admin_ui_session_jwt/plan.md) | Draft | [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) |
 | [plans/2026-08-05-baseline_reference_deployments/plan.md](plans/2026-08-05-baseline_reference_deployments/plan.md) | Draft | [changes/2026-08-05-baseline_reference_deployments.md](changes/2026-08-05-baseline_reference_deployments.md) |
 
 ## Conventions

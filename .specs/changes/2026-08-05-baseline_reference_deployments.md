@@ -65,23 +65,24 @@ and the docs page carries the revision number a template cites.
 
 **Out of scope — owned by sibling change specs, cross-referenced not restated.**
 
-- The KMS `algorithm` strings in `examples/aws-web/config/oidc-exchange.toml:17`
-  (`ECDSA_SHA_256`) and `examples/ecs-fargate/config/fargate.toml:11` (`ECDSA_SHA256`), and the
-  tightened Postgres migration probe, belong to
-  [`2026-08-05-fail_closed_across_config_and_adapters.md`](2026-08-05-fail_closed_across_config_and_adapters.md).
+- The KMS `algorithm` strings in `examples/aws-web/config/oidc-exchange.toml:17` and
+  `examples/ecs-fargate/config/fargate.toml:11` (formerly the AWS `SigningAlgorithmSpec`
+  spellings `ECDSA_SHA_256`/`ECDSA_SHA256`, both now `ES256`), and the tightened Postgres
+  migration probe, belong to the merged
+  [`2026-08-05-fail_closed_across_config_and_adapters.md`](merged/2026-08-05-fail_closed_across_config_and_adapters.md).
   That spec's probe does **not** cover this change's `init.sql` defect: the probe fires only on
   SQLSTATE `42501`, and `examples/linux-postgres/docker-compose.yml:7` makes the app's role
   (`oidc_exchange`) the database owner, so the DDL is never denied and the probe never runs.
   The two changes are complementary — that one makes a DDL-denied deployment prove its schema,
   this one repairs a schema the adapter provisioned over.
 - The `oidc-exchange config check` subcommand this change's gate *invokes* is specified in
-  [`2026-08-05-resolve_config_placeholders_all_channels.md`](2026-08-05-resolve_config_placeholders_all_channels.md).
+  [`2026-08-05-resolve_config_placeholders_all_channels.md`](merged/2026-08-05-resolve_config_placeholders_all_channels.md).
   This change consumes the checker; it does not build it.
 - Release provenance, the installer, the dependency-advisory gate, and the pattern-based
   `.gitignore` rules (including `cdk.out/`) belong to
-  [`2026-08-05-harden_release_supply_chain.md`](2026-08-05-harden_release_supply_chain.md).
+  [`2026-08-05-harden_release_supply_chain.md`](merged/2026-08-05-harden_release_supply_chain.md).
 - The `audit.adapter = "noop"` default and `examples/container/config/production.toml` belong to
-  [`2026-08-05-audit_and_throttle_authentication_failures.md`](2026-08-05-audit_and_throttle_authentication_failures.md).
+  [`2026-08-05-audit_and_throttle_authentication_failures.md`](merged/2026-08-05-audit_and_throttle_authentication_failures.md).
   The baseline's durable-audit property asserts the result; it does not specify the fix.
 
 This change implements
@@ -565,12 +566,13 @@ not from a hardcoded array, so a sixth example is covered on the day it lands.
 
 **D — The manual KMS run.** Deploy `examples/aws-web` and `examples/ecs-fargate` once, by hand,
 with the shipped `key_manager.kms.algorithm` values, and record whether `/token` and `/keys`
-fail on first request. `coverage.json` carries this as an open question and the shipped strings
-(`ECDSA_SHA_256`, `ECDSA_SHA256` — AWS `SigningAlgorithmSpec` names, not JWS `alg` names)
-predict they do. An afternoon's work. If they cannot have been run, that reframes how much
+fail on first request. `coverage.json` carried this as an open question when the shipped
+strings were `ECDSA_SHA_256`/`ECDSA_SHA256` (AWS `SigningAlgorithmSpec` names, not JWS `alg`
+names); the sibling fix has since merged and both example configs now ship `ES256`, so the
+run's purpose is to record the *positive* evidence that the corrected strings work end to end. An afternoon's work. If they cannot have been run, that reframes how much
 confidence every other AWS template deserves, and reducing their scope becomes a reasonable
 alternative to maintaining them. The algorithm fix itself belongs to
-[`2026-08-05-fail_closed_across_config_and_adapters.md`](2026-08-05-fail_closed_across_config_and_adapters.md);
+[`2026-08-05-fail_closed_across_config_and_adapters.md`](merged/2026-08-05-fail_closed_across_config_and_adapters.md);
 what this package produces is the recorded answer, not the patch.
 
 **Regression tests.**
@@ -646,7 +648,7 @@ change. Its own copy still trusts an unverified token.
 ### Assumptions
 
 - `oidc-exchange config check` exists by the time work package C lands. It is specified in
-  [`2026-08-05-resolve_config_placeholders_all_channels.md`](2026-08-05-resolve_config_placeholders_all_channels.md)
+  [`2026-08-05-resolve_config_placeholders_all_channels.md`](merged/2026-08-05-resolve_config_placeholders_all_channels.md)
   and this change consumes it. If that spec has not shipped, C lands without its configuration
   half and gains it later; the other three parts do not depend on it.
 - `fred`'s TLS feature can be enabled for every build without an unacceptable cost. It adds a

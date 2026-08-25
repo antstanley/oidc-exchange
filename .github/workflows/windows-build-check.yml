@@ -1,34 +1,26 @@
 name: Windows build check
-
-# The server crate and the napi/pyo3 bindings are compiled for Windows in release.yml
-# (the win32-x64-msvc platform packages and the Windows server binary), but PR CI otherwise
-# only builds on Linux/macOS. Unix-only code — e.g. `tokio::signal::unix` without a `cfg`
-# gate — therefore compiles in every PR yet breaks the Windows legs of a tagged release,
-# which can't be dry-run. This job cargo-checks the shared crates for windows-msvc so that
-# class of regression is caught in a PR. (pyo3/python is excluded to avoid needing a Python
-# toolchain here; its Windows-relevant code lives in the server crate, which is checked.)
 on:
   pull_request:
     paths:
-      - 'crates/**'
-      - 'bindings/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/windows-build-check.yml'
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
+      - crates/**
+      - bindings/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/windows-build-check.yml
+  workflow_dispatch: null
 jobs:
   windows-check:
     name: cargo check (x86_64-pc-windows-msvc)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
       - name: cargo check for windows-msvc
         run: cargo check --workspace --exclude oidc-exchange-python --target x86_64-pc-windows-msvc
+    permissions:
+      contents: read

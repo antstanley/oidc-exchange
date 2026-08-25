@@ -1,6 +1,6 @@
 {
   "name": "@oidc-exchange/lambda",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AWS Lambda adapter for oidc-exchange - handles API Gateway, ALB, and Function URL events",
   "license": "MIT",
   "repository": {
@@ -27,18 +27,18 @@
     "@oidc-exchange/node": "workspace:^"
   },
   "devDependencies": {
-    "@types/aws-lambda": "^8.10.162",
-    "@types/node": "^26.0.1",
-    "oxfmt": "^0.56.0",
-    "oxlint": "^1.71.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "@types/aws-lambda": "8.10.162",
+    "@types/node": "26.0.1",
+    "oxfmt": "0.56.0",
+    "oxlint": "1.71.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
   },
   "peerDependencies": {
-    "@oidc-exchange/node": "^0.2.0"
+    "@oidc-exchange/node": "^0.3.0"
   },
   "engines": {
     "node": ">= 22"
   },
-  "packageManager": "pnpm@10.11.0"
+  "packageManager": "pnpm@11.9.0"
 }

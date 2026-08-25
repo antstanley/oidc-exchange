@@ -34,44 +34,83 @@
     },
     "HttpRequest": {
       "type": "object",
-      "description": "Transport-agnostic HTTP request handed to the FFI core by every binding.",
-      "required": ["method", "path", "headers"],
+      "description": "Transport-agnostic wire request handed to the FFI normaliser by every binding. Hosts do not decode, strip prefixes, or deduplicate headers.",
+      "required": [
+        "method",
+        "rawPath",
+        "headers"
+      ],
       "properties": {
-        "method": { "$ref": "#/$defs/NonEmptyString", "description": "HTTP method, e.g. GET, POST." },
-        "path": { "type": "string", "description": "Request path including any query string." },
+        "method": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "rawPath": {
+          "type": "string",
+          "description": "Percent-encoded origin-form path without query or fragment; empty normalises to '/'."
+        },
+        "query": {
+          "type": "string",
+          "description": "Percent-encoded query without leading '?'."
+        },
         "headers": {
           "type": "array",
-          "description": "Header name/value pairs. Repeated headers appear as repeated entries.",
+          "description": "Ordered header pairs; duplicates preserved.",
           "items": {
             "type": "object",
-            "required": ["name", "value"],
+            "required": [
+              "name",
+              "value"
+            ],
             "properties": {
-              "name": { "type": "string" },
-              "value": { "type": "string" }
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
             }
           }
         },
         "body": {
           "type": "string",
           "contentEncoding": "base64",
-          "description": "Raw request body as bytes (modelled as base64 in JSON). Optional."
+          "description": "Bounded before host buffering."
+        },
+        "pathIsRaw": {
+          "type": "boolean",
+          "default": true
         }
       }
     },
     "HttpResponse": {
       "type": "object",
       "description": "Transport-agnostic HTTP response returned by the FFI core to every binding.",
-      "required": ["status", "headers", "body"],
+      "required": [
+        "status",
+        "headers",
+        "body"
+      ],
       "properties": {
-        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
         "headers": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["name", "value"],
+            "required": [
+              "name",
+              "value"
+            ],
             "properties": {
-              "name": { "type": "string" },
-              "value": { "type": "string" }
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
             }
           }
         },
@@ -84,8 +123,10 @@
     },
     "OAuthErrorEnvelope": {
       "type": "object",
-      "description": "RFC 6749 §5.2 error body returned by the public HTTP API.",
-      "required": ["error"],
+      "description": "RFC 6749 \u00a75.2 error body returned by the public HTTP API.",
+      "required": [
+        "error"
+      ],
       "properties": {
         "error": {
           "type": "string",
@@ -100,7 +141,22 @@
             "server_error"
           ]
         },
-        "error_description": { "type": "string" }
+        "error_description": {
+          "type": "string"
+        }
+      }
+    },
+    "NormalisationLimits": {
+      "type": "object",
+      "required": [
+        "maxBodyBytes"
+      ],
+      "properties": {
+        "maxBodyBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum request body bytes from server.max_request_body_bytes."
+        }
       }
     }
   }

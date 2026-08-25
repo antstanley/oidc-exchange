@@ -24,16 +24,22 @@ import { OidcExchange } from "@oidc-exchange/node";
 
 const oidc = new OidcExchange({ config: "./config.toml" });
 
-const response = oidc.handleRequest({
+const response = await oidc.handleRequest({
   method: "GET",
-  path: "/health",
+  rawPath: Buffer.from("/health"),
+  query: undefined,
   headers: [],
+  pathIsRaw: true,
 });
 
 console.log(response.status); // 200
 ```
 
-The `handleRequest` method takes `{ method, path, headers, body? }` and returns `{ status, headers, body }`. Headers are arrays of `{ name, value }` objects.
+`handleRequest` returns a Promise and takes the wire request fields `{ method, rawPath, query?, headers, body?, pathIsRaw }`. Keep the still-percent-encoded path separate from the query; the binding owns decoding and configured base-path stripping. Headers are ordered arrays of `{ name, value }` objects.
+
+### Migrating from 0.2
+
+In 0.3, replace `path` with the raw, percent-encoded path bytes in `rawPath`, pass the still-encoded query bytes separately without `?`, set `pathIsRaw` to describe the source, and `await handleRequest`. Do not decode or strip `server.base_path` in application code. Callers that cannot migrate to async immediately can temporarily use deprecated `handleRequestSync` with the same new request shape; it blocks the calling thread and will be removed after one major release cycle.
 
 ## Framework Integration
 
@@ -52,15 +58,21 @@ const app = express();
 app.all("/auth/*", (req, res) => {
   const chunks: Buffer[] = [];
   req.on("data", (chunk: Buffer) => chunks.push(chunk));
-  req.on("end", () => {
+  req.on("end", async () => {
     const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
     const headers = [];
     const raw = req.rawHeaders;
     for (let i = 0; i < raw.length; i += 2) {
       headers.push({ name: raw[i], value: raw[i + 1] });
     }
-    const oidcPath = req.originalUrl.replace(/^\/auth/, "") || "/";
-    const response = oidc.handleRequest({ method: req.method, path: oidcPath, headers, body });
+    const queryIndex = req.originalUrl.indexOf("?");
+    const rawPath = req.originalUrl.slice(0, queryIndex < 0 ? undefined : queryIndex);
+    const query = queryIndex < 0 ? undefined : req.originalUrl.slice(queryIndex + 1);
+    const response = await oidc.handleRequest({
+      method: req.method, rawPath: Buffer.from(rawPath),
+      query: query === undefined ? undefined : Buffer.from(query),
+      headers, body, pathIsRaw: true,
+    });
     for (const { name, value } of response.headers) {
       res.setHeader(name, value);
     }
@@ -84,8 +96,11 @@ const app = new Hono();
 
 app.all("/auth/*", async (c) => {
   const req = c.req.raw;
-  const url = new URL(req.url);
-  const oidcPath = url.pathname.replace(/^\/auth/, "") || "/";
+  const targetStart = req.url.indexOf("/", req.url.indexOf("://") + 3);
+  const rawTarget = targetStart < 0 ? "/" : req.url.slice(targetStart);
+  const queryIndex = rawTarget.indexOf("?");
+  const rawPath = rawTarget.slice(0, queryIndex < 0 ? undefined : queryIndex);
+  const query = queryIndex < 0 ? undefined : rawTarget.slice(queryIndex + 1);
 
   const headers: { name: string; value: string }[] = [];
   req.headers.forEach((value, name) => {
@@ -94,7 +109,7 @@ app.all("/auth/*", async (c) => {
 
   const body = req.body ? Buffer.from(await req.arrayBuffer()) : undefined;
 
-  const response = oidc.handleRequest({ method: req.method, path: oidcPath, headers, body });
+  const response = await oidc.handleRequest({ method: req.method, rawPath: Buffer.from(rawPath), query: query === undefined ? undefined : Buffer.from(query), headers, body, pathIsRaw: true });
 
   const responseHeaders = new Headers();
   for (const { name, value } of response.headers) {
@@ -124,7 +139,10 @@ app.addContentTypeParser("*", { parseAs: "buffer" }, (_req, body, done) => {
 });
 
 app.all("/auth/*", async (request, reply) => {
-  const oidcPath = request.url.replace(/^\/auth/, "") || "/";
+  const rawTarget = request.raw.url ?? request.url;
+  const queryIndex = rawTarget.indexOf("?");
+  const rawPath = rawTarget.slice(0, queryIndex < 0 ? undefined : queryIndex);
+  const query = queryIndex < 0 ? undefined : rawTarget.slice(queryIndex + 1);
   const headers = [];
   for (const [name, value] of Object.entries(request.headers)) {
     if (Array.isArray(value)) {
@@ -137,7 +155,7 @@ app.all("/auth/*", async (request, reply) => {
   const body = request.body instanceof Buffer && request.body.length > 0
     ? request.body : undefined;
 
-  const response = oidc.handleRequest({ method: request.method, path: oidcPath, headers, body });
+  const response = await oidc.handleRequest({ method: request.method, rawPath: Buffer.from(rawPath), query: query === undefined ? undefined : Buffer.from(query), headers, body, pathIsRaw: true });
   for (const { name, value } of response.headers) reply.header(name, value);
   reply.status(response.status).send(response.body);
 });
@@ -155,15 +173,18 @@ import { OidcExchange } from "@oidc-exchange/node";
 const oidc = new OidcExchange({ config: path.resolve(process.cwd(), "..", "config.toml") });
 
 async function handler(request: Request) {
-  const url = new URL(request.url);
-  const oidcPath = url.pathname.replace(/^\/auth/, "") || "/";
+  const targetStart = request.url.indexOf("/", request.url.indexOf("://") + 3);
+  const rawTarget = targetStart < 0 ? "/" : request.url.slice(targetStart);
+  const queryIndex = rawTarget.indexOf("?");
+  const rawPath = rawTarget.slice(0, queryIndex < 0 ? undefined : queryIndex);
+  const query = queryIndex < 0 ? undefined : rawTarget.slice(queryIndex + 1);
 
   const headers: { name: string; value: string }[] = [];
   request.headers.forEach((value, name) => { headers.push({ name, value }); });
 
   const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
 
-  const response = oidc.handleRequest({ method: request.method, path: oidcPath, headers, body });
+  const response = await oidc.handleRequest({ method: request.method, rawPath: Buffer.from(rawPath), query: query === undefined ? undefined : Buffer.from(query), headers, body, pathIsRaw: true });
 
   const responseHeaders = new Headers();
   for (const { name, value } of response.headers) responseHeaders.append(name, value);
@@ -189,14 +210,18 @@ export const handle: Handle = async ({ event, resolve }) => {
   if (!event.url.pathname.startsWith("/auth/")) return resolve(event);
 
   const request = event.request;
-  const oidcPath = event.url.pathname.replace(/^\/auth/, "") || "/";
+  const targetStart = request.url.indexOf("/", request.url.indexOf("://") + 3);
+  const rawTarget = targetStart < 0 ? "/" : request.url.slice(targetStart);
+  const queryIndex = rawTarget.indexOf("?");
+  const rawPath = rawTarget.slice(0, queryIndex < 0 ? undefined : queryIndex);
+  const query = queryIndex < 0 ? undefined : rawTarget.slice(queryIndex + 1);
 
   const headers: { name: string; value: string }[] = [];
   request.headers.forEach((value, name) => { headers.push({ name, value }); });
 
   const body = request.body ? Buffer.from(await request.arrayBuffer()) : undefined;
 
-  const response = oidc.handleRequest({ method: request.method, path: oidcPath, headers, body });
+  const response = await oidc.handleRequest({ method: request.method, rawPath: Buffer.from(rawPath), query: query === undefined ? undefined : Buffer.from(query), headers, body, pathIsRaw: true });
 
   const responseHeaders = new Headers();
   for (const { name, value } of response.headers) responseHeaders.append(name, value);

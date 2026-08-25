@@ -5,7 +5,7 @@
 **Implements:** [change spec §Implementation notes — A.3 Valkey](../../../changes/2026-08-05-baseline_reference_deployments.md#implementation-notes), [service persistence §Session-only stores](../../../service/specs/08-persistence.md#session-only-stores)
 **Depends on:** —
 **Produces:** a TLS-capable Valkey client with a regression proving a `rediss://` URL selects TLS before any template advertises encrypted Valkey transport.
-**Pointers:** `crates/adapters/Cargo.toml:31`; `crates/adapters/src/valkey/mod.rs:25-36`; `crates/adapters/src/valkey/mod.rs:489-...`
+**Pointers:** `crates/adapters/Cargo.toml:33`; `crates/adapters/src/valkey/mod.rs:118-135`; `crates/adapters/src/valkey/mod.rs:489-...`
 
 ## Steps
 

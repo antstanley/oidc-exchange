@@ -5,7 +5,7 @@
 **Implements:** [change spec §Implementation notes — D manual KMS run](../../../changes/2026-08-05-baseline_reference_deployments.md#implementation-notes), [change spec §Assumptions and open questions — AWS reference deployments](../../../changes/2026-08-05-baseline_reference_deployments.md#assumptions-and-open-questions)
 **Depends on:** —
 **Produces:** a dated, reproducible record of first-request `/token` and `/keys` behavior for both AWS reference deployments using their shipped KMS algorithm strings.
-**Pointers:** `examples/aws-web/config/oidc-exchange.toml:17`; `examples/ecs-fargate/config/fargate.toml:11`; `.specs/changes/2026-08-05-baseline_reference_deployments.md:566-574`; sibling `2026-08-05-fail_closed_across_config_and_adapters.md` (external dependency)
+**Pointers:** `examples/aws-web/config/oidc-exchange.toml:17`; `examples/ecs-fargate/config/fargate.toml:11`; `.specs/changes/2026-08-05-baseline_reference_deployments.md:566-574`; [`2026-08-05-fail_closed_across_config_and_adapters.md`](../../../changes/merged/2026-08-05-fail_closed_across_config_and_adapters.md) (merged: the typed config now admits only JWS algorithm names)
 
 ## Steps
 

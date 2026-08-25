@@ -1,22 +1,61 @@
+pub mod assertion;
 pub mod claims;
 pub mod exchange;
+pub mod maintenance;
 pub mod refresh;
 pub mod revoke;
 pub mod user_admin;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use serde_json::Value;
 
-use crate::config::AppConfig;
+use crate::config::Config;
 use crate::domain::{
-    AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity, User,
+    is_valid_family_id, AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome,
+    AuditSeverity, ClientAddr, SecurityEvent, User,
 };
+
+/// Total mandatory audit sink failures observed by this process.
+pub(crate) static AUDIT_SINK_FAILURES_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Current run of consecutive mandatory audit sink failures. Any successful mandatory
+/// emission resets it, so readiness can recover after a transient sink outage.
+pub(crate) static AUDIT_SINK_CONSECUTIVE_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// A single transient failure is observable but does not fail readiness.
+pub const AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES: u64 = 3;
+
+pub fn audit_sink_failures_total() -> u64 {
+    AUDIT_SINK_FAILURES_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn audit_sink_consecutive_failures() -> u64 {
+    AUDIT_SINK_CONSECUTIVE_FAILURES.load(Ordering::Acquire)
+}
+
+pub fn audit_sink_degraded() -> bool {
+    audit_sink_consecutive_failures() >= AUDIT_SINK_DEGRADED_AFTER_CONSECUTIVE_FAILURES
+}
+
+pub(crate) fn record_mandatory_audit_success() {
+    AUDIT_SINK_CONSECUTIVE_FAILURES.store(0, Ordering::Release);
+}
+
+pub(crate) fn record_mandatory_audit_failure() {
+    AUDIT_SINK_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let _ = AUDIT_SINK_CONSECUTIVE_FAILURES.fetch_update(
+        Ordering::AcqRel,
+        Ordering::Acquire,
+        |value| Some(value.saturating_add(1)),
+    );
+}
 use crate::error::{Error, Result};
 use crate::ports::{
-    AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
+    UserSync,
 };
 
 pub struct AppService {
@@ -25,19 +64,25 @@ pub struct AppService {
     pub(crate) keys: Box<dyn KeyManager>,
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
+    /// The shared rate-limit port: the exchange plane's budgets and the
+    /// admin plane's `OperatorAuth` failed-authentication budget both flow
+    /// through it.
+    pub(crate) rate_limiter: Box<dyn RateLimiter>,
     pub(crate) providers: HashMap<String, Box<dyn IdentityProvider>>,
-    pub(crate) config: AppConfig,
+    pub(crate) config: Config,
 }
 
 impl AppService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_repo: Box<dyn UserRepository>,
         session_repo: Box<dyn SessionRepository>,
         keys: Box<dyn KeyManager>,
         audit: Box<dyn AuditLog>,
         user_sync: Box<dyn UserSync>,
+        rate_limiter: Box<dyn RateLimiter>,
         providers: HashMap<String, Box<dyn IdentityProvider>>,
-        config: AppConfig,
+        config: Config,
     ) -> Self {
         Self {
             user_repo,
@@ -45,6 +90,7 @@ impl AppService {
             keys,
             audit,
             user_sync,
+            rate_limiter,
             providers,
             config,
         }
@@ -60,17 +106,56 @@ impl AppService {
         self.keys.algorithm()
     }
 
-    /// Build and sign an access token JWT for the given user.
+    /// Build and sign an access token JWT for the given user, naming the
+    /// session family it belongs to.
+    ///
+    /// `family_id` is supplied by the caller — the family `exchange` has just
+    /// created or the one `refresh` has just rotated (or is serving under
+    /// rotation disabled). It rides the JWT as the stable `sid` claim, so
+    /// every access token names exactly the one family it may revoke,
+    /// invariant across rotations.
+    /// The shared [`RateLimiter`] port instance.
+    ///
+    /// Exposed so the server's operator-auth layer can consult the same
+    /// budget this service was built with — the throttle state must be one
+    /// process-wide instance, never a per-consumer copy.
+    pub fn rate_limiter(&self) -> &dyn RateLimiter {
+        self.rate_limiter.as_ref()
+    }
+
     ///
     /// Returns `(jwt_string, expires_in_seconds)`.
-    pub(crate) async fn build_access_token(&self, user: &User) -> Result<(String, u64)> {
+    ///
+    /// VENDORED SEAM (task 08): the `sid` claim is the minimal in-branch slice
+    /// of the sibling `2026-08-05-validate_revoke_token_claims` contract (PR
+    /// #19); reconcile against that PR at merge time.
+    pub(crate) async fn build_access_token(
+        &self,
+        user: &User,
+        family_id: &str,
+    ) -> Result<(String, u64)> {
+        // Boundary precondition: callers mint well-formed families. The one
+        // tolerated exception is the rotation-disabled refresh of a pre-
+        // rotation legacy row, whose sentinel (empty string) would otherwise
+        // break a refresh path that must keep working unchanged; such a token
+        // fails closed at consumption time like any hash-form sid.
+        assert!(
+            family_id.is_empty() || is_valid_family_id(family_id),
+            "build_access_token: malformed family id {family_id:?}"
+        );
+        assert!(
+            !user.id.is_empty(),
+            "build_access_token: user id must not be empty"
+        );
+
         let now = Utc::now();
-        let access_ttl_secs = parse_duration_secs(&self.config.token.access_token_ttl)?;
+        let access_ttl_secs = self.config.token.access_token_ttl.as_secs();
 
         let access_claims = AccessTokenClaims {
             sub: user.id.clone(),
-            iss: self.config.server.issuer.clone(),
-            aud: self.config.token.audience.clone().unwrap_or_default(),
+            iss: self.config.server.issuer.as_ref().to_string(),
+            aud: self.config.token.audience.as_ref().to_string(),
+            sid: family_id.to_string(),
             iat: now.timestamp() as u64,
             exp: (now.timestamp() as u64) + access_ttl_secs,
             custom: claims::resolve_custom_claims(&self.config.token.custom_claims, user),
@@ -82,7 +167,9 @@ impl AppService {
 
         let header = serde_json::json!({
             "alg": self.keys.algorithm(),
-            "typ": "JWT",
+            // RFC 9068 §2.1 media type for a JWT access token; distinguishes
+            // this artifact from every other JWT the same key might sign.
+            "typ": ACCESS_TOKEN_TYP,
             "kid": self.keys.key_id()
         });
         let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).map_err(|e| {
@@ -99,49 +186,185 @@ impl AppService {
         Ok((access_token, access_ttl_secs))
     }
 
+    /// The only path by which a claim of a service-minted JWT becomes
+    /// readable. Validates a first-party access token in the source-spec
+    /// order — shape, pinned header, signature, and only then typed claims —
+    /// so no caller can observe a claim without proving everything before it.
+    ///
+    /// The `Err` carries one fixed reason constant, used solely as the audit
+    /// `reason`; it never reaches the client.
+    pub(crate) async fn validate_access_token(
+        &self,
+        token: &str,
+    ) -> std::result::Result<AccessTokenClaims, &'static str> {
+        // One captured timestamp for every comparison in this validation, so
+        // the exp/iat/nbf checks cannot disagree about "now".
+        let now_secs = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+
+        let (header_seg, payload_seg, signature_seg) = split_jws_segments(token)?;
+
+        // The header is covered by the signature but is not self-authenticating:
+        // pin it to what this service mints instead of reading it for direction.
+        let header_bytes = URL_SAFE_NO_PAD
+            .decode(header_seg)
+            .map_err(|_| REASON_MALFORMED)?;
+        pin_access_token_header(&header_bytes, self.keys.algorithm(), self.keys.key_id())?;
+
+        // Verify over the original serialized bytes: the JWS signature covers
+        // the segments exactly as received, and re-encoding could normalize
+        // them into different bytes.
+        let signing_input = format!("{}.{}", header_seg, payload_seg);
+        let signature_bytes = URL_SAFE_NO_PAD
+            .decode(signature_seg)
+            .map_err(|_| REASON_MALFORMED)?;
+        let verified = self
+            .keys
+            .verify(signing_input.as_bytes(), &signature_bytes)
+            .await
+            .map_err(|_| REASON_BAD_SIGNATURE)?;
+        if !verified {
+            return Err(REASON_BAD_SIGNATURE);
+        }
+
+        // Signature succeeded — only now may the payload be parsed and any
+        // claim read.
+        let payload_bytes = URL_SAFE_NO_PAD
+            .decode(payload_seg)
+            .map_err(|_| REASON_MALFORMED)?;
+        let claims: AccessTokenClaims =
+            serde_json::from_slice(&payload_bytes).map_err(|_| REASON_INVALID_CLAIMS)?;
+        check_claims(&claims, &payload_bytes, &self.config, now_secs)?;
+
+        // Postconditions the claim checks just established; re-asserting them
+        // pairs the validation with a read-side check, so a future edit that
+        // drops a check fails loudly here instead of leaking an unusable
+        // credential to revocation.
+        assert!(
+            !claims.sub.trim().is_empty(),
+            "validate_access_token: subject must be non-blank after check_claims"
+        );
+        assert!(
+            !claims.sid.trim().is_empty(),
+            "validate_access_token: session id must be non-blank after check_claims"
+        );
+
+        Ok(claims)
+    }
+
+    /// Emits an operational audit event through the threshold-filtered, best-effort path.
     pub async fn emit_audit(&self, event: AuditEvent) -> Result<()> {
-        // Pre-dispatch emit-threshold filter: events strictly less severe
-        // than `[audit] emit_threshold` are dropped before any adapter ever
-        // sees them, independently of the blocking-threshold decision below.
-        let emit_threshold =
-            parse_severity(&self.config.audit.emit_threshold).unwrap_or(AuditSeverity::Info);
+        let emit_threshold = self.config.audit.emit_threshold;
         if event.severity as u8 > emit_threshold as u8 {
             return Ok(());
         }
 
         match self.audit.emit(&event).await {
             Ok(()) => Ok(()),
-            Err(e) => {
-                // Always emit via tracing as fallback (captured by Lambda, CloudWatch, etc.)
-                let serialized =
-                    serde_json::to_string(&event).unwrap_or_else(|_| format!("{:?}", event));
-
-                if event.severity as u8 <= AuditSeverity::Error as u8 {
-                    tracing::error!(audit_fallback = true, "{serialized}");
-                } else {
-                    tracing::info!(audit_fallback = true, "{serialized}");
-                }
-
-                // Parse blocking threshold from config
-                let threshold = parse_severity(&self.config.audit.blocking_threshold)
-                    .unwrap_or(AuditSeverity::Warning);
-
+            Err(error) => {
+                self.log_audit_fallback(&event);
+                let threshold = self.config.audit.blocking_threshold;
                 if event.severity as u8 <= threshold as u8 {
-                    // Severity meets blocking threshold — fail the operation
-                    Err(e)
+                    Err(error)
                 } else {
-                    tracing::warn!(error = %e, "audit provider down, event emitted to std stream");
+                    tracing::warn!(error = %error, "best-effort audit provider down");
                     Ok(())
                 }
             }
         }
     }
+
+    /// Emits a security event through the mandatory path, bypassing audit thresholds.
+    ///
+    /// The event classification is closed by [`SecurityEvent`]; callers can only supply
+    /// the safe context used to construct its fixed durable representation.
+    pub async fn emit_security_event(
+        &self,
+        event: SecurityEvent,
+        outcome: AuditOutcome,
+        actor: Option<String>,
+        provider: Option<String>,
+        client_addr: ClientAddr,
+        user_agent: Option<String>,
+    ) -> Result<()> {
+        self.emit_security_event_with_detail(
+            event,
+            outcome,
+            actor,
+            provider,
+            client_addr,
+            user_agent,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    /// [`Self::emit_security_event`] with correlation `detail` attached (e.g.
+    /// the admin route a rejected operator authentication targeted). The
+    /// classification stays closed; detail is context, never classification.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn emit_security_event_with_detail(
+        &self,
+        event: SecurityEvent,
+        outcome: AuditOutcome,
+        actor: Option<String>,
+        provider: Option<String>,
+        client_addr: ClientAddr,
+        user_agent: Option<String>,
+        detail: HashMap<String, Value>,
+    ) -> Result<()> {
+        let mut event = event.into_audit_event(outcome, actor, provider, client_addr, user_agent);
+        event.detail = detail;
+        self.emit_mandatory_audit_event(event).await
+    }
+
+    /// The mandatory emission path for an already-assembled event (e.g. one
+    /// enriched with correlation `detail`): bypasses audit thresholds and
+    /// applies the `audit.durability` policy.
+    pub(crate) async fn emit_mandatory_audit_event(&self, event: AuditEvent) -> Result<()> {
+        match self.audit.emit(&event).await {
+            Ok(()) => {
+                record_mandatory_audit_success();
+                Ok(())
+            }
+            Err(error) => {
+                record_mandatory_audit_failure();
+                self.log_audit_fallback(&event);
+                if self.config.audit.durability.is_enforce() {
+                    Err(Error::SecurityAuditDurability {
+                        detail: error.to_string(),
+                    })
+                } else {
+                    tracing::error!(
+                        error = %error,
+                        audit_durability_degraded = true,
+                        "mandatory security audit provider down"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    pub(crate) fn log_audit_fallback(&self, event: &AuditEvent) {
+        let serialized = serde_json::to_string(event).unwrap_or_else(|_| format!("{:?}", event));
+        if event.severity as u8 <= AuditSeverity::Error as u8 {
+            tracing::error!(audit_fallback = true, "{serialized}");
+        } else {
+            tracing::info!(audit_fallback = true, "{serialized}");
+        }
+    }
+
 }
 
-/// Build an [`AuditEvent`]. `ip_address` and `user_agent` come from the
-/// caller's client context (the `AuditContext` middleware at the HTTP edge);
-/// the `AuditEvent` shape has no `device_id` field, so device identifiers are
-/// recorded on the `Session` only, never on audit events.
+/// Build an [`AuditEvent`] with no operator attribution.
+///
+/// `ip_address` and `user_agent` come from the caller's client context (the
+/// `AuditContext` middleware at the HTTP edge); the `AuditEvent` shape has no
+/// `device_id` field, so device identifiers are recorded on the `Session`
+/// only, never on audit events. The `operator` field starts as `None`: this
+/// constructor serves every exchange-plane event, where there is no operator,
+/// and admin flows stamp the principal onto the returned event explicitly so
+/// attribution is always a deliberate act, never a default.
 #[allow(clippy::too_many_arguments)]
 pub fn create_audit_event(
     event_type: AuditEventType,
@@ -149,7 +372,7 @@ pub fn create_audit_event(
     outcome: AuditOutcome,
     actor: Option<String>,
     provider: Option<String>,
-    ip_address: Option<String>,
+    client_addr: ClientAddr,
     user_agent: Option<String>,
 ) -> AuditEvent {
     AuditEvent {
@@ -158,8 +381,10 @@ pub fn create_audit_event(
         severity,
         event_type,
         actor,
+        operator: None,
         provider,
-        ip_address,
+        ip_address: client_addr.audit_address(),
+        ip_address_source: client_addr.source(),
         user_agent,
         detail: HashMap::new(),
         outcome,
@@ -180,6 +405,126 @@ pub fn parse_severity(s: &str) -> Option<AuditSeverity> {
     }
 }
 
+/// Typed view of the JWT header this service mints. `alg`, `kid` and `typ`
+/// are required struct fields, so a header missing any of them is a parse
+/// failure rather than an optional read.
+#[derive(serde::Deserialize)]
+struct AccessTokenHeader {
+    alg: String,
+    kid: String,
+    typ: String,
+}
+
+/// Typed view of the optional `nbf` payload claim. `nbf` is deliberately not
+/// a field of [`AccessTokenClaims`] — the service never mints one — so it is
+/// parsed separately, only after the required typed claims have succeeded.
+#[derive(serde::Deserialize)]
+struct NotBeforeClaim {
+    nbf: Option<u64>,
+}
+
+/// Split a compact JWS into its three segments, rejecting any shape that is
+/// not exactly three non-empty dot-separated parts.
+fn split_jws_segments(token: &str) -> std::result::Result<(&str, &str, &str), &'static str> {
+    let segments: Vec<&str> = token.split('.').collect();
+    if segments.len() != JWT_SEGMENT_COUNT {
+        return Err(REASON_MALFORMED);
+    }
+    if let [header, payload, signature] = segments.as_slice() {
+        if !header.is_empty() && !payload.is_empty() && !signature.is_empty() {
+            return Ok((header, payload, signature));
+        }
+    }
+    Err(REASON_MALFORMED)
+}
+
+/// Decode and pin the access-token header to exactly what this service
+/// mints: the key manager's algorithm and key id, and the RFC 9068
+/// access-token media type.
+fn pin_access_token_header(
+    header_bytes: &[u8],
+    algorithm: &str,
+    key_id: &str,
+) -> std::result::Result<(), &'static str> {
+    // Preconditions on the pin values themselves: an unconfigured key
+    // manager would make every pin comparison vacuous.
+    assert!(
+        !algorithm.is_empty(),
+        "key manager must report an algorithm"
+    );
+    assert!(!key_id.is_empty(), "key manager must report a key id");
+
+    let header: AccessTokenHeader =
+        serde_json::from_slice(header_bytes).map_err(|_| REASON_WRONG_TYPE)?;
+
+    if header.alg != algorithm || header.kid != key_id {
+        return Err(REASON_WRONG_KEY);
+    }
+    if header.typ != ACCESS_TOKEN_TYP {
+        return Err(REASON_WRONG_TYPE);
+    }
+    Ok(())
+}
+
+/// Validate the typed claims of a signature-verified payload: issuer,
+/// audience, validity window (with [`CLOCK_SKEW_SECS`] leeway) and non-blank
+/// identifiers, in the source-spec order.
+///
+/// Boundary semantics, made explicit: a token is expired when
+/// `now > exp + CLOCK_SKEW_SECS` (so `now == exp + skew` is still valid),
+/// issued in the future when `iat > now + CLOCK_SKEW_SECS`, and not yet
+/// valid when `nbf > now + CLOCK_SKEW_SECS`. All comparisons are saturating
+/// in `u64` so an absurd claim value can never wrap into acceptance.
+fn check_claims(
+    claims: &AccessTokenClaims,
+    payload_bytes: &[u8],
+    config: &Config,
+    now_secs: u64,
+) -> std::result::Result<(), &'static str> {
+    let expected_issuer = config.server.issuer.as_str();
+    assert!(
+        !expected_issuer.is_empty(),
+        "server.issuer must be configured before tokens can be validated"
+    );
+    let skew = CLOCK_SKEW_SECS as u64;
+    // `token.audience` is a required non-empty configuration value, and it is
+    // exactly what `build_access_token` stamps, so mint and validate agree by
+    // construction.
+    let expected_audience = config.token.audience.as_str();
+
+    if claims.iss != expected_issuer {
+        return Err(REASON_WRONG_ISSUER);
+    }
+    if claims.aud != expected_audience {
+        return Err(REASON_WRONG_AUDIENCE);
+    }
+
+    // `nbf` is optional and parsed only after the typed required claims
+    // above succeeded; a malformed (non-numeric) value is rejected.
+    let not_before: NotBeforeClaim =
+        serde_json::from_slice(payload_bytes).map_err(|_| REASON_INVALID_CLAIMS)?;
+
+    if now_secs > claims.exp.saturating_add(skew) {
+        return Err(REASON_EXPIRED);
+    }
+    if claims.iat > now_secs.saturating_add(skew) {
+        return Err(REASON_FUTURE_ISSUED_AT);
+    }
+    if let Some(nbf) = not_before.nbf {
+        if nbf > now_secs.saturating_add(skew) {
+            return Err(REASON_NOT_YET_VALID);
+        }
+    }
+
+    if claims.sub.trim().is_empty() {
+        return Err(REASON_BLANK_SUBJECT);
+    }
+    if claims.sid.trim().is_empty() {
+        return Err(REASON_BLANK_SESSION);
+    }
+    Ok(())
+}
+
 /// Seconds in one minute, for `m`-suffixed durations (`token.access_token_ttl` /
 /// `refresh_token_ttl`).
 const SECONDS_PER_MINUTE: u64 = 60;
@@ -187,6 +532,40 @@ const SECONDS_PER_MINUTE: u64 = 60;
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
 /// Seconds in one day, for `d`-suffixed durations.
 const SECONDS_PER_DAY: u64 = 24 * SECONDS_PER_HOUR;
+
+/// JWT header `typ` the service mints for access tokens (RFC 9068 §2.1) and
+/// the validator pins to, so an access token cannot be confused with any
+/// other JWT this key signs. Shared by minting and validation so the two
+/// boundaries cannot drift apart.
+pub(crate) const ACCESS_TOKEN_TYP: &str = "at+jwt";
+
+/// Clock skew, in seconds, allowed on the `exp`/`iat`/`nbf` comparisons in
+/// [`AppService::validate_access_token`]. Multi-node deployments and Lambda
+/// cold starts drift; the bound is negligible against the shortest access
+/// token TTL but keeps near-boundary tokens working across replicas.
+pub(crate) const CLOCK_SKEW_SECS: i64 = 60;
+
+/// A compact JWS is exactly three dot-separated segments: header, payload,
+/// signature.
+const JWT_SEGMENT_COUNT: usize = 3;
+
+// Fixed rejection reasons for [`AppService::validate_access_token`]. Each is
+// a constant literal suitable only for the audit `reason` field: none ever
+// carries token bytes, decoded header/payload content, key-manager details,
+// or a serde error, because the string is derived solely from which check
+// failed, never from attacker-controlled data.
+const REASON_MALFORMED: &str = "malformed access token";
+const REASON_WRONG_KEY: &str = "access token pinned to the wrong key";
+const REASON_WRONG_TYPE: &str = "not an access token";
+const REASON_BAD_SIGNATURE: &str = "invalid signature";
+const REASON_INVALID_CLAIMS: &str = "malformed access token claims";
+const REASON_WRONG_ISSUER: &str = "invalid issuer";
+const REASON_WRONG_AUDIENCE: &str = "invalid audience";
+const REASON_EXPIRED: &str = "token expired";
+const REASON_FUTURE_ISSUED_AT: &str = "token issued in the future";
+const REASON_NOT_YET_VALID: &str = "token not yet valid";
+const REASON_BLANK_SUBJECT: &str = "blank subject";
+const REASON_BLANK_SESSION: &str = "blank session identifier";
 
 /// Parse a duration string like "15m", "1h", "30d" into seconds.
 ///
@@ -336,5 +715,604 @@ mod parse_duration_secs_tests {
             }
             other => panic!("expected ConfigError, got {other:?}"),
         }
+    }
+}
+
+/// Focused suite for [`AppService::validate_access_token`]. Lives beside the
+/// validator because the method is `pub(crate)`: integration tests cannot
+/// reach it, and every negative boundary below must drive the real check it
+/// targets rather than a reimplementation.
+///
+/// The suite deliberately does not use `oidc-exchange-test-utils`: that crate
+/// depends on this one, so its mocks would put two copies of
+/// `oidc_exchange_core` into one build graph. Instead the ports the validator
+/// never touches are panicking stubs — reaching one means the validator
+/// performed I/O, which fails the test loudly — and signing uses a
+/// deterministic toy key manager (`sign(p) == p`). Cryptographic strength is
+/// the adapter's job; this suite exercises only the service's own validation
+/// logic.
+#[cfg(test)]
+mod validate_access_token_tests {
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use chrono::Utc;
+    use serde_json::{json, Value};
+
+    use super::{
+        AppService, ACCESS_TOKEN_TYP, CLOCK_SKEW_SECS, REASON_BAD_SIGNATURE, REASON_BLANK_SESSION,
+        REASON_BLANK_SUBJECT, REASON_EXPIRED, REASON_FUTURE_ISSUED_AT, REASON_INVALID_CLAIMS,
+        REASON_MALFORMED, REASON_NOT_YET_VALID, REASON_WRONG_AUDIENCE, REASON_WRONG_ISSUER,
+        REASON_WRONG_KEY, REASON_WRONG_TYPE,
+    };
+    use crate::config::{Config, RawConfig};
+    use crate::domain::{
+        AuditEvent, IdentityClaims, NewUser, ProviderTokens, Session, User, UserPatch,
+    };
+    use crate::error::Result;
+    use crate::ports::{
+        AuditLog, IdentityProvider, KeyManager, SessionRepository, UserRepository, UserSync,
+    };
+
+    /// Stub for the user/session ports: every method panics because the
+    /// validator must decide validity without consulting any store.
+    struct NeverTouchedStore;
+
+    #[async_trait]
+    impl UserRepository for NeverTouchedStore {
+        async fn get_user_by_id(&self, _: &str) -> Result<Option<User>> {
+            unreachable!("validate_access_token must not read the user repository")
+        }
+        async fn get_user_by_external_id(&self, _: &str, _: &str) -> Result<Option<User>> {
+            unreachable!("validate_access_token must not read the user repository")
+        }
+        async fn create_user(&self, _: &NewUser) -> Result<User> {
+            unreachable!("validate_access_token must not create users")
+        }
+        async fn update_user(&self, _: &str, _: &UserPatch) -> Result<User> {
+            unreachable!("validate_access_token must not update users")
+        }
+        async fn delete_user(&self, _: &str) -> Result<()> {
+            unreachable!("validate_access_token must not delete users")
+        }
+        async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
+            unreachable!("validate_access_token must not count users")
+        }
+        async fn list_users(
+            &self,
+            _: Option<&str>,
+            _: u32,
+        ) -> Result<crate::domain::UserPage> {
+            unreachable!("validate_access_token must not list users")
+        }
+    }
+
+    #[async_trait]
+    impl SessionRepository for NeverTouchedStore {
+        async fn store_refresh_token(&self, _: &Session) -> Result<()> {
+            unreachable!("validate_access_token must not write sessions")
+        }
+        async fn put_single_use(&self, _: &str, _: chrono::DateTime<Utc>) -> Result<bool> {
+            unreachable!("validate_access_token must not write single-use markers")
+        }
+        async fn resolve_refresh_token(&self, _: &str) -> Result<crate::domain::RefreshResolution> {
+            unreachable!("validate_access_token must not classify refresh tokens")
+        }
+        async fn rotate_refresh_token(&self, _: &str, _: &Session) -> Result<bool> {
+            unreachable!("validate_access_token must not rotate sessions")
+        }
+        async fn revoke_family(&self, _: &str) -> Result<u64> {
+            unreachable!("validate_access_token must not revoke families")
+        }
+        async fn take_single_use(&self, _: &str) -> Result<bool> {
+            unreachable!("validate_access_token must not burn single-use markers")
+        }
+        async fn get_session_by_refresh_token(
+            &self,
+            _: &crate::secret::Secret<String>,
+        ) -> Result<Option<Session>> {
+            unreachable!(
+                "validate_access_token must not consult the session store; \
+                 signature and claims alone decide validity"
+            )
+        }
+        async fn revoke_session(&self, _: &crate::secret::Secret<String>) -> Result<()> {
+            unreachable!("validate_access_token must never mutate session state")
+        }
+        async fn revoke_all_user_sessions(&self, _: &str) -> Result<()> {
+            unreachable!("validate_access_token must never revoke all sessions")
+        }
+        async fn count_active_sessions(&self) -> Result<u64> {
+            unreachable!("validate_access_token must not count sessions")
+        }
+        async fn cleanup_expired_sessions(&self) -> Result<u64> {
+            unreachable!("validate_access_token must not reap sessions")
+        }
+    }
+
+    /// Deterministic toy signer shared by the service under test and the
+    /// token-minting helpers: the signature of a payload is the payload
+    /// itself, so verification is an equality check.
+    struct ToyKeyManager;
+
+    #[async_trait]
+    impl KeyManager for ToyKeyManager {
+        async fn sign(&self, payload: &[u8]) -> Result<Vec<u8>> {
+            Ok(payload.to_vec())
+        }
+        async fn verify(&self, payload: &[u8], signature: &[u8]) -> Result<bool> {
+            Ok(signature == payload)
+        }
+        async fn public_jwk(&self) -> Result<serde_json::Value> {
+            unreachable!("validate_access_token must not touch JWKS material")
+        }
+        fn algorithm(&self) -> &str {
+            "EdDSA"
+        }
+        fn key_id(&self) -> &str {
+            "test-key-1"
+        }
+    }
+
+    struct NeverTouchedAuditLog;
+
+    #[async_trait]
+    impl AuditLog for NeverTouchedAuditLog {
+        async fn emit(&self, _: &AuditEvent) -> Result<()> {
+            unreachable!("validate_access_token must not audit")
+        }
+    }
+
+    struct NeverTouchedUserSync;
+
+    #[async_trait]
+    impl UserSync for NeverTouchedUserSync {
+        async fn notify_user_created(&self, _: &User) -> Result<()> {
+            unreachable!("validate_access_token must not sync users")
+        }
+        async fn notify_user_updated(&self, _: &User, _: &[&str]) -> Result<()> {
+            unreachable!("validate_access_token must not sync users")
+        }
+        async fn notify_user_deleted(&self, _: &str) -> Result<()> {
+            unreachable!("validate_access_token must not sync users")
+        }
+    }
+
+    struct NeverTouchedRateLimiter;
+
+    #[async_trait]
+    impl crate::ports::RateLimiter for NeverTouchedRateLimiter {
+        async fn check_and_consume(
+            &self,
+            _: &crate::domain::RateLimitKey,
+        ) -> Result<crate::domain::RateLimitDecision> {
+            unreachable!("validate_access_token must not consult the rate limiter")
+        }
+
+        async fn check(
+            &self,
+            _: &crate::domain::RateLimitKey,
+        ) -> Result<crate::domain::RateLimitDecision> {
+            unreachable!("validate_access_token must not consult the rate limiter")
+        }
+
+        async fn consume(
+            &self,
+            _: &crate::domain::RateLimitKey,
+        ) -> Result<crate::domain::RateLimitDecision> {
+            unreachable!("validate_access_token must not consult the rate limiter")
+        }
+    }
+
+    struct NeverTouchedProvider;
+
+    #[async_trait]
+    impl IdentityProvider for NeverTouchedProvider {
+        async fn exchange_code(&self, _: &str, _: &str) -> Result<ProviderTokens> {
+            unreachable!("validate_access_token must not talk to providers")
+        }
+        async fn validate_id_token(&self, _: &str) -> Result<IdentityClaims> {
+            unreachable!("validate_access_token must not validate provider tokens")
+        }
+        async fn revoke_token(&self, _: &str) -> Result<()> {
+            unreachable!("validate_access_token must not revoke at providers")
+        }
+        fn client_id(&self) -> &str {
+            unreachable!("validate_access_token must not read provider client ids")
+        }
+        fn provider_id(&self) -> &str {
+            "never"
+        }
+    }
+
+    fn test_config() -> Config {
+        let mut raw: RawConfig = toml::from_str(include_str!("../../../../config/default.toml"))
+            .expect("default config should deserialize");
+        raw.server.issuer = "https://auth.test.com".to_string();
+        raw.token.audience = "https://api.test.com".to_string();
+        Config::resolve(raw).expect("test config should resolve")
+    }
+
+    fn test_service() -> AppService {
+        AppService::new(
+            Box::new(NeverTouchedStore),
+            Box::new(NeverTouchedStore),
+            Box::new(ToyKeyManager),
+            Box::new(NeverTouchedAuditLog),
+            Box::new(NeverTouchedUserSync),
+            Box::new(NeverTouchedRateLimiter),
+            HashMap::from([("never".to_string(), Box::new(NeverTouchedProvider) as _)]),
+            test_config(),
+        )
+    }
+
+    /// Sign arbitrary header/payload JSON with the service's own key manager,
+    /// exactly as minting does, so mutations below isolate one check each.
+    async fn signed_token(svc: &AppService, header: &Value, payload: &Value) -> String {
+        let header_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(header).expect("header serializes"));
+        let payload_b64 =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).expect("payload serializes"));
+        let signing_input = format!("{}.{}", header_b64, payload_b64);
+        let signature = svc
+            .keys
+            .sign(signing_input.as_bytes())
+            .await
+            .expect("signing succeeds");
+        format!("{}.{}", signing_input, URL_SAFE_NO_PAD.encode(signature))
+    }
+
+    async fn valid_token(svc: &AppService, now: i64) -> String {
+        signed_token(svc, &valid_header(), &valid_claims(now)).await
+    }
+
+    /// Canonical valid claims at `now`, matching `test_config`.
+    fn valid_claims(now: i64) -> Value {
+        json!({
+            "sub": "usr_test",
+            "iss": "https://auth.test.com",
+            "aud": "https://api.test.com",
+            "iat": now,
+            "exp": now + 900,
+            "sid": "a".repeat(64),
+        })
+    }
+
+    /// Header exactly as the service mints it.
+    fn valid_header() -> Value {
+        json!({"alg": "EdDSA", "typ": ACCESS_TOKEN_TYP, "kid": "test-key-1"})
+    }
+
+    /// Flip the final character of the token while keeping every segment
+    /// decodable, so the mutation reaches the verification check instead of
+    /// dying at base64 decode.
+    fn corrupt_signature(token: &str) -> String {
+        let mut corrupted = token.to_string();
+        let last = corrupted.pop().expect("token ends with signature data");
+        corrupted.push(if last == 'A' { 'B' } else { 'A' });
+        assert_ne!(corrupted, token, "the mutation must alter the token");
+        corrupted
+    }
+
+    #[tokio::test]
+    async fn accepts_a_correctly_signed_current_token() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let claims = svc
+            .validate_access_token(&valid_token(&svc, now).await)
+            .await
+            .expect("a well-formed current token must validate");
+
+        assert_eq!(claims.sub, "usr_test");
+        assert_eq!(claims.sid, "a".repeat(64));
+        assert_eq!(claims.iss, "https://auth.test.com");
+        assert_eq!(claims.aud, "https://api.test.com");
+        assert_eq!(claims.exp, (now + 900) as u64);
+    }
+
+    #[tokio::test]
+    async fn rejects_non_three_segment_shapes_as_malformed() {
+        let svc = test_service();
+
+        let bad_shapes = ["", "only-one", "two.segments", "a.b.c.d", "a..c.d", "a.b."];
+        for shape in bad_shapes {
+            let err = svc
+                .validate_access_token(shape)
+                .await
+                .expect_err("a malformed shape must be rejected");
+            assert_eq!(
+                err, REASON_MALFORMED,
+                "shape {shape:?} must report malformed"
+            );
+        }
+
+        // Non-base64url content fails decode cleanly rather than panicking.
+        let err = svc
+            .validate_access_token("!!not-base64!!.e30.e30")
+            .await
+            .expect_err("an undecodable header must be rejected");
+        assert_eq!(err, REASON_MALFORMED);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_header_typ_other_than_at_jwt() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        // Correctly signed generic-JWT header: the type pin fires.
+        let token = signed_token(
+            &svc,
+            &json!({"alg": "EdDSA", "typ": "JWT", "kid": "test-key-1"}),
+            &valid_claims(now),
+        )
+        .await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a generic JWT typ must not validate as an access token");
+        assert_eq!(err, REASON_WRONG_TYPE);
+
+        // A header missing `typ` entirely is a typed-header parse failure,
+        // not an optional read.
+        let token = signed_token(
+            &svc,
+            &json!({"alg": "EdDSA", "kid": "test-key-1"}),
+            &valid_claims(now),
+        )
+        .await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a header without typ must be rejected");
+        assert_eq!(err, REASON_WRONG_TYPE);
+    }
+
+    #[tokio::test]
+    async fn rejects_headers_pinned_to_other_keys_or_algorithms() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let token = signed_token(
+            &svc,
+            &json!({"alg": "EdDSA", "typ": ACCESS_TOKEN_TYP, "kid": "other-key"}),
+            &valid_claims(now),
+        )
+        .await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("an unknown kid must be rejected");
+        assert_eq!(err, REASON_WRONG_KEY);
+
+        // Right key metadata shape, wrong algorithm family.
+        let token = signed_token(
+            &svc,
+            &json!({"alg": "HS256", "typ": ACCESS_TOKEN_TYP, "kid": "test-key-1"}),
+            &valid_claims(now),
+        )
+        .await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a foreign algorithm must be rejected");
+        assert_eq!(err, REASON_WRONG_KEY);
+
+        // A header without `kid` never parses as this service's typed
+        // access-token header, so it lands in the same fixed bucket as the
+        // other header-shape failures.
+        let token = signed_token(
+            &svc,
+            &json!({"alg": "EdDSA", "typ": ACCESS_TOKEN_TYP}),
+            &valid_claims(now),
+        )
+        .await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a header without kid must be rejected");
+        assert_eq!(err, REASON_WRONG_TYPE);
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_payloads_and_forged_signatures() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        // A payload modified after signing no longer matches the signature
+        // computed over the original bytes.
+        let legit = signed_token(&svc, &valid_header(), &valid_claims(now)).await;
+        let parts: Vec<&str> = legit.split('.').collect();
+        let attacker_payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "sub": "usr_attacker",
+                "iss": "https://auth.test.com",
+                "aud": "https://api.test.com",
+                "iat": now,
+                "exp": now + 900,
+                "sid": "b".repeat(64),
+            })
+            .to_string(),
+        );
+        let forged = format!("{}.{}.{}", parts[0], attacker_payload, parts[2]);
+        let err = svc
+            .validate_access_token(&forged)
+            .await
+            .expect_err("a tampered payload must fail signature verification");
+        assert_eq!(err, REASON_BAD_SIGNATURE);
+
+        // An intact-shape token whose signature was flipped also fails.
+        let err = svc
+            .validate_access_token(&corrupt_signature(&legit))
+            .await
+            .expect_err("a corrupted signature must fail verification");
+        assert_eq!(err, REASON_BAD_SIGNATURE);
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_required_registered_claims() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let mut no_exp = valid_claims(now);
+        no_exp
+            .as_object_mut()
+            .expect("claims are an object")
+            .remove("exp")
+            .expect("exp was present to remove");
+        let token = signed_token(&svc, &valid_header(), &no_exp).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("missing exp must be a parse failure, not an omitted check");
+        assert_eq!(err, REASON_INVALID_CLAIMS);
+
+        let mut no_sid = valid_claims(now);
+        no_sid
+            .as_object_mut()
+            .expect("claims are an object")
+            .remove("sid")
+            .expect("sid was present to remove");
+        let token = signed_token(&svc, &valid_header(), &no_sid).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("missing sid must be a parse failure");
+        assert_eq!(err, REASON_INVALID_CLAIMS);
+    }
+
+    #[tokio::test]
+    async fn rejects_foreign_issuer_and_audience() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let mut foreign_iss = valid_claims(now);
+        foreign_iss["iss"] = json!("https://evil.example.com");
+        let token = signed_token(&svc, &valid_header(), &foreign_iss).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a sibling deployment's issuer must be rejected");
+        assert_eq!(err, REASON_WRONG_ISSUER);
+
+        let mut foreign_aud = valid_claims(now);
+        foreign_aud["aud"] = json!("https://other-api.example.com");
+        let token = signed_token(&svc, &valid_header(), &foreign_aud).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a mismatched audience must be rejected");
+        assert_eq!(err, REASON_WRONG_AUDIENCE);
+    }
+
+    #[tokio::test]
+    async fn rejects_expired_beyond_skew_but_accepts_exact_skew_edge() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let mut boundary = valid_claims(now);
+        boundary["exp"] = json!((now - CLOCK_SKEW_SECS) as u64);
+        let token = signed_token(&svc, &valid_header(), &boundary).await;
+        svc.validate_access_token(&token)
+            .await
+            .expect("expiry exactly at the skew edge is still inside the window");
+
+        let mut past_edge = valid_claims(now);
+        past_edge["exp"] = json!((now - CLOCK_SKEW_SECS - 1) as u64);
+        let token = signed_token(&svc, &valid_header(), &past_edge).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("one second past the skew edge the token is expired");
+        assert_eq!(err, REASON_EXPIRED);
+    }
+
+    #[tokio::test]
+    async fn rejects_future_iat_beyond_skew_but_accepts_exact_skew_edge() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let mut boundary = valid_claims(now);
+        boundary["iat"] = json!((now + CLOCK_SKEW_SECS) as u64);
+        let token = signed_token(&svc, &valid_header(), &boundary).await;
+        svc.validate_access_token(&token)
+            .await
+            .expect("iat exactly at the skew edge is tolerated");
+
+        let mut past_edge = valid_claims(now);
+        past_edge["iat"] = json!((now + CLOCK_SKEW_SECS + 1) as u64);
+        let token = signed_token(&svc, &valid_header(), &past_edge).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("iat one second past the skew edge is future-dated");
+        assert_eq!(err, REASON_FUTURE_ISSUED_AT);
+    }
+
+    #[tokio::test]
+    async fn optional_nbf_is_checked_with_the_same_skew_window() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let mut boundary = valid_claims(now);
+        boundary["nbf"] = json!((now + CLOCK_SKEW_SECS) as u64);
+        let token = signed_token(&svc, &valid_header(), &boundary).await;
+        svc.validate_access_token(&token)
+            .await
+            .expect("nbf exactly at the skew edge is tolerated");
+
+        let mut past_edge = valid_claims(now);
+        past_edge["nbf"] = json!((now + CLOCK_SKEW_SECS + 1) as u64);
+        let token = signed_token(&svc, &valid_header(), &past_edge).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("nbf one second past the skew edge means not yet valid");
+        assert_eq!(err, REASON_NOT_YET_VALID);
+
+        // A present-but-non-numeric nbf is rejected even though the typed
+        // required claims above it succeeded.
+        let mut garbage = valid_claims(now);
+        garbage["nbf"] = json!("yesterday");
+        let token = signed_token(&svc, &valid_header(), &garbage).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a non-numeric nbf must be rejected");
+        assert_eq!(err, REASON_INVALID_CLAIMS);
+
+        // And a long-past nbf simply does not obstruct validity.
+        let mut historical = valid_claims(now);
+        historical["nbf"] = json!((now - 3600) as u64);
+        let token = signed_token(&svc, &valid_header(), &historical).await;
+        svc.validate_access_token(&token)
+            .await
+            .expect("a historical nbf does not invalidate the token");
+    }
+
+    #[tokio::test]
+    async fn rejects_blank_subject_and_blank_session_identifiers() {
+        let svc = test_service();
+        let now = Utc::now().timestamp();
+
+        let mut blank_sub = valid_claims(now);
+        blank_sub["sub"] = json!("   ");
+        let token = signed_token(&svc, &valid_header(), &blank_sub).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("a whitespace-only subject must be rejected");
+        assert_eq!(err, REASON_BLANK_SUBJECT);
+
+        let mut blank_sid = valid_claims(now);
+        blank_sid["sid"] = json!("");
+        let token = signed_token(&svc, &valid_header(), &blank_sid).await;
+        let err = svc
+            .validate_access_token(&token)
+            .await
+            .expect_err("an empty session identifier must be rejected");
+        assert_eq!(err, REASON_BLANK_SESSION);
     }
 }
