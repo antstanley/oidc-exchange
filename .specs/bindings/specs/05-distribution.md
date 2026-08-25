@@ -21,7 +21,10 @@ A bash installer for `antstanley/oidc-exchange`. It detects OS (`uname -s`) and 
 (`uname -m`), maps to a release asset name, downloads the binary and its SHA-256 checksum from
 GitHub Releases, verifies the checksum, and installs to `/usr/local/bin` (root) or
 `~/.local/bin` (non-root). It accepts a `--version`/positional pin and defaults to the latest
-release; it requires `curl`/`wget` and `sha256sum`/`shasum`.
+release; it requires `curl`/`wget` and `sha256sum`/`shasum`. Verification is mandatory: if
+neither checksum utility is present the installer prints the missing dependency and exits
+non-zero **before** the downloaded binary is made executable or moved onto `PATH`. There is no
+path through the script that installs an unverified binary.
 
 ## Docker (`Dockerfile`)
 
@@ -81,8 +84,12 @@ use the bare `X.Y.Z`; GitHub and Docker use the `v`-prefixed tag.
 
 - *Tag-triggered unified release.* **A `v*.*.*` tag drives binaries, Docker, npm, and PyPI in
   one pipeline.** Atomic, consistent versioning across every artifact from one monorepo.
-- *Checksum-verified install.* **`install.sh` verifies SHA-256 before installing.** Detects
-  tampering or truncated downloads.
+- *Checksum-verified install, fail closed.* **`install.sh` verifies SHA-256 before installing,
+  and aborts when it cannot verify.** Detects tampering or truncated downloads; a host without
+  `sha256sum` or `shasum` gets an error and no install, not a warning and an unchecked binary.
+  The checksum sidecar is fetched from the same release URL prefix as the binary, so it
+  establishes integrity — these are the bytes someone published — and not authenticity; signing
+  the checksum manifest in the release pipeline is the remaining gap.
 - *npm trusted publishing.* **`@oidc-exchange/node` and its platform packages publish via GitHub
   OIDC, not a stored `NPM_TOKEN`.** Short-lived per-run credentials and npm provenance remove a
   long-lived secret and attest the build to the source commit. The package is configured as a

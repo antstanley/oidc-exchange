@@ -38,8 +38,15 @@ const res = await oidc.handleRequest({
   method: "POST",
   rawPath: Buffer.from("/token"),
   query: undefined,
-  headers: [{ name: "content-type", value: "application/json" }],
-  body: Buffer.from(JSON.stringify({ grant_type: "authorization_code", code, provider: "google" })),
+  headers: [{ name: "content-type", value: "application/x-www-form-urlencoded" }],
+  body: Buffer.from(
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: "https://app.example.com/callback",
+      provider: "google",
+    }).toString(),
+  ),
   pathIsRaw: true,
 });
 
@@ -87,6 +94,12 @@ Wiring for popular Node servers lives in the main repo's [examples](https://gith
 ## Configuration
 
 Configuration is TOML — providers, token TTLs, registration policy, key management, and storage. See the [configuration guide](https://github.com/antstanley/oidc-exchange#configuration).
+
+### Behaviour change
+
+Construction now fails when a `${VAR}` placeholder is unresolved, empty, or malformed instead of
+using that placeholder as literal configuration text. Set every referenced environment variable
+before constructing `OidcExchange`.
 
 ## Links
 

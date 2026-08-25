@@ -1,7 +1,7 @@
 //! Integration coverage for Lambda runtime mode: drives an API Gateway HTTP-API (v2) event
-//! through `lambda_http::request::from_str` and into `bootstrap::build_router`'s output via
-//! `tower::ServiceExt::oneshot` — the same tower `Service` call `lambda_http::run` makes on
-//! every real invocation, minus the runtime-API polling loop itself. See task 03 of
+//! through `lambda_http::request::from_str` and into `bootstrap::build_routers`' single-plane
+//! output via `tower::ServiceExt::oneshot` — the same tower `Service` call `lambda_http::run`
+//! makes on every real invocation, minus the runtime-API polling loop itself. See task 03 of
 //! `.specs/plans/2026-07-02-implement_lambda_runtime/plan.md`.
 
 use std::collections::HashMap;
@@ -9,15 +9,18 @@ use std::collections::HashMap;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use oidc_exchange::bootstrap::build_router;
-use oidc_exchange_core::config::AppConfig;
+use oidc_exchange::bootstrap::build_routers;
+use oidc_exchange::middleware::audit_context::audit_context_from_request;
+use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
-/// Build the real production router (`bootstrap::build_router`, full middleware stack
+/// Build the real production router a Lambda invocation would serve
+/// (`bootstrap::build_routers` + the single-plane rule, full middleware stack
 /// included) backed by mock adapters — the exact `app` value `main.rs` hands to
 /// `lambda_http::run`.
 fn build_app() -> axum::Router {
@@ -25,8 +28,10 @@ fn build_app() -> axum::Router {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
     providers.insert("test".to_string(), Box::new(provider));
 
-    let mut config = AppConfig::default();
-    config.server.issuer = "https://auth.example.com".to_string();
+    let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+        .expect("default test config is valid");
+    raw_config.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw_config).expect("test config should resolve");
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -34,11 +39,15 @@ fn build_app() -> axum::Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );
 
-    build_router(&config, service)
+    build_routers(&config, service)
+        .expect("the exchange-only test config always builds routers")
+        .single_plane()
+        .expect("the exchange role always yields a servable plane")
 }
 
 /// Build a minimal API Gateway HTTP-API (payload format v2) `GET` event for `path`, in the
@@ -85,7 +94,7 @@ fn apigw_v2_get_event(path: &str) -> String {
 }
 
 /// A `GET /keys` API Gateway v2 event, parsed by `lambda_http` and routed through the same
-/// `build_router` output the hyper path serves, returns 200 with a JWKS body — proving the
+/// single-plane router output the hyper path serves, returns 200 with a JWKS body — proving the
 /// Lambda code path (`lambda_http`'s event-to-`tower::Service` translation) reaches the
 /// identical router as the hyper branch, not a fork.
 #[tokio::test]
@@ -113,6 +122,22 @@ async fn apigw_v2_event_for_keys_returns_200_with_jwks() {
 /// Negative space: an API Gateway v2 event for a path no route serves returns 404 through the
 /// exact same `lambda_http` → router path — the Lambda translation must not swallow or
 /// mis-route an unknown path into a false 200.
+#[tokio::test]
+async fn lambda_platform_source_ip_wins_over_forwarding_header() {
+    let event = apigw_v2_get_event("/keys").replace(
+        "\"x-forwarded-for\": \"65.78.31.245\"",
+        "\"x-forwarded-for\": \"203.0.113.99\"",
+    );
+    let request = lambda_http::request::from_str(&event).expect("valid apigw v2 event parses");
+    let context = audit_context_from_request(&request, None, &[], 1);
+
+    assert_eq!(
+        context.ip_address().as_deref(),
+        Some("65.78.31.245"),
+        "Lambda provenance must use requestContext.http.sourceIp, not X-Forwarded-For"
+    );
+}
+
 #[tokio::test]
 async fn apigw_v2_event_for_unknown_path_returns_404() {
     let app = build_app();

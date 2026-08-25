@@ -1,11 +1,13 @@
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use axum::Router;
 use futures_util::FutureExt;
 use http::{HeaderName, HeaderValue, StatusCode};
 use http_body_util::BodyExt;
+use tokio::task::JoinHandle;
 use tower::ServiceExt;
 
 const PATH_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
@@ -13,6 +15,13 @@ const PATH_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPH
     .remove(b'-')
     .remove(b'_')
     .remove(b'~');
+
+use oidc_exchange::reaper::{self, HostRuntime};
+use oidc_exchange::shutdown::ShutdownSignal;
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct FfiError {
@@ -54,10 +63,35 @@ pub struct NormalisationLimits {
     pub max_body_bytes: u64,
 }
 
+///
+/// A persistent embedder hosts the session reaper (`04-http-api.md` →
+/// Bootstrap step 7): while the host process lives, expired sessions and
+/// retirement records are swept every `session_repository.cleanup_interval`
+/// on this instance's own runtime. An instance constructed inside AWS Lambda
+/// — the Node/Python Lambda bindings wrap this same type — classifies as
+/// [`HostRuntime::Lambda`] via [`HostRuntime::detect`] and spawns nothing;
+/// those deployments drive `POST /internal/sessions/cleanup` from an external
+/// scheduler instead.
 pub struct OidcExchange {
     runtime: tokio::runtime::Runtime,
     router: Router,
+    /// The spawned session reaper's handle, retained so [`Drop`] can abort it
+    /// before the runtime shuts down: dropping a `JoinHandle` alone detaches
+    /// its task rather than stopping it, so the explicit abort is what keeps
+    /// no reaper surviving its host.
+    reaper: Option<JoinHandle<()>>,
     limits: NormalisationLimits,
+}
+
+impl Drop for OidcExchange {
+    fn drop(&mut self) {
+        // Abort first, explicitly: once `runtime` drops below, its tasks die
+        // with it anyway, but owning the reaper's stop here keeps that
+        // guarantee independent of field-drop order.
+        if let Some(handle) = self.reaper.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl OidcExchange {
@@ -86,11 +120,9 @@ impl OidcExchange {
                         .to_string(),
                 });
             }
+            // The explicit checks above enforce exactly the canonical form
+            // `Config::resolve` would: absolute, non-root, no trailing slash.
             config.server.base_path = Some(base_path.to_string());
-            config.validate().map_err(|e| FfiError {
-                code: "CONFIG_ERROR".to_string(),
-                message: e.to_string(),
-            })?;
         }
         let limits = NormalisationLimits {
             max_body_bytes: config.server.max_request_body_bytes as u64,
@@ -99,17 +131,53 @@ impl OidcExchange {
             code: "RUNTIME_ERROR".to_string(),
             message: e.to_string(),
         })?;
-        let service = runtime
-            .block_on(oidc_exchange::bootstrap::build_service(&config))
+
+        let service = Arc::new(
+            runtime
+                .block_on(oidc_exchange::bootstrap::build_service(&config))
+                .map_err(|e| FfiError {
+                    code: "SERVICE_ERROR".to_string(),
+                    message: e.to_string(),
+                })?,
+        );
+
+        // Bootstrap step 7: a persistent embedder parks the reaper loop on
+        // *this* embedder-owned runtime via `Runtime::spawn` (which is why the
+        // loop future is split from `tokio::spawn`), so sweeps run whenever
+        // the host process is alive. There is no OS-signal story inside an
+        // embedder, so the loop gets a never-firing signal and stops when
+        // `Drop` aborts it; a Lambda-hosted instance spawns none.
+        let reaper_handle = if HostRuntime::detect().hosts_reaper() {
+            Some(runtime.spawn(reaper::reaper_loop(
+                Arc::clone(&service),
+                reaper::cleanup_interval_duration(&config),
+                ShutdownSignal::never(),
+            )))
+        } else {
+            None
+        };
+
+        // FFI has one request surface and no second socket to bind, so the
+        // single-plane rule applies (`04-http-api.md` → Bootstrap, step 6):
+        // `exchange` and `admin` serve their own plane, `all` serves the
+        // public plane and logs a startup warning naming the unmounted
+        // internal routes. Plane separation on this runtime is expressed by
+        // constructing a second instance with `role = "admin"`.
+        let routers = oidc_exchange::bootstrap::build_routers_shared(&config, service)
             .map_err(|e| FfiError {
                 code: "SERVICE_ERROR".to_string(),
                 message: e.to_string(),
             })?;
-        let router = oidc_exchange::bootstrap::build_router(&config, service);
+        let router = routers.single_plane().ok_or_else(|| FfiError {
+            code: "SERVICE_ERROR".to_string(),
+            message: "configured role produces no servable router plane".to_string(),
+        })?;
+
         Ok(Self {
             runtime,
             router,
             limits,
+            reaper: reaper_handle,
         })
     }
 
@@ -271,6 +339,7 @@ impl OidcExchange {
             runtime,
             router,
             limits: NormalisationLimits { max_body_bytes },
+            reaper: None,
         })
     }
 
@@ -542,5 +611,55 @@ mod tests {
             Some("sync-safe-123"),
             "panic contained at FFI request boundary",
         );
+    }
+}
+
+#[cfg(test)]
+mod embedder_tests {
+    use super::*;
+
+    /// An embedder instance builds over a minimal admin-role SQLite config,
+    /// serves `/health`, hosts a session reaper when the host process is
+    /// persistent, and drops without hanging — which exercises the `Drop`
+    /// path that aborts the reaper before the runtime shuts down.
+    #[test]
+    fn persistent_embedder_builds_serves_and_drops_with_a_reaper_hosted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("embedder.sqlite");
+        let config_toml = format!(
+            "[server]\nissuer = \"https://auth.example.com\"\nrole = \"admin\"\n\n\
+             [repository]\nadapter = \"sqlite\"\n\n\
+             [repository.sqlite]\npath = \"{}\"\n",
+            db_path.display()
+        );
+
+        let exchange = OidcExchange::new(&config_toml).expect("embedded exchange builds");
+
+        // The reaper is hosted only under a persistent host; inside Lambda it
+        // must be absent rather than ticking on a frozen process.
+        if HostRuntime::detect() == HostRuntime::Persistent {
+            assert!(
+                exchange.reaper.is_some(),
+                "a persistent embedder must host the session reaper"
+            );
+        } else {
+            assert!(
+                exchange.reaper.is_none(),
+                "a Lambda-hosted embedder must not spawn a reaper"
+            );
+        }
+
+        let response = exchange
+            .handle_request("GET", "/health", Vec::new(), Vec::new())
+            .expect("health request routes");
+        assert_eq!(response.status, 200, "the embedded router serves /health");
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("health body is JSON");
+        assert_eq!(body["status"], "ok", "health reports service ok");
+
+        // Dropping aborts the reaper and shuts the runtime down; a hang or a
+        // panic here means the lifecycle is not owned end to end.
+        drop(exchange);
     }
 }

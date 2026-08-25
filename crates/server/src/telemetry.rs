@@ -107,14 +107,30 @@ mod tests {
         // We can only call init once per process, and test harnesses share a
         // process, so we just verify the function *without* calling init by
         // checking config parsing.
-        let config = TelemetryConfig {
+        let config =
+            oidc_exchange_core::config::Config::resolve(oidc_exchange_core::config::RawConfig {
+                telemetry: oidc_exchange_core::config::RawTelemetryConfig {
+                    enabled: false,
+                    exporter: "none".to_string(),
+                    endpoint: None,
+                    service_name: None,
+                    sample_rate: None,
+                    protocol: None,
+                },
+                ..oidc_exchange_core::config::RawConfig::default()
+            });
+        assert!(config.is_err(), "incomplete raw config must not resolve");
+        let config = oidc_exchange_core::config::TelemetryConfig {
             enabled: false,
-            exporter: "none".to_string(),
-            ..Default::default()
+            exporter: oidc_exchange_core::config::TelemetryExporter::None,
+            endpoint: None,
+            service_name: None,
+            sample_rate: None,
+            protocol: None,
         };
         // The function would succeed; we test the logic path without actually
         // installing a global subscriber (which would conflict with other tests).
         assert!(!config.enabled);
-        assert_eq!(config.exporter, "none");
+        assert_eq!(config.exporter.as_str(), "none");
     }
 }
