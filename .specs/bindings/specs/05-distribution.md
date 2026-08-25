@@ -1,6 +1,6 @@
 # Distribution
 
-**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** install.sh, Dockerfile, .github/workflows
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** install.sh, Dockerfile, .github/workflows
 
 How every artifact is built and shipped: the binary install script, the Docker image, the
 language packages, and the tag-triggered release pipeline.
@@ -103,3 +103,17 @@ use the bare `X.Y.Z`; GitHub and Docker use the `v`-prefixed tag.
 
 - Version bumps are manual across three manifests; a single-command bump (or a release-please
   style automation) is not yet in place.
+
+
+## Runtime parity update
+
+One version string must match across `Cargo.toml` `workspace.package.version`,
+`bindings/nodejs/package.json`, and `bindings/python/pyproject.toml`. The `validate` job
+checks this before building. Bumps are manual: edit the three files, commit, tag, push. npm
+and PyPI use the bare `X.Y.Z`; GitHub and Docker use the `v`-prefixed tag. Because the three
+artifacts share one version, a breaking change to the FFI surface bumps all of them together
+— under `0.x` that is a minor bump (`0.2.x` → `0.3.0`), and the release notes name the two
+packages whose API changed (`@oidc-exchange/node`, `oidc-exchange` on PyPI) and the migration
+for each.
+- The `conformance` CI job has Rust, Node, and Python toolchains available in one runner; it
+  is a required check on the default branch.

@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2756,6 +2756,7 @@ dependencies = [
  "oidc-exchange-core",
  "oidc-exchange-providers",
  "oidc-exchange-test-utils",
+ "percent-encoding",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2773,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-adapters"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2812,8 +2813,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "oidc-exchange-conformance"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "hyper 1.10.1",
+ "hyper-util",
+ "libc",
+ "oidc-exchange",
+ "oidc-exchange-ffi",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "oidc-exchange-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2836,26 +2855,30 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-ffi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "ed25519-dalek 2.2.0",
+ "futures-util",
  "http 1.4.2",
+ "http-body 1.0.1",
  "http-body-util",
  "oidc-exchange",
  "oidc-exchange-core",
  "oidc-exchange-test-utils",
  "pem",
+ "percent-encoding",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "oidc-exchange-nodejs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "napi",
  "napi-build",
@@ -2865,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-providers"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2888,7 +2911,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-python"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "oidc-exchange-ffi",
  "pyo3",
@@ -2896,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-test-utils"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64",

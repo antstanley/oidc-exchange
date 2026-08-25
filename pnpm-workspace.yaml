@@ -2,6 +2,8 @@ packages:
   - "bindings/nodejs"
   - "bindings/lambda"
   - "apps/*"
+  - "bindings/nodejs/npm/*"
+linkWorkspacePackages: true
 allowBuilds:
   esbuild: true
   lefthook: true

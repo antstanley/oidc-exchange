@@ -1,6 +1,6 @@
 # Python Binding (`oidc-exchange`)
 
-**Status:** Implemented · **Date:** 2026-07-02 · **Owner:** Ant Stanley · **Scope:** bindings/python
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** bindings/python
 
 A PyO3 native extension wrapping [`crates/ffi`](01-ffi-core.md), built with maturin and
 published to PyPI as `oidc-exchange`. The native module is `oidc_exchange._oidc_exchange`; a
@@ -76,3 +76,51 @@ are dev dependencies for adapter-level tests.
 ### Open questions
 
 - (None at this stage.)
+
+
+## Runtime parity update
+
+```python
+class OidcExchange:
+    def __init__(self, *, config: str | None = None, config_string: str | None = None) -> None: ...
+    def limits(self) -> dict[str, int]: ...
+    def handle_request_sync(self, request: dict[str, Any]) -> dict[str, Any]: ...
+    async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]: ...
+    def asgi_app(self) -> Any: ...
+    def wsgi_app(self) -> Any: ...
+    def shutdown(self) -> None: ...
+```
+
+A request `dict` is
+`{ "method": str, "raw_path": bytes, "query": bytes | None, "headers": Sequence[tuple[str, str]], "body": bytes, "path_is_raw": bool }`.
+`headers` is an **ordered sequence of pairs**, not a mapping: HTTP header names are not
+unique, and a name-keyed dict silently picked last-wins where the router reads first. The
+response `dict` is `{ "status": int, "headers": list[tuple[str, str]], "body": bytes }`.
+Malformed input raises `ValueError`; nothing on this path asserts.
+- **Rust (`src/lib.rs`)** — a `#[pyclass] OidcExchange` whose `#[new]` constructor calls FFI
+  `from_file`/`new`. `handle_request_sync` extracts the method, raw path, query, ordered
+  header pairs, and body from the request mapping, returning `PyValueError` for any missing
+  or ill-typed field — an empty path is valid input and normalises to `/`, not a panic. It
+  releases the GIL (`py.allow_threads`) around the blocking FFI call and re-acquires it to
+  build the result dict. `handle_request` is a native coroutine over the same normaliser via
+  `pyo3-async-runtimes`, so the event loop is not occupied by an executor thread. `shutdown`
+  is a no-op.
+- **Python (`python/oidc_exchange/`)** — `_asgi.py` (`make_asgi_app`) forwards
+  `scope["raw_path"]` when present (falling back to `scope["path"]` with
+  `path_is_raw=False`), keeps `scope["query_string"]` separate, passes `scope["headers"]` as
+  ordered pairs, and accumulates the body into a `bytearray` that stops at
+  `limits()["max_body_bytes"]` — the request is refused with `413` before the host allocates
+  past the cap. `_wsgi.py` (`make_wsgi_app`) prefers `RAW_URI` or `REQUEST_URI` for the raw
+  path and falls back to re-encoding `PATH_INFO` with `path_is_raw=False`; it parses
+  `CONTENT_LENGTH` defensively (a non-numeric value is `400` — the status the native server
+  gives a malformed `Content-Length` — a value beyond the cap is `413`, and neither is ever
+  an unhandled `ValueError` or `OverflowError`) and reads `wsgi.input` in capped
+  chunks. Neither adapter builds a URI, strips a prefix, or collapses a header.
+- *Ordered header pairs, not a dict.* **The request and response header surfaces are
+  sequences of `(name, value)` tuples.** A mapping cannot represent repeated headers, and
+  collapsing them made the embedded shape disagree with the native server on
+  `X-Forwarded-For` and `Set-Cookie`. This is the change that required the PyO3 signature to
+  move off `PyDict`.
+- *Native coroutine, not an executor hop.* **`handle_request` is a real coroutine over the
+  async FFI.** The executor design existed because the FFI was blocking; once it is not,
+  the hop is pure latency.

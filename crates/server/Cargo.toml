@@ -3,6 +3,10 @@ name = "oidc-exchange"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+conformance = ["dep:percent-encoding"]
+
 [dependencies]
 oidc-exchange-core.workspace = true
 oidc-exchange-adapters.workspace = true
@@ -27,6 +31,7 @@ aws-sdk-kms = "1"
 aws-sdk-sqs = "1"
 futures = "0.3"
 lambda_http = "1"
+percent-encoding = { version = "2", optional = true }
 ipnet.workspace = true
 
 [dev-dependencies]

@@ -294,6 +294,39 @@ impl Config {
     }
 }
 
+/// Default request-body ceiling shared by native and embedded hosts: 2 MiB.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Canonicalise a `[server] base_path` value from its deserialized form:
+///
+/// - `None` stays `None`.
+/// - `Some("")` and `Some("/")` become `None` — both spell "no mount
+///   prefix", and keeping them as `Some` would force every consumer
+///   (strip middleware, embedded hosts) to re-derive that fact.
+/// - A single trailing `/` is trimmed (`Some("/prod/")` → `Some("/prod")`),
+///   because the strip layer matches at a segment boundary and a trailing
+///   slash would otherwise make `"/prod/health"` fail to match its own
+///   prefix.
+///
+/// A value without a leading `/` is returned unchanged: normalisation never
+/// invents path structure the operator did not write; resolution rejects it
+/// instead, naming the field.
+fn normalise_base_path(base_path: Option<String>) -> Option<String> {
+    let base_path = base_path?;
+    // Trim exactly one trailing slash, then fold any resulting root/empty
+    // form back to unset (`"/"` → `None`, `"//"` → `None`) so the canonical
+    // set is closed under the operation.
+    let trimmed = match base_path.strip_suffix('/') {
+        Some(head) => head.to_string(),
+        None => base_path,
+    };
+    if trimmed.is_empty() || trimmed == "/" {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawServerConfig {
@@ -302,6 +335,8 @@ pub struct RawServerConfig {
     pub issuer: String,
     pub role: String,
     pub request_timeout: String,
+    /// Maximum request body accepted by every host before buffering.
+    pub max_request_body_bytes: usize,
     pub base_path: Option<String>,
     /// CIDR blocks of reverse proxies whose `X-Forwarded-For` may be trusted.
     pub trusted_proxies: Vec<String>,
@@ -317,6 +352,7 @@ impl Default for RawServerConfig {
             issuer: String::new(),
             role: String::new(),
             request_timeout: String::new(),
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             base_path: None,
             trusted_proxies: Vec::new(),
             trusted_proxy_hops: DEFAULT_TRUSTED_PROXY_HOPS,
@@ -336,6 +372,13 @@ pub struct ServerConfig {
     pub issuer: HttpsUrl,
     pub role: ServerRole,
     pub request_timeout: std::time::Duration,
+    /// Maximum request body accepted by every host before buffering.
+    pub max_request_body_bytes: usize,
+    /// Path prefix (e.g. `"/prod"`) stripped from incoming request paths
+    /// before routing. Canonical by construction: resolution folds `""`/`"/"`
+    /// into `None`, trims one trailing `/`, and rejects a value with no
+    /// leading `/` — the strip middleware never re-derives these cases on the
+    /// per-request path.
     pub base_path: Option<String>,
     /// CIDR blocks of reverse proxies whose forwarded-address headers may be
     /// trusted; parsed at load so the middleware never re-parses per request.
@@ -359,7 +402,25 @@ impl ServerConfig {
                 ServerRole::parse_field("server.role", raw.role)?
             },
             request_timeout: parse_duration_field("server.request_timeout", &raw.request_timeout)?,
-            base_path: raw.base_path,
+            max_request_body_bytes: raw.max_request_body_bytes,
+            base_path: {
+                let base_path = normalise_base_path(raw.base_path);
+                if let Some(base_path) = &base_path {
+                    let is_canonical = base_path.len() > 1
+                        && base_path.starts_with('/')
+                        && !base_path.ends_with('/');
+                    if !is_canonical {
+                        return Err(Error::ConfigError {
+                            detail: format!(
+                                "server.base_path {base_path:?} must start with '/' and carry \
+                                 at least one non-slash character (\"\" and \"/\" mean unset, a \
+                                 trailing \"/\" is trimmed at load)"
+                            ),
+                        });
+                    }
+                }
+                base_path
+            },
             trusted_proxies: raw
                 .trusted_proxies
                 .iter()
@@ -2729,5 +2790,91 @@ auth_method = "shared_secret"
             "example".to_string(),
         )]));
         Config::resolve(raw).expect("non-reserved custom claims resolve");
+    }
+}
+
+#[cfg(test)]
+mod base_path_normal_form_tests {
+    use super::*;
+
+    fn raw_with_base_path(base_path: Option<&str>) -> RawConfig {
+        let mut raw: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
+            .expect("default config should deserialize");
+        raw.server.base_path = base_path.map(str::to_string);
+        raw
+    }
+
+    /// Every tolerated sloppy spelling of `[server] base_path` lands on its
+    /// canonical form: unset stays unset, empty/root fold to unset, one
+    /// trailing slash is trimmed, and a residual root (`"//"`) folds to unset.
+    #[test]
+    fn normalise_base_path_canonicalises_unset_root_and_trailing_slash() {
+        assert_eq!(normalise_base_path(None), None, "unset must stay unset");
+        assert_eq!(normalise_base_path(Some(String::new())), None);
+        assert_eq!(normalise_base_path(Some("/".to_string())), None);
+        assert_eq!(normalise_base_path(Some("//".to_string())), None);
+        assert_eq!(
+            normalise_base_path(Some("/prod/".to_string())),
+            Some("/prod".to_string()),
+            "one trailing slash must be trimmed"
+        );
+        assert_eq!(
+            normalise_base_path(Some("/prod".to_string())),
+            Some("/prod".to_string()),
+            "an already-canonical value must pass through unchanged"
+        );
+    }
+
+    /// Normalisation never invents path structure: a missing leading slash is
+    /// left for resolution to reject by name.
+    #[test]
+    fn normalise_base_path_leaves_missing_leading_slash_for_resolve_to_reject() {
+        assert_eq!(
+            normalise_base_path(Some("prod".to_string())),
+            Some("prod".to_string())
+        );
+    }
+
+    /// The load-time contract: sloppy-but-tolerated spellings resolve to their
+    /// canonical forms, and a value with no leading slash fails resolution
+    /// naming the field.
+    #[test]
+    fn resolve_yields_load_time_base_path_contract() {
+        for (input, expected) in [
+            (None, None),
+            (Some(""), None),
+            (Some("/"), None),
+            (Some("/prod/"), Some("/prod")),
+            (Some("/prod"), Some("/prod")),
+        ] {
+            let config = Config::resolve(raw_with_base_path(input))
+                .expect("tolerated base_path spellings must resolve");
+            assert_eq!(config.server.base_path.as_deref(), expected);
+        }
+
+        let Error::ConfigError { detail } = Config::resolve(raw_with_base_path(Some("prod")))
+            .expect_err("base_path without a leading slash must be rejected")
+        else {
+            unreachable!("expected ConfigError");
+        };
+        assert!(
+            detail.contains("server.base_path"),
+            "detail must name the field: {detail}"
+        );
+        assert!(
+            detail.contains("prod"),
+            "detail must echo the offending value: {detail}"
+        );
+    }
+
+    /// The shared body ceiling default survives resolution.
+    #[test]
+    fn max_request_body_bytes_defaults_to_two_mebibytes() {
+        let config =
+            Config::resolve(raw_with_base_path(None)).expect("default config resolves");
+        assert_eq!(
+            config.server.max_request_body_bytes,
+            DEFAULT_MAX_REQUEST_BODY_BYTES
+        );
     }
 }

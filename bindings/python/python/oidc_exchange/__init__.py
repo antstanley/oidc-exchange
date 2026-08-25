@@ -21,10 +21,13 @@ class OidcExchange:
         return self._inner.handle_request_sync(request)
 
     async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Executor-backed coroutine; abi3 prevents the native asyncio bridge."""
         import asyncio
 
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._inner.handle_request_sync, request)
+        return await asyncio.to_thread(self._inner.handle_request_sync, request)
+
+    def limits(self) -> dict[str, int]:
+        return {"max_body_bytes": self._inner.limits()}
 
     def asgi_app(self) -> Any:
         if make_asgi_app is None:

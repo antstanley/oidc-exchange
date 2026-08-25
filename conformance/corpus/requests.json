@@ -1,0 +1,461 @@
+{
+  "schemaVersion": 2,
+  "limits": {
+    "maxBodyBytes": 2097152
+  },
+  "fieldsCompared": [
+    "method",
+    "decodedPath",
+    "query",
+    "orderedHeaders",
+    "bodyLength",
+    "status",
+    "downstreamMarker"
+  ],
+  "fixtures": [
+    {
+      "id": "encoded-slash",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a%2Fb",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a/b",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "encoded-dot-dot",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a/%2E%2E/keys",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a/../keys",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "encoded-question",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a%3Fb",
+        "query": "source=corpus",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a?b",
+        "query": "source=corpus",
+        "orderedHeaders": [],
+        "status": 404,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "encoded-hash",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/a%23b",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/a#b",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "forwarded-for-first",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/health",
+        "headers": [
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          }
+        ]
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/health",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          }
+        ],
+        "status": 200,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "forwarded-for-reversed",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/health",
+        "headers": [
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          }
+        ]
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/health",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "x-forwarded-for",
+            "value": "198.51.100.2"
+          },
+          {
+            "name": "x-forwarded-for",
+            "value": "192.0.2.1"
+          }
+        ],
+        "status": 200,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "base-path-sibling",
+      "request": {
+        "method": "GET",
+        "rawPath": "/authorize",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/authorize",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      },
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
+    },
+    {
+      "id": "base-path-child",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/keys",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/keys",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 200,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "empty-path",
+      "request": {
+        "method": "GET",
+        "rawPath": "",
+        "headers": []
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 404,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
+      "id": "malformed-content-length",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/token",
+        "headers": [
+          {
+            "name": "content-length",
+            "value": "not-a-number"
+          }
+        ]
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/token",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "content-length",
+            "value": "not-a-number"
+          }
+        ],
+        "status": 400,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      },
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
+    },
+    {
+      "id": "huge-content-length",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/token",
+        "headers": [
+          {
+            "name": "content-length",
+            "value": "9223372036854775807"
+          }
+        ]
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/token",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "content-length",
+            "value": "9223372036854775807"
+          }
+        ],
+        "status": 413,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      },
+      "evidence": "Production Hyper rejects a declared Content-Length above server.max_request_body_bytes with 413 before handler dispatch; direct FFI enforces the same configured cap.",
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
+    },
+    {
+      "id": "body-one-below-cap",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/not-a-route",
+        "headers": [],
+        "body": {
+          "repeatByte": 120,
+          "length": 2097151
+        }
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/not-a-route",
+        "query": null,
+        "orderedHeaders": [],
+        "bodyLength": 2097151,
+        "status": 404,
+        "downstreamMarker": "observed-after-routing"
+      },
+      "probe": "provenance"
+    },
+    {
+      "id": "body-at-cap",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/not-a-route",
+        "headers": [],
+        "body": {
+          "repeatByte": 120,
+          "length": 2097152
+        }
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/not-a-route",
+        "query": null,
+        "orderedHeaders": [],
+        "bodyLength": 2097152,
+        "status": 404,
+        "downstreamMarker": "observed-after-routing"
+      },
+      "probe": "provenance"
+    },
+    {
+      "id": "body-one-over-cap",
+      "request": {
+        "method": "POST",
+        "rawPath": "/auth/token",
+        "headers": [],
+        "body": {
+          "repeatByte": 120,
+          "length": 2097153
+        }
+      },
+      "expected": {
+        "method": "POST",
+        "decodedPath": "/token",
+        "query": null,
+        "orderedHeaders": [],
+        "status": 413,
+        "bodyLength": 2097153,
+        "downstreamMarker": "observed-after-routing"
+      },
+      "notApplicable": [
+        "method",
+        "decodedPath",
+        "query",
+        "orderedHeaders",
+        "bodyLength",
+        "downstreamMarker"
+      ]
+    }
+  ],
+  "qualifications": {
+    "native": {},
+    "lambda-fallback": {
+      "encoded-slash": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a/b"
+        }
+      },
+      "encoded-dot-dot": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a/../keys"
+        }
+      },
+      "encoded-question": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a?b"
+        }
+      },
+      "encoded-hash": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "API Gateway v1 exposes only decoded path",
+          "fallbackExpected": "/a#b"
+        }
+      }
+    },
+    "asgi-fallback": {
+      "encoded-slash": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "scope raw_path extension omitted"
+        }
+      },
+      "encoded-dot-dot": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "scope raw_path extension omitted"
+        }
+      },
+      "encoded-question": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "scope raw_path extension omitted"
+        }
+      },
+      "encoded-hash": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "scope raw_path extension omitted"
+        }
+      }
+    },
+    "wsgi-fallback": {
+      "encoded-slash": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "encoded-dot-dot": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "encoded-question": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "encoded-hash": {
+        "decodedPath": {
+          "kind": "host-loss",
+          "reason": "RAW_URI/REQUEST_URI extension omitted"
+        }
+      },
+      "forwarded-for-first": {
+        "orderedHeaders": {
+          "kind": "host-loss",
+          "reason": "ordered header extension omitted"
+        }
+      },
+      "forwarded-for-reversed": {
+        "orderedHeaders": {
+          "kind": "host-loss",
+          "reason": "ordered header extension omitted"
+        }
+      }
+    },
+    "ffi": {},
+    "node": {},
+    "lambda": {},
+    "asgi": {},
+    "wsgi": {}
+  }
+}
