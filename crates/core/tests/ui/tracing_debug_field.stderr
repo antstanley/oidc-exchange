@@ -42,13 +42,15 @@ error[E0277]: `Secret<String>` doesn't implement `std::fmt::Debug`
 8 |     tracing::info!(?secret, "must not compile");
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `std::fmt::Debug` is not implemented for `Secret<String>`
   |
-help: the trait `Value` is implemented for `DebugValue<T>`
+help: the trait `Value` is conditionally implemented for `DebugValue<T>`
  --> $CARGO/tracing-core-$VERSION/src/field.rs
   |
   | / impl<T> Value for DebugValue<T>
   | | where
   | |     T: fmt::Debug,
-  | |__________________^
+  | |________----------^
+  |          |
+  |          unsatisfied requirement introduced here: `&&Secret<String>: std::fmt::Debug`
   = note: required for `&Secret<String>` to implement `std::fmt::Debug`
   = note: 1 redundant requirement hidden
   = note: required for `&&Secret<String>` to implement `std::fmt::Debug`
