@@ -6,8 +6,8 @@ use oidc_exchange_core::domain::{
     is_valid_family_id, RefreshResolution, RetiredRefreshToken, Session,
 };
 use oidc_exchange_core::error::Error;
-use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::SessionRepository;
+use oidc_exchange_core::secret::Secret;
 use std::fs;
 use tracing::instrument;
 
@@ -317,7 +317,8 @@ impl SessionRepository for LmdbSessionRepository {
             // belongs to no family, and `revoke_family` rejects the empty id,
             // so an entry filed under "" could never be addressed.
             if !session.family_id.is_empty() {
-                let family_key = family_index_key(&session.family_id, session.refresh_token_hash.expose());
+                let family_key =
+                    family_index_key(&session.family_id, session.refresh_token_hash.expose());
                 dbs.family_index
                     .put(&mut wtxn, &family_key, FAMILY_INDEX_KIND_LIVE)
                     .map_err(Dbs::store_err)?;
@@ -564,7 +565,10 @@ impl SessionRepository for LmdbSessionRepository {
     }
 
     #[instrument(skip(self, token_hash), fields(token_hash))]
-    async fn revoke_session(&self, token_hash: &Secret<String>) -> oidc_exchange_core::error::Result<()> {
+    async fn revoke_session(
+        &self,
+        token_hash: &Secret<String>,
+    ) -> oidc_exchange_core::error::Result<()> {
         let token_hash = token_hash.expose().as_str();
         assert!(
             !token_hash.is_empty(),
@@ -1021,7 +1025,9 @@ mod tests {
             .expect("session present");
         assert_eq!(loaded.user_id, "usr_1");
 
-        repo.revoke_session(&Secret::new("hash_roundtrip".to_string())).await.expect("revoke");
+        repo.revoke_session(&Secret::new("hash_roundtrip".to_string()))
+            .await
+            .expect("revoke");
         let gone = repo
             .get_session_by_refresh_token(&Secret::new("hash_roundtrip".to_string()))
             .await

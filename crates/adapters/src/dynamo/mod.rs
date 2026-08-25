@@ -9,19 +9,19 @@ use tokio::sync::Mutex as TokioMutex;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::types::{
-    AttributeValue, Delete, DeleteRequest, Put, ReturnConsumedCapacity, TransactWriteItem,
-    Update, WriteRequest,
+    AttributeValue, Delete, DeleteRequest, Put, ReturnConsumedCapacity, TransactWriteItem, Update,
+    WriteRequest,
 };
 use chrono::{DateTime, Utc};
 use oidc_exchange_core::domain::{
-    is_valid_family_id, NewUser, RefreshResolution, RetiredRefreshToken, Session, User,
-    UserPage, UserPatch, UserStatus, INITIAL_USER_VERSION, MAX_ADMIN_PAGE_SIZE,
+    is_valid_family_id, NewUser, RefreshResolution, RetiredRefreshToken, Session, User, UserPage,
+    UserPatch, UserStatus, INITIAL_USER_VERSION, MAX_ADMIN_PAGE_SIZE,
 };
 use tracing::instrument;
 
 use oidc_exchange_core::error::{Error, Result};
-use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
+use oidc_exchange_core::secret::Secret;
 
 use schema::{
     guard_pk, guard_to_item, item_single_use_expiry, item_to_retired, item_to_session,
@@ -1872,21 +1872,32 @@ impl SessionRepository for DynamoRepository {
     /// passing through this adapter, so a maintained counter would drift
     /// downward with nothing to correct it — but the walk runs at most once
     /// per configured TTL window per process, however many
-    /// `GET /internal/stats` calls arrive. The cache lock is held across the
-    /// walk so concurrent callers *wait for* the refresh rather than each
-    /// stampeding into their own full-table read.
+    /// `GET /internal/stats` calls arrive.
+    ///
+    /// The cache guard is never held across the scan (the committed
+    /// `clippy.toml` bans tokio guards across awaits — the same cache-lock
+    /// discipline the JWKS cache follows). Election is by re-stamping: a
+    /// caller that finds a stale entry refreshes its timestamp *before*
+    /// scanning, so concurrent callers arriving during the refresh serve the
+    /// stale count — one refresh late is exactly what a TTL'd cache promises —
+    /// instead of stampeding into their own full-table reads. Only a cold
+    /// cache can admit concurrent walks.
     #[instrument(skip(self))]
     async fn count_active_sessions(&self) -> Result<u64> {
-        let mut cache = self.session_count_cache.lock().await;
-        if let Some((fetched_at, count)) = *cache {
-            // Instant is monotonic, so `duration_since` cannot go negative.
-            let age = fetched_at.elapsed();
-            assert!(
-                fetched_at <= std::time::Instant::now(),
-                "cache timestamps must come from the monotonic clock"
-            );
-            if age < self.stats_cache_ttl {
-                return Ok(count);
+        {
+            let mut cache = self.session_count_cache.lock().await;
+            if let Some((fetched_at, count)) = *cache {
+                // Instant is monotonic, so `elapsed` cannot go negative.
+                assert!(
+                    fetched_at <= std::time::Instant::now(),
+                    "cache timestamps must come from the monotonic clock"
+                );
+                if fetched_at.elapsed() < self.stats_cache_ttl {
+                    return Ok(count);
+                }
+                // Stale: elect this caller by re-stamping the entry under the
+                // guard, then release before the walk below.
+                *cache = Some((std::time::Instant::now(), count));
             }
         }
 
@@ -1895,7 +1906,7 @@ impl SessionRepository for DynamoRepository {
             self.stats_cache_ttl >= MIN_STATS_CACHE_TTL,
             "the cache TTL is validated at construction and never zero"
         );
-        *cache = Some((std::time::Instant::now(), count));
+        *self.session_count_cache.lock().await = Some((std::time::Instant::now(), count));
         Ok(count)
     }
 
@@ -4413,13 +4424,19 @@ mod tests {
             .get_user_roster("usr_roster")
             .await
             .expect("read roster after store");
-        assert_eq!(roster.sessions, vec![chain.gen0.refresh_token_hash.expose().clone()]);
+        assert_eq!(
+            roster.sessions,
+            vec![chain.gen0.refresh_token_hash.expose().clone()]
+        );
         let family = roster
             .families
             .get(&chain.family_id)
             .expect("store must create the family entry");
         assert!(family.live == *chain.gen0.refresh_token_hash.expose());
-        assert_eq!(family.members, vec![chain.gen0.refresh_token_hash.expose().clone()]);
+        assert_eq!(
+            family.members,
+            vec![chain.gen0.refresh_token_hash.expose().clone()]
+        );
 
         // Rotate → the roster swaps live to gen1 and remembers gen0.
         assert!(
@@ -4432,7 +4449,10 @@ mod tests {
             .get_user_roster("usr_roster")
             .await
             .expect("read roster after rotation");
-        assert_eq!(roster.sessions, vec![chain.gen1.refresh_token_hash.expose().clone()]);
+        assert_eq!(
+            roster.sessions,
+            vec![chain.gen1.refresh_token_hash.expose().clone()]
+        );
         let family = roster
             .families
             .get(&chain.family_id)
@@ -4440,7 +4460,9 @@ mod tests {
         assert!(family.live == *chain.gen1.refresh_token_hash.expose());
         assert_eq!(family.members.len(), 2, "gen0 joins the remembered members");
         assert!(
-            family.members.contains(chain.gen0.refresh_token_hash.expose()),
+            family
+                .members
+                .contains(chain.gen0.refresh_token_hash.expose()),
             "the retired generation must join the family's member set"
         );
         assert!(

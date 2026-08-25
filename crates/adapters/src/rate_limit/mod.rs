@@ -252,18 +252,18 @@ impl RateLimiter for AdminAuthRateLimiter {
             // exchange-plane key scopes belong to the fixed-window limiter and
             // are rejected loudly rather than silently allowed into the wrong
             // budget.
-            other => unreachable!(
-                "AdminAuthRateLimiter serves only OperatorAuth keys, got {other:?}"
-            ),
+            other => {
+                unreachable!("AdminAuthRateLimiter serves only OperatorAuth keys, got {other:?}")
+            }
         }
     }
 
     async fn consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
         match key {
             RateLimitKey::OperatorAuth(peer) => Ok(self.consume_at(peer, Instant::now())),
-            other => unreachable!(
-                "AdminAuthRateLimiter serves only OperatorAuth keys, got {other:?}"
-            ),
+            other => {
+                unreachable!("AdminAuthRateLimiter serves only OperatorAuth keys, got {other:?}")
+            }
         }
     }
 }

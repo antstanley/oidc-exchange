@@ -213,7 +213,6 @@ async fn require_security_event(
         .await
 }
 
-
 /// The generic 500 surfaced when a mandatory security event cannot be durably
 /// recorded at a severity meeting `[audit] blocking_threshold`. Deliberately
 /// opaque: no audit-adapter internals reach the wire.

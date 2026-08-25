@@ -9,24 +9,22 @@ use tokio::sync::Mutex;
 use oidc_exchange_core::config::DEFAULT_REFRESH_REUSE_RETENTION;
 use oidc_exchange_core::cursor::KeysetCursor;
 use oidc_exchange_core::domain::{
-    is_valid_family_id, AuditEvent, IdentityClaims, NewUser, ProviderTokens,
-    RateLimitDecision, RateLimitKey, RefreshResolution, RetiredRefreshToken, Session,
-    SingleUseRecord, User, UserPage, UserPatch, UserStatus, INITIAL_USER_VERSION,
-    MAX_ADMIN_PAGE_SIZE,
+    is_valid_family_id, AuditEvent, IdentityClaims, NewUser, ProviderTokens, RateLimitDecision,
+    RateLimitKey, RefreshResolution, RetiredRefreshToken, Session, SingleUseRecord, User, UserPage,
+    UserPatch, UserStatus, INITIAL_USER_VERSION, MAX_ADMIN_PAGE_SIZE,
 };
 use oidc_exchange_core::error::{Error, Result};
-use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
     UserSync,
 };
+use oidc_exchange_core::secret::Secret;
 
 pub mod corpus;
 
 pub mod telemetry;
 
 pub mod session_contract;
-
 
 // ---------------------------------------------------------------------------
 // MockRepository
@@ -114,7 +112,11 @@ impl MockRepository {
         // Sort by hash so callers observe a deterministic order from the
         // hash-map-backed store (assertions on collections must not depend on
         // HashMap iteration order).
-        sessions.sort_by(|a, b| a.refresh_token_hash.expose().cmp(b.refresh_token_hash.expose()));
+        sessions.sort_by(|a, b| {
+            a.refresh_token_hash
+                .expose()
+                .cmp(b.refresh_token_hash.expose())
+        });
         sessions
     }
 
@@ -472,11 +474,15 @@ impl SessionRepository for MockRepository {
             replacement.user_id, live.user_id
         );
         assert!(
-            !state.sessions.contains_key(replacement.refresh_token_hash.expose()),
+            !state
+                .sessions
+                .contains_key(replacement.refresh_token_hash.expose()),
             "rotate_refresh_token: replacement hash already exists as a live session"
         );
         assert!(
-            !state.retired.contains_key(replacement.refresh_token_hash.expose()),
+            !state
+                .retired
+                .contains_key(replacement.refresh_token_hash.expose()),
             "rotate_refresh_token: replacement hash already exists as a retired record"
         );
 
@@ -503,9 +509,10 @@ impl SessionRepository for MockRepository {
                 .insert(retired_record.refresh_token_hash.clone(), retired_record);
         }
         state.sessions.remove(live_hash);
-        state
-            .sessions
-            .insert(replacement.refresh_token_hash.expose().clone(), replacement.clone());
+        state.sessions.insert(
+            replacement.refresh_token_hash.expose().clone(),
+            replacement.clone(),
+        );
 
         Ok(true)
     }

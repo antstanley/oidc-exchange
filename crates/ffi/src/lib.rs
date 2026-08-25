@@ -163,10 +163,12 @@ impl OidcExchange {
         // public plane and logs a startup warning naming the unmounted
         // internal routes. Plane separation on this runtime is expressed by
         // constructing a second instance with `role = "admin"`.
-        let routers = oidc_exchange::bootstrap::build_routers_shared(&config, service)
-            .map_err(|e| FfiError {
-                code: "SERVICE_ERROR".to_string(),
-                message: e.to_string(),
+        let routers =
+            oidc_exchange::bootstrap::build_routers_shared(&config, service).map_err(|e| {
+                FfiError {
+                    code: "SERVICE_ERROR".to_string(),
+                    message: e.to_string(),
+                }
             })?;
         let router = routers.single_plane().ok_or_else(|| FfiError {
             code: "SERVICE_ERROR".to_string(),
@@ -649,6 +651,10 @@ mod embedder_tests {
             );
         }
 
+        // The deprecated synchronous entry point is exercised deliberately: it
+        // stays supported for one major cycle (RELEASE_NOTES.md), so its
+        // routing must keep working until it is actually removed.
+        #[allow(deprecated)]
         let response = exchange
             .handle_request("GET", "/health", Vec::new(), Vec::new())
             .expect("health request routes");

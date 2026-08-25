@@ -76,10 +76,13 @@ describe("OidcExchange", () => {
 
   it("returns HTTP responses for malformed wire requests", async () => {
     const oidc = new OidcExchange({ configString: TEST_CONFIG });
-    expect((await oidc.handleRequest(request("/health", { method: "NOT A METHOD" }))).status).toBe(400);
+    expect((await oidc.handleRequest(request("/health", { method: "NOT A METHOD" }))).status).toBe(
+      400,
+    );
     expect((await oidc.handleRequest(request("//health"))).status).toBe(400);
     expect(
-      (await oidc.handleRequest(request("/token", { method: "POST", body: Buffer.alloc(33) }))).status,
+      (await oidc.handleRequest(request("/token", { method: "POST", body: Buffer.alloc(33) })))
+        .status,
     ).toBe(413);
   });
 

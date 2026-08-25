@@ -838,9 +838,9 @@ impl SessionRepository for SingleUseFailRepo {
     }
 
     async fn get_session_by_refresh_token(
-            &self,
-            token_hash: &oidc_exchange_core::secret::Secret<String>,
-        ) -> Result<Option<Session>> {
+        &self,
+        token_hash: &oidc_exchange_core::secret::Secret<String>,
+    ) -> Result<Option<Session>> {
         self.inner.get_session_by_refresh_token(token_hash).await
     }
 
@@ -852,14 +852,19 @@ impl SessionRepository for SingleUseFailRepo {
     }
 
     async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool> {
-        self.inner.rotate_refresh_token(live_hash, replacement).await
+        self.inner
+            .rotate_refresh_token(live_hash, replacement)
+            .await
     }
 
     async fn revoke_family(&self, family_id: &str) -> Result<u64> {
         self.inner.revoke_family(family_id).await
     }
 
-    async fn revoke_session(&self, token_hash: &oidc_exchange_core::secret::Secret<String>) -> Result<()> {
+    async fn revoke_session(
+        &self,
+        token_hash: &oidc_exchange_core::secret::Secret<String>,
+    ) -> Result<()> {
         self.inner.revoke_session(token_hash).await
     }
 

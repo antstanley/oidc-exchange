@@ -449,8 +449,11 @@ async fn dynamodb_session_spans_never_render_sentinels() {
         .await
         .expect("create leak-corpus table");
 
-    let repo =
-        oidc_exchange_adapters::dynamo::DynamoRepository::new(client, "leak-corpus".to_string(), 3600);
+    let repo = oidc_exchange_adapters::dynamo::DynamoRepository::new(
+        client,
+        "leak-corpus".to_string(),
+        3600,
+    );
 
     let capture = install_span_capture(SharedBuffer::default());
     drive_lifecycle(&repo, &DYNAMO, "usr_corpus_dynamo").await;

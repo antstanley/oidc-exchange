@@ -160,8 +160,7 @@ impl Config {
         // Under role = "admin" the public socket is never bound (same values
         // are harmless), and under any other role the admin listener is not
         // bound at all.
-        let binds_both_listeners =
-            self.server.role == ServerRole::All && self.internal_api.enabled;
+        let binds_both_listeners = self.server.role == ServerRole::All && self.internal_api.enabled;
         if binds_both_listeners
             && listeners_collide(
                 &self.server.host,
@@ -1384,7 +1383,11 @@ pub fn listeners_collide(
 /// under which trusting a proxy-asserted mTLS-subject header is anchored by
 /// reachability rather than faith.
 fn admin_listener_is_loopback(host: &str) -> bool {
-    match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+    match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
         Ok(addr) => addr.is_loopback(),
         Err(_) => host == "localhost",
     }
@@ -2151,10 +2154,7 @@ impl AsRef<str> for NonEmptyString {
 /// zero grace window makes every lost response a reuse alarm; a zero cleanup
 /// interval would spin); negatives cannot be expressed through the unsigned
 /// parser, so only zero needs an explicit check.
-fn parse_positive_duration_field(
-    field: &str,
-    value: &str,
-) -> Result<std::time::Duration, Error> {
+fn parse_positive_duration_field(field: &str, value: &str) -> Result<std::time::Duration, Error> {
     let duration = parse_duration_field(field, value)?;
     if duration.as_secs() == 0 {
         return Err(Error::ConfigError {
@@ -2620,7 +2620,10 @@ auth_method = "shared_secret"
         else {
             unreachable!("expected ConfigError");
         };
-        assert!(detail.contains("at least 32"), "must name the floor: {detail}");
+        assert!(
+            detail.contains("at least 32"),
+            "must name the floor: {detail}"
+        );
         assert!(
             !detail.contains(&below),
             "the secret value must never appear in the error"
@@ -2778,20 +2781,14 @@ auth_method = "shared_secret"
     #[test]
     fn reserved_name_in_token_custom_claims_is_rejected() {
         let mut raw = default_raw_config();
-        raw.token.custom_claims = Some(HashMap::from([(
-            "sid".to_string(),
-            "forged".to_string(),
-        )]));
+        raw.token.custom_claims = Some(HashMap::from([("sid".to_string(), "forged".to_string())]));
         assert_rejected(raw, "reserved protocol claim");
     }
 
     #[test]
     fn non_reserved_token_custom_claim_keys_are_accepted() {
         let mut raw = default_raw_config();
-        raw.token.custom_claims = Some(HashMap::from([(
-            "org".to_string(),
-            "example".to_string(),
-        )]));
+        raw.token.custom_claims = Some(HashMap::from([("org".to_string(), "example".to_string())]));
         Config::resolve(raw).expect("non-reserved custom claims resolve");
     }
 }
@@ -2873,8 +2870,7 @@ mod base_path_normal_form_tests {
     /// The shared body ceiling default survives resolution.
     #[test]
     fn max_request_body_bytes_defaults_to_two_mebibytes() {
-        let config =
-            Config::resolve(raw_with_base_path(None)).expect("default config resolves");
+        let config = Config::resolve(raw_with_base_path(None)).expect("default config resolves");
         assert_eq!(
             config.server.max_request_body_bytes,
             DEFAULT_MAX_REQUEST_BODY_BYTES

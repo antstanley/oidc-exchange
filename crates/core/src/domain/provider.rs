@@ -67,7 +67,8 @@ mod tests {
     fn sample_config() -> OidcProviderConfig {
         OidcProviderConfig {
             provider_id: "google".to_string(),
-            issuer: crate::config::HttpsUrl::parse("https://accounts.google.com").expect("valid https url"),
+            issuer: crate::config::HttpsUrl::parse("https://accounts.google.com")
+                .expect("valid https url"),
             client_id: "client-id".to_string(),
             client_secret: Some(Secret::new(SECRET_SENTINEL.to_string())),
             jwks_uri: None,
@@ -91,5 +92,4 @@ mod tests {
         );
         assert!(rendered.contains("google"));
     }
-
 }

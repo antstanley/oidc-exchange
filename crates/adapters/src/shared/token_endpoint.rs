@@ -462,9 +462,10 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/oauth/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                "p".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES as usize + 1),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("p".repeat(crate::shared::http::MAX_UPSTREAM_BODY_BYTES + 1)),
+            )
             .expect(1)
             .mount(&server)
             .await;

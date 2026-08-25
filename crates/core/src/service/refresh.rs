@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 
 use crate::config::MAX_REFRESH_ROTATION_GRACE_SECS;
 use crate::domain::{
-    is_valid_family_id, new_family_id, AuditEventType, AuditFailure, AuditOutcome,
-    AuditSeverity, ClientAddr, RefreshResolution, Session, TokenResponse, UserStatus,
+    is_valid_family_id, new_family_id, AuditEventType, AuditFailure, AuditOutcome, AuditSeverity,
+    ClientAddr, RefreshResolution, Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::{create_audit_event, AppService};

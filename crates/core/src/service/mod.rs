@@ -16,8 +16,8 @@ use serde_json::Value;
 
 use crate::config::Config;
 use crate::domain::{
-    is_valid_family_id, AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome,
-    AuditSeverity, ClientAddr, SecurityEvent, User,
+    is_valid_family_id, AccessTokenClaims, AuditEvent, AuditEventType, AuditOutcome, AuditSeverity,
+    ClientAddr, SecurityEvent, User,
 };
 
 /// Total mandatory audit sink failures observed by this process.
@@ -353,7 +353,6 @@ impl AppService {
             tracing::info!(audit_fallback = true, "{serialized}");
         }
     }
-
 }
 
 /// Build an [`AuditEvent`] with no operator attribution.
@@ -780,11 +779,7 @@ mod validate_access_token_tests {
         async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
             unreachable!("validate_access_token must not count users")
         }
-        async fn list_users(
-            &self,
-            _: Option<&str>,
-            _: u32,
-        ) -> Result<crate::domain::UserPage> {
+        async fn list_users(&self, _: Option<&str>, _: u32) -> Result<crate::domain::UserPage> {
             unreachable!("validate_access_token must not list users")
         }
     }

@@ -652,8 +652,7 @@ pub fn build_routers_shared(
     }
     if matches!(role, ServerRole::Admin | ServerRole::All) {
         let rate_limiter: Arc<dyn RateLimiter> = Arc::from(
-            build_rate_limiter(config)
-                .expect("validated rate-limit config at router construction"),
+            build_rate_limiter(config).expect("validated rate-limit config at router construction"),
         );
         let state = AppState {
             service,
@@ -931,12 +930,13 @@ fn build_operator_auth_gate(
     for method in &internal.auth_methods {
         match method {
             oidc_exchange_core::config::InternalAuthMethod::SharedSecret => {
-                let secret = internal.shared_secret.clone().ok_or_else(|| {
-                    Error::ConfigError {
+                let secret = internal
+                    .shared_secret
+                    .clone()
+                    .ok_or_else(|| Error::ConfigError {
                         detail: "shared_secret mechanism enabled but no secret is configured"
                             .to_string(),
-                    }
-                })?;
+                    })?;
                 authenticators.push(Box::new(SharedSecretAuthenticator::new(secret)));
             }
             oidc_exchange_core::config::InternalAuthMethod::OperatorToken => {
@@ -1068,7 +1068,6 @@ fn apply_shared_middleware(
         axum::middleware::from_fn_with_state(state.clone(), audit_context_layer),
     )
 }
-
 
 /// Structural assertion backing the task-04 invariant that no public router
 /// ever serves an internal route. Route sets are opaque after `with_state`, so
@@ -1751,9 +1750,7 @@ mod provider_config_to_oidc_tests {
         ProviderConfig {
             provider_id: "google".to_string(),
             adapter: ProviderAdapter::Oidc,
-            issuer: Some(
-                HttpsUrl::parse("https://accounts.google.com").expect("fixture issuer"),
-            ),
+            issuer: Some(HttpsUrl::parse("https://accounts.google.com").expect("fixture issuer")),
             jwks_uri: None,
             token_endpoint: None,
             revocation_endpoint: None,
@@ -2995,7 +2992,8 @@ shared_secret = {TEST_SECRET:?}
         config.internal_api.enabled = true;
         config.internal_api.auth_methods =
             vec![oidc_exchange_core::config::InternalAuthMethod::SharedSecret];
-        config.internal_api.shared_secret = Some(oidc_exchange_core::Secret::new(TEST_SECRET.to_string()));
+        config.internal_api.shared_secret =
+            Some(oidc_exchange_core::Secret::new(TEST_SECRET.to_string()));
         let all = build_routers(&config, build_test_service(&config))
             .expect("test configs always build routers");
         assert!(all.public.is_some() && all.admin.is_some());
@@ -3056,8 +3054,8 @@ mod request_timeout_tests {
     /// seconds — the value `06-configuration.md`'s Defaults summary documents.
     #[test]
     fn request_timeout_duration_resolves_documented_default() {
-        let config =
-            resolve_config_toml(include_str!("../../../config/default.toml")).expect("default config");
+        let config = resolve_config_toml(include_str!("../../../config/default.toml"))
+            .expect("default config");
 
         let duration = request_timeout_duration(&config);
 
@@ -3130,9 +3128,7 @@ mod request_timeout_tests {
             inner,
             timeout,
             oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
-            axum::middleware::from_fn(
-                crate::middleware::audit_context::ffi_audit_context_layer,
-            ),
+            axum::middleware::from_fn(crate::middleware::audit_context::ffi_audit_context_layer),
         );
         wrap_with_base_path_under_outer_guard(stated, None)
     }
@@ -3220,9 +3216,7 @@ mod panic_containment_tests {
             inner,
             std::time::Duration::from_secs(30),
             oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
-            axum::middleware::from_fn(
-                crate::middleware::audit_context::ffi_audit_context_layer,
-            ),
+            axum::middleware::from_fn(crate::middleware::audit_context::ffi_audit_context_layer),
         );
         wrap_with_base_path_under_outer_guard(stated, None)
     }
@@ -3235,9 +3229,7 @@ mod panic_containment_tests {
             inner,
             std::time::Duration::from_secs(30),
             oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
-            axum::middleware::from_fn(
-                crate::middleware::audit_context::ffi_audit_context_layer,
-            ),
+            axum::middleware::from_fn(crate::middleware::audit_context::ffi_audit_context_layer),
         )
         .layer(axum::middleware::from_fn(panicking_outer_layer_middleware));
         wrap_with_base_path_under_outer_guard(stated, None)
@@ -3325,9 +3317,7 @@ mod panic_containment_tests {
             inner,
             std::time::Duration::from_secs(30),
             oidc_exchange_core::config::DEFAULT_MAX_REQUEST_BODY_BYTES,
-            axum::middleware::from_fn(
-                crate::middleware::audit_context::ffi_audit_context_layer,
-            ),
+            axum::middleware::from_fn(crate::middleware::audit_context::ffi_audit_context_layer),
         );
         let app = wrap_with_base_path_under_outer_guard(stated, None);
 
@@ -3366,7 +3356,10 @@ mod stats_cache_ttl_tests {
     /// `AppConfig::validate` is expected to have rejected these at load.
     #[test]
     fn stats_cache_ttl_panics_on_values_validation_should_have_rejected() {
-        for bad in [std::time::Duration::ZERO, std::time::Duration::from_secs(3601)] {
+        for bad in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(3601),
+        ] {
             let mut config = AppConfig::test_default();
             config.internal_api.stats_cache_ttl = bad;
 

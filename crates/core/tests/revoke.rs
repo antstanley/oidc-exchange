@@ -142,7 +142,10 @@ async fn revoke_refresh_token_removes_session() {
 
     // Exchange to get tokens
     let response = do_exchange(&svc).await;
-    let refresh_token = response.refresh_token.expect("should have refresh token").into_inner();
+    let refresh_token = response
+        .refresh_token
+        .expect("should have refresh token")
+        .into_inner();
 
     // Verify session exists
     let sessions = repo.get_all_sessions().await;
@@ -253,7 +256,10 @@ async fn revoke_access_token_revokes_its_family_live_and_retired() {
 
     // The subject's other family still redeems: no user-wide revocation.
     svc.refresh(RefreshRequest {
-        refresh_token: response2.refresh_token.expect("sibling exchange token").into_inner(),
+        refresh_token: response2
+            .refresh_token
+            .expect("sibling exchange token")
+            .into_inner(),
         ..Default::default()
     })
     .await
@@ -311,7 +317,10 @@ async fn revoke_default_hint_treats_as_refresh_token() {
 
     // Exchange to get tokens
     let response = do_exchange(&svc).await;
-    let refresh_token = response.refresh_token.expect("should have refresh token").into_inner();
+    let refresh_token = response
+        .refresh_token
+        .expect("should have refresh token")
+        .into_inner();
 
     // Verify session exists
     let sessions = repo.get_all_sessions().await;
@@ -524,7 +533,10 @@ async fn revoke_valid_refresh_token_emits_token_revocation() {
     let svc = make_service_with_audit(repo.clone(), provider, audit);
 
     let response = do_exchange(&svc).await;
-    let refresh_token = response.refresh_token.expect("should have refresh token").into_inner();
+    let refresh_token = response
+        .refresh_token
+        .expect("should have refresh token")
+        .into_inner();
     let user_id = repo.get_all_sessions().await[0].user_id.clone();
     // `do_exchange` itself emits UserCreated/TokenExchange events; capture
     // the baseline so the assertion below is scoped to what `revoke` adds.

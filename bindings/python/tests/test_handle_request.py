@@ -1,7 +1,7 @@
 """Tests for OidcExchange handle_request methods."""
 
-import http.server
 import json
+import socket
 import subprocess
 import tempfile
 import threading
@@ -13,19 +13,24 @@ from oidc_exchange import OidcExchange
 
 # Regression test tuning for `test_handle_request_sync_releases_gil` below.
 #
-# The test points the `user_sync` webhook adapter at a local HTTP server that
-# deliberately sleeps this long before responding, so a single
-# `handle_request_sync(POST /internal/users)` call blocks the FFI thread for
-# a known, generous duration. `handle_request` awaits the webhook delivery
-# synchronously before returning (see `admin_create_user`), so the *only* way
-# a second Python thread can make substantial progress while that wait is in
-# flight is if `handle_request_sync` releases the GIL (`py.allow_threads`)
-# around the call.
+# The test points the `user_sync` webhook adapter at a local socket that never
+# answers the TLS handshake (the config layer requires an `https` webhook URL,
+# so a plain-HTTP slow server can no longer be configured). The webhook client
+# blocks in the handshake until its own configured timeout, so a single
+# `handle_request_sync(POST /internal/users)` call blocks the FFI thread for a
+# known, generous duration; delivery then fails and `admin_create_user`
+# logs-and-continues, still returning 201. The *only* way a second Python
+# thread can make substantial progress while that wait is in flight is if
+# `handle_request_sync` releases the GIL around the call.
+#
+# `elapsed` must be at least this long for the call to count as having gone
+# through the slow webhook path.
 _GIL_TEST_WEBHOOK_DELAY_SECONDS = 0.3
 
-# Timeout given to the webhook HTTP client, comfortably above the delay above
-# so the delivery completes rather than aborting on its own timeout.
-_GIL_TEST_WEBHOOK_CLIENT_TIMEOUT = "10s"
+# Timeout given to the webhook HTTP client; this is what actually bounds the
+# stalled-handshake wait, so it sits comfortably above the floor asserted via
+# `_GIL_TEST_WEBHOOK_DELAY_SECONDS` while keeping the test fast.
+_GIL_TEST_WEBHOOK_CLIENT_TIMEOUT = "1s"
 
 # Window used to calibrate how fast the counter thread runs when it has the
 # GIL to itself, uncontended. The in-flight rate below is compared against
@@ -261,21 +266,14 @@ def test_handle_request_sync_invalid_method_raises_runtime_error(test_config):
     assert response["status"] == 400
 
 
-class _SlowWebhookHandler(http.server.BaseHTTPRequestHandler):
-    """Responds to a single POST after `_GIL_TEST_WEBHOOK_DELAY_SECONDS`."""
-
-    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler naming
-        time.sleep(_GIL_TEST_WEBHOOK_DELAY_SECONDS)
-        body = b"{}"
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        # Silence the default stderr access logging; the test doesn't need it.
-        pass
+def _stalling_tls_listener() -> "socket.socket":
+    """A bound, listening socket that never accepts: the OS completes the TCP
+    handshake from the backlog, the webhook client sends its TLS ClientHello,
+    and then waits for a ServerHello that never comes — until its own client
+    timeout fires. Deterministic slowness with no server thread at all."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.listen(1)
+    return listener
 
 
 def test_handle_request_sync_releases_gil():
@@ -293,10 +291,8 @@ def test_handle_request_sync_releases_gil():
     baseline_rate = _measure_counter_rate(_GIL_TEST_BASELINE_WINDOW_SECONDS)
     assert baseline_rate > 0, "counter thread made no progress even uncontended"
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), _SlowWebhookHandler)
-    port = server.server_address[1]
-    server_thread = threading.Thread(target=server.handle_request)
-    server_thread.start()
+    listener = _stalling_tls_listener()
+    port = listener.getsockname()[1]
 
     db_path = Path(tempfile.gettempdir()) / "oidc-test-python-gil.db"
     db_path.unlink(missing_ok=True)
@@ -316,7 +312,7 @@ enabled = true
 adapter = "webhook"
 
 [user_sync.webhook]
-url = "http://127.0.0.1:{port}"
+url = "https://127.0.0.1:{port}"
 secret = "test-webhook-secret"
 timeout = "{_GIL_TEST_WEBHOOK_CLIENT_TIMEOUT}"
 retries = 0
@@ -324,7 +320,7 @@ retries = 0
 [internal_api]
 enabled = true
 auth_method = "shared_secret"
-shared_secret = "test-internal-secret"
+shared_secret = "test-internal-secret-0123456789ab"
 
 [audit]
 adapter = "noop"
@@ -350,7 +346,7 @@ enabled = false
                 "method": "POST",
                 "raw_path": b"/internal/users",
                 "headers": [
-                    ("authorization", "Bearer test-internal-secret"),
+                    ("authorization", "Bearer test-internal-secret-0123456789ab"),
                     ("content-type", "application/json"),
                 ],
                 "body": json.dumps(
@@ -364,7 +360,7 @@ enabled = false
     finally:
         stop.set()
         counter_thread.join(timeout=_GIL_TEST_JOIN_TIMEOUT_SECONDS)
-        server_thread.join(timeout=_GIL_TEST_JOIN_TIMEOUT_SECONDS)
+        listener.close()
 
     assert not counter_thread.is_alive(), "counter thread failed to stop in time"
     assert response["status"] == 201

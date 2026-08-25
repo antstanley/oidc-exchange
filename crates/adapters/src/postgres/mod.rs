@@ -15,8 +15,8 @@ use tracing::instrument;
 use oidc_exchange_core::cursor::KeysetCursor;
 use oidc_exchange_core::domain::{UserPage, MAX_ADMIN_PAGE_SIZE};
 use oidc_exchange_core::error::{Error, Result};
-use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
+use oidc_exchange_core::secret::Secret;
 
 pub const MIGRATIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
@@ -790,7 +790,10 @@ impl SessionRepository for PostgresRepository {
             !token_hash.is_empty(),
             "resolve_refresh_token: token_hash must not be empty"
         );
-        if let Some(session) = self.get_session_by_refresh_token(&Secret::new(token_hash.to_string())).await? {
+        if let Some(session) = self
+            .get_session_by_refresh_token(&Secret::new(token_hash.to_string()))
+            .await?
+        {
             return Ok(RefreshResolution::Live(session));
         }
 

@@ -11,13 +11,13 @@ use oidc_exchange::bootstrap::build_routers;
 use oidc_exchange::routes::{internal_routes, public_routes};
 use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::{Config, RawConfig};
-use std::sync::Arc;
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
     MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
     MockUserSync,
 };
+use std::sync::Arc;
 
 const TEST_SECRET: &str = "test-internal-secret-0123456789abcdef";
 
@@ -60,8 +60,6 @@ fn build_admin_plane() -> Router {
         .admin
         .expect("role = \"admin\" produces the admin router")
 }
-
-
 
 async fn body_to_json(body: Body) -> serde_json::Value {
     let bytes = body.collect().await.unwrap().to_bytes();

@@ -115,7 +115,6 @@ pub async fn read_bounded(provider: &str, response: reqwest::Response) -> Result
     Ok(Secret::new(String::from_utf8_lossy(&buffered).into_owned()))
 }
 
-
 /// Why reading an upstream body through the [`MAX_UPSTREAM_BODY_BYTES`]
 /// ceiling *fail-closed* failed. See [`read_bounded_bytes`].
 #[derive(Debug)]
@@ -339,6 +338,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Holding the process-wide capture gate across this test's awaits is the
+    // point — it serializes tracing-capture tests — and the single-threaded
+    // test runtime keeps a std guard deadlock-free.
+    #[allow(clippy::await_holding_lock)]
     async fn oversized_truncation_emits_a_structured_warn_event() {
         use tracing_subscriber::layer::{Context, Layer};
         use tracing_subscriber::prelude::*;
@@ -387,7 +390,9 @@ mod tests {
 
         // Stays active for the whole async body below (single-threaded `#[tokio::test]`
         // runtime keeps every poll on this OS thread), so the truncation warn is
-        // guaranteed to hit the capturing layer.
+        // guaranteed to hit the capturing layer. Holding the process-wide capture
+        // gate across the awaits is the point — it serializes tracing-capture
+        // tests — and the single-threaded runtime keeps a std guard deadlock-free.
         let _gate = oidc_exchange_test_utils::telemetry::CAPTURE_GATE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -513,8 +518,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/toobig"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("y".repeat(MAX_UPSTREAM_BODY_BYTES + 1)),
+                ResponseTemplate::new(200).set_body_string("y".repeat(MAX_UPSTREAM_BODY_BYTES + 1)),
             )
             .expect(1)
             .mount(&server)

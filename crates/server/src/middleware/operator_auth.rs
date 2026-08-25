@@ -533,7 +533,8 @@ mod tests {
     /// missing. Debug output never shows the secret (value or length).
     #[tokio::test]
     async fn shared_secret_authenticates_only_the_exact_value() {
-        let auth = SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()));
+        let auth =
+            SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()));
         let empty = headers(&[]);
 
         let ok = auth
@@ -566,7 +567,8 @@ mod tests {
     /// the constant-time compare covers the whole value, not a prefix.
     #[tokio::test]
     async fn shared_secret_rejects_prefix_and_padded_variants() {
-        let auth = SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()));
+        let auth =
+            SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()));
         let empty = headers(&[]);
 
         for presented in [&SECRET[..SECRET.len() - 1], &format!("{SECRET}x")] {
@@ -842,7 +844,9 @@ mod tests {
 
         let gate = OperatorAuthGate::new(vec![
             Box::new(Rejecting),
-            Box::new(SharedSecretAuthenticator::new(oidc_exchange_core::Secret::new(SECRET.to_string()))),
+            Box::new(SharedSecretAuthenticator::new(
+                oidc_exchange_core::Secret::new(SECRET.to_string()),
+            )),
         ]);
         let empty = headers(&[]);
 
