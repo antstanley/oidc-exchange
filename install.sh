@@ -71,6 +71,16 @@ esac
 
 BINARY_FILENAME="${BINARY_NAME}-${OS_LABEL}-${ARCH_LABEL}"
 
+# Select a checksum verifier before making any network requests.
+if command -v sha256sum >/dev/null 2>&1; then
+    CHECKSUM_VERIFIER="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    CHECKSUM_VERIFIER="shasum"
+else
+    echo "Error: Neither sha256sum nor shasum found; cannot verify checksum." >&2
+    exit 1
+fi
+
 # Resolve version
 if [[ -z "$VERSION" ]]; then
     echo "Fetching latest version..."
@@ -99,18 +109,16 @@ curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "$BINARY_URL"
 echo "Downloading checksum..."
 curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "$CHECKSUM_URL"
 
-# Verify checksum. Missing checksum tools remain warn-and-continue until sibling task 07.
+# Verify checksum. A missing checksum tool already failed the install closed above.
 checksum_verified=false
 echo "Verifying checksum..."
 cd "$TMPDIR"
-if command -v sha256sum &>/dev/null; then
+if [[ "$CHECKSUM_VERIFIER" == "sha256sum" ]]; then
     sha256sum -c "${BINARY_FILENAME}.sha256"
     checksum_verified=true
-elif command -v shasum &>/dev/null; then
+else
     shasum -a 256 -c "${BINARY_FILENAME}.sha256"
     checksum_verified=true
-else
-    echo "Warning: Neither sha256sum nor shasum found. Skipping checksum verification."
 fi
 
 # Verify provenance when GitHub CLI is available. The repository and signer

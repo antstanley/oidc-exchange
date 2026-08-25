@@ -34,11 +34,20 @@ import { OidcExchange } from "@oidc-exchange/node";
 const oidc = new OidcExchange({ config: "./config.toml" });
 // or: new OidcExchange({ configString: "[server]\nissuer = \"https://auth.example.com\"\n…" })
 
-const res = oidc.handleRequest({
+const res = await oidc.handleRequest({
   method: "POST",
-  path: "/token",
-  headers: [{ name: "content-type", value: "application/json" }],
-  body: Buffer.from(JSON.stringify({ grant_type: "authorization_code", code, provider: "google" })),
+  rawPath: Buffer.from("/token"),
+  query: undefined,
+  headers: [{ name: "content-type", value: "application/x-www-form-urlencoded" }],
+  body: Buffer.from(
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: "https://app.example.com/callback",
+      provider: "google",
+    }).toString(),
+  ),
+  pathIsRaw: true,
 });
 
 console.log(res.status); // e.g. 200
@@ -50,15 +59,20 @@ console.log(res.body.toString("utf8")); // { "access_token": …, "refresh_token
 ```ts
 class OidcExchange {
   constructor(options: { config?: string; configString?: string });
-  handleRequest(request: HttpRequest): HttpResponse;
+  handleRequest(request: HttpRequest): Promise<HttpResponse>;
+  /** @deprecated Await handleRequest instead. */
+  handleRequestSync(request: HttpRequest): HttpResponse;
+  limits(): { maxBodyBytes: number };
   shutdown(): void; // graceful shutdown (currently a no-op)
 }
 
 interface HttpRequest {
   method: string;
-  path: string;
+  rawPath: Buffer;
+  query?: Buffer;
   headers: { name: string; value: string }[];
   body?: Buffer;
+  pathIsRaw: boolean;
 }
 interface HttpResponse {
   status: number;
@@ -66,6 +80,10 @@ interface HttpResponse {
   body: Buffer;
 }
 ```
+
+### Migrating from 0.2
+
+`handleRequest` now returns a Promise, so await it. Replace the old combined `path` field with `rawPath` containing the still-percent-encoded path bytes and `query` containing the still-percent-encoded query bytes without a leading `?`; set `pathIsRaw` to `false` only when the host has already decoded the path. Do not strip the configured base path or decode request targets in application code. If an architecture must remain synchronous temporarily, use deprecated `handleRequestSync` with the same wire request shape; it blocks the calling thread and is scheduled for removal after one major release cycle.
 
 `handleRequest` exposes the full service — `/token`, `/revoke`, `/keys`, `/.well-known/openid-configuration`, `/health`, and the internal admin API. See the [HTTP API reference](https://github.com/antstanley/oidc-exchange#api-endpoints) for request/response shapes.
 
@@ -76,6 +94,12 @@ Wiring for popular Node servers lives in the main repo's [examples](https://gith
 ## Configuration
 
 Configuration is TOML — providers, token TTLs, registration policy, key management, and storage. See the [configuration guide](https://github.com/antstanley/oidc-exchange#configuration).
+
+### Behaviour change
+
+Construction now fails when a `${VAR}` placeholder is unresolved, empty, or malformed instead of
+using that placeholder as literal configuration text. Set every referenced environment variable
+before constructing `OidcExchange`.
 
 ## Links
 

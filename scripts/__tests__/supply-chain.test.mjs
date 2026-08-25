@@ -90,7 +90,9 @@ test("owned workflow installs use the exact frozen package manager", () => {
       }
     }
   }
-  assert.equal(installCount, 7);
+  // Seven install sites from the supply-chain hardening plus the runtime-parity
+  // conformance job's frozen install.
+  assert.equal(installCount, 8);
 });
 
 test("isolated Node and Lambda frozen installs accept reviewed graphs", () => {

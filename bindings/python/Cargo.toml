@@ -3,6 +3,10 @@ name = "oidc-exchange-python"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+conformance = ["oidc-exchange-ffi/conformance"]
+
 [lib]
 name = "_oidc_exchange"
 crate-type = ["cdylib"]

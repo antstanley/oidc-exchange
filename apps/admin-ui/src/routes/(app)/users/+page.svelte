@@ -1,5 +1,27 @@
 <script lang="ts">
 	let { data } = $props();
+
+	/**
+	 * Cursor-stack navigation. The API pages forward via `next_cursor` and has
+	 * no previous token, so "back" pops the last visited cursor; "next" pushes
+	 * this page's `next_cursor`. A null next_cursor means the listing is
+	 * exhausted — a short page does not, so exhaustion is keyed on the cursor,
+	 * never on the row count.
+	 *
+	 * Derived, not plain consts: SvelteKit reuses this component across
+	 * same-route navigations, and a const would pin both links to whatever
+	 * page was rendered first.
+	 */
+	const backHref = $derived(
+		data.stack.length > 0
+			? `/users?stack=${encodeURIComponent(data.stack.slice(0, -1).join(","))}`
+			: null,
+	);
+	const nextHref = $derived(
+		data.next_cursor !== null
+			? `/users?stack=${encodeURIComponent([...data.stack, data.next_cursor].join(","))}`
+			: null,
+	);
 </script>
 
 <div>
@@ -27,9 +49,9 @@
 						</td>
 						<td class="px-5 py-3 text-sm text-gray-400">{user.provider}</td>
 						<td class="px-5 py-3">
-							{#if user.status === 'Active'}
+							{#if user.status === 'active'}
 								<span class="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-green-500/10 text-green-400">Active</span>
-							{:else if user.status === 'Suspended'}
+							{:else if user.status === 'suspended'}
 								<span class="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-yellow-500/10 text-yellow-400">Suspended</span>
 							{:else}
 								<span class="inline-flex px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400">Deleted</span>
@@ -49,18 +71,22 @@
 
 	<!-- Pagination -->
 	<div class="flex justify-between items-center mt-4">
-		<a
-			href="/users?page={data.page - 1}"
-			class="px-4 py-2 rounded-lg text-sm {data.page <= 1 ? 'text-gray-600 pointer-events-none' : 'text-gray-300 hover:bg-gray-800'}"
-		>
-			Previous
-		</a>
-		<span class="text-gray-500 text-sm">Page {data.page}</span>
-		<a
-			href="/users?page={data.page + 1}"
-			class="px-4 py-2 rounded-lg text-sm {data.users.length < data.limit ? 'text-gray-600 pointer-events-none' : 'text-gray-300 hover:bg-gray-800'}"
-		>
-			Next
-		</a>
+		{#if backHref !== null}
+			<a href={backHref} class="px-4 py-2 rounded-lg text-sm text-gray-300 hover:bg-gray-800">
+				Previous
+			</a>
+		{:else}
+			<span class="px-4 py-2 rounded-lg text-sm text-gray-600 pointer-events-none">Previous</span>
+		{/if}
+		<span class="text-gray-500 text-sm">
+			{data.users.length} users{data.next_cursor !== null ? " (more)" : ""}
+		</span>
+		{#if nextHref !== null}
+			<a href={nextHref} class="px-4 py-2 rounded-lg text-sm text-gray-300 hover:bg-gray-800">
+				Next
+			</a>
+		{:else}
+			<span class="px-4 py-2 rounded-lg text-sm text-gray-600 pointer-events-none">Next</span>
+		{/if}
 	</div>
 </div>

@@ -29,8 +29,10 @@ The Bash installer is fixed to repository `antstanley/oidc-exchange` and signer 
 to a release asset. `--version` accepts only
 `^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$`; malformed or missing
 operands fail before a request or URL construction. After downloading the binary and SHA-256
-sidecar from GitHub Releases, it verifies the checksum. If `gh` is present, installation also
-requires:
+sidecar from GitHub Releases, it verifies the checksum. Verification is mandatory: if neither
+checksum utility is present the installer prints the missing dependency and exits non-zero
+**before** any download — there is no path through the script that installs an unverified
+binary. If `gh` is present, installation also requires:
 
 ```bash
 gh attestation verify <downloaded-binary> \
@@ -40,9 +42,7 @@ gh attestation verify <downloaded-binary> \
 
 A failed or timed-out provenance check stops installation. Without `gh`, the installer loudly says
 that checksum verification detects corruption only and does not authenticate the artifact. It
-installs to `/usr/local/bin` for root or `~/.local/bin` otherwise. The separate sibling change owns
-the existing behavior when neither checksum utility is present; this specification does not claim
-that branch fails closed.
+installs to `/usr/local/bin` for root or `~/.local/bin` otherwise.
 
 ## Docker (`Dockerfile`)
 
@@ -117,3 +117,12 @@ tag-triggered `validate` job checks parity before builds.
 
 - Version bumps remain manually coordinated across manifests.
 - Whether Docker Hub should gain an independent registry-signing mechanism is future work.
+
+
+## Runtime parity update
+
+One version string must match across `Cargo.toml` `workspace.package.version`,
+`bindings/nodejs/package.json`, and `bindings/python/pyproject.toml`. The `validate` job
+checks this before building. Bumps are manual: edit the three files, commit, tag, push. npm
+and PyPI use the bare `X.Y.Z`; GitHub and Docker use the `v`-prefixed tag. Because the three
+artifacts share one version, a breaking change to the FFI surface bumps all of them together

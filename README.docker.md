@@ -47,7 +47,11 @@ adapter = "oidc"
 issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
+# Origins Google's discovery document may name beyond the issuer's origin:
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
+
+`endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered.
 
 See the [full configuration guide](https://github.com/antstanley/oidc-exchange#configuration) and the [deployment guides](https://github.com/antstanley/oidc-exchange/tree/main/docs/integration) (ECS Fargate, generic container / Kubernetes, …).
 

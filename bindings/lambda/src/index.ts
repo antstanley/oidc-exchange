@@ -13,6 +13,7 @@ import {
   fromAlbEvent,
   fromApiGatewayV1,
   fromApiGatewayV2,
+  BodyTooLargeError,
   isAlbEvent,
   isApiGatewayV1,
   isApiGatewayV2,
@@ -55,52 +56,58 @@ type LambdaResult = APIGatewayProxyResult | APIGatewayProxyResultV2 | ALBResult;
 export function createHandler(
   options: LambdaHandlerOptions,
 ): (event: LambdaEvent, context: Context) => Promise<LambdaResult> {
-  const { basePath = "", ...oidcOptions } = options;
-  const oidc = new OidcExchange(oidcOptions);
+  const oidc = new OidcExchange(options);
+  const maxBodyBytes = oidc.limits().maxBodyBytes;
 
   return async (event: LambdaEvent, _context: Context): Promise<LambdaResult> => {
-    const request = normalise(event, basePath);
-
-    const response = oidc.handleRequest({
-      method: request.method,
-      path: request.path,
-      headers: request.headers,
-      body: request.body,
-    });
-
-    // Build response headers as a plain object
-    const responseHeaders: Record<string, string> = {};
-    for (const { name, value } of response.headers) {
-      responseHeaders[name] = value;
+    let request;
+    try {
+      request = normalise(event, maxBodyBytes);
+    } catch (error) {
+      if (error instanceof BodyTooLargeError) {
+        return { statusCode: 413, body: "", isBase64Encoded: false };
+      }
+      throw error;
     }
 
-    const bodyBase64 = Buffer.from(response.body).toString("base64");
+    const response = await oidc.handleRequest(request);
 
-    // Return the right shape for the event source
-    if (isApiGatewayV2(event)) {
-      return {
-        statusCode: response.status,
-        headers: responseHeaders,
-        body: bodyBase64,
-        isBase64Encoded: true,
-      } satisfies APIGatewayProxyResultV2;
-    }
-
-    // v1 and ALB use the same response shape
-    return {
-      statusCode: response.status,
-      headers: responseHeaders,
-      body: bodyBase64,
-      isBase64Encoded: true,
-    } satisfies APIGatewayProxyResult;
+    return translateResponse(event, response);
   };
 }
 
-function normalise(event: LambdaEvent, basePath: string) {
-  if (isApiGatewayV2(event)) return fromApiGatewayV2(event, basePath);
-  if (isAlbEvent(event)) return fromAlbEvent(event, basePath);
-  if (isApiGatewayV1(event)) return fromApiGatewayV1(event, basePath);
+function normalise(event: LambdaEvent, maxBodyBytes: number) {
+  if (isApiGatewayV2(event)) return fromApiGatewayV2(event, maxBodyBytes);
+  if (isAlbEvent(event)) return fromAlbEvent(event, maxBodyBytes);
+  if (isApiGatewayV1(event)) return fromApiGatewayV1(event, maxBodyBytes);
+  return fromApiGatewayV1(event as APIGatewayProxyEvent, maxBodyBytes);
+}
 
-  // Fallback — treat as v1-like
-  return fromApiGatewayV1(event as APIGatewayProxyEvent, basePath);
+export function translateResponse(
+  event: LambdaEvent,
+  response: { status: number; headers: Array<{ name: string; value: string }>; body: Uint8Array },
+): LambdaResult {
+  const body = Buffer.from(response.body).toString("base64");
+  if (isApiGatewayV2(event)) {
+    const headers: Record<string, string> = {};
+    const cookies: string[] = [];
+    for (const { name, value } of response.headers) {
+      if (name.toLowerCase() === "set-cookie") cookies.push(value);
+      else headers[name] = name in headers ? `${headers[name]}, ${value}` : value;
+    }
+    return {
+      statusCode: response.status,
+      headers,
+      ...(cookies.length ? { cookies } : {}),
+      body,
+      isBase64Encoded: true,
+    };
+  }
+  const headers: Record<string, string> = {};
+  const multiValueHeaders: Record<string, string[]> = {};
+  for (const { name, value } of response.headers) {
+    (multiValueHeaders[name] ??= []).push(value);
+    if (!(name in headers)) headers[name] = value;
+  }
+  return { statusCode: response.status, headers, multiValueHeaders, body, isBase64Encoded: true };
 }

@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
-    "start": "node build"
+    "start": "node build",
+    "test": "node --import tsx --test ../body-limit.test.ts",
+    "typecheck": "tsc --noEmit --module esnext --moduleResolution bundler --target es2022 --lib es2022,dom --types node src/hooks.server.ts src/body-limit.ts --skipLibCheck --ignoreConfig",
+    "lint": "tsc --noEmit --module esnext --moduleResolution bundler --target es2022 --lib es2022,dom --types node src/hooks.server.ts src/body-limit.ts --skipLibCheck --ignoreConfig"
   },
   "dependencies": {
     "@oidc-exchange/node": "^0.1.0",
@@ -14,5 +17,10 @@
     "@sveltejs/kit": "^2",
     "svelte": "^5",
     "vite": "^6"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "^6",
+    "tsx": "^4"
   }
 }

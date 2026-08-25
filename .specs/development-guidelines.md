@@ -169,6 +169,15 @@ The repo is jj-managed (`.jj/` over a Git backend).
 
 - `cargo fmt --all` clean before pushing (`cargo fmt --check --all` in CI).
 - `cargo clippy --workspace -- -D warnings` clean — zero warnings.
+- A committed `clippy.toml` configures `await-holding-invalid-types` with
+  `tokio::sync::RwLockWriteGuard`, `tokio::sync::RwLockReadGuard`, and
+  `tokio::sync::MutexGuard`, so `clippy::await_holding_invalid_type` fires at the binding
+  site when an async-aware lock guard is alive across an `.await`. The better-known
+  `clippy::await_holding_lock` covers only `std::sync` and `parking_lot` guards and does not
+  catch tokio's, which is why the type list is configured deliberately. The stated rule
+  behind the lint: **no lock guard may be alive across an `.await` that performs I/O**, and
+  single-flight is expressed with its own primitive rather than obtained as a side effect of
+  a data lock.
 
 ### Code style
 
@@ -381,5 +390,6 @@ A change is done when:
 
 ### Open questions
 
-- `clippy` runs with `-D warnings` but no `clippy.toml` pedantic ruleset is committed; whether
-  to enable pedantic-adjacent lints is open.
+- A `clippy.toml` is committed, configuring `await-holding-invalid-types` only. Whether to
+  extend it toward a pedantic-adjacent ruleset is still open; the file existing removes the
+  obstacle but not the question.

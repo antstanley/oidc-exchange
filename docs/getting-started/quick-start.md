@@ -17,7 +17,7 @@ For an authenticated binary install, install the [GitHub CLI](https://cli.github
 
 ```bash
 command -v gh
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
 To verify a manually downloaded binary, run:
@@ -108,7 +108,11 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Origins Google's discovery document may name beyond the issuer's origin:
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
+
+`endpoint_origins` pins which origins a provider's discovery document is allowed to name — Google serves its token and revocation endpoints from `oauth2.googleapis.com` and its JWKS URI from `www.googleapis.com`. See the [Identity Providers guide](/guides/providers/) for how origin pinning works.
 
 ## Generate a signing key
 

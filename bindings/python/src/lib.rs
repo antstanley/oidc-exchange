@@ -1,12 +1,55 @@
-// PyO3's `?` operator on PyResult triggers clippy::useless_conversion
-// because From<PyErr> for PyErr is an identity conversion. This is a
-// known interaction between PyO3 proc macros and clippy.
 #![allow(clippy::useless_conversion)]
 
+use oidc_exchange_ffi::{TransportHints, WireRequest};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList, PySequence};
 
-/// Python wrapper around the FFI OidcExchange instance.
+fn required_string(request: &Bound<'_, PyDict>, field: &'static str) -> PyResult<String> {
+    request
+        .get_item(field)?
+        .ok_or_else(|| PyKeyError::new_err(field))?
+        .extract::<String>()
+        .map_err(|_| PyValueError::new_err(format!("request field '{field}' must be a string")))
+}
+
+fn required_bytes(request: &Bound<'_, PyDict>, field: &'static str) -> PyResult<Vec<u8>> {
+    request
+        .get_item(field)?
+        .ok_or_else(|| PyKeyError::new_err(field))?
+        .extract::<Vec<u8>>()
+        .map_err(|_| PyValueError::new_err(format!("request field '{field}' must be bytes")))
+}
+
+fn optional_bytes(request: &Bound<'_, PyDict>, field: &'static str) -> PyResult<Option<Vec<u8>>> {
+    request
+        .get_item(field)?
+        .map(|value| {
+            value.extract::<Vec<u8>>().map_err(|_| {
+                PyValueError::new_err(format!("request field '{field}' must be bytes"))
+            })
+        })
+        .transpose()
+}
+
+fn headers(request: &Bound<'_, PyDict>) -> PyResult<Vec<(String, String)>> {
+    let Some(value) = request.get_item("headers")? else {
+        return Ok(Vec::new());
+    };
+    let sequence = value.cast::<PySequence>().map_err(|_| {
+        PyValueError::new_err("request field 'headers' must be an ordered sequence of pairs")
+    })?;
+    sequence
+        .try_iter()?
+        .map(|item| {
+            let item = item?;
+            item.extract::<(String, String)>().map_err(|_| {
+                PyValueError::new_err("request headers must be (name, value) string pairs")
+            })
+        })
+        .collect()
+}
+
 #[pyclass]
 struct OidcExchange {
     inner: oidc_exchange_ffi::OidcExchange,
@@ -20,112 +63,57 @@ impl OidcExchange {
         let inner = match (config, config_string) {
             (Some(path), _) => oidc_exchange_ffi::OidcExchange::from_file(path),
             (_, Some(toml)) => oidc_exchange_ffi::OidcExchange::new(toml),
-            (None, None) => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Either 'config' (file path) or 'config_string' (TOML string) must be provided",
-                ));
+            _ => {
+                return Err(PyValueError::new_err(
+                    "Either 'config' or 'config_string' must be provided",
+                ))
             }
         }
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self { inner })
     }
 
-    /// Send an HTTP request through the router and return a response dict.
-    ///
-    /// The `request` dict must contain:
-    ///   - method: str
-    ///   - path: str
-    ///   - headers: Optional[dict[str, str]]
-    ///   - body: Optional[bytes | str]
-    ///
-    /// Returns a dict with:
-    ///   - status: int
-    ///   - headers: dict[str, str]
-    ///   - body: bytes
     fn handle_request_sync<'py>(
         &self,
         py: Python<'py>,
         request: &Bound<'py, PyDict>,
     ) -> PyResult<Py<PyDict>> {
-        let method: String = request
-            .get_item("method")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("method"))?
-            .extract()?;
-
-        let path: String = request
-            .get_item("path")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("path"))?
-            .extract()?;
-
-        let headers: Vec<(String, String)> = if let Some(h) = request.get_item("headers")? {
-            let hdict: &Bound<'py, PyDict> = h.cast()?;
-            let mut vec = Vec::new();
-            for (k, v) in hdict.iter() {
-                vec.push((k.extract::<String>()?, v.extract::<String>()?));
-            }
-            vec
-        } else {
-            Vec::new()
+        let wire = WireRequest {
+            method: required_string(request, "method")?,
+            raw_path: required_bytes(request, "raw_path")?,
+            query: optional_bytes(request, "query")?,
+            headers: headers(request)?,
+            body: optional_bytes(request, "body")?.unwrap_or_default(),
+            hints: TransportHints {
+                path_is_raw: request
+                    .get_item("path_is_raw")?
+                    .ok_or_else(|| PyKeyError::new_err("path_is_raw"))?
+                    .extract::<bool>()
+                    .map_err(|_| {
+                        PyValueError::new_err("request field 'path_is_raw' must be a bool")
+                    })?,
+            },
         };
-
-        let body: Vec<u8> = if let Some(b) = request.get_item("body")? {
-            // Try bytes first, then string, default empty
-            if let Ok(bytes) = b.extract::<Vec<u8>>() {
-                bytes
-            } else if let Ok(s) = b.extract::<String>() {
-                s.into_bytes()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Precondition on the extracted inputs: `method` and `path` must have been
-        // populated from the request dict before we release the GIL and hand them
-        // (by reference) to the blocking FFI call below.
-        assert!(!method.is_empty(), "method must be a non-empty string");
-        assert!(!path.is_empty(), "path must be a non-empty string");
-
-        // Detach from the interpreter for the blocking FFI call so other Python
-        // threads — including an asyncio event loop driving this call via an
-        // executor — keep running while the request is serviced. All inputs are
-        // owned/Send Rust values by this point, so the closure satisfies
-        // `Python::detach`'s `Ungil` bound without restructuring.
         let response = py
-            .detach(|| self.inner.handle_request(&method, &path, headers, body))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-        // This thread is attached again; only now do we touch Python objects.
+            .detach(|| self.inner.handle_blocking(wire))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let result = PyDict::new(py);
         result.set_item("status", response.status)?;
-
-        // Use a dict for headers. Note: duplicate header names (e.g. Set-Cookie)
-        // will be collapsed. For full multi-value header support, consumers should
-        // check the raw response. This covers the common case.
-        let resp_headers = PyDict::new(py);
-        for (k, v) in &response.headers {
-            resp_headers.set_item(k, v)?;
+        let response_headers = PyList::empty(py);
+        for header in response.headers {
+            response_headers.append(header)?;
         }
-        result.set_item("headers", resp_headers)?;
+        result.set_item("headers", response_headers)?;
         result.set_item("body", PyBytes::new(py, &response.body))?;
-
-        // Postcondition on the built response: the caller-facing contract
-        // documented above promises a `status` key on every successful result.
-        debug_assert!(
-            result.contains("status")?,
-            "result dict must carry a status key"
-        );
-
         Ok(result.unbind())
     }
 
-    /// Shutdown the instance (no-op, reserved for future use).
+    fn limits(&self) -> u64 {
+        self.inner.limits().max_body_bytes
+    }
     fn shutdown(&self) {}
 }
 
-/// Python module definition.
 #[pymodule]
 fn _oidc_exchange(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<OidcExchange>()?;

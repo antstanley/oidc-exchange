@@ -1,0 +1,7 @@
+# Generated artifacts are formatted by scripts/generate-client.mjs itself; the
+# freshness gate (`pnpm generate:check`) demands byte equality with a fresh
+# generation, so an external formatter reflowing them would break determinism.
+# oxfmt reads ignore files only via --ignore-path (it does not auto-discover
+# this file), which the package.json format scripts pass.
+src/lib/api.ts
+src/lib/types.ts

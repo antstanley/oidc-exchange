@@ -4,9 +4,56 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::error::{Error, Result};
+
 /// The `version` value every `create_user` writes, and the value a read of a
 /// pre-migration row/item (one with no `version` attribute/column) defaults to.
 pub const INITIAL_USER_VERSION: u64 = 1;
+
+/// The largest page size any admin listing may return.
+///
+/// Every admin read is bounded by this constant: a caller asking for more rows
+/// than [`MAX_ADMIN_PAGE_SIZE`] gets a 200-row page rather than an unbounded
+/// one, so no caller configuration can turn `/internal/users` into a
+/// full-table materialization. The clamp runs in the core (see
+/// [`clamp_admin_page_limit`]) — never in a handler — so *every* path to an
+/// adapter is bounded, including paths that bypass HTTP.
+pub const MAX_ADMIN_PAGE_SIZE: u32 = 200;
+
+/// Page size used when an admin-listing caller omits `limit` (the value the
+/// published internal-API schema documents as the default).
+pub const DEFAULT_ADMIN_PAGE_SIZE: u32 = 50;
+
+/// Clamp a caller-supplied admin page size into the contract bounds.
+///
+/// `0` is rejected — the published schema documents `minimum: 1`, and a
+/// zero-row request is a caller bug worth surfacing, not a page shape to
+/// invent. Above-bound requests are clamped down to
+/// [`MAX_ADMIN_PAGE_SIZE`] — the documented server-side clamp that keeps the
+/// response bounded. Returns the effective limit for the read.
+pub fn clamp_admin_page_limit(limit: u32) -> Result<u32> {
+    if limit == 0 {
+        return Err(Error::InvalidRequest {
+            reason: format!("limit must be at least 1 and at most {MAX_ADMIN_PAGE_SIZE}"),
+        });
+    }
+    Ok(limit.min(MAX_ADMIN_PAGE_SIZE))
+}
+
+/// One bounded page of a cursor-paginated user listing.
+///
+/// `next_cursor` is opaque and adapter-issued: `None` means the listing is
+/// exhausted and is the *only* completion signal — a page shorter than the
+/// requested limit may still carry a non-null cursor (on DynamoDB the scan
+/// `Limit` applies before the status filter), so callers page until
+/// `next_cursor` is null, never until a short page. Serialized with an
+/// explicit JSON `null` (not omitted) so the wire contract's
+/// `"next_cursor": null` exhaustion marker survives round-trips.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserPage {
+    pub users: Vec<User>,
+    pub next_cursor: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -125,5 +172,80 @@ mod tests {
         assert!(!UserStatus::Deleted.can_transition_to(&UserStatus::Suspended));
         assert!(!UserStatus::Deleted.can_transition_to(&UserStatus::Deleted));
         assert!(UserStatus::Suspended.can_transition_to(&UserStatus::Deleted));
+    }
+
+    /// The page-limit clamp at all three validity boundaries (one below, at, one above the
+    /// documented maximum): below the minimum rejects, at the maximum passes through
+    /// unchanged, above the maximum clamps down to [`MAX_ADMIN_PAGE_SIZE`].
+    #[test]
+    fn clamp_admin_page_limit_enforces_documented_bounds() {
+        assert!(
+            clamp_admin_page_limit(0).is_err(),
+            "limit 0 must be rejected"
+        );
+        assert_eq!(
+            clamp_admin_page_limit(1).expect("1 is the minimum valid limit"),
+            1
+        );
+        assert_eq!(
+            clamp_admin_page_limit(MAX_ADMIN_PAGE_SIZE).expect("the maximum itself is valid"),
+            MAX_ADMIN_PAGE_SIZE
+        );
+        assert_eq!(
+            clamp_admin_page_limit(MAX_ADMIN_PAGE_SIZE + 1)
+                .expect("above-bound requests clamp rather than error"),
+            MAX_ADMIN_PAGE_SIZE,
+            "an above-bound request must be clamped to MAX_ADMIN_PAGE_SIZE"
+        );
+        assert_eq!(
+            clamp_admin_page_limit(u32::MAX).expect("u32::MAX still fits the clamp"),
+            MAX_ADMIN_PAGE_SIZE
+        );
+    }
+
+    /// The rejected zero case carries a reason naming the bounds, so an operator reading
+    /// the API error can correct the request without consulting the schema.
+    #[test]
+    fn clamp_admin_page_limit_zero_error_names_the_bounds() {
+        let err = clamp_admin_page_limit(0).expect_err("zero must be rejected");
+        match &err {
+            Error::InvalidRequest { reason } => {
+                assert!(
+                    reason.contains(&MAX_ADMIN_PAGE_SIZE.to_string()),
+                    "the reason must name the maximum, got: {reason}"
+                );
+                assert!(
+                    reason.contains("at least 1"),
+                    "the reason must name the minimum, got: {reason}"
+                );
+            }
+            other => panic!("expected Error::InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// `next_cursor` serializes as an explicit JSON `null` when exhausted — never as an
+    /// omitted field — because the published contract makes `"next_cursor": null` the only
+    /// completion signal and generated clients branch on the field's presence-in-JSON value.
+    #[test]
+    fn user_page_next_cursor_serializes_as_explicit_null() {
+        let page = UserPage {
+            users: Vec::new(),
+            next_cursor: None,
+        };
+        let value: serde_json::Value = serde_json::to_value(&page).expect("serialize UserPage");
+        assert!(
+            value.get("next_cursor").is_some(),
+            "next_cursor must be present in JSON even when null"
+        );
+        assert!(value["next_cursor"].is_null());
+
+        let with_cursor = UserPage {
+            users: Vec::new(),
+            next_cursor: Some("opaque-cursor".to_string()),
+        };
+        let value: serde_json::Value =
+            serde_json::to_value(&with_cursor).expect("serialize UserPage");
+        assert_eq!(value["next_cursor"], "opaque-cursor");
+        assert!(value["users"].is_array());
     }
 }

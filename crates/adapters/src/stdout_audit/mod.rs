@@ -69,7 +69,7 @@ fn write_line(mut writer: impl Write, line: &str) -> Result<()> {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use oidc_exchange_core::domain::{AuditEventType, AuditOutcome};
+    use oidc_exchange_core::domain::{AuditEventType, AuditOutcome, ClientAddrSource};
     use std::collections::HashMap;
 
     fn sample_event(severity: AuditSeverity) -> AuditEvent {
@@ -79,8 +79,11 @@ mod tests {
             severity,
             event_type: AuditEventType::TokenExchange,
             actor: Some("usr_abc123".to_string()),
+            // Exchange-plane sample: token events carry no operator.
+            operator: None,
             provider: Some("google".to_string()),
             ip_address: Some("10.0.0.1".to_string()),
+            ip_address_source: ClientAddrSource::Peer,
             user_agent: Some("test-agent/1.0".to_string()),
             detail: {
                 let mut m = HashMap::new();
