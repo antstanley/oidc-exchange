@@ -1,12 +1,31 @@
 use async_trait::async_trait;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use oidc_exchange_core::domain::provider::OidcProviderConfig;
+use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
 
 use crate::shared::claims::coerce_bool;
 use crate::shared::jwks::JwksCache;
+use crate::shared::origins::{parse_https_origin, EndpointOrigins, MAX_ENDPOINT_ORIGINS};
+
+/// The algorithms the generic (Tier 1) provider admits for ID-token signatures:
+/// the nine JWS signature algorithms this adapter has always accepted. Deliberately
+/// a named per-provider policy — not derived from Apple's set and never unioned
+/// with it; see task 04a ("keep provider-specific admitted algorithm policies
+/// explicit") of the outbound-boundary plan.
+pub const OIDC_ADMITTED_ALGORITHMS: &[Algorithm] = &[
+    Algorithm::RS256,
+    Algorithm::RS384,
+    Algorithm::RS512,
+    Algorithm::ES256,
+    Algorithm::ES384,
+    Algorithm::PS256,
+    Algorithm::PS384,
+    Algorithm::PS512,
+    Algorithm::EdDSA,
+];
 
 /// Standard OIDC identity provider adapter (Tier 1 — e.g., Google).
 ///
@@ -15,67 +34,60 @@ use crate::shared::jwks::JwksCache;
 pub struct OidcProvider {
     provider_id: String,
     client_id: String,
-    client_secret: Option<String>,
-    token_endpoint: String,
+    client_secret: Option<Secret<String>>,
+    token_endpoint: oidc_exchange_core::config::HttpsUrl,
     jwks_cache: JwksCache,
-    revocation_endpoint: Option<String>,
-    issuer: String,
-}
-
-/// Infer the signing algorithm from a JWK that carries no `alg` member.
-///
-/// Azure-AD-style JWKS omit `alg`; the algorithm is then derived from the trusted
-/// key material itself (`kty`, and `crv` for EC keys) rather than trusting the
-/// untrusted JWT header. An alg-less RSA key is treated as RS256 (the RSA family is
-/// not distinguishable from key parameters alone, and RS256 matches Azure AD's actual
-/// signing algorithm). Any other alg-less key type is rejected.
-fn infer_alg_from_jwk(jwk: &serde_json::Value) -> Result<Algorithm> {
-    let kty = jwk.get("kty").and_then(|k| k.as_str());
-    let crv = jwk.get("crv").and_then(|c| c.as_str());
-
-    match (kty, crv) {
-        (Some("RSA"), _) => Ok(Algorithm::RS256),
-        (Some("EC"), Some("P-256")) => Ok(Algorithm::ES256),
-        (Some("EC"), Some("P-384")) => Ok(Algorithm::ES384),
-        (Some("OKP"), _) => Ok(Algorithm::EdDSA),
-        _ => Err(Error::InvalidGrant {
-            reason: "JWK has unsupported or missing algorithm".into(),
-        }),
-    }
-}
-
-/// Find the JWK matching `kid` inside a JWKS response's `keys` array.
-///
-/// Returns `Ok(None)` on a genuine `kid` miss (the caller decides whether that is terminal
-/// or should trigger a forced refetch); errors if the response does not carry a `keys`
-/// array at all (a malformed JWKS body, distinct from a miss).
-fn find_jwk(
-    provider_id: &str,
-    jwks: &serde_json::Value,
-    kid: &str,
-) -> Result<Option<serde_json::Value>> {
-    let keys = jwks["keys"]
-        .as_array()
-        .ok_or_else(|| Error::ProviderError {
-            provider: provider_id.to_string(),
-            detail: "JWKS response missing 'keys' array".into(),
-        })?;
-    Ok(keys
-        .iter()
-        .find(|k| k["kid"].as_str() == Some(kid))
-        .cloned())
+    revocation_endpoint: Option<oidc_exchange_core::config::HttpsUrl>,
+    issuer: oidc_exchange_core::config::HttpsUrl,
 }
 
 impl OidcProvider {
     /// Build an `OidcProvider` from an `OidcProviderConfig`.
     ///
     /// If `token_endpoint` or `jwks_uri` are absent from the config they are
-    /// resolved via OIDC discovery on the configured `issuer`.
+    /// resolved via OIDC discovery on the configured `issuer`. Discovery runs
+    /// against the provider's pinned endpoint-origin set — the issuer's own
+    /// origin, the origins of explicitly configured endpoints, and every
+    /// declared `endpoint_origins` entry — so a discovery document can never
+    /// introduce an origin at runtime. The set is fixed here, at construction;
+    /// nothing that happens later in the provider's life widens it.
     pub async fn from_config(provider_id: &str, config: &OidcProviderConfig) -> Result<Self> {
+        // The adapter re-validates what the config layer validated: paired
+        // checks at both ends of the boundary, because a future caller could
+        // construct this config without passing through TOML loading.
+        assert!(
+            config.endpoint_origins.len() <= MAX_ENDPOINT_ORIGINS,
+            "endpoint_origins exceeds MAX_ENDPOINT_ORIGINS"
+        );
+        for entry in &config.endpoint_origins {
+            parse_https_origin(entry).map_err(|e| Error::ConfigError {
+                detail: format!("provider '{provider_id}': invalid endpoint_origins entry: {e}"),
+            })?;
+        }
+
+        let configured_endpoints: Vec<&str> = [
+            config.token_endpoint.as_ref(),
+            config.jwks_uri.as_ref(),
+            config.revocation_endpoint.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(oidc_exchange_core::config::HttpsUrl::as_str)
+        .collect();
+        let permitted_origins = EndpointOrigins::from_parts(
+            config.issuer.as_str(),
+            &configured_endpoints,
+            &config.endpoint_origins,
+        );
+        debug_assert!(
+            permitted_origins.admits(config.issuer.as_str()),
+            "the issuer's own origin is always a member of its pinned set"
+        );
+
         let discovery = if config.token_endpoint.is_some() && config.jwks_uri.is_some() {
             None
         } else {
-            Some(crate::shared::discovery::discover(&config.issuer).await?)
+            Some(crate::shared::discovery::discover(&config.issuer, &permitted_origins).await?)
         };
 
         let token_endpoint = config
@@ -104,7 +116,7 @@ impl OidcProvider {
             client_id: config.client_id.clone(),
             client_secret: config.client_secret.clone(),
             token_endpoint,
-            jwks_cache: JwksCache::new(jwks_uri),
+            jwks_cache: JwksCache::new(jwks_uri.as_str().to_string(), OIDC_ADMITTED_ALGORITHMS),
             revocation_endpoint,
             issuer: config.issuer.clone(),
         })
@@ -115,9 +127,10 @@ impl OidcProvider {
 impl IdentityProvider for OidcProvider {
     async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Result<ProviderTokens> {
         crate::shared::token_endpoint::exchange_code(
-            &self.token_endpoint,
+            self.token_endpoint.as_str(),
             &self.client_id,
-            self.client_secret.as_deref(),
+            // Reveal only at the outbound form-post boundary.
+            self.client_secret.as_ref().map(|s| s.expose().as_str()),
             code,
             redirect_uri,
         )
@@ -134,73 +147,32 @@ impl IdentityProvider for OidcProvider {
             reason: "JWT missing kid header".into(),
         })?;
 
-        // 2. Fetch JWKS (cached)
-        let jwks = self.jwks_cache.get_keys().await?;
-
-        // 3. Find matching key by kid. On a miss, force one rate-limited refetch (task 02's
-        // `JwksCache::refresh` API, bounded by `MIN_REFRESH_INTERVAL`) and re-search the
-        // refetched set before rejecting, so upstream key rotation is picked up immediately
-        // instead of waiting out the (much longer) cache TTL.
-        let jwk = match find_jwk(&self.provider_id, &jwks, kid)? {
-            Some(jwk) => jwk,
-            None => {
-                self.jwks_cache.refresh().await?;
-                let refreshed = self.jwks_cache.get_keys().await?;
-                // Provider responses are adversarial (dev-guidelines §Defensive coding):
-                // find_jwk fails closed with a ProviderError if `refreshed` is not a
-                // `keys` array, so we validate rather than assert/panic on a 2xx body.
-                find_jwk(&self.provider_id, &refreshed, kid)?.ok_or_else(|| {
-                    Error::InvalidGrant {
-                        reason: format!("No matching key for kid: {kid} (after forced refetch)"),
-                    }
-                })?
-            }
-        };
-        assert_eq!(
-            jwk["kid"].as_str(),
-            Some(kid),
-            "resolved JWK's kid must equal the header kid"
+        // 2. Resolve the kid through the cached key set. The cache owns the
+        // miss path: on a miss it forces one rate-limited refetch and re-looks
+        // up, so a rotated key is picked up immediately without waiting out the
+        // TTL, and a kid that matches only ineligible entries fails closed
+        // exactly like an absent one (invariant I3's shape).
+        let verification_key = self.jwks_cache.get_key(kid).await?;
+        debug_assert_eq!(
+            verification_key.kid(),
+            kid,
+            "the resolved key is the one published under the requested kid"
         );
 
-        // 4. Build decoding key from JWK
-        let jwk_value: jsonwebtoken::jwk::Jwk =
-            serde_json::from_value(jwk.clone()).map_err(|e| Error::InvalidGrant {
-                reason: format!("Invalid JWK: {e}"),
-            })?;
-
-        let decoding_key = DecodingKey::from_jwk(&jwk_value).map_err(|e| Error::InvalidGrant {
-            reason: format!("Cannot build decoding key from JWK: {e}"),
-        })?;
-
-        // 5. Configure validation — use the algorithm from the JWK (trusted), not the JWT header (untrusted)
-        let jwk_alg = jwk
-            .get("alg")
-            .and_then(|a| a.as_str())
-            .and_then(|a| match a {
-                "RS256" => Some(Algorithm::RS256),
-                "RS384" => Some(Algorithm::RS384),
-                "RS512" => Some(Algorithm::RS512),
-                "ES256" => Some(Algorithm::ES256),
-                "ES384" => Some(Algorithm::ES384),
-                "PS256" => Some(Algorithm::PS256),
-                "PS384" => Some(Algorithm::PS384),
-                "PS512" => Some(Algorithm::PS512),
-                "EdDSA" => Some(Algorithm::EdDSA),
-                _ => None,
-            })
-            .map(Ok)
-            .unwrap_or_else(|| infer_alg_from_jwk(&jwk))?;
-        let mut validation = Validation::new(jwk_alg);
-        validation.set_issuer(&[&self.issuer]);
+        // 3. Configure validation from the KEY SET, not from the token header:
+        // the algorithm travels with the key it belongs to.
+        let mut validation = Validation::new(verification_key.algorithm());
+        validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[&self.client_id]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         validation.validate_nbf = true;
 
-        // 6. Decode and validate
-        let token_data = decode::<serde_json::Value>(id_token, &decoding_key, &validation)
-            .map_err(|e| Error::InvalidGrant {
-                reason: format!("JWT validation failed: {e}"),
-            })?;
+        // 4. Decode and validate
+        let token_data =
+            decode::<serde_json::Value>(id_token, verification_key.decoding_key(), &validation)
+                .map_err(|e| Error::InvalidGrant {
+                    reason: format!("JWT validation failed: {e}"),
+                })?;
 
         let claims = &token_data.claims;
 
@@ -218,6 +190,10 @@ impl IdentityProvider for OidcProvider {
             email_verified: coerce_bool(&claims["email_verified"]),
             name: claims["name"].as_str().map(String::from),
             is_private_email: None,
+            // The algorithm this token actually verified with (carried by the
+            // resolved key-set entry), surfaced for the core's at_hash check.
+            signing_alg: crate::shared::jwks::jws_alg_name(verification_key.algorithm())
+                .to_string(),
             raw_claims: claims
                 .as_object()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
@@ -231,30 +207,21 @@ impl IdentityProvider for OidcProvider {
             None => return Ok(()), // Provider doesn't support revocation
         };
 
-        let client = crate::shared::http::client();
-        let mut params = vec![("token", token)];
-
-        // Include client credentials if available
         let client_id_owned = self.client_id.clone();
-        params.push(("client_id", &client_id_owned));
+        let params = vec![
+            ("token".to_string(), token.to_string()),
+            ("client_id".to_string(), client_id_owned),
+        ];
 
-        let response = client
-            .post(endpoint)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| Error::ProviderError {
-                provider: self.provider_id.clone(),
-                detail: format!("Revocation request failed: {e}"),
-            })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::ProviderError {
-                provider: self.provider_id.clone(),
-                detail: format!("Revocation returned {status}: {body}"),
-            });
+        // The revocation POST goes through the shared transport: status before
+        // body, bounded body, and the one redacting error-detail constructor —
+        // an intermediary that echoes the submitted form cannot put the token
+        // being revoked into the detail (and from there into a log line).
+        let upstream = crate::shared::transport::ProviderTransport
+            .post_form(&self.provider_id, endpoint.as_str(), &params)
+            .await?;
+        if !upstream.is_success() {
+            return Err(upstream.error_into(&self.provider_id));
         }
 
         Ok(())
@@ -262,6 +229,10 @@ impl IdentityProvider for OidcProvider {
 
     fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+
+    fn client_id(&self) -> &str {
+        &self.client_id
     }
 }
 
@@ -359,6 +330,11 @@ mod tests {
             .as_secs()
     }
 
+    fn test_endpoint(value: impl Into<String>) -> oidc_exchange_core::config::HttpsUrl {
+        oidc_exchange_core::config::HttpsUrl::parse_for_test(value)
+            .expect("wiremock test fixture URL")
+    }
+
     fn make_config(
         server_uri: &str,
         token_endpoint: Option<String>,
@@ -367,12 +343,13 @@ mod tests {
     ) -> OidcProviderConfig {
         OidcProviderConfig {
             provider_id: "test-provider".into(),
-            issuer: server_uri.to_string(),
+            issuer: test_endpoint(server_uri),
             client_id: "test-client-id".into(),
-            client_secret: Some("test-client-secret".into()),
-            jwks_uri,
-            token_endpoint,
-            revocation_endpoint,
+            client_secret: Some(Secret::new("test-client-secret".to_string())),
+            jwks_uri: jwks_uri.map(test_endpoint),
+            token_endpoint: token_endpoint.map(test_endpoint),
+            revocation_endpoint: revocation_endpoint.map(test_endpoint),
+            endpoint_origins: Vec::new(),
             scopes: vec!["openid".into()],
             additional_params: HashMap::new(),
         }
@@ -487,6 +464,13 @@ mod tests {
         assert_eq!(identity.email.as_deref(), Some("user@example.com"));
         assert_eq!(identity.email_verified, Some(true));
         assert_eq!(identity.name.as_deref(), Some("Test User"));
+        // Core-facing metadata: the JWK's verified algorithm, reported as data.
+        assert_eq!(identity.signing_alg, "RS256");
+        assert_eq!(
+            provider.client_id(),
+            "test-client-id",
+            "the port must report the configured audience"
+        );
         assert!(identity.raw_claims.contains_key("iss"));
     }
 
@@ -724,11 +708,202 @@ mod tests {
             .expect("from_config with discovery should succeed");
 
         assert_eq!(provider.provider_id(), "google");
-        assert_eq!(provider.token_endpoint, format!("{uri}/oauth/token"));
         assert_eq!(
-            provider.revocation_endpoint.as_deref(),
+            provider.token_endpoint.as_str(),
+            format!("{uri}/oauth/token")
+        );
+        assert_eq!(
+            provider
+                .revocation_endpoint
+                .as_ref()
+                .map(oidc_exchange_core::config::HttpsUrl::as_str),
             Some(format!("{uri}/oauth/revoke").as_str())
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Origin pinning: discovery may confirm origins, never widen them.
+    // The shipped mode is Warn (see origins::ENDPOINT_ORIGIN_CHECK_MODE);
+    // these tests pin the shipped behaviour and the enforcement shape is
+    // covered exhaustively by the mode-parameterised unit tests in
+    // shared::origins.
+    // ---------------------------------------------------------------
+
+    /// Mount a discovery document on `server` whose endpoints live on a second,
+    /// genuinely distinct loopback origin (a second mock server's port).
+    async fn mount_cross_origin_discovery(server: &MockServer, cross_origin_base: &str) {
+        let body = json!({
+            "issuer": server.uri(),
+            "token_endpoint": format!("{cross_origin_base}/oauth/token"),
+            "jwks_uri": format!("{cross_origin_base}/.well-known/jwks.json"),
+            "revocation_endpoint": format!("{cross_origin_base}/oauth/revoke"),
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn undeclared_cross_origin_discovery_is_served_in_warning_mode() {
+        // Two servers give two genuinely different loopback origins (distinct ports).
+        let issuer_server = MockServer::start().await;
+        let cross_origin_server = MockServer::start().await;
+
+        mount_cross_origin_discovery(&issuer_server, &cross_origin_server.uri()).await;
+
+        // No endpoint_origins declared: the cross-origin document violates the
+        // pinned set, but warning mode must not reject the deployment — it is
+        // the one-release window operators use to learn what to declare.
+        let mut config = make_config(&issuer_server.uri(), None, None, None);
+        config.endpoint_origins.clear();
+
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("warning mode must accept an undeclared cross-origin document");
+
+        assert_eq!(
+            provider.token_endpoint.as_str(),
+            format!("{}/oauth/token", cross_origin_server.uri()),
+            "the discovered endpoint is adopted unchanged under warning mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_cross_origin_jwks_admits_discovered_endpoints_on_that_origin() {
+        // An explicitly configured endpoint's own origin joins the pinned set,
+        // so a discovery document naming further endpoints on that origin is
+        // admitted. The JWKS itself stays on the configured (loopback) URL;
+        // declaring *new* origins is covered by the strict-parse unit tests in
+        // shared::origins and Google's shape below, because declared entries
+        // must be bare https origins and loopback test origins are plain http.
+        let issuer_server = MockServer::start().await;
+        let key_server = MockServer::start().await;
+
+        mount_cross_origin_discovery(&issuer_server, &key_server.uri()).await;
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .expect(1) // The token's kid resolves in this set; no further fetch.
+            .mount(&key_server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &issuer_server.uri(),
+            "aud": "test-client-id",
+            "sub": "user-cross-origin",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        // jwks_uri configured explicitly (its origin therefore joins the pinned
+        // set), token_endpoint left absent so discovery still runs.
+        let config = make_config(
+            &issuer_server.uri(),
+            None,
+            Some(format!("{}/.well-known/jwks.json", key_server.uri())),
+            None,
+        );
+
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("cross-origin discovery over a configured endpoint's origin must be accepted");
+
+        assert_eq!(
+            provider.token_endpoint.as_str(),
+            format!("{}/oauth/token", key_server.uri()),
+            "the discovered token endpoint on the admitted origin is adopted"
+        );
+
+        let identity = provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("the jwks on the admitted origin must actually serve keys");
+
+        assert_eq!(identity.subject, "user-cross-origin");
+    }
+
+    #[tokio::test]
+    async fn google_multi_origin_discovery_shape_passes_when_all_origins_are_declared() {
+        // Google publishes its token/revocation endpoints on oauth2.googleapis.com
+        // and its JWKS on www.googleapis.com — two origins, neither of them the
+        // issuer's. The fixture names those real-world origins in the document
+        // while serving it from loopback; only the parsed strings are checked.
+        let issuer_server = MockServer::start().await;
+        let body = json!({
+            "issuer": issuer_server.uri(),
+            "token_endpoint": "https://oauth2.googleapis.com/token",
+            "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+            "revocation_endpoint": "https://oauth2.googleapis.com/revoke",
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(1)
+            .mount(&issuer_server)
+            .await;
+
+        let mut config = make_config(&issuer_server.uri(), None, None, None);
+        config.endpoint_origins = vec![
+            "https://oauth2.googleapis.com".to_string(),
+            "https://www.googleapis.com".to_string(),
+        ];
+
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("Google's documented multi-origin shape must parse when declared");
+
+        assert_eq!(
+            provider.token_endpoint.as_str(),
+            "https://oauth2.googleapis.com/token"
+        );
+        assert_eq!(
+            provider
+                .revocation_endpoint
+                .as_ref()
+                .map(oidc_exchange_core::config::HttpsUrl::as_str),
+            Some("https://oauth2.googleapis.com/revoke"),
+            "the discovered revocation endpoint is adopted from the declared document"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_endpoint_origins_entries_are_rejected_at_the_adapter_boundary() {
+        let issuer_server = MockServer::start().await;
+
+        for bad in [
+            "http://not-https.example",       // wrong scheme
+            "https://path.example/with/path", // carries a path
+            "https://q.example/?query=1",     // carries a query
+            "garbage",                        // not a URL at all
+        ] {
+            let mut config = make_config(
+                &issuer_server.uri(),
+                Some(format!("{}/oauth/token", issuer_server.uri())),
+                Some(format!("{}/.well-known/jwks.json", issuer_server.uri())),
+                None,
+            );
+            config.endpoint_origins = vec![bad.to_string()];
+
+            let err = OidcProvider::from_config("google", &config)
+                .await
+                .err()
+                .expect("invalid declared entries must fail construction");
+
+            assert!(
+                matches!(err, Error::ConfigError { .. }),
+                "entry {bad:?} must be a config error, got: {err:?}"
+            );
+        }
     }
 
     // ---------------------------------------------------------------
@@ -926,6 +1101,9 @@ mod tests {
             .expect("alg-less RSA JWK should validate as RS256");
 
         assert_eq!(identity.subject, "user-123");
+        // The reported algorithm must be the one the JWK resolved to (explicit here),
+        // not read back from the token header.
+        assert_eq!(identity.signing_alg, "RS256");
         assert!(identity.raw_claims.contains_key("sub"));
     }
 
@@ -979,6 +1157,9 @@ mod tests {
             .expect("alg-less EC P-256 JWK should validate as ES256");
 
         assert_eq!(identity.subject, "user-456");
+        // The JWK carries no `alg`, so this value can only have come from key-material
+        // inference (kty EC + crv P-256 → ES256) — never from the header.
+        assert_eq!(identity.signing_alg, "ES256");
         assert!(identity.raw_claims.contains_key("sub"));
     }
 
@@ -1035,6 +1216,89 @@ mod tests {
             matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
             "unrecognised alg-less key must be reported as InvalidGrant"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 15b: a header alg that disagrees with the JWK is rejected — the
+    // verification (and the reported signing_alg) come from the JWK only
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn validate_id_token_rejects_header_alg_mismatching_jwk() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        // The JWKS pins an RSA key declared RS256; the token below is genuinely signed
+        // with an EC key but its header names the RSA JWK's kid, so the lookup resolves
+        // to the RS256 JWK while the header claims ES256.
+        let (_encoding_key, jwks, kid) = generate_rsa_test_keys();
+        let (ec_encoding_key, _ec_jwks, _ec_kid) = generate_es256_test_keys(true);
+        assert_eq!(jwks["keys"][0]["alg"], "RS256");
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        let claims = json!({
+            "iss": &uri,
+            "aud": "test-client-id",
+            "sub": "user-123",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        // Header claims ES256 while the resolved JWK pins RS256: the alg-confusion case.
+        // Validation is configured from the JWK alone, so the decode must reject before
+        // any signature check — the algorithm is never taken from the header.
+        let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(kid);
+        let id_token = encode(&header, &claims, &ec_encoding_key).unwrap();
+
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        let result = provider.validate_id_token(&id_token).await;
+        assert!(
+            result.is_err(),
+            "a header alg disagreeing with the JWK must never validate"
+        );
+        assert!(
+            matches!(result.unwrap_err(), Error::InvalidGrant { .. }),
+            "alg mismatch must be reported as InvalidGrant"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 15c: client_id reports the configured audience through the port
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn client_id_returns_configured_audience() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        // Explicit endpoints keep this test off the network.
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+        );
+        let provider = OidcProvider::from_config("my-google", &config)
+            .await
+            .expect("from_config should succeed");
+
+        // The audience validation pins (set_audience) and the port's client_id() must be
+        // the same configured value, so the core's azp check needs no config access.
+        assert_eq!(provider.client_id(), "test-client-id");
+        assert_eq!(provider.provider_id(), "my-google");
     }
 
     fn base64_url_encode(bytes: &[u8]) -> String {
@@ -1216,6 +1480,126 @@ mod tests {
         assert!(
             matches!(result2, Err(Error::InvalidGrant { .. })),
             "repeated unknown kid must still fail closed without a new network fetch"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Revocation boundary (plan task 05): a non-2xx revocation response is
+    // read bounded and rendered only through upstream::error_detail, so an
+    // intermediary echoing the submitted form — raw or percent-encoded —
+    // cannot put the token being revoked into the detail that later reaches
+    // an error log. Sentinels are obviously fake.
+    // -------------------------------------------------------------------
+
+    /// Provider wired to explicit endpoints on a fresh mock server; discovery is
+    /// skipped by supplying every endpoint in the config. The caller mounts whichever
+    /// revocation responses the test drives.
+    async fn provider_with_revocation(revocation_path: Option<&str>) -> (OidcProvider, MockServer) {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let revocation_endpoint = revocation_path.map(|p| format!("{uri}{p}"));
+        let config = make_config(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            revocation_endpoint,
+        );
+        let provider = OidcProvider::from_config("google", &config)
+            .await
+            .expect("from_config should succeed");
+        (provider, server)
+    }
+
+    #[tokio::test]
+    async fn revoke_token_returns_ok_on_2xx() {
+        let (provider, server) = provider_with_revocation(Some("/oauth/revoke")).await;
+
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        provider
+            .revoke_token("SENTINEL-REVOKE-TOKEN")
+            .await
+            .expect("a 2xx revocation must succeed");
+    }
+
+    #[tokio::test]
+    async fn revoke_is_noop_without_endpoint() {
+        let (provider, server) = provider_with_revocation(None).await;
+
+        provider
+            .revoke_token("whatever-token")
+            .await
+            .expect("without a revocation endpoint this is a documented no-op");
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests.is_empty(),
+            "the no-op path must not touch the network at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_non_2xx_never_leaks_submitted_token_raw_or_encoded() {
+        let (provider, server) = provider_with_revocation(Some("/oauth/revoke")).await;
+
+        // Echo the submitted form back: once as a raw pair, once percent-encoded under
+        // the same sensitive key. Both shapes decode to text containing the sentinel,
+        // so both must be masked before the detail becomes loggable.
+        let echo = "error=invalid_request&error_description=cannot revoke\
+                    &token=SENTINEL-REVOKE-TOKEN-VALUE&token=1%2F%2FSENTINEL-REVOKE-TOKEN-VALUE";
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(echo))
+            .mount(&server)
+            .await;
+
+        let err = provider
+            .revoke_token("SENTINEL-REVOKE-TOKEN-VALUE")
+            .await
+            .expect_err("a 400 revocation must fail");
+
+        assert!(
+            matches!(err, Error::ProviderError { .. }),
+            "revocation failure must surface as ProviderError"
+        );
+        let message = err.to_string();
+        assert!(
+            !message.contains("SENTINEL-REVOKE-TOKEN-VALUE"),
+            "echoed revoked token (raw or decoded) must never reach the detail, \
+             got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_non_2xx_structured_error_stays_conformant_and_masked() {
+        let (provider, server) = provider_with_revocation(Some("/oauth/revoke")).await;
+
+        // Structured RFC 6749 content: the error code stays visible to operators while
+        // an echoed pair inside the description is masked.
+        let body = r#"{"error":"invalid_request","error_description":"rejected token=SENTINEL-STRUCT-ECHO"}"#;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let message = provider
+            .revoke_token("irrelevant-token")
+            .await
+            .expect_err("a 400 revocation must fail")
+            .to_string();
+
+        assert!(
+            message.contains("invalid_request"),
+            "structured OAuth error code must stay visible, got: {message}"
+        );
+        assert!(
+            !message.contains("SENTINEL-STRUCT-ECHO"),
+            "an echoed pair inside error_description must be masked, got: {message}"
         );
     }
 }

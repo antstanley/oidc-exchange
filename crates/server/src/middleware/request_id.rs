@@ -6,11 +6,36 @@ use tracing::Instrument;
 /// Header name carrying the request id, reused inbound and always echoed outbound.
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
+/// Upper bound, in bytes, of an inbound `X-Request-Id` value that may be reused as a
+/// correlation identifier. Anything longer is attacker-shapable log volume, not a
+/// correlation id; it is silently replaced with a generated UUID v4.
+pub const MAX_REQUEST_ID_LEN: usize = 128;
+
+/// Whether an inbound request id is a plausible correlation identifier: non-empty, at
+/// most [`MAX_REQUEST_ID_LEN`] bytes, and drawn from ASCII `[A-Za-z0-9_-]`.
+///
+/// The predicate deliberately subsumes the emptiness check it replaces: an empty value is
+/// just one more non-plausible shape. Rejected values are *never* logged — echoing even a
+/// truncated form would reintroduce the unbounded client-chosen field this bound exists
+/// to remove.
+pub fn is_acceptable_request_id(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_REQUEST_ID_LEN {
+        return false;
+    }
+    // Byte-level scan: `[A-Za-z0-9_-]` is exactly the ASCII subset, so any multi-byte
+    // UTF-8 sequence necessarily fails the same test as any other disallowed byte.
+    value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// Middleware that ensures every request/response carries an `X-Request-Id` header and that
 /// every log emitted while handling the request is correlated to it.
 ///
-/// If the incoming request already contains a non-empty `X-Request-Id` header it is reused;
-/// otherwise (header absent, empty, or not valid UTF-8) a new UUID v4 is generated. In
+/// If the incoming request already contains a plausible `X-Request-Id` header (see
+/// [`is_acceptable_request_id`]) it is reused; otherwise (header absent, empty, over-long,
+/// wrongly shaped, or not valid UTF-8) a new UUID v4 is generated — the request is never
+/// failed over a malformed correlation header, and the rejected value is never logged. In
 /// `bootstrap::build_router`'s production stack this middleware is the outermost layer (see
 /// its doc comment), so its per-request `info_span` carrying `request_id` (plus `method` and
 /// `path`) wraps the rest of the middleware stack — including the request-timeout layer — and
@@ -28,13 +53,13 @@ pub async fn request_id_layer(request: Request<axum::body::Body>, next: Next) ->
         .headers()
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
+        .filter(|s| is_acceptable_request_id(s))
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    // Precondition: whether reused or generated, the id must never be blank. An empty
-    // header value is treated as absent (filtered out above) so this holds by construction
-    // rather than by chance — a blank id would still satisfy `to_str()` but is not a usable
-    // correlation value.
+    // Precondition: whether reused or generated, the id must never be blank. The predicate
+    // rejects empty header values above, so this holds by construction rather than by
+    // chance — a blank id would still satisfy `to_str()` but is not a usable correlation
+    // value.
     assert!(
         !request_id.is_empty(),
         "request_id must be non-empty: generated as a UUID v4 or reused from the request header"
@@ -363,5 +388,281 @@ mod tests {
             Some("reused-id-456".to_string()),
             "the log emitted inside the handler must carry the reused request_id, not a generated one"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Bounded, charset-checked reuse (plan task 02)
+    // -------------------------------------------------------------------
+
+    /// Predicate-level boundary sweep: below/at the limit pass, above it fails; the empty
+    /// value fails as one more non-plausible shape.
+    #[test]
+    fn is_acceptable_request_id_boundary_and_charset() {
+        // Below and at the length limit are accepted.
+        assert!(is_acceptable_request_id(
+            &"a".repeat(MAX_REQUEST_ID_LEN - 1)
+        ));
+        assert!(is_acceptable_request_id(&"a".repeat(MAX_REQUEST_ID_LEN)));
+
+        // One byte over the limit is rejected — the whole validity boundary in one place.
+        assert!(!is_acceptable_request_id(
+            &"a".repeat(MAX_REQUEST_ID_LEN + 1)
+        ));
+        assert!(!is_acceptable_request_id(""));
+
+        // The full accepted charset.
+        for ch in ['A', 'Z', 'a', 'z', '0', '9', '_', '-'] {
+            let id = ch.to_string();
+            assert!(is_acceptable_request_id(&id), "{ch:?} must be accepted");
+        }
+
+        // Negative space: legal-ASCII but wrongly shaped values, punctuation, whitespace,
+        // and multi-byte UTF-8 all fail even though they are valid header contents.
+        for bad in [
+            "wrong shape",
+            "bad$id",
+            "id.with.dots",
+            "id/slash",
+            "id+plus",
+            "id:colon",
+            "café",        // non-ASCII letter
+            "tab\tinside", // control character
+        ] {
+            assert!(!is_acceptable_request_id(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    /// An inbound id of exactly [`MAX_REQUEST_ID_LEN`] bytes is still reused end to end.
+    #[tokio::test]
+    async fn reuses_request_id_at_max_length() {
+        let at_limit = "k".repeat(MAX_REQUEST_ID_LEN);
+
+        let response = app()
+            .oneshot(
+                Request::get("/")
+                    .header("x-request-id", at_limit.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response
+            .headers()
+            .get("x-request-id")
+            .expect("should have x-request-id header")
+            .to_str()
+            .expect("echoed id must be visible ASCII");
+        assert_eq!(id, at_limit, "an exactly-at-limit id must be reused");
+    }
+
+    /// One byte beyond the limit yields a fresh UUID v4 — never a failed request, never a
+    /// truncated echo.
+    #[tokio::test]
+    async fn generates_request_id_for_oversized_header() {
+        let over_limit = "k".repeat(MAX_REQUEST_ID_LEN + 1);
+
+        let response = app()
+            .oneshot(
+                Request::get("/")
+                    .header("x-request-id", over_limit.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response
+            .headers()
+            .get("x-request-id")
+            .expect("should have x-request-id header")
+            .to_str()
+            .expect("generated id must be visible ASCII");
+        assert_ne!(id, over_limit);
+        assert_eq!(id.len(), 36);
+        assert!(uuid::Uuid::parse_str(id).is_ok());
+    }
+
+    /// A hostile 64 KiB header is discarded wholesale in favor of a generated id; the
+    /// request itself must not be affected.
+    #[tokio::test]
+    async fn generates_request_id_for_64_kib_header() {
+        const HOSTILE_LEN: usize = 65_536;
+        let hostile = "x".repeat(HOSTILE_LEN);
+
+        let response = app()
+            .oneshot(
+                Request::get("/")
+                    .header("x-request-id", hostile.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response
+            .headers()
+            .get("x-request-id")
+            .expect("should have x-request-id header")
+            .to_str()
+            .expect("generated id must be visible ASCII");
+        assert_ne!(id, hostile);
+        assert_eq!(id.len(), 36);
+        assert!(uuid::Uuid::parse_str(id).is_ok());
+    }
+
+    /// Legal-ASCII but wrongly shaped values (spaces, punctuation) are replaced with a
+    /// generated id rather than propagated or rejected outright.
+    #[tokio::test]
+    async fn generates_request_id_for_wrongly_shaped_ascii() {
+        let response = app()
+            .oneshot(
+                Request::get("/")
+                    .header("x-request-id", "not a plausible id!")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response
+            .headers()
+            .get("x-request-id")
+            .expect("should have x-request-id header")
+            .to_str()
+            .expect("generated id must be visible ASCII");
+        assert_ne!(id, "not a plausible id!");
+        assert_eq!(id.len(), 36);
+        assert!(uuid::Uuid::parse_str(id).is_ok());
+    }
+
+    /// Every rendered telemetry fragment — span names, event targets/messages, and field
+    /// values — collected so tests can prove a rejected request id is emitted nowhere.
+    #[derive(Default, Clone)]
+    struct AllOutputCapture(Arc<Mutex<Vec<String>>>);
+
+    struct FragmentVisitor {
+        fragments: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl tracing::field::Visit for FragmentVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fragments
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .push(format!("{}={}", field.name(), value));
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fragments
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .push(format!("{}={:?}", field.name(), value));
+        }
+    }
+
+    impl<S> Layer<S> for AllOutputCapture
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            let fragments = self.0.clone();
+            fragments
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .push(format!("span:{}", attrs.metadata().name()));
+            attrs.record(&mut FragmentVisitor { fragments });
+        }
+
+        fn on_record(
+            &self,
+            _id: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            _ctx: Context<'_, S>,
+        ) {
+            values.record(&mut FragmentVisitor {
+                fragments: self.0.clone(),
+            });
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let fragments = self.0.clone();
+            fragments
+                .lock()
+                .expect("capture mutex must not be poisoned")
+                .push(format!("event:{}", event.metadata().name()));
+            event.record(&mut FragmentVisitor { fragments });
+        }
+    }
+
+    /// Rejection stays silent: driving several malformed ids through the middleware under
+    /// an everything-capturing subscriber emits none of them, while the capture still
+    /// records real `request_id` fields (so the silence claim is not vacuous).
+    #[tokio::test]
+    async fn rejected_request_ids_are_never_logged() {
+        let capture = AllOutputCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let rejected = vec![
+            "k".repeat(MAX_REQUEST_ID_LEN + 1),
+            "wrong shape!".to_string(),
+            "bad$id".to_string(),
+        ];
+        for bad in &rejected {
+            let response = app()
+                .oneshot(
+                    Request::get("/")
+                        .header("x-request-id", bad.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let echoed = response
+                .headers()
+                .get("x-request-id")
+                .expect("should have x-request-id header")
+                .to_str()
+                .expect("generated id must be visible ASCII");
+            assert_ne!(echoed, bad, "a rejected id must never be echoed");
+            assert!(uuid::Uuid::parse_str(echoed).is_ok());
+        }
+
+        let fragments = capture
+            .0
+            .lock()
+            .expect("capture mutex must not be poisoned")
+            .join("\n");
+
+        // Positive control: the request spans were observed carrying generated ids, so the
+        // negative assertions below are made against a live capture, not an empty one.
+        assert!(
+            fragments.contains("span:request"),
+            "the per-request span must have been created inside this capture"
+        );
+        assert!(
+            fragments.matches("request_id=").count() >= 3,
+            "each driven request must have recorded its generated request_id"
+        );
+
+        // Negative space: no rejected value appears anywhere in any rendered fragment.
+        for bad in &rejected {
+            assert!(
+                !fragments.contains(bad.as_str()),
+                "rejected request id must never reach telemetry"
+            );
+        }
     }
 }

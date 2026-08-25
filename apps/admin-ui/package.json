@@ -5,16 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "generate": "node scripts/generate-client.mjs",
+    "generate:check": "node scripts/generate-client.mjs --check",
+    "build": "pnpm generate && vite build",
     "preview": "vite preview",
     "prepare": "svelte-kit sync || echo ''",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "lint": "oxlint --deny-warnings",
-    "format": "oxfmt",
-    "format:check": "oxfmt --check",
-    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test": "vitest run"
+    "format": "oxfmt --ignore-path=.oxfmtignore",
+    "format:check": "oxfmt --check --ignore-path=.oxfmtignore",
+    "test": "vitest run",
+    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
     "d3-array": "^3.2.4",
@@ -37,7 +39,7 @@
     "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "vite": "^8.1.1",
-    "vitest": "^4.1.9"
+    "vitest": "4.1.9"
   },
   "engines": {
     "node": ">= 24.18.0"

@@ -29,29 +29,48 @@
     },
     "Session": {
       "type": "object",
-      "required": ["user_id", "refresh_token_hash", "provider", "expires_at", "created_at"],
+      "description": "One generation of a refresh-token family.",
+      "required": ["user_id", "refresh_token_hash", "family_id", "generation", "provider", "expires_at", "created_at"],
       "properties": {
         "user_id": { "type": "string" },
         "refresh_token_hash": { "type": "string", "description": "SHA-256 hash of the opaque refresh token" },
+        "family_id": { "type": "string", "description": "fam_<lowercase ulid>; stable across every rotation of one sign-in" },
+        "generation": { "type": "integer", "minimum": 0, "description": "0 at exchange, incremented once per rotation" },
         "provider": { "type": "string" },
-        "expires_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time", "description": "Absolute family deadline; set at exchange and never moved by rotation." },
+        "rotated_at": { "type": ["string", "null"], "format": "date-time", "description": "When this generation was issued; null at generation 0." },
         "device_id": { "type": ["string", "null"] },
         "user_agent": { "type": ["string", "null"] },
         "ip_address": { "type": ["string", "null"] },
         "created_at": { "type": "string", "format": "date-time" }
       }
     },
+    "RetiredRefreshToken": {
+      "type": "object",
+      "description": "A retired refresh-token generation, retained so that its re-presentation is detectable as reuse.",
+      "required": ["refresh_token_hash", "family_id", "user_id", "successor_hash", "retired_at", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "refresh_token_hash": { "type": "string", "description": "SHA-256 hash of the retired generation" },
+        "family_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "successor_hash": { "type": "string", "description": "The generation that replaced this one. Grace applies only while this is still the family's live generation." },
+        "retired_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time", "description": "min(retired_at + token.refresh_reuse_retention, family expires_at)." }
+      }
+    },
     "AuditEvent": {
       "type": "object",
-      "required": ["id", "timestamp", "severity", "event_type", "outcome"],
+      "required": ["id", "timestamp", "severity", "event_type", "ip_address_source", "outcome"],
       "properties": {
         "id": { "type": "string", "description": "ULID" },
         "timestamp": { "type": "string", "format": "date-time" },
         "severity": { "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"] },
-        "event_type": { "type": "string" },
+        "event_type": { "enum": ["token_exchange", "token_refresh", "token_revocation", "session_revoked", "all_sessions_revoked", "user_created", "user_updated", "user_suspended", "user_deleted", "validation_failed", "registration_denied", "provider_error", "unauthorized", "throttle_exceeded"] },
         "actor": { "type": ["string", "null"], "description": "User ID if known" },
         "provider": { "type": ["string", "null"] },
         "ip_address": { "type": ["string", "null"] },
+        "ip_address_source": { "enum": ["peer", "forwarded", "asserted", "unknown"] },
         "user_agent": { "type": ["string", "null"] },
         "detail": { "type": "object", "additionalProperties": true },
         "outcome": {
@@ -59,9 +78,18 @@
           "required": ["status"],
           "properties": {
             "status": { "enum": ["success", "failure"] },
-            "reason": { "type": ["string", "null"] }
+            "reason": { "enum": ["authentication_failed", "registration_denied", "principal_suspended", "provider_rejected", "throttle_exceeded", null] }
           }
         }
+      }
+    },
+    "SingleUseRecord": {
+      "type": "object",
+      "required": ["key", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "type": "string", "description": "Namespaced digest key ('nonce:<sha256hex>' or 'assertion:<provider>:[d:]<sha256hex>'); never a raw nonce or raw assertion." },
+        "expires_at": { "type": "string", "format": "date-time", "description": "Instant after which both claim operations treat the record as absent." }
       }
     }
   }

@@ -1,0 +1,9 @@
+error[E0277]: `Secret<String>` doesn't implement `std::fmt::Display`
+ --> tests/ui/display_format.rs:7:14
+  |
+7 |     format!("{secret}")
+  |              ^^^^^^^^ `Secret<String>` cannot be formatted with the default formatter
+  |
+  = help: the trait `std::fmt::Display` is not implemented for `Secret<String>`
+  = note: in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead
+  = note: required for `&Secret<String>` to implement `std::fmt::Display`

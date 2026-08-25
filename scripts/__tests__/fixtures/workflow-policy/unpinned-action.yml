@@ -1,0 +1,12 @@
+name: fixture
+on: workflow_dispatch
+jobs:
+  check:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: corepack pnpm@11.9.0 install --frozen-lockfile

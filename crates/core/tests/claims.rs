@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use oidc_exchange_core::domain::{User, UserStatus, INITIAL_USER_VERSION};
+use oidc_exchange_core::domain::{AccessTokenClaims, User, UserStatus, INITIAL_USER_VERSION};
 use oidc_exchange_core::service::claims::resolve_custom_claims;
 
 fn make_user() -> User {
@@ -94,6 +94,8 @@ fn reserved_claim_rejected_from_config() {
     config_claims.insert("aud".to_string(), "override".to_string());
     config_claims.insert("iat".to_string(), "override".to_string());
     config_claims.insert("exp".to_string(), "override".to_string());
+    config_claims.insert("nbf".to_string(), "override".to_string());
+    config_claims.insert("sid".to_string(), "override".to_string());
     config_claims.insert("org".to_string(), "allowed".to_string());
 
     let result = resolve_custom_claims(&Some(config_claims), &user);
@@ -103,6 +105,10 @@ fn reserved_claim_rejected_from_config() {
     assert!(!result.contains_key("aud"));
     assert!(!result.contains_key("iat"));
     assert!(!result.contains_key("exp"));
+    // `sid` carries revocation authority and `nbf` bounds validity, so a
+    // config template must not be able to supply either.
+    assert!(!result.contains_key("nbf"));
+    assert!(!result.contains_key("sid"));
     assert_eq!(
         result.get("org"),
         Some(&Value::String("allowed".to_string()))
@@ -115,14 +121,45 @@ fn reserved_claim_rejected_from_user_claims() {
     user.claims
         .insert("sub".to_string(), Value::String("override".to_string()));
     user.claims
+        .insert("nbf".to_string(), Value::String("override".to_string()));
+    user.claims
+        .insert("sid".to_string(), Value::String("override".to_string()));
+    user.claims
         .insert("custom".to_string(), Value::String("kept".to_string()));
 
     let result = resolve_custom_claims(&None, &user);
 
+    // A per-user claim named `sid` would collide with the struct field in
+    // the flattened JWT payload — dropping it is what keeps revocation
+    // authority out of user-controlled data.
     assert!(!result.contains_key("sub"));
+    assert!(!result.contains_key("nbf"));
+    assert!(!result.contains_key("sid"));
     assert_eq!(
         result.get("custom"),
         Some(&Value::String("kept".to_string()))
+    );
+}
+
+/// Fail-closed negative space: an access-token payload without `sid` (the
+/// pre-session-binding shape) cannot deserialize into `AccessTokenClaims`,
+/// so old tokens can never reach a code path that reads claims.
+#[test]
+fn access_token_claims_without_sid_fail_to_deserialize() {
+    let legacy_payload = serde_json::json!({
+        "sub": "usr_123",
+        "iss": "https://auth.test.com",
+        "aud": "https://api.test.com",
+        "iat": 1_700_000_000u64,
+        "exp": 1_700_000_900u64,
+    });
+
+    let err = serde_json::from_value::<AccessTokenClaims>(legacy_payload)
+        .expect_err("a payload missing sid must be rejected");
+
+    assert!(
+        err.to_string().contains("sid"),
+        "the rejection should name the missing claim: {err}"
     );
 }
 
@@ -183,4 +220,73 @@ fn empty_config_and_user_claims() {
     let user = make_user();
     let result = resolve_custom_claims(&None, &user);
     assert!(result.is_empty());
+}
+
+/// The exact 24-name closed set, spelled independently of the constant so
+/// drift on either side fails here too.
+const RESERVED_CLAIM_NAMES: [&str; 24] = [
+    "iss",
+    "sub",
+    "aud",
+    "exp",
+    "nbf",
+    "iat",
+    "jti",
+    "acr",
+    "amr",
+    "at_hash",
+    "auth_time",
+    "azp",
+    "c_hash",
+    "cnf",
+    "nonce",
+    "sid",
+    "typ",
+    "client_id",
+    "scope",
+    "scp",
+    "roles",
+    "groups",
+    "entitlements",
+    "permissions",
+];
+
+/// Already-persisted defensive filter: a record written before the write-path
+/// rule may carry reserved names, and none of them — from either the persisted
+/// map or a configured template — may reach the signed token. Paired with an
+/// allowed per-user claim and template that must both survive.
+#[test]
+fn all_24_reserved_names_are_defensively_filtered_at_token_build() {
+    let mut user = make_user();
+    let mut config_claims = HashMap::new();
+
+    for name in RESERVED_CLAIM_NAMES {
+        user.claims.insert(
+            name.to_string(),
+            Value::String("persisted-override".to_string()),
+        );
+        config_claims.insert(name.to_string(), "template-override".to_string());
+    }
+    user.claims.insert(
+        "kept_user_claim".to_string(),
+        Value::String("visible".to_string()),
+    );
+    config_claims.insert("kept_template".to_string(), "{{ user.id }}".to_string());
+
+    let result = resolve_custom_claims(&Some(config_claims), &user);
+
+    for name in RESERVED_CLAIM_NAMES {
+        assert!(
+            !result.contains_key(name),
+            "reserved name {name:?} must be dropped at token build even when persisted"
+        );
+    }
+    assert_eq!(
+        result.get("kept_user_claim"),
+        Some(&Value::String("visible".to_string()))
+    );
+    assert_eq!(
+        result.get("kept_template"),
+        Some(&Value::String("usr_123".to_string()))
+    );
 }
