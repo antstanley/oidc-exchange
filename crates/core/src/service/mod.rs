@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use serde_json::Value;
 
 use crate::config::Config;
 use crate::domain::{
@@ -63,6 +64,9 @@ pub struct AppService {
     pub(crate) keys: Box<dyn KeyManager>,
     pub(crate) audit: Box<dyn AuditLog>,
     pub(crate) user_sync: Box<dyn UserSync>,
+    /// The shared rate-limit port: the exchange plane's budgets and the
+    /// admin plane's `OperatorAuth` failed-authentication budget both flow
+    /// through it.
     pub(crate) rate_limiter: Box<dyn RateLimiter>,
     pub(crate) providers: HashMap<String, Box<dyn IdentityProvider>>,
     pub(crate) config: Config,
@@ -110,6 +114,15 @@ impl AppService {
     /// rotation disabled). It rides the JWT as the stable `sid` claim, so
     /// every access token names exactly the one family it may revoke,
     /// invariant across rotations.
+    /// The shared [`RateLimiter`] port instance.
+    ///
+    /// Exposed so the server's operator-auth layer can consult the same
+    /// budget this service was built with — the throttle state must be one
+    /// process-wide instance, never a per-consumer copy.
+    pub fn rate_limiter(&self) -> &dyn RateLimiter {
+        self.rate_limiter.as_ref()
+    }
+
     ///
     /// Returns `(jwt_string, expires_in_seconds)`.
     ///
@@ -273,7 +286,34 @@ impl AppService {
         client_addr: ClientAddr,
         user_agent: Option<String>,
     ) -> Result<()> {
-        let event = event.into_audit_event(outcome, actor, provider, client_addr, user_agent);
+        self.emit_security_event_with_detail(
+            event,
+            outcome,
+            actor,
+            provider,
+            client_addr,
+            user_agent,
+            HashMap::new(),
+        )
+        .await
+    }
+
+    /// [`Self::emit_security_event`] with correlation `detail` attached (e.g.
+    /// the admin route a rejected operator authentication targeted). The
+    /// classification stays closed; detail is context, never classification.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn emit_security_event_with_detail(
+        &self,
+        event: SecurityEvent,
+        outcome: AuditOutcome,
+        actor: Option<String>,
+        provider: Option<String>,
+        client_addr: ClientAddr,
+        user_agent: Option<String>,
+        detail: HashMap<String, Value>,
+    ) -> Result<()> {
+        let mut event = event.into_audit_event(outcome, actor, provider, client_addr, user_agent);
+        event.detail = detail;
         self.emit_mandatory_audit_event(event).await
     }
 
@@ -313,10 +353,18 @@ impl AppService {
             tracing::info!(audit_fallback = true, "{serialized}");
         }
     }
+
 }
 
-/// Build a best-effort [`AuditEvent`]. The address is rendered with its provenance;
-/// device identifiers remain session-only data and are never included in audit records.
+/// Build an [`AuditEvent`] with no operator attribution.
+///
+/// `ip_address` and `user_agent` come from the caller's client context (the
+/// `AuditContext` middleware at the HTTP edge); the `AuditEvent` shape has no
+/// `device_id` field, so device identifiers are recorded on the `Session`
+/// only, never on audit events. The `operator` field starts as `None`: this
+/// constructor serves every exchange-plane event, where there is no operator,
+/// and admin flows stamp the principal onto the returned event explicitly so
+/// attribution is always a deliberate act, never a default.
 #[allow(clippy::too_many_arguments)]
 pub fn create_audit_event(
     event_type: AuditEventType,
@@ -333,6 +381,7 @@ pub fn create_audit_event(
         severity,
         event_type,
         actor,
+        operator: None,
         provider,
         ip_address: client_addr.audit_address(),
         ip_address_source: client_addr.source(),
@@ -731,7 +780,11 @@ mod validate_access_token_tests {
         async fn count_by_status(&self) -> Result<HashMap<String, u64>> {
             unreachable!("validate_access_token must not count users")
         }
-        async fn list_users(&self, _: u64, _: u64) -> Result<Vec<User>> {
+        async fn list_users(
+            &self,
+            _: Option<&str>,
+            _: u32,
+        ) -> Result<crate::domain::UserPage> {
             unreachable!("validate_access_token must not list users")
         }
     }
@@ -832,6 +885,20 @@ mod validate_access_token_tests {
     #[async_trait]
     impl crate::ports::RateLimiter for NeverTouchedRateLimiter {
         async fn check_and_consume(
+            &self,
+            _: &crate::domain::RateLimitKey,
+        ) -> Result<crate::domain::RateLimitDecision> {
+            unreachable!("validate_access_token must not consult the rate limiter")
+        }
+
+        async fn check(
+            &self,
+            _: &crate::domain::RateLimitKey,
+        ) -> Result<crate::domain::RateLimitDecision> {
+            unreachable!("validate_access_token must not consult the rate limiter")
+        }
+
+        async fn consume(
             &self,
             _: &crate::domain::RateLimitKey,
         ) -> Result<crate::domain::RateLimitDecision> {

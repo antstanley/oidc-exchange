@@ -19,7 +19,8 @@ use oidc_exchange_core::service::revoke::RevokeRequest;
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 fn base_raw_config() -> RawConfig {
@@ -77,7 +78,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         make_config(),
     )

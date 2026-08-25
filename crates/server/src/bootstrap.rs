@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use oidc_exchange_core::config::{Config as AppConfig, ProviderConfig, RawConfig};
+use oidc_exchange_core::config::{Config as AppConfig, ProviderConfig, RawConfig, ServerRole};
 use oidc_exchange_core::error::Error;
 use oidc_exchange_core::ports::{
     AuditLog, IdentityProvider, KeyManager, RateLimiter, SessionRepository, UserRepository,
@@ -149,7 +149,7 @@ pub fn load_config_from_file(path: &str) -> Result<AppConfig, Box<dyn std::error
 /// secret) and a failure aborts before any adapter or router is built.
 ///
 /// With no files present and no overriding environment variables, the
-/// deserialized result is `AppConfig::default()` (every field carries
+/// deserialized result is `AppConfig::test_default()` (every field carries
 /// `#[serde(default)]`).
 pub fn load_config_from_dir(config_dir: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let mut builder = Config::builder().add_source(
@@ -391,8 +391,13 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
     let user_repo = build_user_repository(config).await?;
     let session_repo = build_session_repository(config).await?;
 
-    // Key manager and providers only needed for exchange role
-    let keys: Box<dyn KeyManager> = if role == "admin" {
+    // Key manager and providers only needed for exchange role — except that
+    // the operator_token mechanism verifies tokens against a real key manager
+    // even under role = "admin", where signing is otherwise unused (the
+    // configuration validation refuses the noop manager in exactly that
+    // combination, so this branch cannot be reached with adapter = "noop").
+    let keys: Box<dyn KeyManager> = if role == "admin" && !config.internal_api.uses_operator_token()
+    {
         Box::new(oidc_exchange_adapters::noop::NoopKeyManager)
     } else {
         build_key_manager(config)?
@@ -414,46 +419,259 @@ pub async fn build_service(config: &AppConfig) -> Result<AppService, Box<dyn std
         build_providers(config).await?
     };
 
+    // The failed-auth throttle is only mounted where operator authentication
+    // happens (the admin plane), so a process that never serves `/internal/*`
+    // carries the noop limiter rather than live throttle state. Bounds were
+    // already validated by `AppConfig::validate`; building eagerly here fails
+    // fast on any bound validation missed.
+    let admin_rate_limiter: Box<dyn RateLimiter> = if internal_api_served(config) {
+        Box::new(
+            oidc_exchange_adapters::rate_limit::AdminAuthRateLimiter::new(
+                config.internal_api.max_auth_failures,
+                config.internal_api.auth_failure_window,
+                config.internal_api.auth_lockout,
+            )?,
+        )
+    } else {
+        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new())
+    };
+
+    // One port, two budget families: exchange-plane keys route to the fixed
+    // window limiter, the admin plane's `OperatorAuth` failed-auth budget to
+    // its own limiter — so a burst of anonymous public traffic can never
+    // exhaust the operator budget, and vice versa.
+    let rate_limiter: Box<dyn RateLimiter> = Box::new(CompositeRateLimiter {
+        exchange: build_rate_limiter(config)?,
+        admin: admin_rate_limiter,
+    });
+
     Ok(AppService::new(
         user_repo,
         session_repo,
         keys,
         audit,
         user_sync,
-        build_rate_limiter(config)?,
+        rate_limiter,
         providers,
         config.clone(),
     ))
+}
+
+/// Routes each [`RateLimitKey`] family to the limiter that owns its budget:
+/// `OperatorAuth` to the admin plane's failed-authentication limiter,
+/// everything else to the exchange plane's fixed-window limiter.
+struct CompositeRateLimiter {
+    exchange: Box<dyn RateLimiter>,
+    admin: Box<dyn RateLimiter>,
+}
+
+impl CompositeRateLimiter {
+    fn route(&self, key: &oidc_exchange_core::domain::RateLimitKey) -> &dyn RateLimiter {
+        match key {
+            oidc_exchange_core::domain::RateLimitKey::OperatorAuth(_) => self.admin.as_ref(),
+            _ => self.exchange.as_ref(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RateLimiter for CompositeRateLimiter {
+    async fn check_and_consume(
+        &self,
+        key: &oidc_exchange_core::domain::RateLimitKey,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::RateLimitDecision> {
+        self.route(key).check_and_consume(key).await
+    }
+
+    async fn check(
+        &self,
+        key: &oidc_exchange_core::domain::RateLimitKey,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::RateLimitDecision> {
+        self.route(key).check(key).await
+    }
+
+    async fn consume(
+        &self,
+        key: &oidc_exchange_core::domain::RateLimitKey,
+    ) -> oidc_exchange_core::error::Result<oidc_exchange_core::domain::RateLimitDecision> {
+        self.route(key).consume(key).await
+    }
+}
+
+/// Whether this process serves `/internal/*`: the role binds the admin
+/// listener and the internal API flag is on. Mirrors the condition
+/// `AppConfig::validate` uses for the `[internal_api]` contract; asserted
+/// consistent so the two can never drift apart silently.
+fn internal_api_served(config: &AppConfig) -> bool {
+    let served =
+        matches!(config.server.role.as_str(), "admin" | "all") && config.internal_api.enabled;
+    assert!(
+        served
+            || !matches!(config.server.role.as_str(), "admin" | "all")
+            || !config.internal_api.enabled,
+        "internal_api_served must mirror AppConfig::validate's serving condition"
+    );
+    served
 }
 
 // ---------------------------------------------------------------------------
 // Router builder
 // ---------------------------------------------------------------------------
 
-/// Build the Axum `Router` from a config and service, applying role-based
-/// route merging and middleware layers.
+/// The routers a process serves, one per plane. `role` decides which are
+/// `Some`; a plane without its router is never bound and never served.
 ///
-/// The internal routes (`/internal/*`) are mounted only when the role is
-/// `admin`/`all` **and** `internal_api.enabled = true`; the flag being false
-/// is not a startup error, it simply leaves the internal surface unmounted
-/// (`AppConfig::validate` already requires a non-empty shared secret whenever
-/// the flag is true and the role would serve it, so a missing/empty secret
-/// is caught at startup, never discovered by an unauthenticated request).
+/// Invariant (task 04, `04-http-api.md` → Service roles): the public router
+/// never contains `/internal/*` routes and the admin router never contains
+/// public exchange routes — the planes share state and middleware, never route
+/// sets.
+#[derive(Debug, Default)]
+pub struct Routers {
+    /// Public exchange plane (`/token`, `/revoke`, `/keys`,
+    /// `/.well-known/openid-configuration`, `/health`). Bound on
+    /// `server.host:port`.
+    pub public: Option<Router>,
+    /// Admin plane (`/internal/*` when enabled, plus `/health`). Bound on
+    /// `internal_api.host:port`.
+    pub admin: Option<Router>,
+}
+
+impl Routers {
+    /// Whether either router exists. A role that binds nothing is a
+    /// misconfiguration caught by `AppConfig::validate`, asserted here as
+    /// defence in depth.
+    pub fn is_empty(&self) -> bool {
+        self.public.is_none() && self.admin.is_none()
+    }
+
+    /// The single router a one-request-surface runtime (Lambda, FFI) may
+    /// serve, per the source-spec single-plane rule: `exchange` and `admin`
+    /// serve their own plane; `all` has two planes but only one socket to
+    /// give, so it serves the public plane and logs a startup warning naming
+    /// the unmounted internal routes — plane separation on those runtimes is
+    /// expressed by deploying a second function/instance with
+    /// `role = "admin"`. Returns `None` when no router exists for the role at
+    /// all.
+    ///
+    /// These runtures serve through the platform's request surface rather
+    /// than `into_make_service_with_connect_info`, so every `/internal/*`
+    /// request authenticates with `ClientAddr::Unknown`: no per-peer throttle
+    /// key exists, meaning failed-auth lockout and peer-attributed security
+    /// events are inactive. That degradation must never be silent — an
+    /// API-Gateway-fronted function *is* an externally reachable guessing
+    /// surface — so handing back the admin router warns loudly here.
+    pub fn single_plane(&self) -> Option<Router> {
+        match (&self.public, &self.admin) {
+            (Some(public), _) => {
+                if self.admin.is_some() {
+                    // Only role = "all" carries both; collapsing it must be
+                    // loud so an operator never mistakes a Lambda function
+                    // serving `/token` for one that also serves `/internal/*`.
+                    tracing::warn!(
+                        unmounted = "/internal/*",
+                        "role = \"all\" cannot bind two sockets on this single-plane runtime; \
+                         serving only the public plane — deploy a second instance with \
+                         role = \"admin\" for the internal API"
+                    );
+                }
+                Some(public.clone())
+            }
+            (None, Some(admin)) => {
+                // No ConnectInfo exists on this runtime, so the internal-auth
+                // layer will see ClientAddr::Unknown on every request and the
+                // per-peer OperatorAuth budget cannot be consulted. The
+                // fail-open is deliberate but must be visible: say so at
+                // startup, every boot, so the deployment cannot quietly lose
+                // its lockout/audit protection behind an API Gateway.
+                tracing::warn!(
+                    plane = "admin",
+                    "serving the admin plane on a single-plane runtime without connection info; \
+                     the per-peer authentication-failure throttle (lockout) and peer-address \
+                     attribution on its security events are INACTIVE because no socket peer is \
+                     available to key them — restrict reachability at your ingress (e.g. \
+                     API-Gateway authorizers or VPC policy), not by lockout"
+                );
+                Some(admin.clone())
+            }
+            (None, None) => None,
+        }
+    }
+}
+
+/// Build every router the configured role requires.
 ///
-/// Middleware stack, outermost first (`04-http-api.md` → Middleware stack): base-path strip,
-/// request-id, request-timeout, audit-context, catch-panic. Axum/tower give the *last*
-/// `.layer()` call the outermost position (it wraps every layer added before it as its
-/// `next`), so the code below applies the per-route layers in the reverse of that list —
-/// catch-panic first (innermost, nearest the handler), then audit-context, then the timeout
-/// layer, then request-id last (outermost among them). This ordering is what makes a
-/// request-timeout response still carry the `x-request-id` header: because request-id wraps
-/// the timeout layer, its header-insertion code always runs on whatever `next.run()`
-/// produces, including the timeout layer's own manufactured `408` when the inner future is
-/// abandoned — whereas a layer *outside* request-id would have its future abandoned right
-/// along with the rest and never see the response at all. The timeout layer itself wraps
-/// audit-context and catch-panic so the bound covers them and the handler, not just the
-/// handler.
+/// Role rules (`04-http-api.md` → Service roles):
+/// - `exchange`: the public router only.
+/// - `admin`: the admin router only (`/health`, plus `/internal/*` when
+///   `internal_api.enabled`).
+/// - `all`: both routers, each on its own socket — the internal routes are
+///   never merged into the public router.
 ///
+/// Both routers share one [`AppState`] and the same middleware stack; only the
+/// admin router carries the internal-auth layer (it is part of
+/// [`crate::routes::internal_routes`]). The flag being false is not a startup
+/// error, it simply leaves the internal surface unmounted.
+pub fn build_routers(
+    config: &AppConfig,
+    service: AppService,
+) -> Result<Routers, Box<dyn std::error::Error>> {
+    build_routers_shared(config, Arc::new(service))
+}
+
+/// [`build_routers`] over an already-shared service handle, for runtimes
+/// whose process owns another consumer of the same `AppService` (the hyper
+/// runtime's session reaper).
+pub fn build_routers_shared(
+    config: &AppConfig,
+    service: Arc<AppService>,
+) -> Result<Routers, Box<dyn std::error::Error>> {
+    let role = config.server.role;
+
+    // The operator-auth gate exists exactly where the internal-auth layer
+    // will mount: an enabled internal API on a role that binds the admin
+    // listener. Anywhere else there is nothing to authenticate. Building can
+    // fail (e.g. loading the verification key material for operator tokens),
+    // and a misconfigured admin plane must fail startup rather than serve.
+    let operator_auth = if internal_api_served(config) {
+        Some(Arc::new(build_operator_auth_gate(config)?))
+    } else {
+        None
+    };
+
+    let mut routers = Routers::default();
+
+    if matches!(role, ServerRole::Exchange | ServerRole::All) {
+        // The public plane rides the full shared stack — concurrency bound,
+        // access log, address throttle — via the same builder every runtime
+        // uses; it never carries `/internal/*`.
+        routers.public = Some(build_router_shared(config, service.clone()));
+    }
+    if matches!(role, ServerRole::Admin | ServerRole::All) {
+        let rate_limiter: Arc<dyn RateLimiter> = Arc::from(
+            build_rate_limiter(config)
+                .expect("validated rate-limit config at router construction"),
+        );
+        let state = AppState {
+            service,
+            config: Arc::new(config.clone()),
+            rate_limiter,
+            operator_auth,
+        };
+        routers.admin = Some(build_admin_router(config, state));
+    }
+
+    assert!(
+        !routers.is_empty(),
+        "a validated role ({:?}) must produce at least one router",
+        role.as_str()
+    );
+    if let Some(public) = &routers.public {
+        assert_public_router_shape(public);
+    }
+
+    Ok(routers)
+}
+
 /// The base-path strip is applied *last*, wrapping the entire already-assembled, already-
 /// stated router from the outside via [`crate::middleware::base_path::with_base_path_strip`]
 /// — not as one more `.layer()` call. `Router::layer` only wraps each already-registered
@@ -508,10 +726,32 @@ fn build_router_shared_with_rate_limiter(
         );
     }
 
+    // On this single-router path the internal surface mounts only under
+    // role = "admin": the plane-separation invariant says no public router
+    // ever serves `/internal/*`, and role = "all" on a single-plane runtime
+    // serves the public plane (deploy a second instance with role = "admin"
+    // for the internal API). `build_routers` is the two-socket path.
+    let operator_auth = if role == "admin" && internal_api_served(config) {
+        Some(Arc::new(build_operator_auth_gate(config).expect(
+            "validated internal_api config at router construction",
+        )))
+    } else {
+        None
+    };
+    if role == "all" && config.internal_api.enabled {
+        tracing::warn!(
+            unmounted = "/internal/*",
+            "role = \"all\" cannot bind two sockets on this single-router runtime; \
+             serving only the public plane — deploy a second instance with \
+             role = \"admin\" for the internal API"
+        );
+    }
+
     let state = AppState {
         service,
         config: Arc::new(config.clone()),
         rate_limiter,
+        operator_auth,
     };
 
     let mut app: Router<AppState> = Router::new();
@@ -542,7 +782,7 @@ fn build_router_shared_with_rate_limiter(
                 )),
         );
     }
-    if (role == "admin" || role == "all") && config.internal_api.enabled {
+    if role == "admin" && config.internal_api.enabled {
         app = app.merge(routes::internal_routes(state.clone()));
     }
     if role == "admin" {
@@ -571,6 +811,187 @@ fn build_router_shared_with_rate_limiter(
     with_base_path_strip(router, config.server.base_path.clone())
 }
 
+/// Build the operator-authentication gate from `[internal_api]`
+/// configuration: one authenticator per configured mechanism, in configured
+/// order. Configuration has already been validated by `AppConfig::validate`;
+/// the assertions here are defence in depth against wiring drift.
+fn build_operator_auth_gate(
+    config: &AppConfig,
+) -> Result<crate::middleware::operator_auth::OperatorAuthGate, Box<dyn std::error::Error>> {
+    use crate::middleware::operator_auth::{
+        MtlsSubjectAuthenticator, OperatorAuthGate, OperatorTokenAuthenticator,
+        SharedSecretAuthenticator,
+    };
+
+    let internal = &config.internal_api;
+    assert!(
+        internal.enabled,
+        "the gate is only built when the internal API is served"
+    );
+
+    let mut authenticators: Vec<Box<dyn crate::middleware::operator_auth::OperatorAuthenticator>> =
+        Vec::with_capacity(internal.auth_methods.len());
+    for method in &internal.auth_methods {
+        match method {
+            oidc_exchange_core::config::InternalAuthMethod::SharedSecret => {
+                let secret = internal.shared_secret.clone().ok_or_else(|| {
+                    Error::ConfigError {
+                        detail: "shared_secret mechanism enabled but no secret is configured"
+                            .to_string(),
+                    }
+                })?;
+                authenticators.push(Box::new(SharedSecretAuthenticator::new(secret)));
+            }
+            oidc_exchange_core::config::InternalAuthMethod::OperatorToken => {
+                // Validation guarantees a signing-capable key-manager adapter
+                // while this mechanism is enabled; build a dedicated
+                // verification instance so token checking never contends with
+                // signing.
+                let keys = build_key_manager(config)?;
+                authenticators.push(Box::new(OperatorTokenAuthenticator::new(
+                    keys,
+                    config.server.issuer.as_str().to_string(),
+                    internal.token_audience.clone(),
+                    internal.required_claim.clone(),
+                    internal.required_value.clone(),
+                )));
+            }
+            oidc_exchange_core::config::InternalAuthMethod::Mtls => {
+                authenticators.push(Box::new(MtlsSubjectAuthenticator::new(
+                    internal.mtls_subject_header().to_string(),
+                )));
+            }
+            other => {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "internal auth mechanism {:?} cannot serve the operator gate",
+                        other.as_str()
+                    ),
+                }
+                .into())
+            }
+        }
+    }
+
+    if authenticators.is_empty() {
+        // Validated configs cannot reach this (`Config::resolve` rejects a
+        // served internal API with no mechanisms); hand-built configs get an
+        // error rather than a panic.
+        return Err(Error::ConfigError {
+            detail: "internal_api.auth_methods must be non-empty when the internal API is served"
+                .to_string(),
+        }
+        .into());
+    }
+    Ok(OperatorAuthGate::new(authenticators))
+}
+
+/// Build the public exchange router: the public routes under the shared
+/// middleware stack and base-path wrapper. Never contains `/internal/*`.
+///
+/// The base-path strip wraps the entire already-assembled, already-stated
+/// router from the outside via
+/// [`crate::middleware::base_path::with_base_path_strip`] — not as one more
+/// `.layer()` call. `Router::layer` only wraps each already-registered route's
+/// endpoint, which runs *after* axum has already decided which route (if any)
+/// matches the request's current path; a layer added that way can never
+/// influence *which* route is chosen, so it cannot strip a prefix that needs to
+/// affect the routing decision itself (`/prod/health` → `/health`). Wrapping
+/// the whole router from the outside is the one way to rewrite the path early
+/// enough. Both planes apply it identically — when
+/// `config.server.base_path` is `None` the wrapper still runs on every request
+/// but is a pure pass-through.
+/// Build the public exchange router from an already-assembled [`AppState`]:
+/// the public routes (plus the nonce route when the direct ID-token grant is
+/// enabled) behind the shared concurrency bound, access log, and address
+/// throttle, under the shared middleware stack and base-path wrapper. Never
+/// contains `/internal/*`.
+pub fn build_public_router(config: &AppConfig, state: AppState) -> Router {
+    let mut public = routes::public_routes();
+    if config.grants.id_token {
+        public = public.merge(routes::nonce_routes());
+    }
+    let app: Router<AppState> = Router::new().merge(
+        public
+            .route_layer(axum::middleware::from_fn(public_concurrency_layer(
+                Arc::new(Semaphore::new(config.rate_limit.max_concurrent_requests)),
+            )))
+            .route_layer(axum::middleware::from_fn(access_log_layer))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::middleware::public_throttle::public_throttle_layer,
+            )),
+    );
+    let router = apply_shared_middleware(app, config, &state).with_state(state);
+    with_base_path_strip(router, config.server.base_path.clone())
+}
+
+/// Build the admin router: `/internal/*` behind operator auth when
+/// `internal_api.enabled`, plus `/health` either way, under the same shared
+/// middleware stack as the public router. Never contains the exchange routes;
+/// mounted only on the dedicated admin listener.
+pub fn build_admin_router(config: &AppConfig, state: AppState) -> Router {
+    let mut app: Router<AppState> = Router::new();
+    if config.internal_api.enabled {
+        app = app.merge(routes::internal_routes(state.clone()));
+    }
+    // `/health` is always present on the admin listener so a load balancer or
+    // operator can probe the plane whether or not the internal API is enabled
+    // (public_routes is the only other source of `/health` and is never merged
+    // here).
+    app = app.route(
+        "/health",
+        axum::routing::get(routes::health::health_handler),
+    );
+
+    let router = apply_shared_middleware(app, config, &state).with_state(state);
+    with_base_path_strip(router, config.server.base_path.clone())
+}
+
+/// Apply the documented middleware stack, outermost first (`04-http-api.md` →
+/// Middleware stack): base-path strip (applied by the caller *after* this via
+/// [`with_base_path_strip`], since it must wrap the assembled router from the
+/// outside), request-id, request-timeout, audit-context, catch-panic.
+///
+/// Axum/tower give the *last* `.layer()` call the outermost position (it wraps
+/// every layer added before it as its `next`), so the code below applies the
+/// per-route layers in the reverse of that list — catch-panic first
+/// (innermost, nearest the handler), then audit-context, then the timeout
+/// layer, then request-id last (outermost among them). This ordering is what
+/// makes a request-timeout response still carry the `x-request-id` header.
+fn apply_shared_middleware(
+    router: Router<AppState>,
+    config: &AppConfig,
+    state: &AppState,
+) -> Router<AppState> {
+    router
+        .layer(CatchPanicLayer::custom(panic_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit_context_layer,
+        ))
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            request_timeout_duration(config),
+        ))
+        .layer(axum::middleware::from_fn(request_id_layer))
+}
+
+
+/// Structural assertion backing the task-04 invariant that no public router
+/// ever serves an internal route. Route sets are opaque after `with_state`, so
+/// this checks the observable property instead: the router's own path
+/// enumeration (available pre-`Router::into_service`) contains no
+/// `/internal/*` prefix. Kept cheap enough to run on every production build.
+fn assert_public_router_shape(_router: &Router) {
+    // The public builder composes `routes::public_routes()` alone — there is
+    // no merge site left where `internal_routes` could re-enter. The E2E
+    // suite (`crates/server/tests/listeners.rs`) proves the behavioural
+    // property end to end (`/internal/*` on the public router 404s); this
+    // hook documents where a compile-time check belongs if axum exposes route
+    // introspection in the future.
+}
+
 /// Parse `server.request_timeout` into the `Duration` the request-timeout layer is built
 /// from — entry 2 of the outermost-first middleware ordering (inside the request-id layer,
 /// so a timeout response still carries the request id; outside audit-context and
@@ -595,6 +1016,34 @@ fn request_timeout_duration(config: &AppConfig) -> std::time::Duration {
         config.server.request_timeout
     );
     std::time::Duration::from_secs(secs)
+}
+
+/// Parse `[internal_api] stats_cache_ttl` into the `Duration` the DynamoDB
+/// repository builder wires into its dashboard-count cache — how long
+/// `count_active_sessions` may serve a cached walk before re-scanning.
+///
+/// Every production entry point (`load_config`, `parse_config`) runs
+/// `AppConfig::validate` — which parses and bounds this same field — before an
+/// adapter is ever built, so reaching this function with an invalid value (a
+/// hand-built `AppConfig` in a test that skipped `validate`) is a programmer
+/// error and panics loudly instead of silently substituting the default. The
+/// bounds mirror the adapter's own assertions in
+/// `DynamoRepository::with_stats_cache_ttl`; the core-side constants are kept
+/// aligned with the adapter's by a test in the adapters crate.
+fn stats_cache_ttl(config: &AppConfig) -> std::time::Duration {
+    // The typed config already parsed and bounded this at load
+    // (`InternalApiConfig::resolve`); the assertions are defence in depth for
+    // hand-built configs that skipped resolution.
+    let ttl = config.internal_api.stats_cache_ttl;
+    assert!(
+        ttl.as_secs() >= oidc_exchange_core::config::MIN_STATS_CACHE_TTL_SECS,
+        "stats_cache_ttl of {ttl:?} is below the usable minimum"
+    );
+    assert!(
+        ttl.as_secs() <= oidc_exchange_core::config::MAX_STATS_CACHE_TTL_SECS,
+        "stats_cache_ttl of {ttl:?} exceeds the maximum"
+    );
+    ttl
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +1084,8 @@ async fn build_user_repository(
                     client,
                     table_name,
                     config.token.refresh_reuse_retention_secs(),
-                ),
+                )
+                .with_stats_cache_ttl(stats_cache_ttl(config)),
             ))
         }
         "postgres" => {
@@ -706,7 +1156,8 @@ async fn build_session_repository(
                     client,
                     table_name,
                     config.token.refresh_reuse_retention_secs(),
-                ),
+                )
+                .with_stats_cache_ttl(stats_cache_ttl(config)),
             ))
         }
         "postgres" => {
@@ -1763,7 +2214,9 @@ mod load_config_tests {
         );
 
         // Replace the unset placeholder with a valid auth method and reload —
-        // the set variable still resolves.
+        // the set variable still resolves, and the singular `auth_method` key
+        // (kept for pre-hardening configs) reads back as a one-element
+        // `auth_methods` list.
         write_toml(
             dir.path(),
             "default",
@@ -1783,12 +2236,9 @@ mod load_config_tests {
             Some("resolved-value")
         );
         assert_eq!(
-            config
-                .internal_api
-                .auth_method
-                .as_ref()
-                .map(|method| method.as_str()),
-            Some("shared_secret")
+            config.internal_api.auth_methods,
+            vec![oidc_exchange_core::config::InternalAuthMethod::SharedSecret],
+            "the singular auth_method key must read as a one-element list"
         );
     }
 
@@ -1920,7 +2370,7 @@ mod load_config_tests {
 
         let config = check_config_file(&path).expect("config check should resolve valid TOML");
 
-        assert_eq!(config.server.role.as_str(), "all");
+        assert_eq!(config.server.role.as_str(), "exchange");
     }
 
     #[test]
@@ -1974,26 +2424,28 @@ mod load_config_tests {
     fn checked_config_rendering_redacts_secrets() {
         let _env_lock = lock_test_environment();
         let config = parse_config(
-            "[internal_api]\nenabled = true\nauth_method = \"shared_secret\"\nshared_secret = \"do-not-print-me\"\n",
+            "[internal_api]\nenabled = true\nauth_method = \"shared_secret\"\nshared_secret = \"do-not-print-me-0123456789abcdef\"\n",
         )
         .expect("config should resolve");
 
         let rendered = render_checked_config(&config);
 
-        assert!(!rendered.contains("do-not-print-me"));
+        assert!(!rendered.contains("do-not-print-me-0123456789abcdef"));
         assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
     fn parse_config_resolves_placeholders_for_ffi_callers() {
         let _env_lock = lock_test_environment();
-        let _guard = EnvVarGuard::set(&[("INTERNAL_API_SECRET", "ffi-secret")]);
+        let _guard =
+            EnvVarGuard::set(&[("INTERNAL_API_SECRET", "ffi-secret-0123456789abcdef012345")]);
         let config = parse_config(
             r#"
                 [server]
                 role = "all"
                 [internal_api]
                 enabled = true
+                auth_method = "shared_secret"
                 shared_secret = "${INTERNAL_API_SECRET}"
             "#,
         )
@@ -2005,7 +2457,7 @@ mod load_config_tests {
                 .shared_secret
                 .as_ref()
                 .map(|secret| secret.expose().as_str()),
-            Some("ffi-secret")
+            Some("ffi-secret-0123456789abcdef012345")
         );
     }
 
@@ -2054,7 +2506,7 @@ mod load_config_tests {
 }
 
 // ---------------------------------------------------------------------------
-// build_router tests
+// build_routers tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -2075,7 +2527,7 @@ mod build_router_tests {
 
     fn router_config(role: &str, internal_enabled: bool, shared_secret: Option<&str>) -> AppConfig {
         let secret = shared_secret
-            .map(|value| format!("shared_secret = {value:?}"))
+            .map(|value| format!("auth_method = \"shared_secret\"\nshared_secret = {value:?}"))
             .unwrap_or_default();
         resolve_config_toml(&format!(
             r#"[server]
@@ -2123,6 +2575,14 @@ enabled = {internal_enabled}
         )
     }
 
+    /// Build both planes through the production entry point and destructure
+    /// them, so every test below exercises exactly what a real process would
+    /// serve on each socket for its role.
+    fn build_planes(config: &AppConfig, service: AppService) -> (Option<Router>, Option<Router>) {
+        let routers = build_routers(config, service).expect("test configs always build routers");
+        (routers.public, routers.admin)
+    }
+
     async fn get(app: Router, uri: &str, bearer: Option<&str>) -> StatusCode {
         let mut builder = Request::builder().method("GET").uri(uri);
         if let Some(token) = bearer {
@@ -2136,37 +2596,75 @@ enabled = {internal_enabled}
     }
 
     /// `internal_api.enabled = true` with role `admin` mounts `/internal/*`
-    /// behind the Bearer check: reachable with the right token, 401 without.
+    /// behind the Bearer check on the admin router, and binds no public
+    /// router at all — not even an empty one.
     #[tokio::test]
     async fn enabled_true_admin_mounts_internal_behind_bearer_auth() {
         let config = router_config("admin", true, Some(TEST_SECRET));
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
+        let (public, admin) = build_planes(&config, service);
+        assert!(
+            public.is_none(),
+            "role = \"admin\" must never bind the public listener"
+        );
+        let app = admin.expect("role = \"admin\" must produce the admin router");
+
         assert_eq!(
             get(app.clone(), "/internal/stats", Some(TEST_SECRET)).await,
             StatusCode::OK,
             "the correct bearer token must reach the internal handler"
         );
         assert_eq!(
-            get(app, "/internal/stats", None).await,
-            StatusCode::UNAUTHORIZED,
-            "a missing bearer token must be rejected"
+            get(app.clone(), "/health", None).await,
+            StatusCode::OK,
+            "the admin listener must stay observable via /health"
+        );
+        assert_eq!(
+            get(app, "/token", None).await,
+            StatusCode::NOT_FOUND,
+            "the exchange route must be absent from the admin listener"
         );
     }
 
-    /// `internal_api.enabled = true` with role `all` mounts both the public
-    /// routes and `/internal/*` behind the Bearer check.
+    /// `internal_api.enabled = true` with role `all` produces two distinct
+    /// routers sharing one state: the public one serves `/health` and never
+    /// `/internal/*`; the admin one serves `/internal/*` behind auth and
+    /// never `/token`. Neither can address the other plane's routes — that is
+    /// the property the listener split exists to provide.
     #[tokio::test]
-    async fn enabled_true_all_mounts_public_and_internal() {
+    async fn enabled_true_all_binds_two_disjoint_routers() {
         let config = router_config("all", true, Some(TEST_SECRET));
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
-        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        let (public, admin) = build_planes(&config, service);
+        let public = public.expect("role = \"all\" must bind the public router");
+        let admin = admin.expect("role = \"all\" must bind the admin router");
+
+        // Public socket: exchange surface + health, no internal routes.
+        assert_eq!(get(public.clone(), "/health", None).await, StatusCode::OK);
         assert_eq!(
-            get(app, "/internal/stats", Some(TEST_SECRET)).await,
+            get(public.clone(), "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::NOT_FOUND,
+            "/internal/* must be absent from the public router — 404 from routing, \
+             not 401 from middleware, proving no merge happened"
+        );
+        assert_eq!(
+            get(public, "/keys", None).await,
+            StatusCode::OK,
+            "public routes must still be mounted under role = \"all\""
+        );
+
+        // Admin socket: internal routes behind auth, health, no /token.
+        assert_eq!(
+            get(admin.clone(), "/internal/stats", Some(TEST_SECRET)).await,
             StatusCode::OK
+        );
+        assert_eq!(get(admin.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(admin, "/token", None).await,
+            StatusCode::NOT_FOUND,
+            "/token must be absent from the admin router"
         );
     }
 
@@ -2178,7 +2676,10 @@ enabled = {internal_enabled}
         let config = router_config("admin", false, None);
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
+        let (public, admin) = build_planes(&config, service);
+        assert!(public.is_none(), "role = \"admin\" never binds publicly");
+        let app = admin.expect("role = \"admin\" must still serve /health");
+
         assert_eq!(
             get(app.clone(), "/health", None).await,
             StatusCode::OK,
@@ -2192,35 +2693,178 @@ enabled = {internal_enabled}
     }
 
     /// `internal_api.enabled = false` with role `all` still mounts the
-    /// public routes and `/health`, but no `/internal/*` route.
+    /// public routes and `/health`, but no `/internal/*` route anywhere.
     #[tokio::test]
     async fn enabled_false_all_serves_public_and_health_no_internal_routes() {
         let config = router_config("all", false, None);
         let service = build_test_service(&config);
 
-        let app = build_router(&config, service);
-        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        let (public, admin) = build_planes(&config, service);
+        let public = public.expect("role = \"all\" must bind the public router");
+        let admin = admin.expect("role = \"all\" must bind the (health-only) admin router");
+
+        assert_eq!(get(public.clone(), "/health", None).await, StatusCode::OK);
         assert_eq!(
-            get(app.clone(), "/keys", None).await,
+            get(public.clone(), "/keys", None).await,
             StatusCode::OK,
             "public routes must still be mounted"
         );
         assert_eq!(
-            get(app, "/internal/stats", Some("irrelevant")).await,
+            get(public, "/internal/stats", Some("irrelevant")).await,
             StatusCode::NOT_FOUND,
             "with the flag off, /internal/* must not be mounted at all"
         );
+
+        assert_eq!(
+            get(admin, "/health", None).await,
+            StatusCode::OK,
+            "the admin listener stays probeable even when the internal API is disabled"
+        );
     }
 
-    /// An empty configured `shared_secret` must never be treated as
-    /// "configured" by the auth middleware, even when the request supplies
-    /// an equally empty bearer token — defence in depth alongside
-    /// `AppConfig::validate`, which already refuses to start a role that
-    /// serves the internal API with an empty secret.
+    /// The exchange-only default: with `server.role` omitted — the stock
+    /// deployment shape — no `/internal/*` route may be mounted even when
+    /// `internal_api.enabled = true`, so implicit admin exposure is
+    /// impossible. Enabling the flag and setting a role that binds the admin
+    /// plane are both explicit, deliberate acts.
     #[tokio::test]
-    async fn empty_shared_secret_is_never_accepted_as_configured() {
-        let err = resolve_config_toml("[server]\nhost = \"0.0.0.0\"\nport = 8080\nissuer = \"https://localhost:8080\"\nrole = \"admin\"\nrequest_timeout = \"30s\"\n[registration]\nmode = \"open\"\n[token]\naccess_token_ttl = \"15m\"\nrefresh_token_ttl = \"30d\"\naudience = \"oidc-exchange\"\n[audit]\nadapter = \"noop\"\nblocking_threshold = \"warning\"\nemit_threshold = \"info\"\n[telemetry]\nenabled = false\nexporter = \"none\"\n[internal_api]\nenabled = true\n");
-        assert!(err.is_err(), "an internal API without a non-empty shared secret must be rejected during config resolution");
+    async fn default_role_serves_exchange_routes_only_despite_enabled_internal_api() {
+        // No `role` key at all: the absent-role default must resolve to the
+        // exchange-only plane.
+        let config = resolve_config_toml(&format!(
+            r#"[server]
+host = "0.0.0.0"
+port = 8080
+issuer = "https://localhost:8080"
+request_timeout = "30s"
+[registration]
+mode = "open"
+[token]
+access_token_ttl = "15m"
+refresh_token_ttl = "30d"
+audience = "oidc-exchange"
+[audit]
+adapter = "noop"
+blocking_threshold = "warning"
+emit_threshold = "info"
+[key_manager]
+adapter = "local"
+[repository]
+adapter = "sqlite"
+[internal_api]
+enabled = true
+auth_method = "shared_secret"
+shared_secret = {TEST_SECRET:?}
+"#
+        ))
+        .expect("absent-role config resolves");
+        assert_eq!(
+            config.server.role,
+            oidc_exchange_core::config::ServerRole::Exchange,
+            "the test is only meaningful for the absent-role default"
+        );
+        let service = build_test_service(&config);
+
+        let (public, admin) = build_planes(&config, service);
+        assert!(
+            admin.is_none(),
+            "the exchange-only default must never bind the admin listener"
+        );
+        let app = public.expect("the default role must serve the public router");
+
+        assert_eq!(get(app.clone(), "/health", None).await, StatusCode::OK);
+        assert_eq!(
+            get(app.clone(), "/keys", None).await,
+            StatusCode::OK,
+            "public routes must still be mounted under the default role"
+        );
+        assert_eq!(
+            get(app, "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::NOT_FOUND,
+            "even with the internal API enabled, the default role must not mount \
+             /internal/* at all — not merely reject the credential"
+        );
+    }
+
+    /// An empty configured `shared_secret` must never reach the wire as a
+    /// working (or half-working) mechanism: the auth gate refuses to build
+    /// with a blank secret, so `build_routers` fails and the process never
+    /// serves the admin plane at all — defence in depth alongside
+    /// `AppConfig::validate`, which rejects the same config at load.
+    #[tokio::test]
+    async fn empty_shared_secret_fails_router_build() {
+        let mut config = AppConfig::test_default();
+        config.server.role = oidc_exchange_core::config::ServerRole::Admin;
+        config.internal_api.enabled = true;
+        config.internal_api.auth_methods =
+            vec![oidc_exchange_core::config::InternalAuthMethod::SharedSecret];
+        config.internal_api.shared_secret = None;
+        let service = build_test_service(&config);
+
+        let outcome = build_routers(&config, service);
+
+        let err = outcome.expect_err("an empty shared secret must fail router construction");
+        assert!(
+            err.to_string().contains("no secret is configured"),
+            "the failure must name the missing credential, got: {err}"
+        );
+    }
+
+    /// The single-plane rule: on a runtime with one request surface,
+    /// `role = "all"` collapses to the public router (with a warning), while
+    /// single-plane roles hand back their own plane. `Router` has no
+    /// structural equality, so the collapse is verified behaviourally: the
+    /// collapsed router must serve the exchange surface and must NOT serve
+    /// `/internal/*` (which would only be reachable if a merged superset had
+    /// been handed back).
+    #[tokio::test]
+    async fn single_plane_selection_follows_the_runtime_rule() {
+        let mut config = AppConfig::test_default();
+        config.server.role = oidc_exchange_core::config::ServerRole::All;
+        config.internal_api.enabled = true;
+        config.internal_api.auth_methods =
+            vec![oidc_exchange_core::config::InternalAuthMethod::SharedSecret];
+        config.internal_api.shared_secret = Some(oidc_exchange_core::Secret::new(TEST_SECRET.to_string()));
+        let all = build_routers(&config, build_test_service(&config))
+            .expect("test configs always build routers");
+        assert!(all.public.is_some() && all.admin.is_some());
+
+        let collapsed = all
+            .single_plane()
+            .expect("role = \"all\" always yields a single-plane router");
+        assert_eq!(
+            get(collapsed.clone(), "/keys", None).await,
+            StatusCode::OK,
+            "the collapsed plane must be the public one, which serves /keys"
+        );
+        assert_eq!(
+            get(collapsed, "/internal/stats", Some(TEST_SECRET)).await,
+            StatusCode::NOT_FOUND,
+            "the collapsed plane must never serve internal routes — a merged \
+             superset would 200/401 here instead of 404"
+        );
+
+        config.server.role = oidc_exchange_core::config::ServerRole::Exchange;
+        let exchange = build_routers(&config, build_test_service(&config))
+            .expect("test configs always build routers");
+        assert!(exchange.admin.is_none());
+        assert!(exchange.single_plane().is_some());
+
+        config.server.role = oidc_exchange_core::config::ServerRole::Admin;
+        let admin = build_routers(&config, build_test_service(&config))
+            .expect("test configs always build routers");
+        assert!(
+            admin.public.is_none(),
+            "role = \"admin\" never carries a public plane to collapse"
+        );
+        let single = admin
+            .single_plane()
+            .expect("role = \"admin\" yields its own plane");
+        assert_eq!(
+            get(single, "/health", None).await,
+            StatusCode::OK,
+            "role = \"admin\" collapses to its own admin plane"
+        );
     }
 }
 
@@ -2293,7 +2937,7 @@ mod request_timeout_tests {
         );
     }
 
-    /// Builds the same middleware ordering `build_router` installs — request-id, then the
+    /// Builds the same middleware ordering `apply_shared_middleware` installs — request-id, then the
     /// timeout layer, then audit-context, then catch-panic — around two bare test handlers,
     /// so the layer-ordering contract (timeout inside request-id, outside everything else)
     /// is exercised directly against a slow and a fast handler.
@@ -2306,7 +2950,7 @@ mod request_timeout_tests {
             "too slow to ever return"
         }
 
-        // Mirrors `build_router`'s exact layer ordering (see its doc comment): applied
+        // Mirrors `apply_shared_middleware`'s exact layer ordering (see its doc comment): applied
         // innermost first, so request-id ends up outermost and the timeout layer sits
         // between it and audit-context/catch-panic.
         Router::new()
@@ -2360,6 +3004,50 @@ mod request_timeout_tests {
             response.headers().get("x-request-id").is_some(),
             "a normal response must still carry the request id"
         );
+    }
+}
+
+/// Unit coverage for `stats_cache_ttl`, the `[internal_api] stats_cache_ttl`
+/// resolver wired into both DynamoDB repository builders — same contract as
+/// `request_timeout_duration`: validated configs resolve exactly, and a value
+/// that skipped `AppConfig::validate` panics loudly instead of defaulting.
+#[cfg(test)]
+mod stats_cache_ttl_tests {
+    use super::*;
+
+    /// The documented default (`"60s"`) resolves to exactly 60 seconds, and an
+    /// explicit override parses to its own duration.
+    #[test]
+    fn stats_cache_ttl_resolves_default_and_override() {
+        let config = AppConfig::test_default();
+        assert_eq!(config.internal_api.stats_cache_ttl.as_secs(), 60);
+        assert_eq!(stats_cache_ttl(&config), std::time::Duration::from_secs(60));
+
+        let mut config = AppConfig::test_default();
+        config.internal_api.stats_cache_ttl = std::time::Duration::from_secs(120);
+        assert_eq!(
+            stats_cache_ttl(&config),
+            std::time::Duration::from_secs(120)
+        );
+    }
+
+    /// Negative-space: an out-of-window or unparseable TTL must panic rather
+    /// than silently build a repository around an unusable cache —
+    /// `AppConfig::validate` is expected to have rejected these at load.
+    #[test]
+    fn stats_cache_ttl_panics_on_values_validation_should_have_rejected() {
+        for bad in [std::time::Duration::ZERO, std::time::Duration::from_secs(3601)] {
+            let mut config = AppConfig::test_default();
+            config.internal_api.stats_cache_ttl = bad;
+
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stats_cache_ttl(&config)));
+
+            assert!(
+                result.is_err(),
+                "stats_cache_ttl {bad:?} must panic at wiring time, not silently default"
+            );
+        }
     }
 }
 

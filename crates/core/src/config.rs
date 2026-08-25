@@ -95,18 +95,201 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        if self.internal_api.enabled
-            && matches!(self.server.role, ServerRole::Admin | ServerRole::All)
-            && self
+        // Reserved protocol claim names are refused at startup: a template
+        // claim keyed by a reserved name would be silently dropped at token
+        // build, so the misconfiguration surfaces at load instead.
+        if let Some(custom_claims) = &self.token.custom_claims {
+            // Sorted so the reported offender is deterministic when several
+            // reserved keys are configured.
+            let mut keys: Vec<&String> = custom_claims.keys().collect();
+            keys.sort();
+            for key in keys {
+                if crate::service::claims::is_reserved_claim(key) {
+                    return Err(Error::ConfigError {
+                        detail: format!(
+                            "token.custom_claims key {key:?} is a reserved protocol claim \
+                             name and cannot be used as a custom claim"
+                        ),
+                    });
+                }
+            }
+        }
+
+        // When the internal API will be served, the whole `[internal_api]`
+        // contract applies: a non-empty mechanism list and per-mechanism
+        // requirements (the shared secret's length floor; a real key manager
+        // for operator tokens). See `06-configuration.md` → Validation at load.
+        let internal_api_served = matches!(self.server.role, ServerRole::Admin | ServerRole::All)
+            && self.internal_api.enabled;
+        if internal_api_served {
+            self.validate_internal_api()?;
+        }
+
+        if internal_api_served && self.internal_api.shared_secret_is_only_mechanism() {
+            tracing::warn!(
+                mechanisms = ?self.internal_api.auth_methods,
+                "shared_secret is the only enabled internal-API authentication mechanism; \
+                 it authenticates requests without identifying anyone - migrate to \
+                 operator_token or mtls for attributed admin actions"
+            );
+        }
+
+        // The mtls mechanism trusts a header asserted by whatever terminates
+        // TLS in front of the admin listener. On the default loopback bind
+        // that trust is anchored by reachability; published on a routable
+        // interface it becomes a silent identity-spoofing surface unless the
+        // trusted proxy both sets and strips the header. Warn so the
+        // deployment cannot enable the pairing unknowingly.
+        if internal_api_served
+            && self.internal_api.uses_mtls()
+            && !admin_listener_is_loopback(&self.internal_api.host)
+        {
+            tracing::warn!(
+                host = %self.internal_api.host,
+                port = self.internal_api.port,
+                subject_header = %self.internal_api.mtls_subject_header(),
+                "the mtls mechanism trusts the client-certificate subject header on an \
+                 admin listener bound beyond loopback; any host that can reach this \
+                 listener and set the header authenticates as anyone - ensure your \
+                 TLS-terminating proxy overwrites the header on every request and the \
+                 listener is otherwise unreachable"
+            );
+        }
+
+        // Only role = "all" binds both sockets, so only that role can collide.
+        // Under role = "admin" the public socket is never bound (same values
+        // are harmless), and under any other role the admin listener is not
+        // bound at all.
+        let binds_both_listeners =
+            self.server.role == ServerRole::All && self.internal_api.enabled;
+        if binds_both_listeners
+            && listeners_collide(
+                &self.server.host,
+                self.server.port,
+                &self.internal_api.host,
+                self.internal_api.port,
+            )
+        {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "internal_api listener {}:{} collides with the public listener {}:{}; \
+                     role = \"all\" binds two distinct sockets and they must not share one",
+                    self.internal_api.host,
+                    self.internal_api.port,
+                    self.server.host,
+                    self.server.port
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Validate the `[internal_api]` section whenever the role binds the admin
+    /// listener and `internal_api.enabled = true` — i.e. exactly when a
+    /// rejected credential would otherwise be discovered at request time.
+    fn validate_internal_api(&self) -> Result<(), Error> {
+        if self.internal_api.auth_methods.is_empty() {
+            return Err(Error::ConfigError {
+                detail: "internal_api.auth_methods must be non-empty when the internal API \
+                         is served"
+                    .to_string(),
+            });
+        }
+
+        if self.internal_api.uses_shared_secret() {
+            let secret_len = self
                 .internal_api
                 .shared_secret
                 .as_ref()
-                .map(|s| s.expose().as_str())
-                .unwrap_or("")
-                .is_empty()
-        {
-            return Err(Error::ConfigError { detail: "internal_api.shared_secret must be non-empty when the internal API is served (server.role is \"admin\" or \"all\" and internal_api.enabled = true)".to_string() });
+                .map(|secret| secret.expose().len())
+                .unwrap_or(0);
+            if secret_len < MIN_SHARED_SECRET_BYTES {
+                // Only the length is reported, never the value.
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "internal_api.shared_secret must be at least {MIN_SHARED_SECRET_BYTES} \
+                         bytes while the shared_secret mechanism is enabled (got {secret_len} bytes)"
+                    ),
+                });
+            }
         }
+
+        if self.internal_api.uses_operator_token() {
+            // The typed `server.issuer` is non-empty by construction; what can
+            // still be wrong is the key manager: operator tokens are verified
+            // against this service's own keys, so a keyless process cannot
+            // serve the mechanism.
+            if !matches!(
+                self.key_manager.adapter,
+                ProviderAdapter::Local | ProviderAdapter::Kms
+            ) {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "key_manager.adapter ({:?}) cannot serve the operator_token \
+                         mechanism: token verification requires a real key manager",
+                        self.key_manager.adapter.as_str()
+                    ),
+                });
+            }
+            if self.internal_api.token_audience.trim().is_empty() {
+                return Err(Error::ConfigError {
+                    detail: "internal_api.token_audience must be non-empty while the \
+                             operator_token mechanism is enabled"
+                        .to_string(),
+                });
+            }
+            if self.internal_api.required_claim.trim().is_empty() {
+                return Err(Error::ConfigError {
+                    detail: "internal_api.required_claim must be non-empty while the \
+                             operator_token mechanism is enabled"
+                        .to_string(),
+                });
+            }
+            if self.internal_api.required_value.trim().is_empty() {
+                // An empty (or blank) required value would gate nothing: any
+                // token whose claim equals the empty string — i.e. no real
+                // credential property at all — would authenticate.
+                return Err(Error::ConfigError {
+                    detail: "internal_api.required_value must be non-empty while the \
+                             operator_token mechanism is enabled"
+                        .to_string(),
+                });
+            }
+            if self.token.audience.as_ref() == self.internal_api.token_audience {
+                // The internal audience is the one structural replay defense
+                // between user access tokens and operator credentials, which
+                // share this service's issuer and key manager. Defaults
+                // differ, so equality can only arise through deliberate
+                // misconfiguration — refuse it at load.
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "internal_api.token_audience ({:?}) must differ from \
+                         token.audience: a shared audience lets any user access token minted \
+                         by this service's key manager be replayed as an operator \
+                         credential",
+                        self.internal_api.token_audience
+                    ),
+                });
+            }
+        }
+
+        if self.internal_api.uses_mtls()
+            && self.internal_api.mtls_subject_header().trim().is_empty()
+        {
+            return Err(Error::ConfigError {
+                detail: "internal_api.mtls.subject_header must be non-empty while the mtls \
+                         mechanism is enabled"
+                    .to_string(),
+            });
+        }
+
+        if self.internal_api.max_auth_failures == 0 {
+            return Err(Error::ConfigError {
+                detail: "internal_api.max_auth_failures must be non-zero".to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -168,7 +351,13 @@ impl ServerConfig {
             host: raw.host,
             port: raw.port,
             issuer: HttpsUrl::parse_field("server.issuer", raw.issuer)?,
-            role: ServerRole::parse_field("server.role", raw.role)?,
+            // Fail-closed default: a config that never names a role serves
+            // only the exchange plane; the admin plane is an explicit act.
+            role: if raw.role.is_empty() {
+                ServerRole::Exchange
+            } else {
+                ServerRole::parse_field("server.role", raw.role)?
+            },
             request_timeout: parse_duration_field("server.request_timeout", &raw.request_timeout)?,
             base_path: raw.base_path,
             trusted_proxies: raw
@@ -1092,46 +1281,307 @@ impl TelemetryConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// Default for `[internal_api] host` when the key is absent from config: the
+/// admin listener is reachable only from an operator network, so it binds the
+/// loopback interface unless an operator explicitly publishes it.
+pub const DEFAULT_INTERNAL_API_HOST: &str = "127.0.0.1";
+
+/// Default for `[internal_api] port` when the key is absent from config: one
+/// above the public listener's 8080, so the two planes never collide by
+/// accident.
+pub const DEFAULT_INTERNAL_API_PORT: u16 = 8081;
+
+/// Host values that bind every interface. When either listener binds one of
+/// these, a same-port admin listener collides with the public listener on at
+/// least one interface, so the pair is rejected rather than discovered as an
+/// `EADDRINUSE` at bind time (or worse, silently shared).
+const WILDCARD_LISTENER_HOSTS: [&str; 3] = ["0.0.0.0", "::", "[::]"];
+
+/// Whether an admin listener at (`admin_host`, `admin_port`) can share the
+/// public listener's socket at (`public_host`, `public_port`).
+///
+/// Two listeners collide when their host/port pairs are identical, or when
+/// their ports are equal and either side binds a wildcard host — a wildcard
+/// listener covers every specific interface, so `0.0.0.0:8081` and
+/// `127.0.0.1:8081` cannot coexist. Different ports never collide.
+pub fn listeners_collide(
+    public_host: &str,
+    public_port: u16,
+    admin_host: &str,
+    admin_port: u16,
+) -> bool {
+    if public_port != admin_port {
+        return false;
+    }
+    if public_host == admin_host {
+        return true;
+    }
+    WILDCARD_LISTENER_HOSTS.contains(&public_host) || WILDCARD_LISTENER_HOSTS.contains(&admin_host)
+}
+
+/// Whether the admin listener host is a loopback bind — the deployment shape
+/// under which trusting a proxy-asserted mTLS-subject header is anchored by
+/// reachability rather than faith.
+fn admin_listener_is_loopback(host: &str) -> bool {
+    match host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+        Ok(addr) => addr.is_loopback(),
+        Err(_) => host == "localhost",
+    }
+}
+
+/// Minimum byte length for `internal_api.shared_secret` whenever the
+/// shared-secret mechanism serves the internal API: 32 bytes (256 bits of
+/// operator-chosen material), the floor below which offline guessing of the
+/// constant-time comparison becomes a realistic project.
+pub const MIN_SHARED_SECRET_BYTES: usize = 32;
+
+/// Default audience a verified operator token must carry.
+pub const DEFAULT_TOKEN_AUDIENCE: &str = "internal";
+
+/// Default claim name a verified operator token must carry.
+pub const DEFAULT_REQUIRED_CLAIM: &str = "role";
+
+/// Default value [`DEFAULT_REQUIRED_CLAIM`] must carry on a verified operator token.
+pub const DEFAULT_REQUIRED_VALUE: &str = "admin";
+
+/// Default header the `mtls` mechanism reads the client-certificate subject from.
+pub const DEFAULT_MTLS_SUBJECT_HEADER: &str = "x-client-cert-subject";
+
+/// Default failed-authentication budget per peer before lockout.
+pub const DEFAULT_MAX_AUTH_FAILURES: u64 = 5;
+
+/// Default window over which failed operator authentications draw down the budget.
+pub const DEFAULT_AUTH_FAILURE_WINDOW: &str = "1m";
+
+/// Default lockout duration once the operator-auth failure budget is exhausted.
+pub const DEFAULT_AUTH_LOCKOUT: &str = "5m";
+
+/// Default TTL for the admin stats cache.
+pub const DEFAULT_STATS_CACHE_TTL: &str = "60s";
+
+/// Bounds for `internal_api.stats_cache_ttl`: at least 1s (a zero TTL turns
+/// the cache into a per-request stampede) and at most one hour (stale stats
+/// beyond that mislead more than they serve).
+pub const MIN_STATS_CACHE_TTL_SECS: u64 = 1;
+pub const MAX_STATS_CACHE_TTL_SECS: u64 = 3600;
+
+/// Accept `auth_methods = ["a", "b"]` and the pre-hardening singular
+/// `auth_method = "a"` (via the serde alias) as the same field: a bare string
+/// is read as a one-element list.
+fn string_or_seq_string<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrSeqVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StringOrSeqVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string or a list of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(vec![value.to_string()])
+        }
+
+        fn visit_seq<S>(self, mut seq: S) -> Result<Self::Value, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            let mut values = Vec::new();
+            while let Some(value) = seq.next_element::<String>()? {
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrSeqVisitor)
+}
+
+/// Configuration for the `mtls` mechanism: the proxy header carrying the
+/// client-certificate subject.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MtlsConfig {
+    pub subject_header: String,
+}
+
+impl Default for MtlsConfig {
+    fn default() -> Self {
+        Self {
+            subject_header: DEFAULT_MTLS_SUBJECT_HEADER.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RawInternalApiConfig {
     pub enabled: bool,
-    pub auth_method: Option<String>,
+    /// Host for the dedicated admin listener.
+    pub host: String,
+    /// Port for the dedicated admin listener.
+    pub port: u16,
+    /// Enabled authentication mechanisms, tried in the order given. The
+    /// singular `auth_method = "..."` key from pre-hardening deployments is
+    /// still accepted and read as a one-element list (the `alias`); both
+    /// spellings in one file fail the load as a duplicate field rather than
+    /// silently picking one.
+    #[serde(
+        default,
+        alias = "auth_method",
+        deserialize_with = "string_or_seq_string"
+    )]
+    pub auth_methods: Vec<String>,
     pub shared_secret: Option<String>,
+    /// Audience a verified operator token must carry.
+    pub token_audience: String,
+    /// Claim name a verified operator token must carry.
+    pub required_claim: String,
+    /// Value `required_claim` must carry on a verified operator token.
+    pub required_value: String,
+    pub mtls: Option<MtlsConfig>,
+    /// Failed-authentication budget per peer before lockout.
+    pub max_auth_failures: u64,
+    /// Window over which failed attempts draw down the budget (humantime).
+    pub auth_failure_window: String,
+    /// Lockout duration once the failure budget is exhausted (humantime).
+    pub auth_lockout: String,
+    /// TTL for the admin stats cache (humantime).
+    pub stats_cache_ttl: String,
+}
+
+impl Default for RawInternalApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: DEFAULT_INTERNAL_API_HOST.to_string(),
+            port: DEFAULT_INTERNAL_API_PORT,
+            auth_methods: Vec::new(),
+            shared_secret: None,
+            token_audience: DEFAULT_TOKEN_AUDIENCE.to_string(),
+            required_claim: DEFAULT_REQUIRED_CLAIM.to_string(),
+            required_value: DEFAULT_REQUIRED_VALUE.to_string(),
+            mtls: None,
+            max_auth_failures: DEFAULT_MAX_AUTH_FAILURES,
+            auth_failure_window: DEFAULT_AUTH_FAILURE_WINDOW.to_string(),
+            auth_lockout: DEFAULT_AUTH_LOCKOUT.to_string(),
+            stats_cache_ttl: DEFAULT_STATS_CACHE_TTL.to_string(),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct InternalApiConfig {
     pub enabled: bool,
-    pub auth_method: Option<InternalAuthMethod>,
-    /// Bearer secret for the internal API: validated non-empty at load and
-    /// wrapped so the configured value cannot be formatted.
+    /// Host for the dedicated admin listener. Defaults to
+    /// [`DEFAULT_INTERNAL_API_HOST`] so publishing the admin plane is an
+    /// explicit configuration act.
+    pub host: String,
+    /// Port for the dedicated admin listener. Defaults to
+    /// [`DEFAULT_INTERNAL_API_PORT`]. `Config::resolve` rejects a
+    /// role = "all" config whose admin listener collides with the public
+    /// socket.
+    pub port: u16,
+    /// Enabled authentication mechanisms, tried in the order given. Empty is
+    /// rejected at load whenever the internal API is served: a served admin
+    /// plane with no way in would answer every request with `not_configured`
+    /// forever.
+    pub auth_methods: Vec<InternalAuthMethod>,
+    /// Compatibility shared secret for the `shared_secret` mechanism;
+    /// redacted in `Debug` and wrapped so the configured value cannot be
+    /// formatted. Required (at [`MIN_SHARED_SECRET_BYTES`] bytes) whenever
+    /// that mechanism is enabled and the internal API is served.
     pub shared_secret: Option<Secret<String>>,
+    /// Audience a verified operator token must carry. Only meaningful when
+    /// `operator_token` is among `auth_methods`.
+    pub token_audience: String,
+    /// Claim name a verified operator token must carry.
+    pub required_claim: String,
+    /// Value [`Self::required_claim`] must carry on a verified operator token.
+    pub required_value: String,
+    /// Configuration for the `mtls` mechanism (the proxy header carrying the
+    /// client-certificate subject).
+    pub mtls: Option<MtlsConfig>,
+    /// Failed-authentication budget per peer before lockout.
+    pub max_auth_failures: u64,
+    /// Window over which failed attempts draw down the budget.
+    pub auth_failure_window: std::time::Duration,
+    /// Lockout duration once the failure budget is exhausted.
+    pub auth_lockout: std::time::Duration,
+    /// TTL for the admin stats cache. Bounded to
+    /// `MIN_STATS_CACHE_TTL_SECS..=MAX_STATS_CACHE_TTL_SECS` at load.
+    pub stats_cache_ttl: std::time::Duration,
 }
 
 impl std::fmt::Debug for InternalApiConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InternalApiConfig")
             .field("enabled", &self.enabled)
-            .field("auth_method", &self.auth_method)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("auth_methods", &self.auth_methods)
             .field(
                 "shared_secret",
                 &self.shared_secret.as_ref().map(|_| "<redacted>"),
             )
+            .field("token_audience", &self.token_audience)
+            .field("required_claim", &self.required_claim)
+            .field("required_value", &self.required_value)
+            .field("mtls", &self.mtls)
+            .field("max_auth_failures", &self.max_auth_failures)
+            .field("auth_failure_window", &self.auth_failure_window)
+            .field("auth_lockout", &self.auth_lockout)
+            .field("stats_cache_ttl", &self.stats_cache_ttl)
             .finish()
     }
 }
 
 impl InternalApiConfig {
     fn resolve(raw: RawInternalApiConfig) -> Result<Self, Error> {
+        let mut auth_methods = Vec::with_capacity(raw.auth_methods.len());
+        for method in raw.auth_methods {
+            let parsed = InternalAuthMethod::parse_field("internal_api.auth_methods", method)?;
+            if auth_methods.contains(&parsed) {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "internal_api.auth_methods lists {:?} more than once",
+                        parsed.as_str()
+                    ),
+                });
+            }
+            auth_methods.push(parsed);
+        }
+
+        let stats_cache_ttl =
+            parse_positive_duration_field("internal_api.stats_cache_ttl", &raw.stats_cache_ttl)?;
+        let stats_cache_secs = stats_cache_ttl.as_secs();
+        if stats_cache_secs < MIN_STATS_CACHE_TTL_SECS {
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "internal_api.stats_cache_ttl must be at least                      {MIN_STATS_CACHE_TTL_SECS}s (got {stats_cache_secs}s)"
+                ),
+            });
+        }
+        if stats_cache_secs > MAX_STATS_CACHE_TTL_SECS {
+            // The bound is stated, never any cached value.
+            return Err(Error::ConfigError {
+                detail: format!(
+                    "internal_api.stats_cache_ttl exceeds the maximum of                      {MAX_STATS_CACHE_TTL_SECS}s (got {stats_cache_secs}s)"
+                ),
+            });
+        }
+
         Ok(Self {
             enabled: raw.enabled,
-            auth_method: raw
-                .auth_method
-                .map(|auth_method| {
-                    InternalAuthMethod::parse_field("internal_api.auth_method", auth_method)
-                })
-                .transpose()?,
+            host: raw.host,
+            port: raw.port,
+            auth_methods,
             shared_secret: raw
                 .shared_secret
                 .map(|shared_secret| {
@@ -1139,7 +1589,64 @@ impl InternalApiConfig {
                         .map(|secret| Secret::new(secret.as_str().to_string()))
                 })
                 .transpose()?,
+            token_audience: raw.token_audience,
+            required_claim: raw.required_claim,
+            required_value: raw.required_value,
+            mtls: raw.mtls,
+            max_auth_failures: raw.max_auth_failures,
+            auth_failure_window: parse_positive_duration_field(
+                "internal_api.auth_failure_window",
+                &raw.auth_failure_window,
+            )?,
+            auth_lockout: parse_positive_duration_field(
+                "internal_api.auth_lockout",
+                &raw.auth_lockout,
+            )?,
+            stats_cache_ttl,
         })
+    }
+
+    /// Whether the unattributed shared-secret compatibility mechanism is enabled.
+    pub fn uses_shared_secret(&self) -> bool {
+        self.auth_methods
+            .contains(&InternalAuthMethod::SharedSecret)
+    }
+
+    /// Whether the named-principal operator-token mechanism is enabled.
+    pub fn uses_operator_token(&self) -> bool {
+        self.auth_methods
+            .contains(&InternalAuthMethod::OperatorToken)
+    }
+
+    /// Whether the proxy-asserted mTLS-subject mechanism is enabled.
+    pub fn uses_mtls(&self) -> bool {
+        self.auth_methods.contains(&InternalAuthMethod::Mtls)
+    }
+
+    /// Whether the shared secret is the *only* enabled mechanism — the state
+    /// every deployment should migrate away from; warned about at startup.
+    pub fn shared_secret_is_only_mechanism(&self) -> bool {
+        self.auth_methods.len() == 1 && self.uses_shared_secret()
+    }
+
+    /// The `host:port` string the admin listener binds under the hyper
+    /// runtime, asserted non-empty so a misconfigured host can never produce
+    /// a degenerate bind address.
+    pub fn bind_address(&self) -> String {
+        assert!(
+            !self.host.is_empty(),
+            "internal_api.host must be non-empty before a bind address is composed"
+        );
+        format!("{}:{}", self.host, self.port)
+    }
+
+    /// The header name the `mtls` mechanism reads its subject from, resolved
+    /// against the default.
+    pub fn mtls_subject_header(&self) -> &str {
+        match &self.mtls {
+            Some(cfg) => cfg.subject_header.as_str(),
+            None => DEFAULT_MTLS_SUBJECT_HEADER,
+        }
     }
 }
 
@@ -1204,7 +1711,7 @@ impl ProviderConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerRole {
     All,
     Exchange,
@@ -1395,12 +1902,16 @@ impl TelemetryExporter {
 pub enum InternalAuthMethod {
     SharedSecret,
     Oidc,
+    OperatorToken,
+    Mtls,
 }
 impl InternalAuthMethod {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::SharedSecret => "shared_secret",
             Self::Oidc => "oidc",
+            Self::OperatorToken => "operator_token",
+            Self::Mtls => "mtls",
         }
     }
 
@@ -1408,6 +1919,8 @@ impl InternalAuthMethod {
         match value.as_str() {
             "shared_secret" => Ok(Self::SharedSecret),
             "oidc" => Ok(Self::Oidc),
+            "operator_token" => Ok(Self::OperatorToken),
+            "mtls" => Ok(Self::Mtls),
             _ => Err(Error::ConfigError {
                 detail: format!("{field}: invalid internal auth method {value:?}"),
             }),
@@ -1913,5 +2426,308 @@ max_assertion_lifetime = "30m"
             Config::resolve(zero_ttl).is_ok(),
             "a parseable zero duration must not fail config load"
         );
+    }
+}
+
+#[cfg(test)]
+mod admin_plane_config_tests {
+    use super::*;
+
+    /// 32 bytes exactly: the documented shared-secret floor.
+    const TEST_SHARED_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn test_shared_secret_constant_meets_the_documented_floor() {
+        assert_eq!(TEST_SHARED_SECRET.len(), MIN_SHARED_SECRET_BYTES);
+    }
+
+    fn default_raw_config() -> RawConfig {
+        toml::from_str(include_str!("../../../config/default.toml"))
+            .expect("default config should deserialize")
+    }
+
+    /// A raw config that serves the internal API under the given role and
+    /// mechanisms, with the given shared secret (when provided).
+    fn served_raw(role: &str, auth_methods: &[&str], shared_secret: Option<&str>) -> RawConfig {
+        let mut raw = default_raw_config();
+        raw.server.role = role.to_string();
+        raw.internal_api.enabled = true;
+        raw.internal_api.auth_methods = auth_methods.iter().map(|s| s.to_string()).collect();
+        raw.internal_api.shared_secret = shared_secret.map(str::to_string);
+        raw
+    }
+
+    fn assert_rejected(raw: RawConfig, fragment: &str) {
+        let Error::ConfigError { detail } =
+            Config::resolve(raw).expect_err("config should be rejected")
+        else {
+            unreachable!("expected ConfigError");
+        };
+        assert!(
+            detail.contains(fragment),
+            "error {detail:?} should mention {fragment:?}"
+        );
+    }
+
+    // ── exchange-only default (task 02) ─────────────────────────────────
+
+    #[test]
+    fn server_role_absent_resolves_to_exchange_default() {
+        let mut raw = default_raw_config();
+        raw.server.role = String::new();
+        let config = Config::resolve(raw).expect("absent role resolves");
+        assert_eq!(config.server.role, ServerRole::Exchange);
+    }
+
+    #[test]
+    fn explicit_all_and_admin_roles_are_preserved() {
+        for (value, expected) in [("all", ServerRole::All), ("admin", ServerRole::Admin)] {
+            let mut raw = default_raw_config();
+            raw.server.role = value.to_string();
+            let config = Config::resolve(raw).expect("explicit role resolves");
+            assert_eq!(config.server.role, expected);
+        }
+    }
+
+    #[test]
+    fn default_role_with_enabled_internal_api_is_not_served() {
+        // The exchange-only default never binds the admin plane, so enabling
+        // the flag alone must not trigger the served-plane validation (no
+        // mechanisms and no secret are configured here).
+        let mut raw = default_raw_config();
+        raw.server.role = String::new();
+        raw.internal_api.enabled = true;
+        let config = Config::resolve(raw).expect("unserved internal API resolves");
+        assert_eq!(config.server.role, ServerRole::Exchange);
+        assert!(config.internal_api.enabled);
+    }
+
+    // ── mechanism list (task 03) ────────────────────────────────────────
+
+    #[test]
+    fn served_internal_api_with_no_mechanisms_is_rejected() {
+        assert_rejected(
+            served_raw("admin", &[], Some(TEST_SHARED_SECRET)),
+            "internal_api.auth_methods must be non-empty",
+        );
+    }
+
+    #[test]
+    fn unknown_auth_mechanism_names_are_rejected() {
+        assert_rejected(
+            served_raw("admin", &["bogus"], Some(TEST_SHARED_SECRET)),
+            "internal_api.auth_methods",
+        );
+    }
+
+    #[test]
+    fn duplicate_auth_mechanisms_are_rejected() {
+        assert_rejected(
+            served_raw(
+                "admin",
+                &["shared_secret", "shared_secret"],
+                Some(TEST_SHARED_SECRET),
+            ),
+            "more than once",
+        );
+    }
+
+    #[test]
+    fn singular_auth_method_alias_reads_as_one_element_list() {
+        let raw: RawInternalApiConfig = toml::from_str(
+            r#"
+enabled = true
+auth_method = "shared_secret"
+"#,
+        )
+        .expect("singular alias deserializes");
+        assert_eq!(raw.auth_methods, vec!["shared_secret".to_string()]);
+    }
+
+    // ── shared-secret floor (task 03) ───────────────────────────────────
+
+    #[test]
+    fn shared_secret_length_floor_boundary_is_enforced() {
+        // 31 bytes: one below the floor — rejected, naming only the length.
+        let below = "a".repeat(MIN_SHARED_SECRET_BYTES - 1);
+        let Error::ConfigError { detail } =
+            Config::resolve(served_raw("admin", &["shared_secret"], Some(&below)))
+                .expect_err("a 31-byte secret must be rejected")
+        else {
+            unreachable!("expected ConfigError");
+        };
+        assert!(detail.contains("at least 32"), "must name the floor: {detail}");
+        assert!(
+            !detail.contains(&below),
+            "the secret value must never appear in the error"
+        );
+
+        // 32 bytes: exactly the floor — accepted.
+        let config = Config::resolve(served_raw(
+            "admin",
+            &["shared_secret"],
+            Some(TEST_SHARED_SECRET),
+        ))
+        .expect("a 32-byte secret must be accepted");
+        assert!(config.internal_api.uses_shared_secret());
+    }
+
+    #[test]
+    fn served_internal_api_with_missing_secret_is_rejected() {
+        assert_rejected(
+            served_raw("admin", &["shared_secret"], None),
+            "internal_api.shared_secret",
+        );
+    }
+
+    // ── listener collision (task 04) ────────────────────────────────────
+
+    #[test]
+    fn internal_api_listener_defaults_to_loopback_adjacent_port() {
+        let config = Config::resolve(served_raw(
+            "admin",
+            &["shared_secret"],
+            Some(TEST_SHARED_SECRET),
+        ))
+        .expect("served admin config resolves");
+        assert_eq!(config.internal_api.host, DEFAULT_INTERNAL_API_HOST);
+        assert_eq!(config.internal_api.port, DEFAULT_INTERNAL_API_PORT);
+        assert_eq!(
+            config.internal_api.bind_address(),
+            format!("{DEFAULT_INTERNAL_API_HOST}:{DEFAULT_INTERNAL_API_PORT}")
+        );
+    }
+
+    #[test]
+    fn listeners_collide_matches_exact_and_wildcard_pairs_only() {
+        assert!(listeners_collide("0.0.0.0", 8080, "0.0.0.0", 8080));
+        assert!(listeners_collide("127.0.0.1", 8080, "127.0.0.1", 8080));
+        assert!(
+            listeners_collide("0.0.0.0", 8080, "127.0.0.1", 8080),
+            "a wildcard covers every specific interface on the same port"
+        );
+        assert!(listeners_collide("::", 9000, "127.0.0.1", 9000));
+        assert!(!listeners_collide("0.0.0.0", 8080, "0.0.0.0", 8081));
+        assert!(!listeners_collide("127.0.0.1", 8080, "127.0.0.2", 8080));
+    }
+
+    #[test]
+    fn all_role_with_colliding_admin_listener_is_rejected() {
+        let mut raw = served_raw("all", &["shared_secret"], Some(TEST_SHARED_SECRET));
+        raw.internal_api.host = raw.server.host.clone();
+        raw.internal_api.port = raw.server.port;
+        assert_rejected(raw, "collides with the public listener");
+    }
+
+    #[test]
+    fn admin_role_on_the_public_port_is_accepted() {
+        // role = "admin" never binds the public socket, so equal values are
+        // harmless.
+        let mut raw = served_raw("admin", &["shared_secret"], Some(TEST_SHARED_SECRET));
+        raw.internal_api.host = raw.server.host.clone();
+        raw.internal_api.port = raw.server.port;
+        Config::resolve(raw).expect("admin role on the public port resolves");
+    }
+
+    #[test]
+    fn all_role_with_distinct_listeners_is_accepted() {
+        let raw = served_raw("all", &["shared_secret"], Some(TEST_SHARED_SECRET));
+        Config::resolve(raw).expect("distinct listeners resolve");
+    }
+
+    #[test]
+    fn admin_listener_collision_is_ignored_when_internal_api_disabled() {
+        let mut raw = default_raw_config();
+        raw.server.role = "all".to_string();
+        raw.internal_api.enabled = false;
+        raw.internal_api.host = raw.server.host.clone();
+        raw.internal_api.port = raw.server.port;
+        Config::resolve(raw).expect("a disabled admin listener cannot collide");
+    }
+
+    // ── operator-token mechanism requirements ───────────────────────────
+
+    fn operator_token_raw() -> RawConfig {
+        let mut raw = served_raw("admin", &["operator_token"], None);
+        raw.key_manager.adapter = "local".to_string();
+        raw.key_manager.local = Some(RawLocalKeyConfig {
+            private_key_path: "/tmp/test-key.pem".to_string(),
+            algorithm: "EdDSA".to_string(),
+            kid: "test-kid".to_string(),
+        });
+        raw
+    }
+
+    #[test]
+    fn operator_token_on_a_keyless_manager_is_rejected() {
+        let mut raw = operator_token_raw();
+        raw.key_manager.adapter = "oidc".to_string();
+        raw.key_manager.local = None;
+        assert_rejected(raw, "key_manager.adapter");
+    }
+
+    #[test]
+    fn operator_token_with_a_real_key_manager_is_accepted() {
+        let config = Config::resolve(operator_token_raw())
+            .expect("operator_token over a local key manager resolves");
+        assert!(config.internal_api.uses_operator_token());
+        assert_eq!(config.internal_api.token_audience, DEFAULT_TOKEN_AUDIENCE);
+        assert_eq!(config.internal_api.required_claim, DEFAULT_REQUIRED_CLAIM);
+        assert_eq!(config.internal_api.required_value, DEFAULT_REQUIRED_VALUE);
+    }
+
+    #[test]
+    fn blank_required_value_is_rejected_while_operator_token_enabled() {
+        let mut raw = operator_token_raw();
+        raw.internal_api.required_value = "   ".to_string();
+        assert_rejected(raw, "internal_api.required_value");
+    }
+
+    #[test]
+    fn operator_token_audience_shared_with_user_tokens_is_rejected() {
+        let mut raw = operator_token_raw();
+        raw.internal_api.token_audience = raw.token.audience.clone();
+        assert_rejected(raw, "must differ from");
+    }
+
+    #[test]
+    fn audience_equality_is_only_refused_while_operator_token_is_enabled() {
+        let mut raw = served_raw("admin", &["shared_secret"], Some(TEST_SHARED_SECRET));
+        raw.internal_api.token_audience = raw.token.audience.clone();
+        Config::resolve(raw)
+            .expect("a shared audience is harmless while operator_token is disabled");
+    }
+
+    // ── mtls mechanism requirements ─────────────────────────────────────
+
+    #[test]
+    fn empty_mtls_subject_header_is_rejected_while_mtls_enabled() {
+        let mut raw = served_raw("admin", &["mtls"], None);
+        raw.internal_api.mtls = Some(MtlsConfig {
+            subject_header: "  ".to_string(),
+        });
+        assert_rejected(raw, "internal_api.mtls.subject_header");
+    }
+
+    // ── reserved custom claims ──────────────────────────────────────────
+
+    #[test]
+    fn reserved_name_in_token_custom_claims_is_rejected() {
+        let mut raw = default_raw_config();
+        raw.token.custom_claims = Some(HashMap::from([(
+            "sid".to_string(),
+            "forged".to_string(),
+        )]));
+        assert_rejected(raw, "reserved protocol claim");
+    }
+
+    #[test]
+    fn non_reserved_token_custom_claim_keys_are_accepted() {
+        let mut raw = default_raw_config();
+        raw.token.custom_claims = Some(HashMap::from([(
+            "org".to_string(),
+            "example".to_string(),
+        )]));
+        Config::resolve(raw).expect("non-reserved custom claims resolve");
     }
 }

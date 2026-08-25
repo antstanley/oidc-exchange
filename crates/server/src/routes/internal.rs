@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -11,20 +11,36 @@ use serde_json::Value;
 use crate::error::ApiError;
 use crate::middleware::internal_auth::internal_auth_layer;
 use crate::state::AppState;
-use oidc_exchange_core::domain::{NewUser, UserPatch};
+use oidc_exchange_core::domain::{NewUser, OperatorPrincipal, UserPatch};
+use oidc_exchange_core::error::Error;
 
-/// Build the internal API router with shared-secret auth middleware.
+/// Build the internal API surface with relative route paths, behind the
+/// operator-auth layer.
+///
+/// The auth layer is scoped to *this* router only: callers mount it under
+/// `/internal` via [`routes::internal_routes`] (`nest`), so the layer can never
+/// wrap the admin listener's other routes or its fallback — an unmatched path
+/// on the admin plane must render a routing-level 404, not an authentication
+/// rejection, and `/health` must stay reachable without a credential.
+///
+/// The layer inserts the authenticated [`OperatorPrincipal`] as a request
+/// extension; every mutating handler below takes it as an `Extension`
+/// extractor and threads it into its service call, so attribution always
+/// records *the principal that was actually authenticated* — never a value the
+/// handler chose for itself. A request reaching these handlers without the
+/// extension is a wiring bug; extraction fails with 500 rather than mutating
+/// data unattributed.
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/internal/stats", get(stats))
-        .route("/internal/sessions/cleanup", post(cleanup_sessions))
-        .route("/internal/users", get(list_users).post(create_user))
+        .route("/stats", get(stats))
+        .route("/users", get(list_users).post(create_user))
+        .route("/sessions/cleanup", post(cleanup_sessions))
         .route(
-            "/internal/users/{id}",
+            "/users/{id}",
             get(get_user).patch(update_user).delete(delete_user),
         )
         .route(
-            "/internal/users/{id}/claims",
+            "/users/{id}/claims",
             get(get_claims)
                 .put(set_claims)
                 .patch(merge_claims)
@@ -71,20 +87,41 @@ pub async fn cleanup_sessions(
 // User list
 // ---------------------------------------------------------------------------
 
+/// The `GET /internal/users` query contract, exactly as the published schema
+/// documents it: an opaque `cursor` and a `limit` the core clamps.
+///
+/// `offset` is *removed*, not deprecated — a caller that still sends one gets
+/// a deterministic rejection naming the replacement rather than a silently
+/// ignored parameter that would appear to work while always starting from the
+/// first page. The field exists on this struct only so its presence can be
+/// detected; serde ignores unknown fields, so without it an old caller would
+/// never learn it was speaking a dead contract.
 #[derive(serde::Deserialize)]
 pub struct ListUsersQuery {
-    offset: Option<u64>,
-    limit: Option<u64>,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    #[serde(rename = "offset")]
+    removed_offset: Option<String>,
 }
 
 pub async fn list_users(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<ListUsersQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(50).min(200);
-    let users = state.service.admin_list_users(offset, limit).await?;
-    Ok(Json(users))
+    // Negative space: an explicit `offset` (even `offset=0`) is refused with
+    // the migration message instead of being honoured or dropped.
+    if query.removed_offset.is_some() {
+        return Err(Error::InvalidRequest {
+            reason: "the offset parameter has been removed; page with cursor/limit".to_string(),
+        }
+        .into());
+    }
+
+    let page = state
+        .service
+        .admin_list_users(query.cursor.as_deref(), query.limit)
+        .await?;
+    Ok(Json(page))
 }
 
 // ---------------------------------------------------------------------------
@@ -93,9 +130,13 @@ pub async fn list_users(
 
 pub async fn create_user(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Json(new_user): Json<NewUser>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let user = state.service.admin_create_user(&new_user).await?;
+    let user = state
+        .service
+        .admin_create_user(&operator, &new_user)
+        .await?;
     Ok((StatusCode::CREATED, Json(user)))
 }
 
@@ -119,18 +160,23 @@ pub async fn get_user(
 
 pub async fn update_user(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
     Json(patch): Json<UserPatch>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let user = state.service.admin_update_user(&id, &patch).await?;
+    let user = state
+        .service
+        .admin_update_user(&operator, &id, &patch)
+        .await?;
     Ok(Json(user))
 }
 
 pub async fn delete_user(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_delete_user(&id).await?;
+    state.service.admin_delete_user(&operator, &id).await?;
     Ok(StatusCode::OK)
 }
 
@@ -148,26 +194,35 @@ pub async fn get_claims(
 
 pub async fn set_claims(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
     Json(claims): Json<HashMap<String, Value>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_set_claims(&id, claims).await?;
+    state
+        .service
+        .admin_set_claims(&operator, &id, claims)
+        .await?;
     Ok(StatusCode::OK)
 }
 
 pub async fn merge_claims(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
     Json(claims): Json<HashMap<String, Value>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_merge_claims(&id, claims).await?;
+    state
+        .service
+        .admin_merge_claims(&operator, &id, claims)
+        .await?;
     Ok(StatusCode::OK)
 }
 
 pub async fn clear_claims(
     State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.service.admin_clear_claims(&id).await?;
+    state.service.admin_clear_claims(&operator, &id).await?;
     Ok(StatusCode::OK)
 }

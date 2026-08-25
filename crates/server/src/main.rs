@@ -33,61 +33,112 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let role = config.server.role.as_str();
     tracing::info!(role = %role, "server role");
 
-    // 3. Build service and router. The service is shared: the router's
-    // `AppState` holds one `Arc` clone and — under a long-lived runtime — the
-    // session reaper holds another, so both observe one store/audit/provider
-    // set (`04-http-api.md` → Bootstrap steps 4–5 and 7).
+    // 3. Build service and the per-plane routers the role requires. The
+    // service is shared: each router's `AppState` holds one `Arc` clone and —
+    // under a long-lived runtime — the session reaper holds another, so all
+    // observe one store/audit/provider set (`04-http-api.md` → Bootstrap
+    // steps 4–5 and 7).
     let service = Arc::new(bootstrap::build_service(&config).await?);
-    let app = bootstrap::build_router_shared(&config, Arc::clone(&service));
+    let routers = bootstrap::build_routers_shared(&config, Arc::clone(&service))?;
+
+    if config.server.role == oidc_exchange_core::config::ServerRole::All {
+        // Native runtime: both planes bind, each on its own socket. The
+        // warning is informational here (unlike the single-plane runtimes,
+        // where the same role collapses), but an operator selecting `all`
+        // should know the admin listener exists and needs network-policy
+        // protection of its own.
+        tracing::warn!(
+            public = %format!("{}:{}", config.server.host, config.server.port),
+            admin = %config.internal_api.bind_address(),
+            "role = \"all\" binds two distinct listeners; the admin plane must be \
+             firewalled separately from the exchange plane"
+        );
+    }
 
     // 4. Run. One runtime detection feeds both the serve-mode branch and the
     // reaper's host gate, so "Lambda spawns no in-process interval" cannot
     // drift from "Lambda serves via lambda_http".
     let host_runtime = HostRuntime::detect();
     if host_runtime == HostRuntime::Lambda {
-        // Lambda mode: the same router (middleware, state, and base-path layer) is served
-        // through `lambda_http`, which speaks the Lambda Runtime API directly and translates
-        // API Gateway REST/HTTP-API, Function URL, and ALB events into tower `Service` calls
-        // against `app` (`04-http-api.md` → Bootstrap, step 6). `lambda::run_lambda` wraps
-        // `app` in the per-invocation flush hook (`FlushOnResponse`) so telemetry (and any
-        // future buffered audit writes) force-flush synchronously after each invocation's
-        // response future resolves and before the response is returned — the execution
-        // environment may freeze immediately after the response. `lambda_http::run` fails with
-        // `lambda_http::Error` (`Box<dyn std::error::Error + Send + Sync>`), which the
-        // standard library does not blanket-convert into `main`'s `Box<dyn std::error::Error>`
-        // (the `Send + Sync` marker traits make the two boxed trait objects distinct types to
-        // `?`'s `From` resolution); the error message is preserved and reboxed so the failure
-        // still propagates via `?` with no `unwrap`/`expect` on this path.
+        // Lambda mode: there is one request surface, so exactly one plane can
+        // be served (`04-http-api.md` → Bootstrap, step 6). The single-plane
+        // rule lives in `Routers::single_plane`: `exchange` and `admin` serve
+        // their own plane; `all` serves the public plane and warns that
+        // `/internal/*` is unmounted. `lambda::run_lambda` wraps the chosen
+        // router in the per-invocation flush hook (`FlushOnResponse`) so
+        // telemetry force-flushes synchronously after each invocation's
+        // response future resolves. `lambda_http::run` fails with
+        // `lambda_http::Error` (`Box<dyn std::error::Error + Send + Sync>`),
+        // which the standard library does not blanket-convert into `main`'s
+        // `Box<dyn std::error::Error>` (the `Send + Sync` marker traits make
+        // the two boxed trait objects distinct types to `?`'s `From`
+        // resolution); the error message is preserved and reboxed so the
+        // failure still propagates via `?` with no `unwrap`/`expect`.
         //
-        // The session reaper is deliberately not spawned here: there is no long-lived process
-        // to host it, and the same sweep stays reachable as `POST /internal/sessions/cleanup`
-        // for an external scheduler to drive on the deployment's own cadence
-        // (`04-http-api.md` → Bootstrap step 7).
+        // The session reaper is deliberately not spawned here: there is no
+        // long-lived process to host it, and the same sweep stays reachable as
+        // `POST /internal/sessions/cleanup` for an external scheduler to drive
+        // on the deployment's own cadence (`04-http-api.md` → Bootstrap step 7).
+        let app = routers.single_plane().ok_or_else(|| {
+            std::io::Error::other("configured role produces no servable router plane")
+        })?;
         tracing::info!("Lambda runtime detected; serving via lambda_http");
         lambda::run_lambda(app, Arc::new(telemetry::flush_telemetry))
             .await
             .map_err(|err| -> Box<dyn std::error::Error> { err.to_string().into() })?;
     } else {
-        let addr = format!("{}:{}", config.server.host, config.server.port);
+        // Hyper runtime: one socket per router the role produced, served
+        // concurrently under one graceful-shutdown signal. Both sockets are
+        // bound *before* either server starts, so a bind failure on either
+        // fails startup rather than silently serving half the configured
+        // surface — a process that cannot bind its admin listener must not
+        // keep serving `/token` as if the admin plane did not exist.
+        let mut planes: Vec<(String, axum::Router)> = Vec::new();
+        if let Some(public) = routers.public {
+            let addr = format!("{}:{}", config.server.host, config.server.port);
+            assert!(
+                !addr.is_empty(),
+                "public bind address must not be empty before serving"
+            );
+            tracing::info!(addr = %addr, plane = "public", "binding listener");
+            planes.push((addr, public));
+        }
+        if let Some(admin) = routers.admin {
+            let addr = config.internal_api.bind_address();
+            assert!(
+                !addr.is_empty(),
+                "admin bind address must not be empty before serving"
+            );
+            tracing::info!(addr = %addr, plane = "admin", "binding listener");
+            planes.push((addr, admin));
+        }
         assert!(
-            !addr.is_empty(),
-            "bind address must not be empty before serving"
+            !planes.is_empty(),
+            "a validated role binds at least one listener; build_routers guarantees a router"
         );
-        tracing::info!(addr = %addr, "starting server");
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-        // `signal` is spawned once, up front, and cloned so the graceful-shutdown hook below,
-        // `run_with_drain_deadline`'s watchdog, and the session reaper all observe the *same*
-        // SIGTERM/ctrl-c instant — the drain deadline must be anchored to when the signal
-        // fires, not to process startup (see `shutdown` module docs), and the reaper must stop
-        // on that same instant rather than ticking past shutdown.
+        let mut bound: Vec<(tokio::net::TcpListener, axum::Router)> =
+            Vec::with_capacity(planes.len());
+        for (addr, router) in planes {
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            bound.push((listener, router));
+        }
+
+        // One signal anchors every listener's drain, the deadline watchdog,
+        // and the session reaper: each gets its own clone so all of them
+        // observe the same SIGTERM/ctrl-c instant (see the `shutdown` module
+        // docs) — and the reaper stops on that same instant rather than
+        // ticking past shutdown.
+        //
+        // Both planes serve through the connect-info make-service so the
+        // client-address middleware — and the admin plane's operator-auth
+        // throttle key — keep a real socket peer on every request.
         let signal = ShutdownSignal::spawn();
-
-        // Bootstrap step 7: this hyper runtime is long-lived, so it hosts the session reaper —
-        // one sweep of expired sessions and retirement records per
-        // `session_repository.cleanup_interval`, each run logged with its deleted count. The
-        // handle is retained and aborted once the drain finishes below; nothing detached
-        // outlives the server.
+        // Bootstrap step 7: this hyper runtime is long-lived, so it hosts the
+        // session reaper — one sweep of expired sessions and retirement
+        // records per `session_repository.cleanup_interval`, each run logged
+        // with its deleted count. The handle is retained and aborted once the
+        // drain finishes below; nothing detached outlives the server.
         let reaper_handle = reaper::spawn_session_reaper_for_runtime(
             &config,
             &service,
@@ -95,14 +146,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             host_runtime,
         );
 
-        let graceful_signal = signal.clone();
-        let serve_future = async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(graceful_signal.wait())
-            .await
+        let serve_future = {
+            let mut handles = Vec::with_capacity(bound.len());
+            for (listener, router) in bound {
+                let graceful = signal.clone();
+                handles.push(tokio::spawn(async move {
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(graceful.wait())
+                    .await
+                }));
+            }
+            async move {
+                // Resolve only when every listener has finished draining, so
+                // the drain-deadline watchdog bounds the whole process, not
+                // just whichever plane happens to drain first.
+                for handle in handles {
+                    let served = handle
+                        .await
+                        .map_err(|err| std::io::Error::other(err.to_string()))?;
+                    served?;
+                }
+                Ok::<(), std::io::Error>(())
+            }
         };
         let deadline = std::time::Duration::from_secs(SHUTDOWN_DRAIN_DEADLINE_SECS);
 

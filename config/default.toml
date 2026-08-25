@@ -2,7 +2,7 @@
 host = "0.0.0.0"
 port = 8080
 issuer = "https://auth.example.com"
-role = "all"
+role = "exchange"
 request_timeout = "30s"
 trusted_proxies = []
 trusted_proxy_hops = 1

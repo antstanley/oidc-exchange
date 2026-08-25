@@ -20,7 +20,8 @@ use oidc_exchange_core::service::refresh::RefreshRequest;
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 fn base_raw_config() -> RawConfig {
@@ -78,7 +79,7 @@ fn make_service(repo: MockRepository, provider: MockIdentityProvider) -> AppServ
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         make_config(),
     )
@@ -102,7 +103,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -941,10 +942,10 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
         }
         async fn list_users(
             &self,
-            offset: u64,
-            limit: u64,
-        ) -> Result<Vec<oidc_exchange_core::domain::User>> {
-            self.inner.list_users(offset, limit).await
+            cursor: Option<&str>,
+            limit: u32,
+        ) -> Result<oidc_exchange_core::domain::UserPage> {
+            self.inner.list_users(cursor, limit).await
         }
     }
 
@@ -1303,10 +1304,10 @@ async fn missing_user_is_refused_before_any_write() {
         }
         async fn list_users(
             &self,
-            offset: u64,
-            limit: u64,
-        ) -> Result<Vec<oidc_exchange_core::domain::User>> {
-            self.inner.list_users(offset, limit).await
+            cursor: Option<&str>,
+            limit: u32,
+        ) -> Result<oidc_exchange_core::domain::UserPage> {
+            self.inner.list_users(cursor, limit).await
         }
     }
 

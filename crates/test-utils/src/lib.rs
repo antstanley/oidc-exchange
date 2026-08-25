@@ -7,10 +7,12 @@ use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
 use oidc_exchange_core::config::DEFAULT_REFRESH_REUSE_RETENTION;
+use oidc_exchange_core::cursor::KeysetCursor;
 use oidc_exchange_core::domain::{
     is_valid_family_id, AuditEvent, IdentityClaims, NewUser, ProviderTokens,
     RateLimitDecision, RateLimitKey, RefreshResolution, RetiredRefreshToken, Session,
-    SingleUseRecord, User, UserPatch, UserStatus, INITIAL_USER_VERSION,
+    SingleUseRecord, User, UserPage, UserPatch, UserStatus, INITIAL_USER_VERSION,
+    MAX_ADMIN_PAGE_SIZE,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::secret::Secret;
@@ -297,16 +299,57 @@ impl UserRepository for MockRepository {
         Ok(counts)
     }
 
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
+    /// Keyset-paginated listing ordered `created_at DESC, id DESC` — the same
+    /// ordering contract as the SQL adapters — resuming strictly after the
+    /// decoded cursor's position and peeking one row past the limit so
+    /// termination is exact (a short page is always the last page).
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        assert!(
+            (1..=MAX_ADMIN_PAGE_SIZE).contains(&limit),
+            "mock list_users expects a pre-clamped limit within 1..={MAX_ADMIN_PAGE_SIZE}, got {limit}"
+        );
+
+        let resume_after = cursor.map(KeysetCursor::decode).transpose()?;
+
         let state = self.state.lock().await;
         let mut users: Vec<User> = state.users.values().cloned().collect();
-        users.sort_by_key(|b| std::cmp::Reverse(b.created_at));
-        let start = offset as usize;
-        let end = std::cmp::min(start + limit as usize, users.len());
-        if start >= users.len() {
-            return Ok(Vec::new());
-        }
-        Ok(users[start..end].to_vec())
+        users.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+
+        // Strictly-after semantics on the composite key: a row deleted between
+        // pages neither duplicates nor skips its neighbours.
+        let remaining: Vec<&User> = match &resume_after {
+            Some(position) => users
+                .iter()
+                .filter(|u| {
+                    (u.created_at, u.id.as_str()) < (position.created_at, position.id.as_str())
+                })
+                .collect(),
+            None => users.iter().collect(),
+        };
+
+        let take = limit as usize;
+        let has_more = remaining.len() > take;
+        let page: Vec<User> = remaining.iter().take(take).map(|u| (*u).clone()).collect();
+
+        let next_cursor = if has_more {
+            let last = page.last().expect("has_more implies a non-empty page");
+            assert!(
+                page.len() == take,
+                "a continued page must carry exactly the requested limit"
+            );
+            Some(KeysetCursor::new(last.created_at, last.id.clone()).encode())
+        } else {
+            assert!(
+                remaining.len() <= take,
+                "no continuation may be signalled when every remaining row fit"
+            );
+            None
+        };
+
+        Ok(UserPage {
+            users: page,
+            next_cursor,
+        })
     }
 }
 
@@ -735,11 +778,22 @@ impl AuditLog for MockAuditLog {
 // MockRateLimiter
 // ---------------------------------------------------------------------------
 
+/// Fixed Retry-After (seconds) the mock reports while in deny mode.
+pub const MOCK_RETRY_AFTER_SECS: u64 = 60;
+
+/// A scriptable rate limiter for tests. By default it allows everything.
+/// `set_decisions`/`keys`/`set_fail_mode` script the exchange plane's
+/// `check_and_consume`; `deny_mode` plus the check/consume call counters
+/// script the admin plane's consult-then-consume contract, so auth-layer
+/// tests can assert exactly *when* the budget is consulted and drawn down.
 #[derive(Clone)]
 pub struct MockRateLimiter {
     decisions: Arc<Mutex<Vec<RateLimitDecision>>>,
     keys: Arc<Mutex<Vec<RateLimitKey>>>,
     fail_mode: Arc<Mutex<bool>>,
+    deny_mode: Arc<Mutex<bool>>,
+    check_calls: Arc<Mutex<u64>>,
+    consume_calls: Arc<Mutex<u64>>,
 }
 
 impl MockRateLimiter {
@@ -748,6 +802,9 @@ impl MockRateLimiter {
             decisions: Arc::new(Mutex::new(Vec::new())),
             keys: Arc::new(Mutex::new(Vec::new())),
             fail_mode: Arc::new(Mutex::new(false)),
+            deny_mode: Arc::new(Mutex::new(false)),
+            check_calls: Arc::new(Mutex::new(0)),
+            consume_calls: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -761,6 +818,31 @@ impl MockRateLimiter {
 
     pub async fn set_fail_mode(&self, fail: bool) {
         *self.fail_mode.lock().await = fail;
+    }
+
+    /// Force every subsequent `check`/`consume` to return `Deny`.
+    pub async fn set_deny_mode(&self, deny: bool) {
+        *self.deny_mode.lock().await = deny;
+    }
+
+    /// How many times [`RateLimiter::check`] has been invoked.
+    pub async fn check_calls(&self) -> u64 {
+        *self.check_calls.lock().await
+    }
+
+    /// How many times [`RateLimiter::consume`] has been invoked.
+    pub async fn consume_calls(&self) -> u64 {
+        *self.consume_calls.lock().await
+    }
+
+    async fn deny_or_allow(&self) -> RateLimitDecision {
+        if *self.deny_mode.lock().await {
+            RateLimitDecision::Deny {
+                retry_after_secs: MOCK_RETRY_AFTER_SECS,
+            }
+        } else {
+            RateLimitDecision::Allow
+        }
     }
 }
 
@@ -785,6 +867,16 @@ impl RateLimiter for MockRateLimiter {
             .await
             .pop()
             .unwrap_or(RateLimitDecision::Allow))
+    }
+
+    async fn check(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        *self.check_calls.lock().await += 1;
+        Ok(self.deny_or_allow().await)
+    }
+
+    async fn consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        *self.consume_calls.lock().await += 1;
+        Ok(self.deny_or_allow().await)
     }
 }
 
@@ -1360,7 +1452,7 @@ mod tests {
     use super::{MockIdentityProvider, MockRepository, MOCK_CLIENT_ID};
     use crate::session_contract;
     use oidc_exchange_core::domain::{
-        NewUser, RetiredRefreshToken, UserPatch, INITIAL_USER_VERSION,
+        NewUser, RetiredRefreshToken, UserPatch, INITIAL_USER_VERSION, MAX_ADMIN_PAGE_SIZE,
     };
     use oidc_exchange_core::error::Error;
     use oidc_exchange_core::ports::{SessionRepository, UserRepository};
@@ -1891,5 +1983,200 @@ mod tests {
             "a losing put must not extend or replace the winner's expiry"
         );
         assert_eq!(stored.key, key);
+    }
+
+    // ── Bounded cursor pagination (task 08): mock keyset traversal ──────────
+
+    /// Seed `count` users and return nothing; ids are unique per call.
+    async fn seed_users(repo: &MockRepository, count: usize, tag: &str) {
+        for i in 0..count {
+            repo.create_user(&NewUser {
+                external_id: format!("{tag}-{i}"),
+                provider: "mock".to_string(),
+                email: Some(format!("{tag}-{i}@example.com")),
+                display_name: None,
+            })
+            .await
+            .expect("seed create_user");
+        }
+    }
+
+    /// Walk every page at `limit`, returning (all row ids in page order,
+    /// per-page sizes). Fails if the traversal does not terminate.
+    async fn walk(repo: &MockRepository, limit: u32) -> (Vec<String>, Vec<usize>) {
+        let mut seen: Vec<String> = Vec::new();
+        let mut sizes: Vec<usize> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            assert!(pages <= 1000, "traversal must terminate");
+            let page = repo
+                .list_users(cursor.as_deref(), limit)
+                .await
+                .expect("each page succeeds");
+            assert!(
+                page.users.len() <= limit as usize,
+                "a page never exceeds its limit"
+            );
+            sizes.push(page.users.len());
+            seen.extend(page.users.iter().map(|u| u.id.clone()));
+            match page.next_cursor {
+                Some(next) => {
+                    assert!(!next.is_empty(), "an issued cursor is a non-empty token");
+                    cursor = Some(next);
+                }
+                None => break,
+            }
+        }
+        (seen, sizes)
+    }
+
+    #[tokio::test]
+    async fn pagination_covers_every_user_exactly_once_across_adjacent_pages() {
+        let repo = MockRepository::new();
+        seed_users(&repo, 11, "trav").await;
+
+        let (seen, sizes) = walk(&repo, 3).await;
+
+        // Exact-count traversal: no duplicates, no skips.
+        assert_eq!(seen.len(), 11, "every user is returned exactly once");
+        assert_eq!(
+            seen.iter().collect::<std::collections::HashSet<_>>().len(),
+            11,
+            "no id repeats across adjacent pages"
+        );
+        assert_eq!(
+            sizes,
+            vec![3, 3, 3, 2],
+            "full pages then one short final page"
+        );
+    }
+
+    #[tokio::test]
+    async fn ordering_is_stable_across_independent_traversals() {
+        let repo = MockRepository::new();
+        seed_users(&repo, 9, "ord").await;
+
+        let (first, _) = walk(&repo, 4).await;
+        let (second, _) = walk(&repo, 4).await;
+
+        assert_eq!(first.len(), 9);
+        assert_eq!(
+            first, second,
+            "two independent traversals must visit rows in the same order"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_final_page_and_exact_fit_both_terminate_with_null_cursor() {
+        // Short final page: 5 users at limit 2 = 2+2+1.
+        let repo = MockRepository::new();
+        seed_users(&repo, 5, "short").await;
+        let (_, sizes) = walk(&repo, 2).await;
+        assert_eq!(sizes, vec![2, 2, 1]);
+
+        // Exact fit: 6 users at limit 2 — the peek must not invent an
+        // empty trailing page nor carry a dangling cursor.
+        let repo = MockRepository::new();
+        seed_users(&repo, 6, "exact").await;
+        let (seen, sizes) = walk(&repo, 2).await;
+        assert_eq!(sizes, vec![2, 2, 2], "no empty trailing page");
+        assert_eq!(seen.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn single_page_when_the_limit_covers_the_whole_listing() {
+        let repo = MockRepository::new();
+        seed_users(&repo, 4, "one").await;
+
+        let page = repo
+            .list_users(None, MAX_ADMIN_PAGE_SIZE)
+            .await
+            .expect("page");
+        assert_eq!(page.users.len(), 4);
+        assert!(
+            page.next_cursor.is_none(),
+            "everything fit, so the listing is exhausted"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_store_returns_an_empty_page_with_null_cursor() {
+        let repo = MockRepository::new();
+
+        let page = repo.list_users(None, 10).await.expect("empty page");
+        assert!(page.users.is_empty());
+        assert!(page.next_cursor.is_none(), "empty listing is exhausted");
+    }
+
+    #[tokio::test]
+    async fn tampered_cursor_is_invalid_request_not_a_first_page() {
+        let repo = MockRepository::new();
+        seed_users(&repo, 3, "tamper").await;
+
+        for bad_cursor in ["garbage", "", "aGVsbG8="] {
+            let err = repo
+                .list_users(Some(bad_cursor), 10)
+                .await
+                .expect_err("tampered cursors are rejected");
+            match err {
+                Error::InvalidRequest { .. } => {}
+                other => panic!("expected InvalidRequest for {bad_cursor:?}, got {other:?}"),
+            }
+        }
+
+        // The negative path must not have disturbed the positive one.
+        let page = repo.list_users(None, 10).await.expect("valid page");
+        assert_eq!(page.users.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn deleting_the_cursor_row_mid_traversal_neither_duplicates_nor_skips() {
+        let repo = MockRepository::new();
+        seed_users(&repo, 6, "del").await;
+
+        let page_one = repo.list_users(None, 2).await.expect("page one");
+        assert_eq!(page_one.users.len(), 2);
+        let cursor_row_id = page_one.users[1].id.clone();
+        let cursor = page_one.next_cursor.as_ref().expect("more pages remain");
+
+        // Delete exactly the row the cursor points at, then continue.
+        repo.delete_user(&cursor_row_id)
+            .await
+            .expect("delete cursor row");
+
+        let mut rest: Vec<String> = Vec::new();
+        let mut cursor = Some(cursor.clone());
+        while let Some(c) = cursor {
+            let page = repo
+                .list_users(Some(&c), 2)
+                .await
+                .expect("continuation succeeds");
+            rest.extend(page.users.iter().map(|u| u.id.clone()));
+            cursor = page.next_cursor;
+        }
+
+        // Six seeded, one deleted: five distinct ids are ever observable.
+        // The four rows strictly after the deleted cursor position must all
+        // come back — none skipped by the removal.
+        assert_eq!(rest.len(), 4, "every row after the deleted cursor position");
+        let neighbour_id = &page_one.users[0].id;
+        assert!(
+            !rest.contains(neighbour_id),
+            "the first-page neighbour sorts before the cursor and must never recur"
+        );
+        let mut observed: Vec<String> = page_one.users.iter().map(|u| u.id.clone()).collect();
+        observed.extend(rest);
+        assert_eq!(
+            observed
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            6,
+            "every seed is observed at most once across the whole traversal"
+        );
+        // The deleted row's single appearance was page one itself, before its
+        // deletion; `rest`'s exclusion of it is asserted above.
     }
 }

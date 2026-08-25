@@ -87,6 +87,7 @@ async fn build_corpus_app() -> CorpusApp {
         service: Arc::new(service),
         config: Arc::new(config),
         rate_limiter: std::sync::Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        operator_auth: None,
     };
 
     // Layer order mirrors production: request id outermost so every downstream span —

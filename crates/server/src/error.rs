@@ -180,6 +180,9 @@ fn map_domain_error_inner(err: &Error) -> (StatusCode, String, String) {
             "not_found".to_string(),
             description_for(err),
         ),
+        // A throttled caller must back off; the Retry-After header on the
+        // auth layer's own 429 carries the authoritative window. This arm is
+        // the defensive in-handler mapping for the same variant.
         Error::TooManyRequests {
             retry_after_secs: _,
         } => (

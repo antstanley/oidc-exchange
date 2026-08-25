@@ -114,7 +114,21 @@ impl OidcExchange {
             None
         };
 
-        let router = oidc_exchange::bootstrap::build_router_shared(&config, service);
+        // FFI has one request surface and no second socket to bind, so the
+        // single-plane rule applies (`04-http-api.md` → Bootstrap, step 6):
+        // `exchange` and `admin` serve their own plane, `all` serves the
+        // public plane and logs a startup warning naming the unmounted
+        // internal routes. Plane separation on this runtime is expressed by
+        // constructing a second instance with `role = "admin"`.
+        let routers = oidc_exchange::bootstrap::build_routers_shared(&config, service)
+            .map_err(|e| FfiError {
+                code: "SERVICE_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+        let router = routers.single_plane().ok_or_else(|| FfiError {
+            code: "SERVICE_ERROR".to_string(),
+            message: "configured role produces no servable router plane".to_string(),
+        })?;
 
         Ok(Self {
             runtime,

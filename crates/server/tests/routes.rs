@@ -15,7 +15,8 @@ use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
 /// Build a router over the public routes with the same `audit_context`
@@ -64,7 +65,7 @@ fn build_test_app_with_provider_impl(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );
@@ -73,6 +74,8 @@ fn build_test_app_with_provider_impl(
     let state = AppState {
         service: Arc::new(service),
         config: Arc::new(config),
+        // Public-plane suite only; no internal routes are mounted here.
+        operator_auth: None,
         rate_limiter,
     };
 

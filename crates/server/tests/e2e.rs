@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
-use axum::middleware::from_fn;
 use axum::Router;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -14,11 +13,8 @@ use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
-use oidc_exchange::bootstrap::build_router_with_rate_limiter;
-use oidc_exchange::middleware::audit_context::ffi_audit_context_layer;
+use oidc_exchange::bootstrap::{build_router_with_rate_limiter, build_routers, Routers};
 use oidc_exchange::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets, TestClock};
-use oidc_exchange::routes::{internal_routes, public_routes};
-use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::domain::{AuditEventType, RateLimitDecision, RateLimitKey};
 use oidc_exchange_core::ports::IdentityProvider;
@@ -28,30 +24,35 @@ use oidc_exchange_test_utils::{
     MockUserSync,
 };
 
-const TEST_SECRET: &str = "test-internal-secret-e2e";
+const TEST_SECRET: &str = "test-internal-secret-e2e-0123456789ab";
 
 fn test_config(registration_mode: &str) -> Config {
     let mut raw_config: RawConfig = toml::from_str(include_str!("../../../config/default.toml"))
         .expect("default test config is valid");
     raw_config.server.issuer = "https://auth.example.com".to_string();
+    raw_config.server.role = "all".to_string();
     raw_config.registration.mode = registration_mode.to_string();
     raw_config.internal_api.enabled = true;
+    raw_config.internal_api.auth_methods = vec!["shared_secret".to_string()];
     raw_config.internal_api.shared_secret = Some(TEST_SECRET.to_string());
     Config::resolve(raw_config).expect("test config should resolve")
 }
-
 
 fn base_raw() -> RawConfig {
     toml::from_str(include_str!("../../../config/default.toml"))
         .expect("default test config is valid")
 }
 
-fn build_e2e_app() -> Router {
-    let provider = MockIdentityProvider::new("test");
+/// The two production planes (`bootstrap::build_routers`, role = "all") over
+/// mock adapters — the same disjoint routers a real `role = "all"` process
+/// serves on separate sockets. E2E flows that cross planes send each request
+/// to its own plane, so no test ever relies on a merged surface.
+fn build_e2e_planes_with_config(config: Config) -> Routers {
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
-    providers.insert("test".to_string(), Box::new(provider));
-
-    let config = test_config("open");
+    providers.insert(
+        "test".to_string(),
+        Box::new(MockIdentityProvider::new("test")),
+    );
 
     let service = AppService::new(
         Box::new(MockRepository::new()),
@@ -59,51 +60,20 @@ fn build_e2e_app() -> Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );
 
-    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
-    let state = AppState {
-        service: Arc::new(service),
-        config: Arc::new(config),
-        rate_limiter,
-    };
-
-    public_routes()
-        .merge(internal_routes(state.clone()))
-        .layer(from_fn(ffi_audit_context_layer))
-        .with_state(state)
+    let routers =
+        build_routers(&config, service).expect("the e2e test config always builds routers");
+    assert!(routers.public.is_some() && routers.admin.is_some());
+    routers
 }
 
-fn build_e2e_app_with_config(config: Config) -> Router {
-    let provider = MockIdentityProvider::new("test");
-    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
-    providers.insert("test".to_string(), Box::new(provider));
-
-    let service = AppService::new(
-        Box::new(MockRepository::new()),
-        Box::new(MockRepository::new()),
-        Box::new(MockKeyManager::new()),
-        Box::new(MockAuditLog::new()),
-        Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
-        providers,
-        config.clone(),
-    );
-
-    let rate_limiter = Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new());
-    let state = AppState {
-        service: Arc::new(service),
-        config: Arc::new(config),
-        rate_limiter,
-    };
-
-    public_routes()
-        .merge(internal_routes(state.clone()))
-        .layer(from_fn(ffi_audit_context_layer))
-        .with_state(state)
+/// The default e2e planes: internal API enabled behind the shared secret.
+fn build_e2e_planes() -> Routers {
+    build_e2e_planes_with_config(test_config("open"))
 }
 
 async fn body_to_json(body: Body) -> serde_json::Value {
@@ -315,7 +285,8 @@ fn decode_jwt_payload(jwt: &str) -> serde_json::Value {
 
 #[tokio::test]
 async fn e2e_full_auth_flow() {
-    let app = build_e2e_app();
+    let planes = build_e2e_planes();
+    let app = planes.public.expect("role = all binds the public plane");
 
     // Step 1: POST /token with grant_type=authorization_code → get access_token + refresh_token
     let exchange_body =
@@ -421,11 +392,13 @@ async fn e2e_full_auth_flow() {
 
 #[tokio::test]
 async fn e2e_internal_api_custom_claims() {
-    let app = build_e2e_app();
+    let planes = build_e2e_planes();
+    let public = planes.public.expect("role = all binds the public plane");
+    let admin = planes.admin.expect("role = all binds the admin plane");
 
-    // Step 1: POST /internal/users → create user
+    // Step 1: POST /internal/users on the ADMIN plane → create user
     // Use external_id "test-subject" to match the mock provider's identity claims
-    let response = app
+    let response = admin
         .clone()
         .oneshot(
             Request::builder()
@@ -453,8 +426,8 @@ async fn e2e_internal_api_custom_claims() {
     let user_id = user_json["id"].as_str().unwrap().to_string();
     assert!(user_id.starts_with("usr_"));
 
-    // Step 2: PUT /internal/users/{id}/claims → set claims {"role": "admin"}
-    let response = app
+    // Step 2: PUT /internal/users/{id}/claims on the ADMIN plane → {"role": "admin"}
+    let response = admin
         .clone()
         .oneshot(
             Request::builder()
@@ -470,10 +443,14 @@ async fn e2e_internal_api_custom_claims() {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Step 3: POST /token → resulting JWT includes custom claim role=admin
+    // Step 3: POST /token with grant_type=authorization_code (for that user) on the
+    // PUBLIC plane → get access_token. The mock provider returns
+    // external_id="test-subject", matching the user we created.
     let exchange_body =
         "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
-    let response = app
+
+    let response = public
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -857,13 +834,15 @@ async fn router_counts_invalid_grant_failures_but_not_malformed_requests() {
 
 #[tokio::test]
 async fn e2e_registration_policy_existing_users_only() {
-    let app = build_e2e_app_with_config(test_config("existing_users_only"));
+    let planes = build_e2e_planes_with_config(test_config("existing_users_only"));
+    let public = planes.public.expect("role = all binds the public plane");
+    let admin = planes.admin.expect("role = all binds the admin plane");
 
-    // Step 1: POST /token → 403 access_denied (user doesn't exist)
+    // Step 1: POST /token on the PUBLIC plane → 403 access_denied (user doesn't exist)
     let exchange_body =
         "grant_type=authorization_code&code=test-code&redirect_uri=http://localhost/callback&provider=test";
 
-    let response = app
+    let response = public
         .clone()
         .oneshot(
             Request::builder()
@@ -881,8 +860,8 @@ async fn e2e_registration_policy_existing_users_only() {
     let error_json = body_to_json(response.into_body()).await;
     assert_eq!(error_json["error"], "access_denied");
 
-    // Step 2: POST /internal/users → create user with matching external_id
-    let response = app
+    // Step 2: POST /internal/users on the ADMIN plane → create user with matching external_id
+    let response = admin
         .clone()
         .oneshot(
             Request::builder()
@@ -905,8 +884,8 @@ async fn e2e_registration_policy_existing_users_only() {
 
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    // Step 3: POST /token → 200 success (user now exists)
-    let response = app
+    // Step 3: POST /token on the PUBLIC plane → 200 success (user now exists)
+    let response = public
         .oneshot(
             Request::builder()
                 .method("POST")

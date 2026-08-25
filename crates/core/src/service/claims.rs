@@ -4,25 +4,83 @@ use serde_json::Value;
 
 use crate::domain::User;
 
-/// Reserved JWT claim names that must not be overridden by custom claims.
-///
-/// `sub`/`iss`/`aud`/`iat`/`exp` are registered claims the service stamps
-/// itself. `sid` carries revocation authority — it names the one session an
-/// access token may revoke — and `nbf` bounds validity, so neither may come
-/// from a config template or a per-user claim.
-const RESERVED_CLAIMS: &[&str] = &["sub", "iss", "aud", "iat", "exp", "nbf", "sid"];
+/// Number of names in [`RESERVED_CLAIMS`]. Kept beside the set so the array
+/// length is checked against a named bound, and so tests can fail loudly if
+/// the two ever drift apart.
+pub const RESERVED_CLAIM_COUNT: usize = 24;
 
-fn is_reserved(key: &str) -> bool {
+/// The closed set of reserved protocol claim names — the names a conformant
+/// verifier or relying party reads as protocol-defined, so a caller-supplied
+/// claim of the same name could override or forge them in a signed token.
+///
+/// Mirrors the registry-backed enumeration in `03-service-flows.md`:
+/// - the RFC 7519 §4.1 registered names,
+/// - the OpenID Connect, RFC 9068, and RFC 7800 names, including `sid` and
+///   `nbf` (reserved by the revoke-claims work: `sid` collides with the
+///   flattened session binding `/revoke` resolves),
+/// - the de-facto authorization names.
+///
+/// It is *closed*, not a maintained denylist: the set changes only when the
+/// registry it mirrors does, never per-incident. It is enforced at the write
+/// boundaries (`admin_set_claims`/`admin_merge_claims`/`admin_update_user`),
+/// at configuration acceptance (`token.custom_claims` in
+/// `AppConfig::validate`), and defensively at token build and template
+/// resolution, so a record written before the write-path rule existed still
+/// cannot leak a reserved name into a signed token.
+pub const RESERVED_CLAIMS: [&str; RESERVED_CLAIM_COUNT] = [
+    // RFC 7519 §4.1 registered names.
+    "iss",
+    "sub",
+    "aud",
+    "exp",
+    "nbf",
+    "iat",
+    "jti",
+    // OpenID Connect, RFC 9068, and RFC 7800 names.
+    "acr",
+    "amr",
+    "at_hash",
+    "auth_time",
+    "azp",
+    "c_hash",
+    "cnf",
+    "nonce",
+    "sid",
+    "typ",
+    "client_id",
+    // De-facto authorization names.
+    "scope",
+    "scp",
+    "roles",
+    "groups",
+    "entitlements",
+    "permissions",
+];
+
+/// Whether `key` collides with a protocol-owned claim name. Claim names are
+/// case-sensitive per JWT: `Sub` is not reserved, `sub` is.
+pub fn is_reserved_claim(key: &str) -> bool {
     RESERVED_CLAIMS.contains(&key)
+}
+
+/// The lowest (sorted) reserved key in a caller-supplied claim map, if any.
+///
+/// Sorted so the reported offender is deterministic when a payload carries
+/// several reserved names; callers turn the name into an `InvalidRequest`
+/// reason at the write/config boundary.
+pub(crate) fn find_reserved_claim_key<V>(claims: &HashMap<String, V>) -> Option<String> {
+    let mut keys: Vec<&String> = claims.keys().collect();
+    keys.sort();
+    keys.into_iter().find(|key| is_reserved_claim(key)).cloned()
 }
 
 /// Resolve custom claims by merging config template claims with per-user claims.
 ///
 /// Per-user claims (`user.claims`) take precedence over config template claims.
-/// Reserved JWT claim names (`sub`, `iss`, `aud`, `iat`, `exp`, `nbf`, `sid`)
-/// are silently ignored from both sources, because each is either stamped by
-/// [`crate::service::AppService::build_access_token`] or validated against a
-/// value the service controls.
+/// Reserved protocol claim names ([`RESERVED_CLAIMS`]) are silently ignored
+/// from both sources — the write path and config validation reject them before
+/// they can be persisted or configured; this filter is the defensive last line
+/// for records written before that rule existed.
 pub fn resolve_custom_claims(
     config_claims: &Option<HashMap<String, String>>,
     user: &User,
@@ -32,7 +90,7 @@ pub fn resolve_custom_claims(
     // 1. Resolve config template claims
     if let Some(templates) = config_claims {
         for (key, template) in templates {
-            if is_reserved(key) {
+            if is_reserved_claim(key) {
                 continue;
             }
             if let Some(value) = resolve_template(template, user) {
@@ -43,7 +101,7 @@ pub fn resolve_custom_claims(
 
     // 2. Merge per-user claims on top (they take precedence)
     for (key, value) in &user.claims {
-        if is_reserved(key) {
+        if is_reserved_claim(key) {
             continue;
         }
         result.insert(key.clone(), value.clone());
@@ -122,6 +180,15 @@ fn resolve_field(path: &str, user: &User) -> Option<Value> {
         }
         "claims" => {
             let key = segments.get(2)?;
+            // A template may not read a reserved claim back out of the
+            // persisted map: records written before the write-path rule
+            // existed could otherwise re-export a protocol-colliding value
+            // into a signed token through this second route. Refusing yields
+            // the same behaviour as a missing field (a `default:` filter, if
+            // any, applies).
+            if is_reserved_claim(key) {
+                return None;
+            }
             user.claims.get(*key).cloned()
         }
         _ => None,
@@ -131,6 +198,37 @@ fn resolve_field(path: &str, user: &User) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact 24 names the closed set must contain, spelled out
+    /// independently of [`RESERVED_CLAIMS`] so a typo or an accidental
+    /// addition/removal on either side fails these tests rather than silently
+    /// widening or narrowing the enforced set.
+    const EXPECTED_RESERVED_CLAIMS: [&str; RESERVED_CLAIM_COUNT] = [
+        "iss",
+        "sub",
+        "aud",
+        "exp",
+        "nbf",
+        "iat",
+        "jti",
+        "acr",
+        "amr",
+        "at_hash",
+        "auth_time",
+        "azp",
+        "c_hash",
+        "cnf",
+        "nonce",
+        "sid",
+        "typ",
+        "client_id",
+        "scope",
+        "scp",
+        "roles",
+        "groups",
+        "entitlements",
+        "permissions",
+    ];
 
     fn make_user() -> User {
         User {
@@ -146,6 +244,144 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn reserved_claim_set_is_exactly_the_closed_24_name_protocol_set() {
+        assert_eq!(
+            RESERVED_CLAIMS.len(),
+            RESERVED_CLAIM_COUNT,
+            "the set's length must equal its named count"
+        );
+
+        let mut actual: Vec<&str> = RESERVED_CLAIMS.to_vec();
+        actual.sort();
+        let mut expected = EXPECTED_RESERVED_CLAIMS.to_vec();
+        expected.sort();
+
+        assert_eq!(
+            actual, expected,
+            "RESERVED_CLAIMS must be exactly the closed protocol set, no more, no fewer"
+        );
+
+        // Every name must also be individually detectable.
+        for name in EXPECTED_RESERVED_CLAIMS {
+            assert!(
+                is_reserved_claim(name),
+                "{name:?} is in the closed set and must be flagged as reserved"
+            );
+        }
+    }
+
+    /// Negative space: near-misses, case variants, and ordinary custom claim
+    /// names are not reserved — claim names are case-sensitive per JWT.
+    #[test]
+    fn non_reserved_and_case_variant_names_are_not_flagged() {
+        for name in [
+            "role",
+            "tenant",
+            "email",
+            "custom",
+            "",
+            "Sub",
+            "SUB",
+            "scopes",
+            "subject",
+            "iatx",
+            "client_ids",
+        ] {
+            assert!(
+                !is_reserved_claim(name),
+                "{name:?} is not a protocol claim name and must stay writable"
+            );
+        }
+    }
+
+    /// Every one of the 24 reserved names is dropped from *both* sources at
+    /// token build — including from a per-user map that models a record
+    /// persisted before the write-path rule existed — while non-reserved keys
+    /// from each source survive.
+    #[test]
+    fn resolve_custom_claims_drops_every_reserved_name_from_both_sources() {
+        let mut user = make_user();
+        let mut config_claims = HashMap::new();
+
+        for name in EXPECTED_RESERVED_CLAIMS {
+            config_claims.insert(name.to_string(), "from-config".to_string());
+            user.claims
+                .insert(name.to_string(), Value::String("persisted".to_string()));
+        }
+        config_claims.insert("kept_config".to_string(), "visible".to_string());
+        user.claims.insert(
+            "kept_user".to_string(),
+            Value::String("visible".to_string()),
+        );
+
+        let result = resolve_custom_claims(&Some(config_claims), &user);
+
+        for name in EXPECTED_RESERVED_CLAIMS {
+            assert!(
+                !result.contains_key(name),
+                "reserved name {name:?} must never reach the signed token"
+            );
+        }
+        assert_eq!(
+            result.get("kept_config"),
+            Some(&Value::String("visible".to_string()))
+        );
+        assert_eq!(
+            result.get("kept_user"),
+            Some(&Value::String("visible".to_string()))
+        );
+    }
+
+    /// The template route is closed too: `{{ user.claims.<reserved> }}`
+    /// resolves to nothing even when the persisted record carries the name,
+    /// and a `default:` filter yields the operator's static value rather than
+    /// leaking the stored claim.
+    #[test]
+    fn resolve_field_refuses_persisted_reserved_claims() {
+        let mut user = make_user();
+
+        for name in EXPECTED_RESERVED_CLAIMS {
+            user.claims.insert(
+                name.to_string(),
+                Value::String("secret-override".to_string()),
+            );
+        }
+
+        for name in EXPECTED_RESERVED_CLAIMS {
+            assert_eq!(
+                resolve_field(&format!("user.claims.{name}"), &user),
+                None,
+                "{{ user.claims.{name} }} must not resolve even when persisted"
+            );
+        }
+
+        // Paired positive: non-reserved claims still resolve through templates.
+        user.claims
+            .insert("tier".to_string(), Value::String("gold".to_string()));
+        assert_eq!(
+            resolve_field("user.claims.tier", &user),
+            Some(Value::String("gold".to_string()))
+        );
+    }
+
+    #[test]
+    fn reserved_template_reference_falls_back_to_default_filter_not_stored_value() {
+        let mut user = make_user();
+        user.claims.insert(
+            "sid".to_string(),
+            Value::String("forged-session".to_string()),
+        );
+
+        let result = resolve_template("{{ user.claims.sid | default: 'fallback' }}", &user);
+
+        assert_eq!(
+            result,
+            Some(Value::String("fallback".to_string())),
+            "a refused reserved reference must behave like a missing field"
+        );
     }
 
     #[test]

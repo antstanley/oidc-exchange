@@ -40,7 +40,17 @@ impl NoopRateLimiter {
 
 #[async_trait]
 impl RateLimiter for NoopRateLimiter {
+    // Every shape of the port is an unconditional allow: a no-op throttle
+    // consults nothing, consumes nothing, and never denies.
     async fn check_and_consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        Ok(RateLimitDecision::Allow)
+    }
+
+    async fn check(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
+        Ok(RateLimitDecision::Allow)
+    }
+
+    async fn consume(&self, _key: &RateLimitKey) -> Result<RateLimitDecision> {
         Ok(RateLimitDecision::Allow)
     }
 }

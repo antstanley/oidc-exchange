@@ -41,6 +41,11 @@ tempfile = "3"
 rand.workspace = true
 rsa = { version = "0.10.0-rc.1", features = ["sha2"] }
 tokio = { workspace = true, features = ["test-util"] }
+# Interceptor support for the DynamoDB capacity-probe tests: must resolve to
+# the same versions the SDK uses so the `Intercept` impl registers (the
+# workspace lock already carries these for aws-sdk-dynamodb).
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
 # Span-leak regression tests need a fmt subscriber whose writer they control and whose
 # span lifecycle events (FmtSpan::CLOSE) they can enable explicitly.
 tracing-subscriber = "0.3"

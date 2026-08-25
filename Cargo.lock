@@ -2780,6 +2780,8 @@ dependencies = [
  "aws-sdk-dynamodb",
  "aws-sdk-kms",
  "aws-sdk-sqs",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
  "base64",
  "chrono",
  "ed25519-dalek 3.0.0-rc.1",

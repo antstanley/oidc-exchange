@@ -13,6 +13,8 @@ pub const SUBJECT_HASH_HEX_LEN: usize = 64;
 /// Maximum length of a client-authored address retained in audit records.
 pub const MAX_ASSERTED_CLIENT_ADDR_LEN: usize = 128;
 
+use crate::domain::OperatorPrincipal;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     /// ULID
@@ -20,8 +22,13 @@ pub struct AuditEvent {
     pub timestamp: DateTime<Utc>,
     pub severity: AuditSeverity,
     pub event_type: AuditEventType,
-    /// User ID if known
+    /// User id if known — the subject of the action.
     pub actor: Option<String>,
+    /// The operator principal that performed the action. Present on
+    /// `/internal/*` operations (under the shared-secret compatibility
+    /// mechanism it is present and explicitly `unattributed`), `None` on the
+    /// exchange plane, where there is no operator.
+    pub operator: Option<OperatorPrincipal>,
     pub provider: Option<String>,
     pub ip_address: Option<String>,
     pub ip_address_source: ClientAddrSource,
@@ -65,6 +72,12 @@ pub enum AuditEventType {
     /// window: the credential chain leaked, its family was revoked. Emitted at
     /// `AuditSeverity::Warning` so it survives the default emit threshold.
     RefreshTokenReuse,
+    /// A rejected operator authentication: no credential presented.
+    MissingCredential,
+    /// A rejected operator authentication: credential failed verification.
+    InvalidCredential,
+    /// A rejected operator authentication: no mechanism usable/configured.
+    NotConfigured,
 }
 
 /// The server's confidence in the address recorded on an audit event.
@@ -150,6 +163,11 @@ pub enum SecurityEvent {
     SessionsRevoked,
     ProviderRejected,
     AdminMutation { kind: AdminMutationKind },
+    /// A rejected `/internal/*` operator authentication, with its closed
+    /// failure reason. Renders as [`AuditEventType::Unauthorized`].
+    OperatorAuthenticationFailed {
+        reason: crate::domain::operator::OperatorAuthFailureReason,
+    },
     ThrottleExceeded,
 }
 
@@ -175,6 +193,7 @@ impl SecurityEvent {
             | Self::RegistrationDenied
             | Self::PrincipalSuspended
             | Self::ProviderRejected
+            | Self::OperatorAuthenticationFailed { .. }
             | Self::ThrottleExceeded => AuditSeverity::Warning,
             Self::PrincipalCreated | Self::SessionsRevoked | Self::AdminMutation { .. } => {
                 AuditSeverity::Notice
@@ -209,6 +228,7 @@ impl SecurityEvent {
             Self::AdminMutation {
                 kind: AdminMutationKind::Deleted,
             } => AuditEventType::UserDeleted,
+            Self::OperatorAuthenticationFailed { .. } => AuditEventType::Unauthorized,
             Self::ThrottleExceeded => AuditEventType::ThrottleExceeded,
         }
     }
@@ -229,6 +249,10 @@ impl SecurityEvent {
             severity: self.severity(),
             event_type: self.event_type(),
             actor,
+            // A security event never carries an operator identity: the flows
+            // that emit one either have no operator (exchange plane) or have
+            // not yet established who the operator is (rejected admin auth).
+            operator: None,
             provider,
             ip_address: client_addr.audit_address(),
             ip_address_source: client_addr.source(),
@@ -250,6 +274,11 @@ pub enum RateLimitKey {
     ClientAddr(IpAddr),
     /// A separate bucket for failed authentication attempts from a trusted client address.
     ClientAddrFailure(IpAddr),
+    /// Failed `/internal/*` operator authentications from one peer address.
+    /// Kept distinct from every exchange-plane key so a burst of anonymous
+    /// public traffic can never exhaust the operator budget and lock an
+    /// administrator out of the plane they would use to respond to it.
+    OperatorAuth(IpAddr),
     Subject {
         provider: Option<String>,
         subject_hash: String,
@@ -318,6 +347,12 @@ pub enum AuditFailure {
     /// window: the credential chain leaked, its family was revoked. Emitted at
     /// `AuditSeverity::Warning` so it survives the default emit threshold.
     RefreshTokenReuse,
+    /// A rejected operator authentication: no credential presented.
+    MissingCredential,
+    /// A rejected operator authentication: credential failed verification.
+    InvalidCredential,
+    /// A rejected operator authentication: no mechanism usable/configured.
+    NotConfigured,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

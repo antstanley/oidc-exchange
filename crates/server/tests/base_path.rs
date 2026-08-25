@@ -1,6 +1,7 @@
 //! E2E coverage for the `server.base_path` strip layer, driven through the real
-//! `bootstrap::build_router` output (middleware stack included) via `tower::ServiceExt::oneshot`
-//! — see task 02 of `.specs/plans/2026-07-02-implement_lambda_runtime/plan.md`.
+//! `bootstrap::build_public_router` output (middleware stack included) via
+//! `tower::ServiceExt::oneshot` — see task 02 of
+//! `.specs/plans/2026-07-02-implement_lambda_runtime/plan.md`.
 
 use std::collections::HashMap;
 
@@ -9,16 +10,19 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use tower::ServiceExt;
 
-use oidc_exchange::bootstrap::build_router;
+use oidc_exchange::bootstrap::build_public_router;
+use oidc_exchange::state::AppState;
 use oidc_exchange_core::config::{Config, RawConfig};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync,
 };
 
-/// Build the real production router (`bootstrap::build_router`, full middleware stack
-/// included) over a config carrying the given `base_path`, backed by mock adapters.
+/// Build the real production public router (`bootstrap::build_public_router`,
+/// full middleware stack included) over a config carrying the given
+/// `base_path`, backed by mock adapters.
 fn build_app(base_path: Option<&str>) -> Router {
     let provider = MockIdentityProvider::new("test");
     let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
@@ -36,12 +40,20 @@ fn build_app(base_path: Option<&str>) -> Router {
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config.clone(),
     );
 
-    build_router(&config, service)
+    let state = AppState {
+        service: std::sync::Arc::new(service),
+        config: std::sync::Arc::new(config.clone()),
+        rate_limiter: std::sync::Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        // The base-path suite exercises the public plane only.
+        operator_auth: None,
+    };
+
+    build_public_router(&config, state)
 }
 
 async fn get(app: &Router, uri: &str) -> StatusCode {

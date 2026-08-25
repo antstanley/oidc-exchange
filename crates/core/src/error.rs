@@ -30,6 +30,8 @@ pub enum Error {
     #[error("not found: {detail}")]
     NotFound { detail: String },
 
+    /// A bounded rate-limit budget is exhausted; the caller must back off for
+    /// at least `retry_after_secs`.
     #[error("too many requests; retry after {retry_after_secs} seconds")]
     TooManyRequests { retry_after_secs: u64 },
 

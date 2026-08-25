@@ -317,6 +317,7 @@ fn build_app(providers: HashMap<String, Box<dyn IdentityProvider>>) -> Router {
         service: Arc::new(service),
         config: Arc::new(config),
         rate_limiter: std::sync::Arc::new(oidc_exchange_adapters::noop::NoopRateLimiter::new()),
+        operator_auth: None,
     };
 
     public_routes()

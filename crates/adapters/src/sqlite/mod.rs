@@ -12,6 +12,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use tracing::instrument;
 
+use oidc_exchange_core::cursor::KeysetCursor;
+use oidc_exchange_core::domain::{UserPage, MAX_ADMIN_PAGE_SIZE};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::secret::Secret;
 use oidc_exchange_core::ports::{SessionRepository, UserRepository};
@@ -680,23 +682,80 @@ impl UserRepository for SqliteRepository {
         Ok(counts)
     }
 
+    /// Keyset-paginated listing ordered `created_at DESC, id DESC`, resuming
+    /// strictly after the decoded cursor's `(created_at, id)` position.
+    ///
+    /// The page size is pushed into SQLite as a hard `LIMIT` — never applied
+    /// to an in-memory result — and one row *past* the limit is fetched so
+    /// termination is exact: a non-null `next_cursor` is emitted only when a
+    /// following row actually exists, which makes a short page always mean an
+    /// exhausted listing on this adapter. The composite key makes the ordering
+    /// total, so adjacent pages neither duplicate nor skip rows even when many
+    /// users share one `created_at`.
     #[instrument(skip(self))]
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        let rows = sqlx::query("SELECT * FROM users ORDER BY created_at DESC LIMIT ?1 OFFSET ?2")
-            .bind(limit as i64)
-            .bind(offset as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| Error::StoreError {
-                detail: e.to_string(),
-            })?;
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        // Defense in depth alongside the core's clamp: this adapter is public
+        // to any embedder that may not have passed the value through
+        // `admin_list_users`, so the bound is re-asserted at the boundary.
+        assert!(
+            (1..=MAX_ADMIN_PAGE_SIZE).contains(&limit),
+            "list_users limit must arrive pre-clamped within 1..={MAX_ADMIN_PAGE_SIZE}, got {limit}"
+        );
+        let resume_after = cursor.map(KeysetCursor::decode).transpose()?;
 
-        let mut users = Vec::new();
-        for row in &rows {
+        let fetch_limit = i64::from(limit) + 1;
+        let rows = match &resume_after {
+            Some(position) => {
+                let created_at_str = position.created_at.to_rfc3339();
+                sqlx::query(
+                    "SELECT * FROM users \
+                     WHERE (created_at < ?1) OR (created_at = ?1 AND id < ?2) \
+                     ORDER BY created_at DESC, id DESC LIMIT ?3",
+                )
+                .bind(&created_at_str)
+                .bind(&position.id)
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?
+            }
+            None => sqlx::query("SELECT * FROM users ORDER BY created_at DESC, id DESC LIMIT ?1")
+                .bind(fetch_limit)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Error::StoreError {
+                    detail: e.to_string(),
+                })?,
+        };
+
+        assert!(
+            rows.len() <= fetch_limit as usize,
+            "SQLite returned more rows than the pushed LIMIT of {fetch_limit}"
+        );
+
+        // The extra row proves more pages exist and is dropped from the page.
+        let has_more = rows.len() > limit as usize;
+        let page_rows = if has_more {
+            &rows[..limit as usize]
+        } else {
+            &rows[..]
+        };
+
+        let mut users = Vec::with_capacity(page_rows.len());
+        for row in page_rows {
             users.push(row_to_user(row)?);
         }
 
-        Ok(users)
+        let next_cursor = if has_more {
+            let last = users.last().expect("a continued page is non-empty");
+            Some(KeysetCursor::new(last.created_at, last.id.clone()).encode())
+        } else {
+            None
+        };
+
+        Ok(UserPage { users, next_cursor })
     }
 }
 
@@ -2377,5 +2436,174 @@ mod tests {
             consumed,
             "the pre-existing record must survive migration replay"
         );
+    }
+
+    // ── Keyset pagination (task 08) ─────────────────────────────────────────
+
+    /// Insert a user row at an exact `created_at`, bypassing
+    /// `create_user`'s clock, so ordering and `created_at` ties are
+    /// deterministic in the assertions below.
+    ///
+    /// The timestamp is stored through `DateTime::to_rfc3339()` — the same
+    /// rendering `create_user` writes and the keyset predicate re-binds —
+    /// because pagination compares stored text lexicographically: a row
+    /// seeded in any other RFC 3339 spelling (e.g. a bare `Z` suffix) would
+    /// not compare equal to its own cursor position and would break resumption.
+    async fn insert_user_at(
+        repo: &SqliteRepository,
+        id: &str,
+        external_id: &str,
+        created_at_rfc3339: &str,
+    ) {
+        let now = created_at_rfc3339
+            .parse::<DateTime<Utc>>()
+            .expect("seed timestamps are valid RFC 3339")
+            .to_rfc3339();
+        sqlx::query(
+            "INSERT INTO users (id, external_id, provider, email, display_name, metadata, claims, status, version, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, NULL, NULL, '{}', '{}', 'active', 1, ?4, ?4)",
+        )
+        .bind(id)
+        .bind(external_id)
+        .bind("mock")
+        .bind(&now)
+        .execute(&repo.pool)
+        .await
+        .expect("seeded user row inserts");
+    }
+
+    /// Seed six users whose `created_at` values descend in known steps,
+    /// two of which share one timestamp to exercise the `id` tiebreaker.
+    /// Expected listing order (newest first):
+    async fn seed_ordered_users(repo: &SqliteRepository) -> Vec<String> {
+        let stamps = [
+            ("usr_p1", "2026-01-01T00:00:01Z"),
+            ("usr_p2", "2026-01-01T00:00:02Z"),
+            ("usr_p3", "2026-01-01T00:00:03Z"),
+            ("usr_tie_a", "2026-01-01T00:00:05Z"),
+            ("usr_tie_b", "2026-01-01T00:00:05Z"),
+            ("usr_p5", "2026-01-01T00:00:06Z"),
+        ];
+        for (id, ts) in &stamps {
+            insert_user_at(repo, id, &format!("ext-{id}"), ts).await;
+        }
+        vec![
+            "usr_p5".into(),
+            "usr_tie_b".into(),
+            "usr_tie_a".into(),
+            "usr_p3".into(),
+            "usr_p2".into(),
+            "usr_p1".into(),
+        ]
+    }
+
+    /// Walk pages of `limit`, returning every id in visit order.
+    async fn walk(repo: &SqliteRepository, limit: u32) -> Vec<String> {
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            assert!(pages <= 1000, "traversal must terminate");
+            let page = repo
+                .list_users(cursor.as_deref(), limit)
+                .await
+                .expect("each page succeeds");
+            assert!(page.users.len() <= limit as usize);
+            seen.extend(page.users.iter().map(|u| u.id.clone()));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn keyset_pages_preserve_created_desc_ordering_across_boundaries() {
+        let repo = create_test_repo().await;
+        let expected = seed_ordered_users(&repo).await;
+
+        // Page boundaries land inside the tie group and between plain rows.
+        assert_eq!(walk(&repo, 2).await, expected, "limit=2 traversal order");
+        assert_eq!(walk(&repo, 4).await, expected, "limit=4 traversal order");
+    }
+
+    #[tokio::test]
+    async fn keyset_traversal_is_exact_with_no_duplicates_or_skips() {
+        let repo = create_test_repo().await;
+        let expected = seed_ordered_users(&repo).await;
+
+        let seen = walk(&repo, 1).await;
+        assert_eq!(seen.len(), expected.len());
+        assert_eq!(
+            seen.iter().collect::<std::collections::HashSet<_>>().len(),
+            expected.len(),
+            "no duplicates across adjacent pages"
+        );
+        assert_eq!(seen, expected);
+    }
+
+    #[tokio::test]
+    async fn short_final_page_carries_null_cursor_and_exact_fit_has_no_empty_trailer() {
+        let repo = create_test_repo().await;
+        seed_ordered_users(&repo).await;
+
+        // 6 rows at limit 4: full page, then a short final page.
+        let page_one = repo.list_users(None, 4).await.expect("page one");
+        assert_eq!(page_one.users.len(), 4);
+        let cursor = page_one.next_cursor.expect("more remain after a full page");
+        let page_two = repo.list_users(Some(&cursor), 4).await.expect("page two");
+        assert_eq!(page_two.users.len(), 2, "short final page");
+        assert!(
+            page_two.next_cursor.is_none(),
+            "short final page is exhausted"
+        );
+
+        // Exactly-fitting listing: one full page with a null cursor, so there
+        // is no dangling cursor to follow and no empty trailer page in the
+        // traversal.
+        let whole = repo.list_users(None, 6).await.expect("whole listing");
+        assert_eq!(whole.users.len(), 6);
+        assert!(whole.next_cursor.is_none());
+        // Resuming *strictly after* the final row (the position an exhausted
+        // traversal would sit at) yields an empty page that still terminates:
+        // nothing past the end can smuggle a dangling cursor back in. An
+        // absent cursor cannot play this role — by contract it restarts the
+        // listing from the first page.
+        let last = whole.users.last().expect("a non-empty page has a last row");
+        let past_end = KeysetCursor::new(last.created_at, last.id.clone()).encode();
+        let past = repo
+            .list_users(Some(&past_end), 6)
+            .await
+            .expect("resume after the final row");
+        assert!(past.users.is_empty());
+        assert!(past.next_cursor.is_none(), "nothing follows the last row");
+    }
+
+    #[tokio::test]
+    async fn empty_table_returns_an_empty_exhausted_page() {
+        let repo = create_test_repo().await;
+
+        let page = repo.list_users(None, 10).await.expect("empty page");
+        assert!(page.users.is_empty());
+        assert!(page.next_cursor.is_none(), "an empty listing is exhausted");
+    }
+
+    #[tokio::test]
+    async fn tampered_cursor_is_invalid_request_not_a_silent_first_page() {
+        let repo = create_test_repo().await;
+        seed_ordered_users(&repo).await;
+
+        for bad_cursor in ["garbage", "", "aGVsbG8="] {
+            let err = repo
+                .list_users(Some(bad_cursor), 5)
+                .await
+                .expect_err("tampered cursors are rejected");
+            match err {
+                Error::InvalidRequest { .. } => {}
+                other => panic!("expected InvalidRequest for {bad_cursor:?}, got {other:?}"),
+            }
+        }
     }
 }

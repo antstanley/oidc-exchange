@@ -11,7 +11,7 @@ use oidc_exchange_core::config::{
 };
 use oidc_exchange_core::domain::{
     is_valid_family_id, AccessTokenClaims, AuditEventType, AuditFailure, AuditOutcome,
-    AuditSeverity, IdentityClaims, NewUser, User, UserPatch, UserStatus,
+    AuditSeverity, IdentityClaims, NewUser, User, UserPage, UserPatch, UserStatus,
 };
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::{IdentityProvider, UserRepository};
@@ -19,7 +19,8 @@ use oidc_exchange_core::service::exchange::{ExchangeCredential, ExchangeRequest}
 use oidc_exchange_core::service::AppService;
 
 use oidc_exchange_test_utils::{
-    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRepository, MockUserSync, UserSyncCall,
+    MockAuditLog, MockIdentityProvider, MockKeyManager, MockRateLimiter, MockRepository,
+    MockUserSync, UserSyncCall,
 };
 
 fn base_raw_config() -> RawConfig {
@@ -106,7 +107,7 @@ fn make_service_with_config(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -147,7 +148,7 @@ fn make_service_with_user_repo_and_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -172,7 +173,7 @@ fn make_service_with_user_sync(
         Box::new(MockKeyManager::new()),
         Box::new(MockAuditLog::new()),
         Box::new(user_sync),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -196,7 +197,7 @@ fn make_service_with_audit(
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )
@@ -262,8 +263,8 @@ impl UserRepository for StaleReadUserRepository {
         self.inner.count_by_status().await
     }
 
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        self.inner.list_users(offset, limit).await
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        self.inner.list_users(cursor, limit).await
     }
 }
 
@@ -327,8 +328,8 @@ impl UserRepository for FailingCreateUserRepository {
         self.inner.count_by_status().await
     }
 
-    async fn list_users(&self, offset: u64, limit: u64) -> Result<Vec<User>> {
-        self.inner.list_users(offset, limit).await
+    async fn list_users(&self, cursor: Option<&str>, limit: u32) -> Result<UserPage> {
+        self.inner.list_users(cursor, limit).await
     }
 }
 

@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OIDC Exchange Internal API",
+  "description": "The service's published internal-API contract. The admin console's client (apps/admin-ui/src/lib/api.ts and types.ts) is generated from this file at build time; a service-side rename that is not reflected here breaks generation instead of silently changing an operator control. Wire values (snake_case enums, cursor paging, 429 semantics) are canonical: the console adopts the service's spelling, never the reverse.",
+  "version": "1.0.0",
+
+  "x-base-url-env": "INTERNAL_API_URL",
+  "x-default-base-url": "http://localhost:8081",
+
+  "x-credentials": {
+    "description": "The operator credential is selected server-side (SvelteKit server only; the browser holds only the session cookie and never sees any credential value) in this exact preference order.",
+    "preference": [
+      {
+        "kind": "operator_token",
+        "description": "An operator token verified by the service's own key manager under the internal_api.operator_token mechanism.",
+        "env": ["INTERNAL_API_TOKEN"],
+        "transport": "authorization-header"
+      },
+      {
+        "kind": "client_certificate",
+        "description": "A client certificate/key pair presented over mutual TLS to the admin listener's terminating proxy or listener.",
+        "env": ["INTERNAL_API_CLIENT_CERT", "INTERNAL_API_CLIENT_KEY"],
+        "transport": "mtls"
+      },
+      {
+        "kind": "shared_secret",
+        "description": "The compatibility shared secret for deployments that have not yet migrated; authenticates as the reserved unattributed principal.",
+        "env": ["INTERNAL_API_SECRET"],
+        "transport": "authorization-header"
+      }
+    ]
+  },
+
+  "$defs": {
+    "UserStatus": {
+      "type": "string",
+      "enum": ["active", "suspended", "deleted"],
+      "description": "The service's wire spelling of UserStatus (serde snake_case)."
+    },
+    "User": {
+      "type": "object",
+      "required": ["id", "external_id", "provider", "status", "version", "created_at", "updated_at"],
+      "properties": {
+        "id": { "type": "string", "description": "Internal user ID (e.g., usr_01ARZ3NDEK...)" },
+        "external_id": { "type": "string", "description": "Provider subject claim or DID" },
+        "provider": { "type": "string", "description": "Provider identifier (google, apple, atproto)" },
+        "email": { "type": ["string", "null"] },
+        "display_name": { "type": ["string", "null"] },
+        "metadata": { "type": "object", "additionalProperties": true, "description": "Extensible key-value pairs for sync data" },
+        "claims": { "type": "object", "additionalProperties": true, "description": "Per-user private claims added to access token JWT, managed via the internal API" },
+        "status": { "$ref": "#/$defs/UserStatus" },
+        "version": { "type": "integer", "minimum": 1, "description": "Optimistic-concurrency counter" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "NewUser": {
+      "type": "object",
+      "required": ["external_id", "provider"],
+      "properties": {
+        "external_id": { "type": "string" },
+        "provider": { "type": "string" },
+        "email": { "type": "string" },
+        "display_name": { "type": "string" }
+      }
+    },
+    "UserPatch": {
+      "type": "object",
+      "description": "Partial update; omitted fields are left unchanged.",
+      "properties": {
+        "email": { "type": ["string", "null"] },
+        "display_name": { "type": ["string", "null"] },
+        "metadata": { "type": "object", "additionalProperties": true },
+        "status": { "$ref": "#/$defs/UserStatus" }
+      }
+    },
+    "ClaimsMap": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Per-user private claims injected into access tokens. Reserved protocol claim names are rejected by the service."
+    },
+    "UserPage": {
+      "type": "object",
+      "description": "One page of a cursor-paginated user listing. next_cursor is opaque and adapter-issued: null means the listing is exhausted; a page may be shorter than the requested limit while next_cursor is still non-null, so callers must follow next_cursor — never stop at a short page.",
+      "required": ["users", "next_cursor"],
+      "properties": {
+        "users": { "type": "array", "items": { "$ref": "#/$defs/User" } },
+        "next_cursor": { "type": ["string", "null"], "x-cursor": true }
+      }
+    },
+    "Stats": {
+      "type": "object",
+      "required": ["users", "sessions"],
+      "properties": {
+        "users": {
+          "type": "object",
+          "required": ["total", "active", "suspended", "deleted"],
+          "properties": {
+            "total": { "type": "integer" },
+            "active": { "type": "integer" },
+            "suspended": { "type": "integer" },
+            "deleted": { "type": "integer" }
+          }
+        },
+        "sessions": {
+          "type": "object",
+          "required": ["active"],
+          "properties": {
+            "active": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "OperatorAuthMechanism": {
+      "type": "string",
+      "enum": ["mtls", "operator_token", "shared_secret"],
+      "description": "How an /internal/* request was authenticated."
+    },
+    "OperatorPrincipal": {
+      "type": "object",
+      "description": "The authenticated identity behind an /internal/* request, recorded on admin audit events. The shared-secret mechanism always pairs with the reserved id 'unattributed'. Never carries credential material.",
+      "required": ["id", "mechanism"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "description": "Certificate subject, operator-token sub, or the reserved literal 'unattributed'" },
+        "mechanism": { "$ref": "#/$defs/OperatorAuthMechanism" }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "description": "The stable OAuth-style error envelope every non-2xx response renders.",
+      "required": ["error"],
+      "properties": {
+        "error": { "type": "string" },
+        "error_description": { "type": "string" }
+      }
+    }
+  },
+
+  "paths": {
+    "/internal/stats": {
+      "get": {
+        "operationId": "getStats",
+        "description": "Aggregate user and active-session counts.",
+        "responses": {
+          "200": { "$ref": "#/$defs/Stats" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      }
+    },
+    "/internal/users": {
+      "get": {
+        "operationId": "listUsersPage",
+        "description": "List users, one bounded page at a time. Page with cursor=next_cursor until it is null; a short page does not mean the end.",
+        "parameters": [
+          { "name": "cursor", "in": "query", "schema": { "type": "string" }, "description": "Opaque next_cursor from the previous page; absent starts the listing." },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }, "description": "Clamped server-side to MAX_ADMIN_PAGE_SIZE (200)." }
+        ],
+        "responses": {
+          "200": { "$ref": "#/$defs/UserPage" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      },
+      "post": {
+        "operationId": "createUser",
+        "description": "Create a user from an external identity.",
+        "body": { "$ref": "#/$defs/NewUser" },
+        "responses": {
+          "201": { "$ref": "#/$defs/User" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "422": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      }
+    },
+    "/internal/users/{id}": {
+      "get": {
+        "operationId": "getUser",
+        "description": "Fetch one user by id. The id is one encoded path segment; it can never re-address the request.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/$defs/User" },
+          "404": { "$ref": "#/$defs/ErrorResponse", "x-not-found-is-null": true },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      },
+      "patch": {
+        "operationId": "updateUser",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "body": { "$ref": "#/$defs/UserPatch" },
+        "responses": {
+          "200": { "$ref": "#/$defs/User" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      },
+      "delete": {
+        "operationId": "deleteUser",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "type": "null" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      }
+    },
+    "/internal/users/{id}/claims": {
+      "get": {
+        "operationId": "getUserClaims",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/$defs/ClaimsMap" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      },
+      "put": {
+        "operationId": "setClaims",
+        "description": "Replace the whole claims map.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "body": { "$ref": "#/$defs/ClaimsMap" },
+        "responses": {
+          "200": { "type": "null" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "422": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      },
+      "patch": {
+        "operationId": "mergeClaims",
+        "description": "Merge new claims over existing (new keys win).",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "body": { "$ref": "#/$defs/ClaimsMap" },
+        "responses": {
+          "200": { "type": "null" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "422": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      },
+      "delete": {
+        "operationId": "clearClaims",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "type": "null" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      }
+    }
+  }
+}

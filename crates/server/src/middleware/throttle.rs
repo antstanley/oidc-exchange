@@ -69,6 +69,11 @@ impl RateLimitBudgets {
             RateLimitKey::ClientAddrFailure(_) => self.per_ip_failures,
             RateLimitKey::Subject { .. } => self.per_subject,
             RateLimitKey::Provider(_) => self.per_provider,
+            // The admin plane's budget lives in AdminAuthRateLimiter; routing
+            // its key into the exchange window is a wiring bug.
+            RateLimitKey::OperatorAuth(_) => unreachable!(
+                "the OperatorAuth budget belongs to AdminAuthRateLimiter, not the fixed window"
+            ),
         }
     }
 }
@@ -156,6 +161,21 @@ impl FixedWindowRateLimiter {
 impl RateLimiter for FixedWindowRateLimiter {
     async fn check_and_consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
         self.check_at(key, self.clock.now())
+    }
+
+    // The exchange-plane fixed window has no consult-without-consume shape:
+    // its budgets meter requests, not failed attempts. The admin plane uses
+    // `AdminAuthRateLimiter`; routing an operator-auth key here is a wiring
+    // bug, surfaced loudly.
+    async fn check(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
+        unreachable!(
+            "FixedWindowRateLimiter meters requests via check_and_consume; \
+             consult-only check is not part of its contract (key {key:?})"
+        )
+    }
+
+    async fn consume(&self, key: &RateLimitKey) -> Result<RateLimitDecision> {
+        self.check_and_consume(key).await
     }
 }
 

@@ -118,7 +118,7 @@ fn make_service_with_audit(audit: MockAuditLog, config: Config) -> AppService {
         Box::new(MockKeyManager::new()),
         Box::new(audit),
         Box::new(MockUserSync::new()),
-        Box::new(oidc_exchange_test_utils::MockRateLimiter::new()),
+        Box::new(MockRateLimiter::new()),
         providers,
         config,
     )

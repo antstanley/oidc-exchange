@@ -27,6 +27,7 @@ The following shows every configuration section with all available options. In p
 host = "0.0.0.0"                       # bind address
 port = 8080                            # listen port
 issuer = "https://auth.example.com"    # issuer URL for JWTs (iss claim)
+role = "exchange"                      # "exchange" (default), "admin", or "all" — see Upgrading below
 # Trust X-Forwarded-For only from these peer CIDRs. Empty means never trust it.
 trusted_proxies = ["10.0.0.0/8"]
 trusted_proxy_hops = 1                 # select this many entries from X-Forwarded-For's right side
@@ -51,7 +52,8 @@ audience = "https://api.example.com"   # aud claim in access tokens
 # Static values are used as-is.
 # Template values reference the User model with {{ field }} syntax.
 # The | default: filter provides a fallback if the field is missing.
-# Reserved claims (sub, iss, aud, iat, exp) cannot be overridden.
+# Reserved protocol claim names cannot be used as keys here or as per-user
+# claims via the internal API; a configuration carrying one fails startup.
 [token.custom_claims]
 org = "example"
 role = "{{ user.metadata.role | default: 'user' }}"
@@ -152,8 +154,40 @@ protocol = "grpc"                      # "grpc" or "http"
 
 # ─── Internal admin API ───────────────────────────────────────────
 [internal_api]
-auth_method = "shared_secret"
+enabled = true                         # serves /internal/* on the dedicated admin listener
+host = "127.0.0.1"                     # admin listener bind address (loopback by default)
+port = 8081
+# Authentication mechanisms, tried in the order given.
+# Values: "operator_token", "mtls", "shared_secret". The legacy singular
+# `auth_method` key is still accepted and read as a one-element list.
+auth_methods = ["operator_token"]
+# Shared secret for the "shared_secret" compatibility mechanism. While that
+# mechanism is enabled it must be at least 32 bytes — non-empty is not enough.
 shared_secret = "${INTERNAL_API_SECRET}"
+
+# "operator_token" mechanism: operator JWTs are verified against THIS
+# service's own key manager ([key_manager]) and require a real (non-noop)
+# adapter plus a non-empty [server].issuer.
+token_audience = "internal"            # aud an operator token must carry; must differ from [token].audience
+required_claim = "role"                # claim name a verified operator token must carry
+required_value = "${OPERATOR_ROLE_VALUE}"  # value required_claim must carry
+
+# Failed-authentication throttle, keyed by peer address on the admin listener:
+max_auth_failures = 5                  # failed attempts one peer may spend...
+auth_failure_window = "1m"             # ...per this window before lockout
+auth_lockout = "5m"                    # how long a locked-out peer stays denied
+
+# How long cached dashboard counts (active sessions) may be served before a
+# re-scan; consumed by the DynamoDB adapter only. Valid range: 1s–3600s.
+stats_cache_ttl = "60s"
+
+# "mtls" mechanism: the client-certificate subject is asserted by the
+# TLS-terminating proxy via this header. Trustworthy only while the admin
+# listener is unreachable except through that proxy (which must also strip
+# client-supplied copies of the header); a startup warning fires when this
+# mechanism is enabled on a non-loopback listener.
+[internal_api.mtls]
+subject_header = "x-client-cert-subject"
 
 # ─── Identity providers ───────────────────────────────────────────
 # Each [providers.<name>] block registers a provider. The name is used
@@ -217,6 +251,7 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 |---|---|
 | `server.host` | `0.0.0.0` |
 | `server.port` | `8080` |
+| `server.role` | `exchange` |
 | `server.issuer`, `token.audience` | `https://auth.example.com` / `https://api.example.com` (deployment placeholders; replace before production) |
 | `registration.mode` | `open` |
 | `registration.domain_allowlist` | none (all domains allowed) |
@@ -234,7 +269,40 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 | `audit.blocking_threshold` | `warning` |
 | `providers.<name>.endpoint_origins` | none — the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
-| `internal_api` | disabled |
+| `internal_api.enabled` | `false` |
+| `internal_api.host` / `.port` | `127.0.0.1:8081` |
+| `internal_api.auth_methods` | `["shared_secret"]` |
+| `internal_api.token_audience` | `"internal"` |
+| `internal_api.required_claim` / `.required_value` | `"role"` / `"admin"` |
+| `internal_api.mtls.subject_header` | `"x-client-cert-subject"` |
+| `internal_api.max_auth_failures` | `5` |
+| `internal_api.auth_failure_window` | `"1m"` |
+| `internal_api.auth_lockout` | `"5m"` |
+| `internal_api.stats_cache_ttl` | `"60s"` |
+
+## Upgrading: `server.role` now defaults to `exchange`
+
+Earlier releases defaulted `server.role` to `all`: a deployment that only set
+`internal_api.enabled = true` got the internal admin API served on the same
+process as the public `/token` endpoint without ever naming that decision. The
+default is now `exchange`, which serves only the public exchange plane —
+admin reachability must be a deliberate deployment decision, visible in
+configuration.
+
+If an installation relied on the implicit `all`, set the role explicitly when
+upgrading:
+
+```toml
+[server]
+role = "all"     # public exchange plane + internal admin API on this process
+```
+
+Prefer splitting the planes when you do: keep `role = "exchange"` (or omit the
+key) on internet-facing processes, and run a separate process with
+`role = "admin"` and `internal_api.enabled = true` for the admin API, reachable
+only from your operator network. An `exchange`-role process never mounts
+`/internal/*`, so a forgotten `internal_api.enabled = true` there fails closed
+instead of publishing the privilege-assignment primitive.
 
 ## Trusted proxies and rate limiting
 
