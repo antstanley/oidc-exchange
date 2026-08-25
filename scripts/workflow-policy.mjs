@@ -94,6 +94,8 @@ export function validateWorkflow(text, workflowName) {
       // are rejected above as dynamic commands.
       if (step.run.includes("pnpm exec") && !/corepack pnpm@[\w.-]+ (?:--\S+ )*exec\b/.test(step.run))
         errors.push(`${key}: pnpm exec must use the pinned corepack invocation`);
+      if (/\bpnpm(?:@[\w.-]+)?\s+exec\s+--offline\b/.test(step.run))
+        errors.push(`${key}: pnpm 11 exec treats everything after exec as the command; --offline is not a flag there`);
       for (const command of step.run.matchAll(/\bcargo\s+install\s+cross\b[^\n]*/g)) {
         const version = /(?:^|\s)--version\s+(\S+)/.exec(command[0])?.[1];
         if (!version || !/^\d+\.\d+\.\d+$/.test(version))
