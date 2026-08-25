@@ -346,7 +346,7 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -450,7 +450,7 @@ async fn exchange_existing_user_does_not_create_new() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -467,7 +467,7 @@ async fn exchange_existing_user_does_not_create_new() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -553,7 +553,7 @@ async fn exchange_suspended_user_is_rejected() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -585,7 +585,7 @@ async fn exchange_suspended_user_is_rejected() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -615,7 +615,7 @@ async fn exchange_unknown_provider_is_rejected() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "nonexistent".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -671,7 +671,7 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -723,7 +723,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 redirect_uri: "https://app.test.com/callback".to_string(),
             },
             provider: "mock".to_string(),
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         };
@@ -755,7 +755,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 redirect_uri: "https://app.test.com/callback".to_string(),
             },
             provider: "mock".to_string(),
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         };
@@ -787,7 +787,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 redirect_uri: "https://app.test.com/callback".to_string(),
             },
             provider: "mock".to_string(),
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         };
@@ -824,7 +824,7 @@ async fn exchange_wildcard_subdomain_matching() {
                 redirect_uri: "https://app.test.com/callback".to_string(),
             },
             provider: "mock".to_string(),
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         };
@@ -861,7 +861,7 @@ async fn exchange_existing_users_only_rejects_new_user() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -913,7 +913,7 @@ async fn exchange_existing_user_is_denied_after_allowlist_tightening() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -950,7 +950,7 @@ async fn exchange_open_registration_requires_verified_email_without_allowlist() 
             },
             provider: "mock".to_string(),
             provider_access_token: None,
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         })
@@ -996,7 +996,7 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1052,7 +1052,7 @@ async fn exchange_with_direct_id_token_skips_code_exchange() {
             id_token: "fake.id.token".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1092,7 +1092,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1129,7 +1129,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1176,7 +1176,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1216,7 +1216,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1262,7 +1262,7 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1319,7 +1319,7 @@ async fn exchange_provider_timeout_emits_exactly_one_typed_terminal_event() {
         },
         provider: "mock".to_string(),
         provider_access_token: None,
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1354,7 +1354,7 @@ async fn exchange_with_client_context_stores_exact_session_values() {
         },
         provider: "mock".to_string(),
         provider_access_token: None,
-        ip_address: Some("203.0.113.7".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.7".parse().unwrap()),
         user_agent: Some("integration-test-agent/1.0".to_string()),
         device_id: Some("device-abc-123".to_string()),
     };
@@ -1389,7 +1389,7 @@ async fn exchange_without_client_context_stores_none_session_values() {
         },
         provider: "mock".to_string(),
         provider_access_token: None,
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1427,7 +1427,7 @@ async fn exchange_new_user_emits_user_created_then_token_exchange() {
         },
         provider: "mock".to_string(),
         provider_access_token: None,
-        ip_address: Some("203.0.113.9".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.9".parse().unwrap()),
         user_agent: Some("test-agent/2.0".to_string()),
         device_id: None,
     };
@@ -1483,7 +1483,7 @@ async fn exchange_existing_user_emits_only_token_exchange() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1505,7 +1505,7 @@ async fn exchange_existing_user_emits_only_token_exchange() {
         },
         provider: "mock".to_string(),
         provider_access_token: None,
-        ip_address: Some("203.0.113.10".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.10".parse().unwrap()),
         user_agent: Some("test-agent/3.0".to_string()),
         device_id: None,
     };
@@ -1542,7 +1542,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1577,7 +1577,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
         },
         provider: "mock".to_string(),
         provider_access_token: None,
-        ip_address: Some("203.0.113.11".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.11".parse().unwrap()),
         user_agent: Some("test-agent/4.0".to_string()),
         device_id: None,
     };
@@ -1649,7 +1649,7 @@ async fn exchange_existing_user_allowlist_rejection_names_user_in_audit() {
             },
             provider: "mock".to_string(),
             provider_access_token: None,
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         })
@@ -1689,7 +1689,7 @@ async fn exchange_existing_users_only_rejection_emits_registration_denied() {
             },
             provider: "mock".to_string(),
             provider_access_token: None,
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         })
@@ -1742,7 +1742,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
         },
         provider: "mock".to_string(),
         provider_access_token: None,
-        ip_address: Some("203.0.113.12".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.12".parse().unwrap()),
         user_agent: Some("test-agent/5.0".to_string()),
         device_id: None,
     };
@@ -1816,7 +1816,7 @@ async fn exchange_enforce_audit_failure_revokes_new_session() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1860,7 +1860,7 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1896,7 +1896,7 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -1939,7 +1939,7 @@ async fn exchange_jit_registration_still_returns_token_when_sync_fails_every_att
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };

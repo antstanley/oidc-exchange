@@ -16,7 +16,9 @@ use tower::ServiceExt;
 use oidc_exchange::bootstrap::{build_router_with_rate_limiter, build_routers, Routers};
 use oidc_exchange::middleware::throttle::{FixedWindowRateLimiter, RateLimitBudgets, TestClock};
 use oidc_exchange_core::config::{Config, RawConfig};
-use oidc_exchange_core::domain::{AuditEventType, RateLimitDecision, RateLimitKey};
+use oidc_exchange_core::domain::{
+    AuditEventType, ClientAddrSource, RateLimitDecision, RateLimitKey,
+};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::service::AppService;
 use oidc_exchange_test_utils::{
@@ -267,6 +269,81 @@ async fn production_router_uses_observed_peer_and_trusted_forwarding_for_audit_a
                 address.parse().expect("valid address")
             )],
             "{name}"
+        );
+    }
+}
+
+/// S7: the terminal `/token` audit event records the middleware's *resolved*
+/// `ip_address_source` (`peer`/`forwarded`/`unknown`) rather than the flattened
+/// `asserted` the core flow used to manufacture. Before the fix, every
+/// core-flow event carried `ip_address_source = "asserted"` regardless of how
+/// the middleware learned the address; this drives the production router end to
+/// end and inspects the emitted `TokenExchange` event's provenance directly.
+#[tokio::test]
+async fn production_flow_audit_events_record_resolved_provenance_source() {
+    // (name, peer, forwarded, strip_connect_info, expected source)
+    let cases = [
+        (
+            "peer",
+            "198.51.100.9:443",
+            Some("203.0.113.4"),
+            false,
+            ClientAddrSource::Peer,
+        ),
+        (
+            "trusted_forwarded",
+            "10.0.0.9:443",
+            Some("203.0.113.4"),
+            false,
+            ClientAddrSource::Forwarded,
+        ),
+        (
+            "no_peer",
+            "10.0.0.9:443",
+            None,
+            true,
+            ClientAddrSource::Unknown,
+        ),
+    ];
+
+    for (name, peer, forwarded, strip_connect_info, expected_source) in cases {
+        let audit_log = MockAuditLog::new();
+        let public_limiter = MockRateLimiter::new();
+        let (app, mut request) = build_production_audit_router(
+            peer.parse().expect("valid peer"),
+            forwarded,
+            audit_log.clone(),
+            public_limiter,
+        );
+        if strip_connect_info {
+            // No server-established transport peer: provenance must resolve to
+            // Unknown, not be manufactured as Asserted.
+            request.extensions_mut().remove::<ConnectInfo<SocketAddr>>();
+        }
+
+        let response = app.oneshot(request).await.expect("router response");
+        assert_eq!(response.status(), StatusCode::OK, "{name}");
+
+        let events = audit_log.events().await;
+        assert!(
+            !events.is_empty(),
+            "{name}: the flow must emit audit events"
+        );
+        // No core-flow event may carry the flattened `asserted` provenance any
+        // more — that is precisely the S7 regression.
+        assert!(
+            events
+                .iter()
+                .all(|event| event.ip_address_source != ClientAddrSource::Asserted),
+            "{name}: no core-flow event may record asserted provenance: {events:#?}"
+        );
+        let terminal = events
+            .iter()
+            .find(|event| event.event_type == AuditEventType::TokenExchange)
+            .unwrap_or_else(|| panic!("{name}: a terminal TokenExchange event must be emitted"));
+        assert_eq!(
+            terminal.ip_address_source, expected_source,
+            "{name}: the terminal event must record the middleware's resolved provenance"
         );
     }
 }
@@ -782,6 +859,139 @@ async fn router_denies_sixty_first_request_before_provider_work_and_sets_retry_a
         "direct public throttle denial emits once"
     );
     assert_eq!(throttle_events[0].ip_address.as_deref(), Some("192.0.2.1"));
+}
+
+/// S11: `/nonce` — unauthenticated and single-use-state-writing — shares the
+/// server-established per-IP throttle budget with `/token`. Exhausting the
+/// budget from one peer returns `429 slow_down` with `Retry-After` and emits the
+/// mandatory `ThrottleExceeded`; a request with no server-established address is
+/// not throttled.
+#[tokio::test]
+async fn nonce_shares_the_public_per_ip_throttle_budget() {
+    fn nonce_request(client_addr: oidc_exchange_core::domain::ClientAddr) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/nonce")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(oidc_exchange::middleware::audit_context::AuditContext {
+                client_addr,
+                user_agent: None,
+                device_id: None,
+            });
+        request
+    }
+    let peer = || oidc_exchange_core::domain::ClientAddr::Peer("192.0.2.1".parse().unwrap());
+
+    let mut raw = base_raw();
+    raw.grants.id_token = true;
+    raw.rate_limit.enabled = true;
+    raw.rate_limit.per_ip = 2;
+    raw.rate_limit.per_ip_failures = 0;
+    raw.rate_limit.per_provider = 0;
+    raw.rate_limit.per_subject = 0;
+    raw.rate_limit.max_entries = 1024;
+    raw.audit.durability = "observe".to_string();
+    raw.server.role = "exchange".to_string();
+    raw.server.issuer = "https://auth.example.com".to_string();
+    let config = Config::resolve(raw).expect("test config resolves");
+
+    let mut providers: HashMap<String, Box<dyn IdentityProvider>> = HashMap::new();
+    providers.insert(
+        "test".to_string(),
+        Box::new(MockIdentityProvider::new("test")),
+    );
+    let audit = MockAuditLog::new();
+    let public_limiter = MockRateLimiter::new();
+    let service = AppService::new(
+        Box::new(MockRepository::new()),
+        Box::new(MockRepository::new()),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit.clone()),
+        Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
+        providers,
+        config.clone(),
+    );
+    let app = build_router_with_rate_limiter(&config, service, Arc::new(public_limiter.clone()));
+    // Two allowed nonce mints, then a denial — one decision consumed per
+    // request. Decisions are consumed back-to-front (`Vec::pop`), so the denial
+    // is listed first to arrive last.
+    public_limiter
+        .set_decisions(vec![
+            RateLimitDecision::Deny {
+                retry_after_secs: 60,
+            },
+            RateLimitDecision::Allow,
+            RateLimitDecision::Allow,
+        ])
+        .await;
+
+    for _ in 0..2 {
+        let response = app.clone().oneshot(nonce_request(peer())).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "under-budget nonce mints"
+        );
+    }
+
+    let response = app.clone().oneshot(nonce_request(peer())).await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .expect("a throttled nonce must carry a numeric Retry-After");
+    assert!(retry_after >= 1, "Retry-After must be at least one second");
+    assert_eq!(
+        body_to_json(response.into_body()).await["error"],
+        "slow_down"
+    );
+
+    // The budget is keyed exactly as `/token`'s is — the shared per-IP key.
+    let keys = public_limiter.keys().await;
+    assert!(
+        keys.iter()
+            .all(|key| *key == RateLimitKey::ClientAddr("192.0.2.1".parse().unwrap())),
+        "/nonce must consume the shared per-IP ClientAddr budget: {keys:?}"
+    );
+
+    // The denial emitted exactly one mandatory ThrottleExceeded.
+    let throttle_events = audit
+        .events()
+        .await
+        .into_iter()
+        .filter(|event| event.event_type == AuditEventType::ThrottleExceeded)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        throttle_events.len(),
+        1,
+        "nonce denial emits ThrottleExceeded once"
+    );
+
+    // A request with no server-established address is never throttled and
+    // consumes no budget (early return before check_and_consume).
+    let keys_before = public_limiter.keys().await.len();
+    let response = app
+        .oneshot(nonce_request(
+            oidc_exchange_core::domain::ClientAddr::Unknown,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a nonce request with no server-established address must not be throttled"
+    );
+    assert_eq!(
+        public_limiter.keys().await.len(),
+        keys_before,
+        "an unthrottled nonce request must consume no per-IP budget"
+    );
 }
 
 #[tokio::test]

@@ -121,7 +121,7 @@ fn direct_request() -> ExchangeRequest {
         },
         provider: PROVIDER_ID.to_string(),
         provider_access_token: None,
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     }
@@ -136,7 +136,7 @@ fn code_request() -> ExchangeRequest {
         },
         provider: PROVIDER_ID.to_string(),
         provider_access_token: None,
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     }

@@ -242,7 +242,7 @@ pub async fn token_handler(
                     credential: ExchangeCredential::AuthorizationCode { code, redirect_uri },
                     provider,
                     provider_access_token: None,
-                    ip_address: audit_ctx.ip_address(),
+                    client_addr: audit_ctx.client_addr.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
                 })
@@ -260,7 +260,7 @@ pub async fn token_handler(
                     credential: ExchangeCredential::IdTokenAssertion { id_token },
                     provider,
                     provider_access_token,
-                    ip_address: audit_ctx.ip_address(),
+                    client_addr: audit_ctx.client_addr.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
                 })
@@ -272,7 +272,7 @@ pub async fn token_handler(
                 .service
                 .refresh(RefreshRequest {
                     refresh_token,
-                    ip_address: audit_ctx.ip_address(),
+                    client_addr: audit_ctx.client_addr.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
                 })

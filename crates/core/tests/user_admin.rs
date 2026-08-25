@@ -677,7 +677,7 @@ async fn admin_delete_user_revokes_sessions() {
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -750,7 +750,7 @@ async fn service_with_active_session() -> (AppService, String, MockRepository, M
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };

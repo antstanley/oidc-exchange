@@ -119,7 +119,7 @@ async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService
             redirect_uri: "https://app.test.com/callback".to_string(),
         },
         provider: "mock".to_string(),
-        ip_address: None,
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
     };
@@ -349,7 +349,7 @@ async fn refresh_unknown_token_under_default_threshold_emits_nothing() {
 
     let request = RefreshRequest {
         refresh_token: "this-token-does-not-exist".to_string(),
-        ip_address: Some("203.0.113.20".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.20".parse().unwrap()),
         user_agent: Some("test-agent/1.0".to_string()),
         device_id: None,
     };
@@ -390,7 +390,7 @@ async fn refresh_unknown_token_under_debug_threshold_emits_validation_failed() {
 
     let request = RefreshRequest {
         refresh_token: "this-token-does-not-exist".to_string(),
-        ip_address: Some("203.0.113.21".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.21".parse().unwrap()),
         user_agent: Some("test-agent/2.0".to_string()),
         device_id: None,
     };
@@ -508,7 +508,7 @@ async fn refresh_suspended_user_emits_user_suspended_event() {
 
     let request = RefreshRequest {
         refresh_token,
-        ip_address: Some("203.0.113.22".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.22".parse().unwrap()),
         user_agent: Some("test-agent/3.0".to_string()),
         device_id: None,
     };
@@ -555,7 +555,7 @@ async fn refresh_success_emits_token_refresh_event() {
 
     let request = RefreshRequest {
         refresh_token,
-        ip_address: Some("203.0.113.23".to_string()),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.23".parse().unwrap()),
         user_agent: Some("test-agent/4.0".to_string()),
         device_id: None,
     };
@@ -623,7 +623,9 @@ async fn rotation_replaces_generation_and_inherits_family_metadata() {
     let response = svc
         .refresh(RefreshRequest {
             refresh_token: refresh_token.clone(),
-            ip_address: Some("203.0.113.30".to_string()),
+            client_addr: oidc_exchange_core::domain::ClientAddr::Peer(
+                "203.0.113.30".parse().unwrap(),
+            ),
             user_agent: Some("rotation-agent/1.0".to_string()),
             device_id: original.device_id.clone(),
         })
@@ -783,7 +785,9 @@ async fn superseded_outside_grace_revokes_family_and_audits_warning() {
     let err = svc
         .refresh(RefreshRequest {
             refresh_token: gen0_token,
-            ip_address: Some("203.0.113.31".to_string()),
+            client_addr: oidc_exchange_core::domain::ClientAddr::Peer(
+                "203.0.113.31".parse().unwrap(),
+            ),
             user_agent: Some("attacker/1.0".to_string()),
             ..Default::default()
         })

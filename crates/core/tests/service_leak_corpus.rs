@@ -114,7 +114,9 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
             },
             provider: "test".to_string(),
             provider_access_token: None,
-            ip_address: ip,
+            client_addr: ip
+                .and_then(oidc_exchange_core::domain::ClientAddr::asserted)
+                .unwrap_or(oidc_exchange_core::domain::ClientAddr::Unknown),
             user_agent,
             device_id: device,
         })
@@ -134,7 +136,9 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
     let refreshed = service
         .refresh(RefreshRequest {
             refresh_token: refresh_token_one.clone(),
-            ip_address: ip,
+            client_addr: ip
+                .and_then(oidc_exchange_core::domain::ClientAddr::asserted)
+                .unwrap_or(oidc_exchange_core::domain::ClientAddr::Unknown),
             user_agent,
             device_id: device,
         })
@@ -157,7 +161,9 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
         .revoke(RevokeRequest {
             token: refresh_token_two.clone(),
             token_type_hint: Some("refresh_token".to_string()),
-            ip_address: ip,
+            client_addr: ip
+                .and_then(oidc_exchange_core::domain::ClientAddr::asserted)
+                .unwrap_or(oidc_exchange_core::domain::ClientAddr::Unknown),
             user_agent,
             device_id: device,
         })
@@ -169,7 +175,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
         .revoke(RevokeRequest {
             token: format!("SENTINEL-UNKNOWN-TOKEN-PREFIX-{refresh_token_one}"),
             token_type_hint: Some("refresh_token".to_string()),
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         })
@@ -221,7 +227,9 @@ async fn audit_fallback_payloads_carry_no_credentials() {
             },
             provider: "test".to_string(),
             provider_access_token: None,
-            ip_address: ip,
+            client_addr: ip
+                .and_then(oidc_exchange_core::domain::ClientAddr::asserted)
+                .unwrap_or(oidc_exchange_core::domain::ClientAddr::Unknown),
             user_agent,
             device_id: device,
         })
@@ -239,7 +247,7 @@ async fn audit_fallback_payloads_carry_no_credentials() {
     service
         .refresh(RefreshRequest {
             refresh_token: "SENTINEL-PRESENTED-BUT-UNKNOWN-TOKEN".to_string(),
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         })
@@ -281,7 +289,7 @@ async fn configured_secrets_never_render_during_normal_operation() {
             },
             provider: "test".to_string(),
             provider_access_token: None,
-            ip_address: None,
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
         })

@@ -58,7 +58,10 @@ pub async fn public_throttle_layer(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if !matches!(request.uri().path(), "/token" | "/revoke") {
+    // `/nonce` is unauthenticated and writes single-use state (`mint_nonce`), so
+    // it shares the server-established per-IP budget with the credential-handling
+    // routes before any handler work runs.
+    if !matches!(request.uri().path(), "/token" | "/revoke" | "/nonce") {
         return next.run(request).await;
     }
     let Some(context) = request.extensions().get::<AuditContext>().cloned() else {

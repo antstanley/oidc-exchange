@@ -1,15 +1,21 @@
-use oidc_exchange_core::config::TelemetryConfig;
+use oidc_exchange_core::config::{TelemetryConfig, TelemetryExporter};
 
 /// Initialise the tracing/telemetry pipeline based on configuration.
 ///
-/// Currently supports the following exporter values:
+/// Behaviour by `[telemetry].exporter` (the closed [`TelemetryExporter`]
+/// domain), when `config.enabled` is `true`:
 ///
-/// | Exporter  | Behaviour |
-/// |-----------|-----------|
-/// | `"none"`  | JSON structured logs via `tracing-subscriber` only |
-/// | `"stdout"`| Same as `"none"` (OTEL stdout exporter is a future enhancement) |
-/// | `"otlp"`  | Falls back to `"stdout"` with a warning (OTLP pipeline is a future enhancement) |
-/// | `"xray"`  | Falls back to `"stdout"` with a warning (X-Ray pipeline is a future enhancement) |
+/// | Exporter       | Behaviour |
+/// |----------------|-----------|
+/// | `none`         | JSON structured logs via `tracing-subscriber` only |
+/// | `stdout`       | Same as `none` (OTEL stdout exporter is a future enhancement) |
+/// | `otlp`         | Falls back to stdout JSON with a warning (OTLP pipeline is a future enhancement) |
+/// | `xray`         | Falls back to stdout JSON with a warning (X-Ray pipeline is a future enhancement) |
+/// | `prometheus`   | Accepted, but not yet implemented: warns and falls back to stdout JSON — no metrics are exported and no metrics endpoint is exposed |
+///
+/// The match is exhaustive over the closed enum: because a config-valid value can
+/// never be an unknown string, there is no "unknown exporter" arm — a future
+/// exporter is a compile error here rather than a silent stdout fallback.
 ///
 /// When `config.enabled` is `false` the exporter field is ignored and a plain
 /// JSON subscriber is installed.
@@ -17,54 +23,58 @@ pub fn init_telemetry(config: &TelemetryConfig) -> Result<(), Box<dyn std::error
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    if !config.enabled {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .json()
-            .init();
-        return Ok(());
-    }
+    // The JSON stdout formatter is what every exporter installs today; the only
+    // variation is the fallback warning, computed by the exhaustive classifier
+    // below. Installing the subscriber (`init`) can happen only once per
+    // process, so keeping the *decision* in a pure function lets it be unit
+    // tested without a global subscriber.
+    let warning = if config.enabled {
+        exporter_fallback_warning(&config.exporter)
+    } else {
+        None
+    };
 
-    match config.exporter.as_str() {
-        "none" | "stdout" => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
-        "otlp" => {
-            // TODO: Wire up opentelemetry-otlp exporter when OTEL crate versions stabilize.
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-            tracing::warn!(
-                "OTLP exporter requested but not yet implemented — falling back to stdout JSON logs"
-            );
-        }
-        "xray" => {
-            // TODO: Wire up opentelemetry X-Ray ID generator + OTLP exporter.
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-            tracing::warn!(
-                "X-Ray exporter requested but not yet implemented — falling back to stdout JSON logs"
-            );
-        }
-        other => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-            tracing::warn!(
-                exporter = other,
-                "unknown telemetry exporter — using stdout JSON logs"
-            );
-        }
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .json()
+        .init();
+
+    if let Some(message) = warning {
+        tracing::warn!("{message}");
     }
 
     Ok(())
+}
+
+/// Accurately describes what `init_telemetry` does for each exporter: `None`
+/// means the value is served directly (JSON stdout, no warning); `Some(message)`
+/// is the fallback warning for a value accepted by the closed config domain but
+/// not yet backed by a real pipeline.
+///
+/// The match is exhaustive over the closed [`TelemetryExporter`] enum with no
+/// catch-all: a config-valid value can never be an unknown string, so there is
+/// no "unknown exporter" arm, and a future exporter variant is a compile error
+/// here rather than a silent stdout fallback.
+fn exporter_fallback_warning(exporter: &TelemetryExporter) -> Option<&'static str> {
+    match exporter {
+        // TODO: OTEL stdout exporter is a future enhancement; served as JSON today.
+        TelemetryExporter::None | TelemetryExporter::Stdout => None,
+        // TODO: Wire up opentelemetry-otlp exporter when OTEL crate versions stabilize.
+        TelemetryExporter::Otlp => Some(
+            "OTLP exporter requested but not yet implemented — falling back to stdout JSON logs",
+        ),
+        // TODO: Wire up opentelemetry X-Ray ID generator + OTLP exporter.
+        TelemetryExporter::Xray => Some(
+            "X-Ray exporter requested but not yet implemented — falling back to stdout JSON logs",
+        ),
+        // Accepted by the closed config domain, but no metrics pipeline is wired
+        // here — that belongs with the pending
+        // `2026-06-24-complete_telemetry_exporters.md` change.
+        TelemetryExporter::Prometheus => Some(
+            "prometheus exporter requested but not yet implemented — no metrics are exported and \
+             no metrics endpoint is exposed; falling back to stdout JSON logs",
+        ),
+    }
 }
 
 /// Force-flush the installed telemetry pipeline.
@@ -132,5 +142,45 @@ mod tests {
         // installing a global subscriber (which would conflict with other tests).
         assert!(!config.enabled);
         assert_eq!(config.exporter.as_str(), "none");
+    }
+
+    /// Every exporter is classified (the function is total over the closed enum,
+    /// so this exercises the JSON-formatter path for all of them without
+    /// installing a global subscriber), and `prometheus` produces its accurate
+    /// accepted-but-unimplemented warning — never the old "unknown exporter"
+    /// wording, which is now unrepresentable.
+    #[test]
+    fn every_exporter_is_classified_and_prometheus_warns_accurately() {
+        for exporter in [
+            TelemetryExporter::None,
+            TelemetryExporter::Stdout,
+            TelemetryExporter::Otlp,
+            TelemetryExporter::Xray,
+            TelemetryExporter::Prometheus,
+        ] {
+            // Total function: returns for every variant without panicking.
+            let warning = exporter_fallback_warning(&exporter);
+            match exporter {
+                TelemetryExporter::None | TelemetryExporter::Stdout => {
+                    assert!(warning.is_none(), "{exporter:?} is served directly");
+                }
+                _ => {
+                    let message = warning.expect("unimplemented exporters warn");
+                    assert!(
+                        !message.contains("unknown"),
+                        "no exporter may be reported as unknown: {message}"
+                    );
+                }
+            }
+        }
+
+        let prometheus =
+            exporter_fallback_warning(&TelemetryExporter::Prometheus).expect("prometheus warns");
+        assert!(prometheus.contains("prometheus"), "{prometheus}");
+        assert!(prometheus.contains("not yet implemented"), "{prometheus}");
+        assert!(
+            prometheus.contains("no metrics endpoint is exposed"),
+            "the prometheus warning must state no metrics endpoint is exposed: {prometheus}"
+        );
     }
 }

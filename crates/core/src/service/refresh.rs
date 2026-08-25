@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use crate::config::MAX_REFRESH_ROTATION_GRACE_SECS;
 use crate::domain::{
     is_valid_family_id, new_family_id, AuditEventType, AuditFailure, AuditOutcome, AuditSeverity,
-    ClientAddr, RefreshResolution, Session, TokenResponse, UserStatus,
+    AuthenticationKind, ClientAddr, RefreshResolution, SecurityEvent, Session, TokenResponse,
+    UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::{create_audit_event, AppService};
@@ -40,8 +41,10 @@ const REFRESH_TOKEN_BYTES: usize = 32;
 #[derive(Default)]
 pub struct RefreshRequest {
     pub refresh_token: String,
-    /// Client IP address extracted by the server's audit-context middleware.
-    pub ip_address: Option<String>,
+    /// Client address with the provenance the server's audit-context middleware
+    /// resolved it from (`Peer`/`Forwarded`/`Unknown`), carried so the flow's
+    /// audit events record the true `ip_address_source`. Defaults to `Unknown`.
+    pub client_addr: ClientAddr,
     /// Client `User-Agent` header, extracted by the server's audit-context
     /// middleware.
     pub user_agent: Option<String>,
@@ -164,11 +167,7 @@ impl AppService {
             AuditOutcome::Failure(AuditFailure::AuthenticationFailed),
             actor,
             None,
-            request
-                .ip_address
-                .clone()
-                .and_then(ClientAddr::asserted)
-                .unwrap_or(ClientAddr::Unknown),
+            request.client_addr.clone(),
             request.user_agent.clone(),
         ))
         .await?;
@@ -199,19 +198,6 @@ impl AppService {
 
         let sessions_revoked = self.session_repo.revoke_family(family_id).await?;
 
-        let mut event = create_audit_event(
-            AuditEventType::RefreshTokenReuse,
-            AuditSeverity::Warning,
-            AuditOutcome::Success,
-            Some(user_id.to_string()),
-            None,
-            request
-                .ip_address
-                .clone()
-                .and_then(ClientAddr::asserted)
-                .unwrap_or(ClientAddr::Unknown),
-            request.user_agent.clone(),
-        );
         // Detail carries correlation data only — never a token hash or digest.
         let detail: HashMap<String, Value> = HashMap::from([
             ("family_id".to_string(), Value::from(family_id)),
@@ -226,8 +212,22 @@ impl AppService {
                 .any(|v| v.as_str().is_some_and(|s| s.len() == REFRESH_HASH_HEX_LEN)),
             "audit detail must never carry a token-hash-shaped value"
         );
-        event.detail = detail;
-        self.emit_audit(event).await?;
+        // Reuse is a security outcome: emit on the mandatory channel
+        // (`emit_threshold`-immune, `audit.durability`-governed), byte-compatible
+        // with the previous best-effort event (`refresh_token_reuse`, warning,
+        // outcome `success`, detail `{family_id, sessions_revoked}`) — only the
+        // channel changes. Revocation already ran above, so a durability-enforced
+        // emission failure cannot leave the reused family alive.
+        self.emit_security_event_with_detail(
+            SecurityEvent::RefreshTokenReuse,
+            AuditOutcome::Success,
+            Some(user_id.to_string()),
+            None,
+            request.client_addr.clone(),
+            request.user_agent.clone(),
+            detail,
+        )
+        .await?;
 
         // Postcondition of the indistinguishability rule: the reuse refusal
         // must carry exactly the unknown-token reason string.
@@ -343,19 +343,18 @@ impl AppService {
             }
         };
         if user.status != UserStatus::Active {
-            self.emit_audit(create_audit_event(
-                AuditEventType::UserSuspended,
-                AuditSeverity::Warning,
+            // Suspension is a security outcome: emit on the mandatory channel so
+            // no configured `emit_threshold` can drop it and a sink failure
+            // follows `audit.durability` (the same shape the exchange flow's
+            // terminal mapping produces).
+            self.emit_security_event(
+                SecurityEvent::PrincipalSuspended,
                 AuditOutcome::Failure(AuditFailure::PrincipalSuspended),
                 Some(user.id.clone()),
                 None,
-                request
-                    .ip_address
-                    .clone()
-                    .and_then(ClientAddr::asserted)
-                    .unwrap_or(ClientAddr::Unknown),
+                request.client_addr.clone(),
                 request.user_agent.clone(),
-            ))
+            )
             .await?;
             return Err(Error::UserSuspended { user_id: user.id });
         }
@@ -451,19 +450,18 @@ impl AppService {
             }
         };
         if user.status != UserStatus::Active {
-            self.emit_audit(create_audit_event(
-                AuditEventType::UserSuspended,
-                AuditSeverity::Warning,
+            // Suspension is a security outcome: emit on the mandatory channel so
+            // no configured `emit_threshold` can drop it and a sink failure
+            // follows `audit.durability` (the same shape the exchange flow's
+            // terminal mapping produces).
+            self.emit_security_event(
+                SecurityEvent::PrincipalSuspended,
                 AuditOutcome::Failure(AuditFailure::PrincipalSuspended),
                 Some(user.id.clone()),
                 None,
-                request
-                    .ip_address
-                    .clone()
-                    .and_then(ClientAddr::asserted)
-                    .unwrap_or(ClientAddr::Unknown),
+                request.client_addr.clone(),
                 request.user_agent.clone(),
-            ))
+            )
             .await?;
             return Err(Error::UserSuspended { user_id: user.id });
         }
@@ -511,24 +509,27 @@ impl AppService {
             "audit detail carries the session family id, got {family_id:?}"
         );
 
-        let mut event = create_audit_event(
-            AuditEventType::TokenRefresh,
-            AuditSeverity::Info,
-            AuditOutcome::Success,
-            Some(user_id.to_string()),
-            None,
-            request
-                .ip_address
-                .clone()
-                .and_then(ClientAddr::asserted)
-                .unwrap_or(ClientAddr::Unknown),
-            request.user_agent.clone(),
-        );
-        event.detail = HashMap::from([
+        let detail = HashMap::from([
             ("family_id".to_string(), Value::from(family_id)),
             ("generation".to_string(), Value::from(generation)),
             ("grace".to_string(), Value::from(via_grace)),
         ]);
-        self.emit_audit(event).await
+        // Refresh success is a security outcome: emit on the mandatory channel,
+        // finally constructing the long-mapped
+        // `AuthenticationSucceeded { kind: Refresh }` arm (`domain/audit.rs`).
+        // Rendered `TokenRefresh` at Info with `{family_id, generation, grace}`
+        // as before; only the channel changes.
+        self.emit_security_event_with_detail(
+            SecurityEvent::AuthenticationSucceeded {
+                kind: AuthenticationKind::Refresh,
+            },
+            AuditOutcome::Success,
+            Some(user_id.to_string()),
+            None,
+            request.client_addr.clone(),
+            request.user_agent.clone(),
+            detail,
+        )
+        .await
     }
 }

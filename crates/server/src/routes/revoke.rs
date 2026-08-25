@@ -50,7 +50,7 @@ pub async fn revoke_handler(
         .revoke(RevokeRequest {
             token: form.token,
             token_type_hint: form.token_type_hint,
-            ip_address: audit_ctx.ip_address(),
+            client_addr: audit_ctx.client_addr.clone(),
             user_agent: audit_ctx.user_agent,
             device_id: audit_ctx.device_id,
         })
