@@ -1,52 +1,84 @@
 name: CI
-
 on:
   push:
-    branches: [main]
-  pull_request:
-
+    branches:
+      - main
+  pull_request: null
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
-
+  RUSTFLAGS: -D warnings
 jobs:
+  advisories:
+    name: Dependency advisories (reported policy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 24.18.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+      - name: Provision pinned scanners
+        run: |
+          cargo install cargo-deny --version 0.19.0 --locked
+          python -m pip install --require-hashes --only-binary=:all: -r config/pip-audit-requirements.txt
+          corepack pnpm@11.9.0 --version
+      - name: Evaluate frozen Cargo, pnpm, and Python graphs
+        run: node scripts/run-advisory-scans.mjs
+      - name: Enforce signing and verification paths
+        run: node scripts/run-signing-path-policy.mjs
+    permissions:
+      contents: read
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
       - run: cargo fmt --check --all
       - run: cargo clippy --workspace -- -D warnings
-
+    permissions:
+      contents: read
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: taiki-e/install-action@83a8c001de7da72527da9df53f6ef9d3a1f5b3e2 # nextest
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: taiki-e/install-action@83a8c001de7da72527da9df53f6ef9d3a1f5b3e2
       - run: cargo nextest run --workspace
-
+    permissions:
+      contents: read
   nodejs-test:
     name: Node.js Binding Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 24.18.0
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-      - run: pnpm add -g @napi-rs/cli
+      - name: Activate pnpm 11.9.0
+        run: corepack pnpm@11.9.0 --version
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: pnpm install
+        run: corepack pnpm@11.9.0 install --frozen-lockfile
       - name: Lint
         working-directory: bindings/nodejs
         run: pnpm lint
@@ -58,18 +90,13 @@ jobs:
         run: pnpm typecheck
       - name: Build native module
         working-directory: bindings/nodejs
-        # Redirect napi's auto-generated .d.ts to a throwaway file so it never
-        # overwrites the hand-curated index.d.ts. napi rebuilds the .d.ts from
-        # proc-macro output, which is empty when the crate is restored from the
-        # build cache instead of recompiled — that produced a non-module
-        # index.d.ts and broke the Lambda adapter's `tsc` build below.
-        run: napi build --release --dts index.generated.d.ts
+        run: corepack pnpm@11.9.0 exec --offline napi build --release --dts index.generated.d.ts
       - name: Run tests
         working-directory: bindings/nodejs
         run: pnpm test
       - name: Install Lambda adapter dependencies
         working-directory: bindings/lambda
-        run: pnpm install
+        run: corepack pnpm@11.9.0 install --frozen-lockfile
       - name: Lint Lambda adapter
         working-directory: bindings/lambda
         run: pnpm lint
@@ -85,18 +112,23 @@ jobs:
       - name: Test Lambda adapter
         working-directory: bindings/lambda
         run: pnpm test
-
+    permissions:
+      contents: read
   python-test:
     name: Python Binding Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.10"
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
       - name: Install dependencies
         working-directory: bindings/python
         run: uv sync
@@ -119,8 +151,12 @@ jobs:
   conformance:
     name: Conformance
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -132,7 +168,7 @@ jobs:
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
       - run: uv sync --project bindings/python
       - name: Require executable cross-runtime parity
         run: node conformance/report.mjs
@@ -141,13 +177,16 @@ jobs:
     name: Web Apps (lint, format, typecheck)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: 24.18.0
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - name: Activate pnpm 11.9.0
+        run: corepack pnpm@11.9.0 --version
       - name: Install dependencies
-        run: pnpm install
+        run: corepack pnpm@11.9.0 install --frozen-lockfile
       - name: Website — lint
         working-directory: apps/website
         run: pnpm lint
@@ -166,3 +205,5 @@ jobs:
       - name: Admin UI — type-check
         working-directory: apps/admin-ui
         run: pnpm typecheck
+    permissions:
+      contents: read

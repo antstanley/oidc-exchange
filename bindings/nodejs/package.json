@@ -28,12 +28,14 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.2",
-    "@types/node": "^26.0.1",
-    "oxfmt": "^0.56.0",
-    "oxlint": "^1.71.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "@arethetypeswrong/cli": "0.18.2",
+    "@napi-rs/cli": "3.7.2",
+    "@types/node": "26.0.1",
+    "oxfmt": "0.56.0",
+    "oxlint": "1.71.0",
+    "publint": "0.3.18",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
   },
   "optionalDependencies": {
     "@oidc-exchange/darwin-arm64": "0.3.0",

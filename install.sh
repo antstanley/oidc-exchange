@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="antstanley/oidc-exchange"
-BINARY_NAME="oidc-exchange"
+readonly REPO="antstanley/oidc-exchange"
+readonly SIGNER_WORKFLOW="antstanley/oidc-exchange/.github/workflows/release.yml"
+readonly BINARY_NAME="oidc-exchange"
+readonly GH_VERIFY_TIMEOUT="30s"
 VERSION=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "Error: --version requires a release tag" >&2
+                echo "Usage: install.sh [--version v1.2.3]" >&2
+                exit 1
+            fi
             VERSION="$2"
             shift 2
             ;;
@@ -19,6 +26,18 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+validate_version() {
+    local version="$1"
+    if [[ ! "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+        echo "Error: Invalid version '$version'. Expected vX.Y.Z or vX.Y.Z-prerelease." >&2
+        exit 1
+    fi
+}
+
+if [[ -n "$VERSION" ]]; then
+    validate_version "$VERSION"
+fi
 
 # Detect OS
 OS="$(uname -s)"
@@ -70,6 +89,7 @@ if [[ -z "$VERSION" ]]; then
         echo "Error: Could not determine latest version from GitHub API"
         exit 1
     fi
+    validate_version "$VERSION"
 fi
 
 echo "Installing ${BINARY_NAME} ${VERSION} (${OS_LABEL}/${ARCH_LABEL})..."
@@ -89,13 +109,33 @@ curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "$BINARY_URL"
 echo "Downloading checksum..."
 curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "$CHECKSUM_URL"
 
-# Verify checksum
+# Verify checksum. A missing checksum tool already failed the install closed above.
+checksum_verified=false
 echo "Verifying checksum..."
 cd "$TMPDIR"
 if [[ "$CHECKSUM_VERIFIER" == "sha256sum" ]]; then
     sha256sum -c "${BINARY_FILENAME}.sha256"
+    checksum_verified=true
 else
     shasum -a 256 -c "${BINARY_FILENAME}.sha256"
+    checksum_verified=true
+fi
+
+# Verify provenance when GitHub CLI is available. The repository and signer
+# workflow are constants, never values derived from installer input.
+if command -v gh &>/dev/null; then
+    echo "Verifying GitHub build provenance..."
+    if command -v timeout &>/dev/null; then
+        timeout "$GH_VERIFY_TIMEOUT" gh attestation verify             "${TMPDIR}/${BINARY_FILENAME}"             --repo "$REPO"             --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+    else
+        gh attestation verify             "${TMPDIR}/${BINARY_FILENAME}"             --repo "$REPO"             --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+    fi
+else
+    if [[ "$checksum_verified" = true ]]; then
+        echo "Warning: GitHub CLI not found; checksum verified corruption only, artifact provenance was not authenticated." >&2
+    else
+        echo "Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation." >&2
+    fi
 fi
 
 # Determine install directory
@@ -107,8 +147,8 @@ else
 fi
 
 # Install
-chmod +x "${BINARY_FILENAME}"
-mv "${BINARY_FILENAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+chmod +x "${TMPDIR}/${BINARY_FILENAME}"
+mv "${TMPDIR}/${BINARY_FILENAME}" "${INSTALL_DIR}/${BINARY_NAME}"
 
 echo ""
 echo "Installed ${BINARY_NAME} ${VERSION} to ${INSTALL_DIR}/${BINARY_NAME}"

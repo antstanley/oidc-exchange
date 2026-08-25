@@ -36,11 +36,11 @@ fn headers(request: &Bound<'_, PyDict>) -> PyResult<Vec<(String, String)>> {
     let Some(value) = request.get_item("headers")? else {
         return Ok(Vec::new());
     };
-    let sequence = value.downcast::<PySequence>().map_err(|_| {
+    let sequence = value.cast::<PySequence>().map_err(|_| {
         PyValueError::new_err("request field 'headers' must be an ordered sequence of pairs")
     })?;
     sequence
-        .iter()?
+        .try_iter()?
         .map(|item| {
             let item = item?;
             item.extract::<(String, String)>().map_err(|_| {
@@ -95,16 +95,16 @@ impl OidcExchange {
             },
         };
         let response = py
-            .allow_threads(|| self.inner.handle_blocking(wire))
+            .detach(|| self.inner.handle_blocking(wire))
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        let result = PyDict::new_bound(py);
+        let result = PyDict::new(py);
         result.set_item("status", response.status)?;
-        let response_headers = PyList::empty_bound(py);
+        let response_headers = PyList::empty(py);
         for header in response.headers {
             response_headers.append(header)?;
         }
         result.set_item("headers", response_headers)?;
-        result.set_item("body", PyBytes::new_bound(py, &response.body))?;
+        result.set_item("body", PyBytes::new(py, &response.body))?;
         Ok(result.unbind())
     }
 

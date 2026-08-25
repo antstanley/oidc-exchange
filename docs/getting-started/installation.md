@@ -9,6 +9,9 @@ description: Install oidc-exchange via one-line script, prebuilt binary, Docker,
 curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
+The installer verifies the downloaded binary's checksum and, when the GitHub CLI (`gh`) is available, requires GitHub build provenance from `antstanley/oidc-exchange` and `.github/workflows/release.yml`. Without `gh`, it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
+
+
 To install a specific version:
 
 ```bash
@@ -71,3 +74,5 @@ cargo build --release
 ```
 
 The binary is at `target/release/oidc-exchange`.
+
+When GitHub CLI is unavailable, the installer reports whether checksum verification actually succeeded. If checksum tooling is also unavailable, the current installer warns loudly that neither checksum nor provenance authenticity was verified and continues; fail-closed handling for that missing-tool case is tracked separately. Whenever `gh` is present, provenance failure aborts installation even when checksum tools are unavailable.

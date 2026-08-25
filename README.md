@@ -9,18 +9,37 @@ A Rust service that validates ID tokens from third-party OIDC providers and exch
 
 ## Install
 
-**One-line install script** (Linux/macOS, downloads the latest release binary):
+**Verified install script** (Linux/macOS):
+
+For an authenticated binary install, install the [GitHub CLI](https://cli.github.com/) first. The installer requires the downloaded binary to have GitHub build provenance from repository `antstanley/oidc-exchange` and signer workflow `antstanley/oidc-exchange/.github/workflows/release.yml`:
 
 ```bash
+command -v gh
 curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
-**Docker:**
+To verify a manually downloaded binary, run:
 
 ```bash
-docker pull ghcr.io/antstanley/oidc-exchange:latest
-docker run -p 8080:8080 ghcr.io/antstanley/oidc-exchange:latest
+gh attestation verify ./oidc-exchange-linux-x64 \
+  --repo antstanley/oidc-exchange \
+  --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
 ```
+
+Without `gh`, the installer loudly falls back to checksum-only corruption detection; that does not authenticate the release.
+
+**Docker:**
+
+The GHCR multi-arch tag has build provenance for its immutable final manifest digest (in addition to each platform digest). Verify the final GHCR manifest before running it:
+
+```bash
+gh attestation verify oci://ghcr.io/antstanley/oidc-exchange:latest \
+  --repo antstanley/oidc-exchange \
+  --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
+docker pull ghcr.io/antstanley/oidc-exchange:latest
+```
+
+This is GitHub build provenance, not a registry signature. The release is also copied to Docker Hub, but the workflow does not attach or promise a Docker Hub-verifiable attestation; use GHCR for this verification path.
 
 **Node.js (npm):**
 

@@ -56,6 +56,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 | [changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md](changes/merged/2026-06-29-migrate_enforcement_to_lefthook_pyright.md) | Merged | tooling: lefthook hook, pyright, TS workspace lint/format/typecheck |
 | [changes/merged/2026-06-29-add_npm_trusted_publishing.md](changes/merged/2026-06-29-add_npm_trusted_publishing.md) | Merged | distribution: npm publish job, platform packages, OIDC trusted publishing |
 | [changes/merged/2026-06-29-add_pypi_trusted_publishing.md](changes/merged/2026-06-29-add_pypi_trusted_publishing.md) | Merged | distribution: PyPI publish job, abi3/manylinux wheels, OIDC trusted publishing |
+| [changes/merged/2026-08-05-harden_release_supply_chain.md](changes/merged/2026-08-05-harden_release_supply_chain.md) | Merged | distribution: frozen least-privilege releases, provenance, installer verification, advisory/signing-path policy |
 
 ## Plans
 
@@ -92,6 +93,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md](plans/2026-08-05-eliminate_secret_leakage_in_logs_and_spans/plan.md) | Review | [changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md](changes/2026-08-05-eliminate_secret_leakage_in_logs_and_spans.md) |
 | [plans/2026-08-05-own_outbound_http_boundary/plan.md](plans/2026-08-05-own_outbound_http_boundary/plan.md) | Review | [changes/2026-08-05-own_outbound_http_boundary.md](changes/2026-08-05-own_outbound_http_boundary.md) |
 | [plans/2026-08-05-runtime_parity_across_interfaces/plan.md](plans/2026-08-05-runtime_parity_across_interfaces/plan.md) | Draft | [changes/2026-08-05-runtime_parity_across_interfaces.md](changes/2026-08-05-runtime_parity_across_interfaces.md) |
+| [plans/2026-08-05-harden_release_supply_chain/plan.md](plans/2026-08-05-harden_release_supply_chain/plan.md) | Done | [changes/merged/2026-08-05-harden_release_supply_chain.md](changes/merged/2026-08-05-harden_release_supply_chain.md) |
 
 ## Conventions
 

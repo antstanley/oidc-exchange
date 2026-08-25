@@ -13,4 +13,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 oidc-exchange-ffi = { path = "../../crates/ffi" }
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }

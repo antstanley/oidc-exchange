@@ -27,12 +27,12 @@
     "@oidc-exchange/node": "workspace:^"
   },
   "devDependencies": {
-    "@types/aws-lambda": "^8.10.162",
-    "@types/node": "^26.0.1",
-    "oxfmt": "^0.56.0",
-    "oxlint": "^1.71.0",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "@types/aws-lambda": "8.10.162",
+    "@types/node": "26.0.1",
+    "oxfmt": "0.56.0",
+    "oxlint": "1.71.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
   },
   "peerDependencies": {
     "@oidc-exchange/node": "^0.3.0"

@@ -1,0 +1,10 @@
+name: bad
+on: workflow_dispatch
+jobs:
+  publish-npm:
+    needs: build-nodejs
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps: []
