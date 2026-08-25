@@ -24,3 +24,5 @@ Demonstrates embedding oidc-exchange as a library inside an Express application.
    ```
 
 The OIDC-Exchange endpoints are available under `/auth/*` (e.g. `http://localhost:8080/auth/.well-known/openid-configuration`).
+
+Requests are bounded by the binding's published `oidc.limits().maxBodyBytes` value before OIDC handling; oversized bodies receive HTTP 413.

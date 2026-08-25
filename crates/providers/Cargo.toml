@@ -22,3 +22,5 @@ toml.workspace = true
 oidc-exchange-test-utils.workspace = true
 wiremock = "0.6"
 rand.workspace = true
+# The Apple leak-corpus case materializes a throwaway .p8 key on disk for from_config.
+tempfile = "3"

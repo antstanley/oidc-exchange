@@ -7,13 +7,13 @@ issuer = "https://auth.example.com"
 adapter = "sqlite"
 
 [repository.sqlite]
-path = "./data/oidc-exchange.db"
+path = "/tmp/oidc-exchange-example.db"
 
 [key_manager]
 adapter = "local"
 
 [key_manager.local]
-private_key_path = "./keys/signing.pem"
+private_key_path = "/tmp/oidc-exchange-example-signing.pem"
 algorithm = "EdDSA"
 kid = "key-1"
 

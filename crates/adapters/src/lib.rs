@@ -5,6 +5,7 @@ pub mod local_keys;
 pub mod noop;
 pub mod oidc;
 pub mod postgres;
+pub mod rate_limit;
 pub mod shared;
 pub mod sqlite;
 pub mod sqs_audit;

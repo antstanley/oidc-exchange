@@ -10,9 +10,9 @@
 	<div class="flex items-center gap-3 mb-6">
 		<a href="/users" class="text-gray-400 hover:text-gray-300">&larr;</a>
 		<h2 class="text-xl font-semibold text-white">User Detail</h2>
-		{#if data.user.status === 'Active'}
+		{#if data.user.status === 'active'}
 			<span class="px-2 py-0.5 rounded text-xs font-medium bg-green-500/10 text-green-400">Active</span>
-		{:else if data.user.status === 'Suspended'}
+		{:else if data.user.status === 'suspended'}
 			<span class="px-2 py-0.5 rounded text-xs font-medium bg-yellow-500/10 text-yellow-400">Suspended</span>
 		{:else}
 			<span class="px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400">Deleted</span>
@@ -60,8 +60,8 @@
 			<label class="block">
 				<span class="text-gray-400 text-sm">Status</span>
 				<select name="status" class="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg p-2.5 text-white text-sm focus:outline-none focus:border-blue-500">
-					<option value="Active" selected={data.user.status === 'Active'}>Active</option>
-					<option value="Suspended" selected={data.user.status === 'Suspended'}>Suspended</option>
+					<option value="active" selected={data.user.status === 'active'}>Active</option>
+					<option value="suspended" selected={data.user.status === 'suspended'}>Suspended</option>
 				</select>
 			</label>
 		</div>

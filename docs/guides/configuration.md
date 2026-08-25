@@ -12,7 +12,8 @@ Configuration is loaded and merged in the following order, with later sources ov
 1. **`config/default.toml`** --- baseline defaults shipped with the binary
 2. **`config/{OIDC_EXCHANGE_ENV}.toml`** --- environment-specific overrides. The `OIDC_EXCHANGE_ENV` environment variable selects the file (e.g., `production`, `staging`, `local`). If unset, only `default.toml` is loaded.
 3. **Environment variable overrides** --- structural overrides using double-underscore delimiters: `OIDC_EXCHANGE__{section}__{key}` (e.g., `OIDC_EXCHANGE__SERVER__PORT=9090`)
-4. **`${VAR_NAME}` placeholder resolution** --- any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time
+4. **`${VAR_NAME}` placeholder resolution** --- any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time; an unset value is a configuration error
+5. **Closed-domain resolution** --- the merged configuration is narrowed into typed values; invalid security-relevant values (including non-HTTPS issuer, provider, and webhook URLs) fail before startup
 
 Secrets (client secrets, API keys, KMS ARNs) should always use `${VAR_NAME}` placeholders and be injected via environment variables. Never hardcode secrets in TOML files.
 
@@ -26,6 +27,10 @@ The following shows every configuration section with all available options. In p
 host = "0.0.0.0"                       # bind address
 port = 8080                            # listen port
 issuer = "https://auth.example.com"    # issuer URL for JWTs (iss claim)
+role = "exchange"                      # "exchange" (default), "admin", or "all" — see Upgrading below
+# Trust X-Forwarded-For only from these peer CIDRs. Empty means never trust it.
+trusted_proxies = ["10.0.0.0/8"]
+trusted_proxy_hops = 1                 # select this many entries from X-Forwarded-For's right side
 
 # ─── Registration policy ──────────────────────────────────────────
 [registration]
@@ -47,7 +52,8 @@ audience = "https://api.example.com"   # aud claim in access tokens
 # Static values are used as-is.
 # Template values reference the User model with {{ field }} syntax.
 # The | default: filter provides a fallback if the field is missing.
-# Reserved claims (sub, iss, aud, iat, exp) cannot be overridden.
+# Reserved protocol claim names cannot be used as keys here or as per-user
+# claims via the internal API; a configuration carrying one fails startup.
 [token.custom_claims]
 org = "example"
 role = "{{ user.metadata.role | default: 'user' }}"
@@ -60,13 +66,13 @@ adapter = "local"                      # "local" or "kms"
 # Local key signing — load a PEM private key from disk
 [key_manager.local]
 private_key_path = "./keys/ed25519.pem"
-algorithm = "EdDSA"                    # "EdDSA" (Ed25519) or "ES256" (P-256)
+algorithm = "EdDSA"                    # EdDSA only: the local adapter signs Ed25519 keys
 kid = "key-1"                          # key ID for JWT kid header
 
 # AWS KMS — sign with a KMS asymmetric key
 [key_manager.kms]
 key_id = "arn:aws:kms:us-east-1:123456789:key/abcd-1234"
-algorithm = "ECDSA_SHA_256"            # KMS signing algorithm (ECC_NIST_P256)
+algorithm = "ES256"                    # JWS signing algorithm (ECC_NIST_P256)
 kid = "key-2024-01"
 
 # ─── User and session storage ─────────────────────────────────────
@@ -101,11 +107,26 @@ max_size_mb = 64
 
 # ─── Audit logging ────────────────────────────────────────────────
 [audit]
-adapter = "noop"                       # "noop", "stdout", or "sqs"
-# Severity threshold for blocking. If the audit provider fails and the
-# event's severity is at or above this threshold, the operation fails.
-# Severities (RFC 5424): emergency, alert, critical, error, warning, notice, info, debug
+adapter = "stdout"                     # "noop", "stdout", or "sqs" (default: stdout)
+# Best-effort events below this severity are not dispatched. Shipped security events use
+# the mandatory channel, which no threshold suppresses.
+emit_threshold = "info"
+# Best-effort sink-failure policy threshold (RFC 5424 severities).
 blocking_threshold = "warning"
+# Mandatory security-event sink failures: "observe" logs degradation; "enforce" fails the operation.
+durability = "observe"
+
+# ─── Public-route rate limiting ───────────────────────────────────
+[rate_limit]
+enabled = true
+store = "in_process"                   # "in_process" or "none"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10                    # consumed only by authentication failures
+per_subject = 10
+per_provider = 600
+max_concurrent_requests = 256
+max_entries = 10000
 
 # SQS adapter — send audit events to an SQS queue (e.g., for Firehose → S3/Iceberg pipeline)
 [audit.sqs]
@@ -133,8 +154,40 @@ protocol = "grpc"                      # "grpc" or "http"
 
 # ─── Internal admin API ───────────────────────────────────────────
 [internal_api]
-auth_method = "shared_secret"
+enabled = true                         # serves /internal/* on the dedicated admin listener
+host = "127.0.0.1"                     # admin listener bind address (loopback by default)
+port = 8081
+# Authentication mechanisms, tried in the order given.
+# Values: "operator_token", "mtls", "shared_secret". The legacy singular
+# `auth_method` key is still accepted and read as a one-element list.
+auth_methods = ["operator_token"]
+# Shared secret for the "shared_secret" compatibility mechanism. While that
+# mechanism is enabled it must be at least 32 bytes — non-empty is not enough.
 shared_secret = "${INTERNAL_API_SECRET}"
+
+# "operator_token" mechanism: operator JWTs are verified against THIS
+# service's own key manager ([key_manager]) and require a real (non-noop)
+# adapter plus a non-empty [server].issuer.
+token_audience = "internal"            # aud an operator token must carry; must differ from [token].audience
+required_claim = "role"                # claim name a verified operator token must carry
+required_value = "${OPERATOR_ROLE_VALUE}"  # value required_claim must carry
+
+# Failed-authentication throttle, keyed by peer address on the admin listener:
+max_auth_failures = 5                  # failed attempts one peer may spend...
+auth_failure_window = "1m"             # ...per this window before lockout
+auth_lockout = "5m"                    # how long a locked-out peer stays denied
+
+# How long cached dashboard counts (active sessions) may be served before a
+# re-scan; consumed by the DynamoDB adapter only. Valid range: 1s–3600s.
+stats_cache_ttl = "60s"
+
+# "mtls" mechanism: the client-certificate subject is asserted by the
+# TLS-terminating proxy via this header. Trustworthy only while the admin
+# listener is unreachable except through that proxy (which must also strip
+# client-supplied copies of the header); a startup warning fires when this
+# mechanism is enabled on a non-loopback listener.
+[internal_api.mtls]
+subject_header = "x-client-cert-subject"
 
 # ─── Identity providers ───────────────────────────────────────────
 # Each [providers.<name>] block registers a provider. The name is used
@@ -146,6 +199,10 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Extra origins Google's discovery document may name beyond accounts.google.com:
+# token/revocation endpoints on oauth2.googleapis.com, JWKS on www.googleapis.com.
+# Each entry is a bare https origin; defaults to empty (issuer's origin only).
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 
 [providers.apple]
 adapter = "apple"
@@ -186,12 +243,16 @@ client_secret = "${GOOGLE_CLIENT_SECRET}"
 
 At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`, the config value becomes that string. If the environment variable is not set, the service fails to start with a configuration error.
 
+Use `oidc-exchange config check path/to/config.toml` to run the same side-effect-free resolver used at startup. It merges the file with committed defaults but intentionally ignores environment variables and overlays, so pass a fully materialized deployment file. It reports missing deployment inputs (such as unresolved placeholders) separately from invalid value domains, and redacts secrets in its rendered output.
+
 ## Defaults
 
 | Setting | Default |
 |---|---|
 | `server.host` | `0.0.0.0` |
 | `server.port` | `8080` |
+| `server.role` | `exchange` |
+| `server.issuer`, `token.audience` | `https://auth.example.com` / `https://api.example.com` (deployment placeholders; replace before production) |
 | `registration.mode` | `open` |
 | `registration.domain_allowlist` | none (all domains allowed) |
 | `token.access_token_ttl` | `15m` |
@@ -199,7 +260,57 @@ At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`,
 | `telemetry.enabled` | `false` |
 | `telemetry.exporter` | `none` |
 | `telemetry.sample_rate` | `1.0` |
-| `audit.adapter` | `noop` |
+| `audit.adapter` | `stdout` |
+| `audit.durability` | `observe` |
+| `audit.emit_threshold` | `info` |
+| `rate_limit.enabled` / `store` / `window` | `true` / `in_process` / `1m` |
+| `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
+| `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `audit.blocking_threshold` | `warning` |
+| `providers.<name>.endpoint_origins` | none — the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
-| `internal_api` | disabled |
+| `internal_api.enabled` | `false` |
+| `internal_api.host` / `.port` | `127.0.0.1:8081` |
+| `internal_api.auth_methods` | `["shared_secret"]` |
+| `internal_api.token_audience` | `"internal"` |
+| `internal_api.required_claim` / `.required_value` | `"role"` / `"admin"` |
+| `internal_api.mtls.subject_header` | `"x-client-cert-subject"` |
+| `internal_api.max_auth_failures` | `5` |
+| `internal_api.auth_failure_window` | `"1m"` |
+| `internal_api.auth_lockout` | `"5m"` |
+| `internal_api.stats_cache_ttl` | `"60s"` |
+
+## Upgrading: `server.role` now defaults to `exchange`
+
+Earlier releases defaulted `server.role` to `all`: a deployment that only set
+`internal_api.enabled = true` got the internal admin API served on the same
+process as the public `/token` endpoint without ever naming that decision. The
+default is now `exchange`, which serves only the public exchange plane —
+admin reachability must be a deliberate deployment decision, visible in
+configuration.
+
+If an installation relied on the implicit `all`, set the role explicitly when
+upgrading:
+
+```toml
+[server]
+role = "all"     # public exchange plane + internal admin API on this process
+```
+
+Prefer splitting the planes when you do: keep `role = "exchange"` (or omit the
+key) on internet-facing processes, and run a separate process with
+`role = "admin"` and `internal_api.enabled = true` for the admin API, reachable
+only from your operator network. An `exchange`-role process never mounts
+`/internal/*`, so a forgotten `internal_api.enabled = true` there fails closed
+instead of publishing the privilege-assignment primitive.
+
+## Trusted proxies and rate limiting
+
+The server uses the connection peer as the client address by default. It reads
+`X-Forwarded-For` only when that peer belongs to `server.trusted_proxies`; it then selects
+`trusted_proxy_hops` entries from the **right** of the comma-separated chain. This makes the
+address `forwarded`; direct peers are `peer`. A forwarding header from any other peer is
+client-asserted and is never used as a rate-limit key or authorization input.
+
+The shipped in-process limiter is per process. Use an API gateway, WAF, or other edge control
+for a global limit across replicas or Lambda execution environments.

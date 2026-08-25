@@ -1,6 +1,6 @@
 # Lambda Binding (`@oidc-exchange/lambda`)
 
-**Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** bindings/lambda
+**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** bindings/lambda
 
 A pure-TypeScript adapter that turns AWS Lambda HTTP events into calls on the
 [Node.js binding](02-nodejs.md). It contains no Rust; it depends on `@oidc-exchange/node`.
@@ -66,3 +66,31 @@ behaviour (basePath stripping, query strings, header flattening, base64 bodies).
 ### Open questions
 
 - (None at this stage.)
+
+
+## Runtime parity update
+
+- Detect the incoming event shape (API Gateway REST v1, HTTP API v2 / Function URL, or ALB).
+- Translate it to the Node binding's `HttpRequest` — event field to request field, and
+  nothing more. The adapter performs no path stripping, no query re-encoding, and no header
+  deduplication; those belong to the normaliser, which already implements them once and
+  correctly.
+- **Detection** — `isApiGatewayV1` (`httpMethod` + `resource`, no `version`), `isApiGatewayV2`
+  (`version === "2.0"`), `isAlbEvent` (`requestContext.elb`).
+- **Translation** — `fromApiGatewayV1`, `fromApiGatewayV2`, `fromAlbEvent` each read the
+  rawest path the event carries (`rawPath` for v2, `path` for v1 and ALB, with
+  `pathIsRaw: false` for the two sources that pre-decode), pass the query string through
+  unmodified (`rawQueryString` for v2; `multiValueQueryStringParameters` re-encoded once for
+  v1 and ALB), emit headers as ordered pairs preserving multi-value entries, and base64-decode
+  the body when `isBase64Encoded`.
+- **Base path** — `createHandler`'s `basePath` option is forwarded to the FFI instance and
+  applied by `crates/server`'s segment-aware strip. The adapter no longer contains a strip of
+  its own, so `/authorize` under `basePath: "/auth"` routes exactly as it does on the
+  standalone server: a clean `404`, not a mangled `orize` or a `502` from an uncaught request
+  build error.
+- **Helpers** — `decodeBody(body, isBase64Encoded)` decodes base64 or UTF-8 and refuses a
+  body above `limits().maxBodyBytes` with a `413` before it is handed across the boundary.
+- *No control logic in the adapter.* **Prefix stripping, path decoding, and header handling
+  live in Rust; the adapter only maps event fields.** Three hand-maintained copies of one
+  control drifted from the Rust original that they were copied from; the way to keep them in
+  step is for them not to exist.

@@ -2,6 +2,9 @@ packages:
   - "bindings/nodejs"
   - "bindings/lambda"
   - "apps/*"
+  - "bindings/nodejs/npm/*"
+linkWorkspacePackages: true
+minimumReleaseAge: 1440
 allowBuilds:
   esbuild: true
   lefthook: true

@@ -107,6 +107,17 @@ web_modules/
 .env.*
 !.env.example
 
+# Generated key material and local state (patterns matter under jj auto-track)
+*.pem
+*.p8
+*.key
+keys/
+data/
+lmdb/
+*.db
+*.sqlite
+*.sqlite3
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

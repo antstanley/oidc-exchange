@@ -45,11 +45,18 @@ application = oidc.wsgi_app()
 ### Direct request handling
 
 ```python
+from urllib.parse import urlencode
+
 resp = oidc.handle_request_sync({
     "method": "POST",
     "path": "/token",
-    "headers": {"content-type": "application/json"},
-    "body": b'{"grant_type": "authorization_code", "code": "…", "provider": "google"}',
+    "headers": {"content-type": "application/x-www-form-urlencoded"},
+    "body": urlencode({
+        "grant_type": "authorization_code",
+        "code": "abc123",
+        "redirect_uri": "https://app.example.com/callback",
+        "provider": "google",
+    }).encode(),
 })
 # resp -> {"status": 200, "headers": {...}, "body": b"…"}
 
@@ -78,6 +85,12 @@ See the main repo's [Python examples](https://github.com/antstanley/oidc-exchang
 ## Configuration
 
 TOML config — providers, token TTLs, registration policy, key management, and storage. See the [configuration guide](https://github.com/antstanley/oidc-exchange#configuration).
+
+### Behaviour change
+
+Construction now fails when a `${VAR}` placeholder is unresolved, empty, or malformed instead of
+using that placeholder as literal configuration text. Set every referenced environment variable
+before constructing `OidcExchange`.
 
 ## Links
 

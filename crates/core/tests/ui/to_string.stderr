@@ -1,0 +1,16 @@
+error[E0599]: the method `to_string` exists for reference `&Secret<String>`, but its trait bounds were not satisfied
+ --> tests/ui/to_string.rs:7:20
+  |
+7 |     let _ = secret.to_string();
+  |                    ^^^^^^^^^ method cannot be called on `&Secret<String>` due to unsatisfied trait bounds
+  |
+ ::: src/secret.rs
+  |
+  | pub struct Secret<T>(T);
+  | -------------------- doesn't satisfy `Secret<String>: ToString` or `Secret<String>: std::fmt::Display`
+  |
+  = note: the following trait bounds were not satisfied:
+          `Secret<String>: std::fmt::Display`
+          which is required by `Secret<String>: ToString`
+          `&Secret<String>: std::fmt::Display`
+          which is required by `&Secret<String>: ToString`

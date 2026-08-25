@@ -130,8 +130,9 @@ def test_health_endpoint(test_config):
     response = instance.handle_request_sync(
         {
             "method": "GET",
-            "path": "/health",
-            "headers": {},
+            "raw_path": b"/health",
+            "headers": [],
+            "path_is_raw": True,
         }
     )
     assert response["status"] == 200
@@ -143,8 +144,9 @@ def test_jwks_endpoint(test_config):
     response = instance.handle_request_sync(
         {
             "method": "GET",
-            "path": "/keys",
-            "headers": {},
+            "raw_path": b"/keys",
+            "headers": [],
+            "path_is_raw": True,
         }
     )
     assert response["status"] == 200
@@ -159,8 +161,9 @@ def test_openid_discovery(test_config):
     response = instance.handle_request_sync(
         {
             "method": "GET",
-            "path": "/.well-known/openid-configuration",
-            "headers": {},
+            "raw_path": b"/.well-known/openid-configuration",
+            "headers": [],
+            "path_is_raw": True,
         }
     )
     assert response["status"] == 200
@@ -174,8 +177,9 @@ def test_unknown_route(test_config):
     response = instance.handle_request_sync(
         {
             "method": "GET",
-            "path": "/nonexistent",
-            "headers": {},
+            "raw_path": b"/nonexistent",
+            "headers": [],
+            "path_is_raw": True,
         }
     )
     assert response["status"] == 404
@@ -188,28 +192,73 @@ async def test_async_health(test_config):
     response = await instance.handle_request(
         {
             "method": "GET",
-            "path": "/health",
-            "headers": {},
+            "raw_path": b"/health",
+            "headers": [],
+            "path_is_raw": True,
         }
     )
     assert response["status"] == 200
 
 
+def test_handle_request_sync_accepts_empty_path_without_assertion(test_config):
+    """An empty path reaches the legacy FFI boundary and returns its typed error."""
+    instance = OidcExchange(config_string=test_config)
+    response = instance.handle_request_sync(
+        {"method": "GET", "raw_path": b"", "headers": [], "path_is_raw": True}
+    )
+    assert response["status"] == 404
+
+
+@pytest.mark.parametrize("missing_field", ["method", "raw_path", "path_is_raw"])
+def test_handle_request_sync_missing_required_field_raises_key_error(test_config, missing_field):
+    """Missing required fields retain the documented KeyError contract."""
+    instance = OidcExchange(config_string=test_config)
+    request = {"method": "GET", "raw_path": b"/health", "path_is_raw": True}
+    del request[missing_field]
+    with pytest.raises(KeyError, match=missing_field):
+        instance.handle_request_sync(request)
+
+
+@pytest.mark.parametrize(
+    ("request_data", "message"),
+    [
+        ({"method": 1, "raw_path": b"/health", "path_is_raw": True}, "method.*string"),
+        ({"method": "GET", "raw_path": 1, "path_is_raw": True}, "raw_path.*bytes"),
+        (
+            {"method": "GET", "raw_path": b"/health", "path_is_raw": True, "body": object()},
+            "body.*bytes",
+        ),
+        (
+            {"method": "GET", "raw_path": b"/health", "path_is_raw": True, "headers": {}},
+            "headers.*ordered sequence",
+        ),
+    ],
+)
+def test_handle_request_sync_invalid_field_type_raises_value_error(
+    test_config, request_data, message
+):
+    """Ill-typed direct inputs fail as ValueError rather than panicking or defaulting."""
+    instance = OidcExchange(config_string=test_config)
+    with pytest.raises(ValueError, match=message):
+        instance.handle_request_sync(request_data)
+
+
 def test_handle_request_sync_invalid_method_raises_runtime_error(test_config):
     """An errored FFI request (invalid HTTP method) still raises PyRuntimeError."""
     instance = OidcExchange(config_string=test_config)
-    with pytest.raises(RuntimeError):
-        instance.handle_request_sync(
-            {
-                # Not a valid HTTP method token (contains a space), so the FFI
-                # layer's `http::Method::from_str` fails and `handle_request_sync`
-                # must map the resulting `FfiError` to `PyRuntimeError` even
-                # though the call is wrapped in `py.allow_threads`.
-                "method": "BAD METHOD",
-                "path": "/health",
-                "headers": {},
-            }
-        )
+    response = instance.handle_request_sync(
+        {
+            # Not a valid HTTP method token (contains a space), so the FFI
+            # layer's `http::Method::from_str` fails and `handle_request_sync`
+            # must map the resulting `FfiError` to `PyRuntimeError` even
+            # though the call is wrapped in `py.allow_threads`.
+            "method": "BAD METHOD",
+            "raw_path": b"/health",
+            "headers": [],
+            "path_is_raw": True,
+        }
+    )
+    assert response["status"] == 400
 
 
 class _SlowWebhookHandler(http.server.BaseHTTPRequestHandler):
@@ -299,12 +348,15 @@ enabled = false
         response = instance.handle_request_sync(
             {
                 "method": "POST",
-                "path": "/internal/users",
-                "headers": {
-                    "authorization": "Bearer test-internal-secret",
-                    "content-type": "application/json",
-                },
-                "body": json.dumps({"external_id": "gil-test-user", "provider": "test-provider"}),
+                "raw_path": b"/internal/users",
+                "headers": [
+                    ("authorization", "Bearer test-internal-secret"),
+                    ("content-type", "application/json"),
+                ],
+                "body": json.dumps(
+                    {"external_id": "gil-test-user", "provider": "test-provider"}
+                ).encode(),
+                "path_is_raw": True,
             }
         )
         elapsed = time.monotonic() - start

@@ -68,6 +68,19 @@ async def test_asgi_health(test_config):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("size", "expected"), [(3, 404), (4, 404), (5, 413)])
+async def test_asgi_body_limit_boundary(test_config, size, expected):
+    """ASGI accepts at/below the cap and rejects one byte above before forwarding."""
+    from oidc_exchange._asgi import make_asgi_app
+
+    instance = OidcExchange(config_string=test_config)
+    app = make_asgi_app(instance, max_request_body_bytes=4)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post("/nonexistent", content=b"x" * size)
+    assert response.status_code == expected
+
+
 async def test_asgi_jwks(test_config):
     """ASGI app responds to GET /keys with status 200 and a JSON body containing 'keys'."""
     instance = OidcExchange(config_string=test_config)

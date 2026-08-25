@@ -74,7 +74,7 @@ adapter = "kms"
 
 [key_manager.kms]
 key_id = "${KMS_KEY_ARN}"
-algorithm = "ECDSA_SHA256"
+algorithm = "ES256"
 kid = "prod-1"
 
 [repository]
@@ -85,10 +85,20 @@ table_name = "oidc-exchange"
 
 [audit]
 adapter = "sqs"
-blocking_threshold = "error"
+durability = "enforce"
+emit_threshold = "info"
 
 [audit.sqs]
 queue_url = "${AUDIT_QUEUE_URL}"
+
+[rate_limit]
+enabled = true
+store = "in_process"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10
+per_subject = 10
+per_provider = 600
 
 [providers.google]
 adapter = "oidc"
@@ -96,7 +106,11 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+# Origins Google's discovery document may name beyond the issuer's origin:
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
+
+`endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered (see [Identity Providers](/guides/providers/)).
 
 **5. Deploy the Lambda function**
 

@@ -136,7 +136,7 @@ adapter = "kms"
 
 [key_manager.kms]
 key_id = "arn:aws:kms:us-east-1:123456789:key/abcd-1234"
-algorithm = "ECDSA_SHA_256"
+algorithm = "ES256"
 kid = "prod-key-1"
 ```
 
@@ -219,9 +219,121 @@ The webhook payload:
 }
 ```
 
-Event types: `user.created`, `user.updated`, `user.deleted`. The request includes an `X-Signature-256` header containing the hex-encoded HMAC-SHA256 of the raw request body.
+Event types: `user.created`, `user.updated`, `user.deleted`. User sync is non-blocking: sync failures are logged via `tracing::warn!` and never fail the originating request.
 
-User sync is non-blocking: sync failures are logged via `tracing::warn!` and never fail the originating request.
+### Verifying a delivery (receiver contract)
+
+Each delivery is authenticated and identified by three headers:
+
+| Header | Value |
+|---|---|
+| `X-Webhook-Timestamp` | The RFC3339 instant the delivery was minted |
+| `X-Webhook-Delivery-Id` | A ULID unique to the delivery occasion |
+| `X-Signature-256` | `sha256=` followed by the hex HMAC-SHA256 of `<X-Webhook-Timestamp> "." <X-Webhook-Delivery-Id> "." <raw request body>` under your configured secret |
+
+The signature and delivery id are minted **once** per logical delivery, outside
+the retry loop: every attempt in a retry burst carries the same id, timestamp,
+and signature, and byte-identical bodies. A repeated `X-Webhook-Delivery-Id` is
+therefore a retry of one delivery — treat it as such, not as an anomaly.
+
+A conforming receiver **must**:
+
+1. Verify the signature **before parsing the body**, which makes
+   `X-Webhook-Timestamp` an authenticated value.
+2. Reject deliveries whose `X-Webhook-Timestamp` is outside ±5 minutes of the
+   receiver's clock. This bounds replay of a captured delivery to the tolerance
+   window.
+3. Deduplicate on `X-Webhook-Delivery-Id`, retaining seen ids for at least that
+   ±5-minute window — at least as long as timestamps are trusted, so no expired
+   delivery can be replayed past the dedup memory.
+4. Treat any 2xx as success. 5xx and timeout responses are retried by the sender
+   up to the configured `retries` count with exponential backoff; 4xx is not
+   retried.
+
+Worked receiver example (Node.js):
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+export function verifyDelivery(req, rawBody, secret, seenIds, now = Date.now()) {
+  // 1. Signature first, over exactly the documented input — before any JSON.parse.
+  const expected =
+    "sha256=" +
+    createHmac("sha256", secret)
+      .update(`${req.header("x-webhook-timestamp")}.${req.header("x-webhook-delivery-id")}.${rawBody}`)
+      .digest("hex");
+  const received = req.header("x-signature-256");
+  if (
+    typeof received !== "string" ||
+    received.length !== expected.length ||
+    !timingSafeEqual(Buffer.from(received), Buffer.from(expected))
+  ) {
+    return { ok: false, reason: "bad signature" };
+  }
+
+  // 2. Freshness: reject anything outside the ±5 minute tolerance.
+  const sentAt = Date.parse(req.header("x-webhook-timestamp"));
+  const TOLERANCE_MS = 5 * 60 * 1000; // keep this constant paired with the dedup window below
+  if (!Number.isFinite(sentAt) || Math.abs(now - sentAt) > TOLERANCE_MS) {
+    return { ok: false, reason: "stale or future timestamp" };
+  }
+
+  // 3. Dedup: one id is one delivery; repeats are retries, not new events.
+  const deliveryId = req.header("x-webhook-delivery-id");
+  if (seenIds.has(deliveryId)) {
+    return { ok: true, reason: "retry of a delivered id — acknowledged, not reprocessed" };
+  }
+  seenIds.add(deliveryId); // retain ids for AT LEAST the tolerance window
+
+  // 4. Only now parse and act on the body.
+  const event = JSON.parse(rawBody);
+  return { ok: true, event };
+}
+```
+
+#### Release note (breaking receiver change)
+
+**Webhook receivers must be updated when deploying this version.** Both the
+signed input and the `X-Signature-256` value format changed:
+
+- Before: `X-Signature-256` carried the bare hex HMAC-SHA256 of the raw body only.
+- After: the header carries `sha256=<hex>` over `timestamp.delivery-id.body`, and
+  receivers must additionally check `X-Webhook-Timestamp` freshness (±5 minutes)
+  and deduplicate on `X-Webhook-Delivery-Id`.
+
+Every existing receiver rejects every delivery until it is updated — there is no
+negotiation or compatibility mode. The failure is quiet on the receiver side (a
+4xx is not retried, and sync failures are logged-and-swallowed upstream), so plan
+the receiver deploy together with this upgrade. `user_sync.enabled` defaults to
+`false` and no shipped example enables it; see the worked example above for the
+reference verification flow.
+
+#### Release note (embedding surface, `crates/adapters`)
+
+For embedders linking `crates/adapters` directly (the `IdentityProvider` trait
+signature itself is unchanged):
+
+- **`JwksCache::new`/`with_ttl` gained a required admitted-algorithms parameter**
+  (e.g. pass the same constant your validator advertises). Constructing without
+  it no longer compiles.
+- **`JwksCache::get_keys` returns `Arc<VerificationKeySet>`**, not
+  `serde_json::Value`. Use `get_key(kid)` for the resolve → one rate-limited
+  forced refetch → re-resolve → fail-closed path both built-in providers use.
+- **Key-selection behavior changed** to one shared constructor
+  (`VerificationKeySet::from_jwks`): keys declaring an unknown algorithm (e.g.
+  `RSA-OAEP`) are rejected instead of being inferred from their key type;
+  alg-less RSA / EC P-256 / OKP Ed25519 signing keys are now accepted on Apple's
+  path too; and a duplicate-`kid` JWKS whose eligible entry appears second now
+  validates (two *eligible* entries under one `kid` remain an error).
+- **Discovery endpoint origins**: each provider's discovery document may name
+  only origins pinned at config load (`endpoint_origins`, plus the issuer's own).
+  The check currently ships in warning mode — undeclared origins log a warning
+  and are served — and rejecting them (`Warn` → `Enforce`) is a separate future
+  release-owner decision after one release of that telemetry, not part of this
+  version.
+- Every outbound provider request goes through `ProviderTransport` (status read
+  before body; bodies bounded at the shared 64 KiB ceiling); webhook delivery
+  keeps its own operator-timeout client by design.
 
 ### Noop
 

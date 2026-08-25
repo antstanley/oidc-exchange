@@ -19,7 +19,18 @@ table_name = "oidc-exchange"
 region = "us-east-1"
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
+durability = "enforce"
+emit_threshold = "info"
+
+[rate_limit]
+enabled = true
+store = "in_process"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10
+per_subject = 10
+per_provider = 600
 
 [telemetry]
 enabled = true
@@ -31,3 +42,4 @@ issuer = "https://accounts.google.com"
 client_id = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]

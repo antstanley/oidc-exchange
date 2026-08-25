@@ -3,6 +3,10 @@ name = "oidc-exchange-ffi"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+conformance = ["oidc-exchange/conformance"]
+
 [dependencies]
 oidc-exchange = { path = "../server" }
 oidc-exchange-core.workspace = true
@@ -10,6 +14,8 @@ tokio.workspace = true
 axum = "0.8"
 http = "1"
 http-body-util = "0.1"
+percent-encoding = "2"
+futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }
 tracing.workspace = true
 
@@ -19,3 +25,5 @@ serde_json.workspace = true
 ed25519-dalek = { version = "2", features = ["pkcs8"] }
 pem = "3"
 tempfile = "3"
+http-body = "1"
+tracing-subscriber = "0.3"
