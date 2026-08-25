@@ -408,18 +408,23 @@ npm stage approve <id>              # or approve from the npmjs.com UI
 
 PyPI and the container images publish without a manual step.
 
-### Step 5 — refresh `pnpm-lock.yaml`
+### Step 5 — verify `pnpm-lock.yaml`
 
-The four `@oidc-exchange/*` platform packages are **self-published**: they cannot enter
-`pnpm-lock.yaml` until they exist on npm, which is why the bump script leaves the lockfile
-alone. Once step 4 makes them public:
+The four `@oidc-exchange/*` platform packages live at `bindings/nodejs/npm/*`, which are
+**workspace packages** (`pnpm-workspace.yaml` lists them, with `linkWorkspacePackages:
+true`), so the root lockfile records them as `link:` entries — registry publication does
+not change the lockfile. This step is a post-publish sanity check, not a refresh:
 
 ```bash
-pnpm install                             # resolves the new platform packages into the lock
+pnpm install                             # should produce no lockfile diff
 CI=true pnpm install --frozen-lockfile   # verify it matches (the check CI runs)
 ```
 
-Commit the refreshed `pnpm-lock.yaml` and PR it to `main`.
+If `pnpm install` does produce a diff (it will again if the platform packages ever stop
+being workspace-linked — releases before 0.3.0 pinned them from the registry and needed a
+post-publish refresh PR), commit the refreshed `pnpm-lock.yaml`, mirror it into
+`bindings/nodejs/pnpm-lock.yaml` and `bindings/lambda/pnpm-lock.yaml`, and PR it to
+`main`.
 
 ### Re-running a release
 
