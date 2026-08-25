@@ -28,7 +28,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@arethetypeswrong/cli": "0.18.2",
+    "@arethetypeswrong/cli": "0.18.5",
     "@napi-rs/cli": "3.7.2",
     "@types/node": "26.0.1",
     "oxfmt": "0.56.0",
