@@ -1,5 +1,54 @@
 # Release notes
 
+## 0.4.0
+
+0.4.0 closes the code-side divergences found by the post-0.3.0 conformance audit of the
+canonical specs against the implementation. The fixes are small but several change
+observable behaviour — read **Behaviour changes** before upgrading.
+
+### Behaviour changes
+
+- **Explicit `false`/`0`/`""` configuration values are now honoured.** A defaults-merge bug
+  silently discarded falsy overrides before they reached the resolver, so
+  `token.refresh_rotation = false`, a zero rate-limit budget (which disables that scope),
+  and `rate_limit.enabled = false` were quietly reverted to their defaults. The merge now
+  operates on raw values before deserialization, so an explicitly-set falsy value survives.
+  Deployments that set any of these and relied on the (broken) default behaviour will now
+  see the value they actually wrote.
+- **The Apple provider is reachable from configuration.** `providers.<id>.adapter = "apple"`
+  now resolves and boots; previously the value was rejected at config load and the adapter
+  was unreachable. Adapter selection is a closed domain (`oidc`, `apple`); an unknown value
+  still fails closed at startup.
+- **Refresh-flow security outcomes use the mandatory audit channel.** Refresh success,
+  session suspension, and refresh-token reuse now emit through the mandatory channel governed
+  by `audit.durability`, matching the token-exchange and revocation flows — a raised
+  `audit.emit_threshold` can no longer drop a token-theft (`RefreshTokenReuse`) alarm. The
+  Debug-level pre-emption `ValidationFailed` refusals remain on the best-effort channel by
+  design. Under the committed defaults (`durability = "observe"`), a reuse-alarm sink failure
+  now records degradation feeding `/health` rather than failing the request.
+- **`/nonce` is rate-limited.** The nonce endpoint — unauthenticated and state-writing — now
+  sits behind the same per-IP throttle as `/token` and `/revoke`.
+- **Core-flow audit events record true client-address provenance.** The token, refresh, and
+  revoke flows now carry the middleware-resolved `ClientAddr` (peer/forwarded/unknown)
+  instead of recording every address as `asserted`.
+
+### Other changes
+
+- The published `schemas/datamodel.schema.json` was brought back in step with the code
+  (the full audit `event_type` and failure-reason vocabularies, and the optional `operator`
+  attribution), guarded by a mirror test.
+- The `prometheus` telemetry exporter — accepted by configuration but not yet wired — now
+  emits an accurate "accepted, not yet exported" warning with defined fallback instead of the
+  misleading "unknown exporter" message.
+- Release-pipeline reliability fixes carried since 0.3.0: corepack shims enabled in the npm
+  validation/build/publish jobs, the last invalid pnpm-11 `exec --offline` removed, and
+  `arethetypeswrong` bumped to 0.18.5 to fix a tarball-parse crash in package validation.
+
+Deferred: the canonical specification pages and `canonical-types.schema.json` are updated by
+the merge plan of the change spec that drove this release; that documentation pass, together
+with the admin-plane and parity-appendix reconciliations the audit also identified, lands
+separately.
+
 ## 0.3.0
 
 0.3.0 is a security-hardening release: fourteen change specs landed since 0.2.0, tightening
