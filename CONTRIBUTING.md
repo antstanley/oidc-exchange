@@ -271,20 +271,20 @@ These boundaries are enforced by the Cargo workspace. If `core` compiles, the do
 
 ## Documentation
 
-The canonical source for all documentation is the `docs/` directory at the repo root. The website at `apps/website/` reads from `docs/` via a symlink (`apps/website/src/content/docs` → `docs/`).
+The canonical source for all documentation is `apps/website/src/content/docs/`. It is the Astro + Starlight content collection that the website at `apps/website/` renders and publishes to oidc-exchange.iamstan.dev.
 
-**Always edit files in `docs/`** — never edit content directly in `apps/website/src/content/docs/`. Changes to `docs/` automatically appear on the website.
+**Edit the documentation directly in `apps/website/src/content/docs/`.** Changes appear on the website on the next deploy.
 
 ### Structure
 
 ```
-docs/
+apps/website/src/content/docs/
 ├── getting-started/     # Introduction, installation, quick-start
 ├── guides/              # Configuration, providers, API reference, Node.js, Python, Docker
 ├── deployment/          # AWS Lambda, ECS Fargate, container, Linux server scenarios
 ├── architecture/        # Architecture overview, adapter documentation
-├── contributing/        # Contributing guide (website version)
-└── superpowers/         # Internal design specs and implementation plans (not user-facing)
+├── contributing/        # Contributing/development guide
+└── security/            # Dependency and signing-path policies
 ```
 
 ### Code examples in docs

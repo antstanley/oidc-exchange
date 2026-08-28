@@ -5,7 +5,7 @@ description: "Development setup, testing, and code standards."
 
 ## Prerequisites
 
-- **Rust** --- stable toolchain, 1.75 or later. Install via [rustup](https://rustup.rs/).
+- **Rust** --- stable toolchain. CI builds and tests on stable rustc 1.98; no MSRV is pinned in the workspace. Install via [rustup](https://rustup.rs/).
 - **cargo-nextest** --- test runner. Install with `cargo install cargo-nextest`.
 - **cargo-lambda** --- required only for building Lambda binaries. Install with `cargo install cargo-lambda`.
 - **Docker** --- required for DynamoDB Local integration tests.
@@ -104,7 +104,7 @@ cargo nextest run -p oidc-exchange-adapters -- --ignored
 
 The codebase uses hexagonal architecture to make testing straightforward:
 
-- **`crates/test-utils/`** --- provides mock implementations of all port traits (`MockRepository`, `MockKeyManager`, `MockAuditLog`, `MockIdentityProvider`, `MockUserSync`). These are in-memory implementations used by core service tests and server E2E tests.
+- **`crates/test-utils/`** --- provides mock implementations of all port traits (`MockRepository`, `MockKeyManager`, `MockAuditLog`, `MockRateLimiter`, `MockIdentityProvider`, `MockUserSync`). These are in-memory implementations used by core service tests and server E2E tests.
 - **Core tests** (`crates/core/tests/`) --- test business logic in isolation using mocks. No network, no filesystem.
 - **Adapter tests** (`crates/adapters/tests/`) --- test infrastructure integrations. HTTP-based adapters use [wiremock](https://crates.io/crates/wiremock) for deterministic HTTP mocking. DynamoDB tests require DynamoDB Local.
 - **Server E2E tests** (`crates/server/tests/`) --- spin up a full axum router with mock adapters and issue real HTTP requests.
@@ -126,6 +126,7 @@ The codebase uses hexagonal architecture to make testing straightforward:
 | `crates/adapters` | `oidc-exchange-adapters` | Implementations of port traits for DynamoDB, KMS, SQS, OIDC, webhooks. |
 | `crates/providers` | `oidc-exchange-providers` | Non-standard identity provider modules (Apple). |
 | `crates/server` | `oidc-exchange` | HTTP layer (axum), middleware, telemetry, and the binary entrypoint. |
+| `crates/ffi` | `oidc-exchange-ffi` | Language-agnostic request/response FFI wrapper over the server router. Reused by the Node.js and Python bindings. |
 | `crates/test-utils` | `oidc-exchange-test-utils` | Mock implementations of all ports. Dev-dependency only. |
 
 ### Dependency rules
@@ -133,6 +134,7 @@ The codebase uses hexagonal architecture to make testing straightforward:
 - `core` depends on nothing infrastructure-specific (no AWS SDKs, no HTTP clients).
 - `adapters` and `providers` depend on `core` for trait definitions.
 - `server` depends on `core`, `adapters`, and `providers`.
+- `ffi` depends on `server` (router construction) and `core`; the Node.js and Python bindings depend on `ffi`.
 - `test-utils` depends only on `core`.
 
 These boundaries are enforced by the Cargo workspace. If `core` compiles, the domain logic is free of infrastructure coupling.
@@ -142,14 +144,14 @@ These boundaries are enforced by the Cargo workspace. If `core` compiles, the do
 1. Define the implementation in `crates/adapters/src/`.
 2. Implement the relevant port trait from `crates/core/src/ports/`.
 3. Add a builder function (e.g., `from_config()`) that constructs the adapter from the TOML config.
-4. Wire it into the adapter selection in `crates/server/src/main.rs`.
+4. Wire it into the adapter selection in `crates/server/src/bootstrap.rs`.
 5. Add tests --- use wiremock for HTTP-based adapters, Docker services for database adapters.
 
 ### Adding a new identity provider
 
 1. If the provider follows standard OIDC, it only needs a config entry --- no code required.
 2. If the provider has quirks (like Apple), add a module in `crates/providers/src/` implementing `IdentityProvider`.
-3. Add an adapter name and wire it into provider construction in `crates/server/src/main.rs`.
+3. Add an adapter name and wire it into provider construction in `crates/server/src/bootstrap.rs`.
 
 ## Code standards
 

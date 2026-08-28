@@ -25,7 +25,7 @@ At startup, the adapter fetches `https://accounts.google.com/.well-known/openid-
 
 #### Why `endpoint_origins` is there
 
-Google publishes its endpoints off its issuer's origin: the token and revocation endpoints live on `oauth2.googleapis.com` and the JWKS URI on `www.googleapis.com`. The service pins, per provider, the set of origins a discovery document is permitted to name — the issuer's own origin, plus the origins of any endpoint you configure explicitly, plus every origin listed in `endpoint_origins` (each a bare `https://host[:port]`). The set is fixed when configuration loads: discovery can confirm which origins this service talks to but can never widen them, so a compromised or hostile discovery document cannot relocate where verification keys are fetched from or where the client secret is posted. If your provider serves an endpoint from an origin that is not pinned, add it to `endpoint_origins`; while the check runs in warning mode (the shipped default) an undeclared origin logs a structured warning naming the endpoint, the observed origin, and the permitted set, and rejecting such origins outright becomes a later release's decision. See the [configuration reference](/guides/configuration/) for the exact syntax.
+Google publishes its endpoints off its issuer's origin: the token and revocation endpoints live on `oauth2.googleapis.com` and the JWKS URI on `www.googleapis.com`. The service pins, per provider, the set of origins a discovery document is permitted to name: the issuer's own origin, plus the origins of any endpoint you configure explicitly, plus every origin listed in `endpoint_origins` (each a bare `https://host[:port]`). The set is fixed when configuration loads: discovery can confirm which origins this service talks to but can never widen them, so a compromised or hostile discovery document cannot relocate where verification keys are fetched from or where the client secret is posted. If your provider serves an endpoint from an origin that is not pinned, add it to `endpoint_origins`; while the check runs in warning mode (the shipped default) an undeclared origin logs a structured warning naming the endpoint, the observed origin, and the permitted set, and rejecting such origins outright becomes a later release's decision. See the [configuration reference](/guides/configuration/) for the exact syntax.
 
 ### Adding any standard OIDC provider
 
@@ -36,15 +36,14 @@ To add a new provider, create a `[providers.<name>]` block with the following fi
 | `adapter` | Yes | Must be `"oidc"` for standard providers |
 | `issuer` | Yes | The provider's issuer URL (used for OIDC discovery) |
 | `client_id` | Yes | OAuth client ID from the provider |
-| `client_secret` | Yes | OAuth client secret (use `${VAR_NAME}` placeholder) |
-| `scopes` | No | Scopes to request (defaults to `["openid"]`) |
+| `client_secret` | Cond. | OAuth client secret (use `${VAR_NAME}` placeholder). Optional in config; required by providers whose token endpoint expects one |
+| `scopes` | No | Defaults to `["openid"]`. Parsed but not sent on the back-channel code exchange (this service does not perform the authorization redirect) |
 | `jwks_uri` | No | Override discovered JWKS URI |
 | `token_endpoint` | No | Override discovered token endpoint |
 | `revocation_endpoint` | No | Override discovered revocation endpoint |
 | `endpoint_origins` | No | Extra origins (bare `https://host[:port]`) the provider's discovery document may name beyond the issuer's origin and configured-endpoint origins; defaults to empty |
-| `additional_params` | No | Extra parameters to include in token requests |
 
-For Tier 1 providers, only `issuer`, `client_id`, and `client_secret` are required. Endpoint fields are populated from the issuer's `.well-known/openid-configuration` at startup. If provided in config, they override the discovered values. If you override an endpoint onto another host, its origin joins the pinned set automatically; use `endpoint_origins` for extra origins only the *discovered* document names.
+For most Tier 1 providers, `issuer`, `client_id`, and `client_secret` are the fields you set. Endpoint fields are populated from the issuer's `.well-known/openid-configuration` at startup. If provided in config, they override the discovered values. If you override an endpoint onto another host, its origin joins the pinned set automatically; use `endpoint_origins` for extra origins only the *discovered* document names.
 
 ### Examples
 

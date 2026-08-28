@@ -14,6 +14,7 @@ oidc-exchange exposes public endpoints for token operations and internal endpoin
 | GET | `/keys` | JWKS (JSON Web Key Set) endpoint |
 | GET | `/.well-known/openid-configuration` | OpenID Connect discovery document |
 | GET | `/health` | Health check |
+| POST | `/nonce` | Mint a single-use nonce for the direct ID-token grant (only when `[grants] id_token = true`) |
 
 ### POST /token (authorization code exchange)
 
@@ -75,12 +76,51 @@ grant_type=refresh_token
 ```json
 {
   "access_token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImtleS0xIn0...",
+  "refresh_token": "bmV3LXJvdGF0ZWQtcmVmcmVzaC10b2tlbg...",
   "token_type": "Bearer",
   "expires_in": 900
 }
 ```
 
-Refresh does not issue a new refresh token. The original refresh token remains valid until it expires or is revoked.
+By default (`[token] refresh_rotation = true`), each refresh rotates the token: the response carries a new `refresh_token`, the presented token is retired, and re-presenting a retired token is rejected as reuse (a short grace window covers a retried request). Setting `[token] refresh_rotation = false` is the only opt-out; it returns no new `refresh_token` and keeps the presented token valid until it expires or is revoked.
+
+### POST /token (direct ID-token assertion)
+
+Opt-in grant, served only when `[grants] id_token = true`. Exchange a provider ID token you already hold for access and refresh tokens, without an authorization code.
+
+**Request:**
+
+```
+POST /token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=id_token
+&provider=google
+&id_token=PROVIDER_ID_TOKEN
+&provider_access_token=PROVIDER_ACCESS_TOKEN
+```
+
+| Parameter | Required | Description |
+|---|---|---|
+| `grant_type` | Yes | Must be `id_token` |
+| `provider` | Yes | Provider name as configured |
+| `id_token` | Yes | The provider ID token to exchange |
+| `provider_access_token` | No | Provider access token co-issued with the ID token, used only to verify its `at_hash` binding |
+
+When the grant is disabled (the default), any request carrying an `id_token` field is rejected with `unsupported_grant_type`.
+
+### POST /nonce
+
+Mints a single-use nonce for the direct ID-token grant. Mounted only when `[grants] id_token = true`; it takes no request body.
+
+**Response (200 OK):**
+
+```json
+{
+  "nonce": "9c8b...",
+  "expires_in": 600
+}
+```
 
 ### POST /revoke
 
@@ -99,7 +139,7 @@ token=dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4...
 | Parameter | Required | Description |
 |---|---|---|
 | `token` | Yes | The token to revoke |
-| `token_type_hint` | No | `refresh_token` or `access_token`. If a refresh token is revoked, only that session is invalidated. If an access token is revoked, all sessions for the user are revoked (since individual JWTs cannot be revoked). |
+| `token_type_hint` | No | `refresh_token` or `access_token`. If a refresh token is revoked, only that session is invalidated. If an access token is revoked, only the single session (family) named by the token's `sid` claim is invalidated, not all of the user's sessions. |
 
 **Response (200 OK):** Empty body.
 
@@ -151,30 +191,34 @@ Returns `200 OK` if the service is operational. No authentication required.
 
 ## Internal endpoints
 
-Internal endpoints provide user CRUD and claims management. All internal routes require authentication.
+Internal endpoints provide user CRUD and claims management. They are served on a dedicated admin listener (default `127.0.0.1:8081`), and are mounted only when `server.role` is `admin` or `all` and `internal_api.enabled = true`; with either condition unmet, no `/internal/*` routes exist. All internal routes require authentication.
 
 ### Authentication
 
-Internal routes are protected by a shared secret. Callers must include the secret in the `Authorization` header:
+Internal routes sit behind an operator-authentication gate that supports three mechanisms, tried in the order listed in `internal_api.auth_methods`:
 
-```
-Authorization: Bearer <shared_secret>
-```
+- `operator_token` (recommended): an operator JWT verified against this service's own key manager, carrying the configured audience and required claim.
+- `mtls`: the client-certificate subject asserted by a TLS-terminating proxy via a trusted header.
+- `shared_secret` (legacy): a static secret presented as `Authorization: Bearer <shared_secret>` and compared in constant time.
 
-The shared secret is configured via:
+A successful attempt attaches the authenticated operator principal to the request; a failed attempt counts against a per-peer lockout that answers with `429` and a `Retry-After` header once exhausted.
+
+Example using the legacy shared-secret mechanism:
 
 ```toml
 [internal_api]
-auth_method = "shared_secret"
+enabled = true
+auth_methods = ["shared_secret"]
 shared_secret = "${INTERNAL_API_SECRET}"
 ```
-
-Middleware compares the provided secret using constant-time comparison.
 
 ### Internal routes
 
 | Method | Path | Description |
 |---|---|---|
+| GET | `/internal/stats` | Aggregate user and session counts |
+| POST | `/internal/sessions/cleanup` | Sweep expired sessions; returns `{ "deleted": <count> }` |
+| GET | `/internal/users` | List users (query: `cursor`, `limit`) |
 | POST | `/internal/users` | Create a user |
 | GET | `/internal/users/{id}` | Get a user by ID |
 | PATCH | `/internal/users/{id}` | Update a user |
@@ -257,9 +301,11 @@ All error responses follow the OAuth 2.0 error format (RFC 6749 Section 5.2):
 |---|---|---|
 | `invalid_grant` | 400 | Expired or invalid authorization code or refresh token |
 | `invalid_request` | 400 | Missing required parameter or unknown provider |
+| `unsupported_grant_type` | 400 | Unknown or empty `grant_type`, or an `id_token` field when the direct grant is disabled |
 | `invalid_token` | 401 | Malformed or expired token |
 | `unauthorized` | 401 | Missing or invalid authentication |
 | `access_denied` | 403 | Registration denied (domain not allowed, existing_users_only mode, or user suspended) |
+| `slow_down` | 429 | Rate limit exceeded; retry after the delay in the `Retry-After` header |
 | `server_error` | 500/502/504 | Internal failure, provider error, or provider timeout |
 
 Internal details are never leaked to the client. `server_error` responses log the detail internally and return a generic message.

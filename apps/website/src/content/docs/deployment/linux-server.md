@@ -39,6 +39,9 @@ Place config files in `/etc/oidc-exchange/config/`:
 host = "127.0.0.1"
 port = 8080
 issuer = "https://auth.example.com"
+# Trust nginx's loopback connection before reading its forwarding chain.
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
+trusted_proxy_hops = 1
 
 [key_manager]
 adapter = "local"
@@ -58,11 +61,6 @@ region = "us-east-1"
 [audit]
 adapter = "stdout"
 durability = "observe"
-
-# Trust nginx's loopback connection before reading its forwarding chain.
-[server]
-trusted_proxies = ["127.0.0.1/32", "::1/128"]
-trusted_proxy_hops = 1
 
 [rate_limit]
 enabled = true
@@ -196,5 +194,5 @@ Forward to your log aggregator via journald export, or switch to `exporter = "ot
 
 For deployment-specific storage configurations, see:
 
-- [Linux + PostgreSQL](/deployment/linux-postgres/) — relational storage with optional Valkey for sessions
-- [Linux + SQLite](/deployment/linux-sqlite/) — embedded storage for single-server deployments
+- [Linux + PostgreSQL](/deployment/linux-postgres/): relational storage with optional Valkey for sessions
+- [Linux + SQLite](/deployment/linux-sqlite/): embedded storage for single-server deployments

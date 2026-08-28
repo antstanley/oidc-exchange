@@ -232,7 +232,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 
 ### AWS Lambda
 
-Use the `@oidc-exchange/lambda` package for serverless deployments. It automatically detects the event source — API Gateway v1 (REST API), API Gateway v2 (HTTP API), Lambda Function URL, or ALB.
+Use the `@oidc-exchange/lambda` package for serverless deployments. It automatically detects the event source: API Gateway v1 (REST API), API Gateway v2 (HTTP API), Lambda Function URL, or ALB.
 
 ```typescript
 import { createHandler } from "@oidc-exchange/lambda";
@@ -249,15 +249,15 @@ Works with SAM, CDK, Serverless Framework, Terraform, or any other deployment to
 
 #### Deployment modes: managed runtime and container image
 
-`@oidc-exchange/lambda` runs on either Lambda packaging model, and it's common to use both — a **container image** for local, reproducible end-client testing, and either model in production:
+`@oidc-exchange/lambda` runs on either Lambda packaging model, and it's common to use both (a **container image** for local, reproducible end-client testing, and either model in production):
 
-- **Managed (zip) runtime** — deploy your bundle (including `@oidc-exchange/node`'s native addon) to a `nodejs22.x`-style runtime. These run on **Amazon Linux 2023 (glibc 2.34)**.
-- **Container image** — package the function as a container image with the AWS Lambda Runtime Interface Client (RIC). Convenient for reproducing the runtime locally (e.g. `public.ecr.aws/lambda/nodejs:22`, which mirrors AL2023) and for pinning your own base image.
+- **Managed (zip) runtime**: deploy your bundle (including `@oidc-exchange/node`'s native addon) to a `nodejs22.x`-style runtime. These run on **Amazon Linux 2023 (glibc 2.34)**.
+- **Container image**: package the function as a container image with the AWS Lambda Runtime Interface Client (RIC). Convenient for reproducing the runtime locally (e.g. `public.ecr.aws/lambda/nodejs:22`, which mirrors AL2023) and for pinning your own base image.
 
 The published `@oidc-exchange/linux-{x64,arm64}-gnu` native addons are built against an **old glibc floor (~2.17)**, so they load on the AL2023 managed runtime and on common container base images alike. Two things to know:
 
-- The floor is what matters for compatibility — the addon loads on any glibc **≥ 2.17** host (effectively every mainstream distro and the managed runtime). The Node.js version does **not** affect this: Lambda's glibc comes from the OS (AL2023), not the Node runtime, so bumping Node won't change it.
-- The addons are **glibc**, not musl. Alpine/musl base images would need a `-musl` build (not currently published) — use a glibc base (`debian`, `ubuntu`, `public.ecr.aws/lambda/nodejs:*`, `gcr.io/distroless/nodejs*`) instead.
+- The floor is what matters for compatibility: the addon loads on any glibc **≥ 2.17** host (effectively every mainstream distro and the managed runtime). The Node.js version does **not** affect this: Lambda's glibc comes from the OS (AL2023), not the Node runtime, so bumping Node won't change it.
+- The addons are **glibc**, not musl. Alpine/musl base images would need a `-musl` build (not currently published), so use a glibc base (`debian`, `ubuntu`, `public.ecr.aws/lambda/nodejs:*`, `gcr.io/distroless/nodejs*`) instead.
 
 > For local testing, prefer an AWS-provided base image (`public.ecr.aws/lambda/nodejs:*`): it mirrors the managed runtime (AL2023), so a function that loads there will load in production too.
 

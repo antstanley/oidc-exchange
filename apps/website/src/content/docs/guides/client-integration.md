@@ -49,12 +49,13 @@ curl -X POST https://auth.example.com/token \
 ```json
 {
   "access_token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImtleS0xIn0...",
+  "refresh_token": "bmV3IHJvdGF0ZWQgcmVmcmVzaCB0b2tlbg...",
   "token_type": "Bearer",
   "expires_in": 900
 }
 ```
 
-The refresh response does not include a new refresh token. The original refresh token remains valid until it expires or is explicitly revoked.
+By default (`refresh_rotation = true`) the refresh grant rotates the refresh token: the response carries a new `refresh_token` and the presented one is retired. Replace your stored refresh token with the new value on every refresh, and discard the one you sent. With `refresh_rotation = false` the response omits `refresh_token` and the presented token stays valid until it expires or is explicitly revoked.
 
 ## Token revocation
 
@@ -67,7 +68,7 @@ curl -X POST https://auth.example.com/revoke \
   -d "token_type_hint=refresh_token"
 ```
 
-The endpoint always returns `200 OK` per RFC 7009, even if the token is unknown or already revoked. If you revoke a refresh token, only that session is invalidated. If you revoke an access token, all sessions for the user are revoked since individual JWTs cannot be invalidated.
+The endpoint returns `200 OK` per RFC 7009 for any token state, even if the token is unknown or already revoked, and returns `503` only if the storage backend is unavailable. Revocation is scoped to a single session: revoking a refresh token invalidates its session, and revoking an access token invalidates only the one session it was minted for (identified by its `sid` claim), not every session for the user.
 
 ## JWKS verification
 

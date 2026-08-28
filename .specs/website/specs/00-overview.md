@@ -2,8 +2,8 @@
 
 **Status:** Implemented · **Date:** 2026-06-24 · **Owner:** Ant Stanley · **Scope:** apps/website
 
-The public documentation site at `oidc-exchange.dev`, built with Astro and Starlight. It
-renders the canonical prose docs in `/docs` and additionally serves their raw markdown for
+The public documentation site at `oidc-exchange.iamstan.dev`, built with Astro and Starlight. It
+renders the canonical prose docs in `src/content/docs/` and additionally serves their raw markdown for
 agent consumption.
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md). The
@@ -21,8 +21,8 @@ agent consumption.
 - `astro.config.mjs` — Starlight + Svelte integrations, site metadata, sidebar sections, a
   redirect from `/` to `/getting-started/introduction/`, and the custom `markdownApi()`
   integration.
-- `src/content/docs/` — a symlink to the repository's `/docs`, so the canonical docs are the
-  single source. `content.config.ts` defines the collection schema.
+- `src/content/docs/` — the canonical documentation content, the Starlight collection itself.
+  `content.config.ts` defines the collection schema.
 - `integrations/markdown-api.js` — emits the `.md` twins at build time and injects markdown
   content negotiation in dev/SSR.
 - `src/middleware-markdown.ts` — strips frontmatter and negotiates markdown vs HTML.
@@ -39,13 +39,15 @@ agent consumption.
 
 ### Assumptions
 
-- `/docs` is the canonical documentation source; the website never holds its own copy (the
-  `src/content/docs` symlink enforces this).
+- `src/content/docs/` is the canonical documentation source; it is the single copy of the
+  prose docs in the repository.
 
 ### Decisions
 
-- *Docs symlinked, not copied.* **`src/content/docs` symlinks `/docs`.** One source of truth;
-  editing `/docs` updates the site with no sync step.
+- *Docs live in the content collection.* **The prose docs are `src/content/docs/` directly.**
+  They were moved out of a repo-root `/docs` reached by a committed symlink, because
+  blogwright's deploy source-zipper cannot read a symlinked directory. A real directory keeps
+  one source of truth with no symlink.
 - *Markdown twin + content negotiation.* **Every page is also served as raw markdown.** Lets
   agents and tools consume the docs without HTML parsing.
 

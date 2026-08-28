@@ -1,0 +1,45 @@
+{
+  // Shared preview stack for docs PRs, mirroring blogwright's own preview setup:
+  // one CloudFront distribution routes <pr-id>.preview.oidc-exchange.iamstan.dev
+  // to previews/<pr-id>/. The preview domain must be its own Route53 hosted zone
+  // (the zone lookup is an exact name match), so preview.oidc-exchange.iamstan.dev
+  // is a child zone NS-delegated from the oidc-exchange.iamstan.dev zone. Previews
+  // live in the preview account; production lives in the production account.
+  "region": "us-east-1",
+  "siteName": "oidc-exchange",
+  "app": "oidc-exchange",
+  "domain": "preview.oidc-exchange.iamstan.dev",
+
+  // The docs site is the apps/website workspace (see production.jsonc).
+  "paths": {
+    "app": "apps/website",
+    "dist": "apps/website/dist"
+  },
+
+  "spa": false,
+
+  // owner/repo scoping the GitHub OIDC deploy role's trust policy.
+  "githubRepo": "antstanley/oidc-exchange",
+
+  "microvm": {
+    "memory": 2,
+    "maxDurationSeconds": 1800,
+    "idle": {
+      "autoResumeEnabled": false,
+      "maxIdleDurationSeconds": 1500,
+      "suspendedDurationSeconds": 120
+    }
+  },
+
+  "retention": {
+    "microvmDays": 365,
+    "cloudfrontDays": 90
+  },
+
+  "sourceIgnore": [".git/", ".jj/", "node_modules/", "dist/", ".astro/"],
+  "defaultRootObject": "index.html",
+  "invalidationMaxPaths": 1000,
+
+  // Previews are non-production: block crawlers and skip the sitemap.
+  "seo": { "robots": "noindex", "sitemap": "off" }
+}
