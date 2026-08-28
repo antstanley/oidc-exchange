@@ -112,7 +112,7 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 
 `endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered (see [Identity Providers](/guides/providers/)).
 
-Note that `rate_limit.store = "in_process"` holds budgets per Lambda execution environment, not shared across them. Under concurrency the effective limit is roughly N times the configured value, where N is the number of warm execution environments serving traffic.
+`rate_limit.store = "in_process"` holds budgets per Lambda execution environment, not shared across them. Under concurrency the effective limit is roughly N times the configured value, where N is the number of warm execution environments serving traffic.
 
 **5. Deploy the Lambda function**
 

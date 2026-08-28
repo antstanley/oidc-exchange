@@ -3,7 +3,7 @@ title: Docker
 description: Run oidc-exchange in Docker with GHCR or Docker Hub images.
 ---
 
-## Pull the Image
+## Pull the image
 
 From GitHub Container Registry:
 
@@ -17,7 +17,7 @@ From Docker Hub:
 docker pull antstanley80/oidc-exchange:latest
 ```
 
-## Run with Config Volume
+## Run with config volume
 
 Mount your configuration directory into the container:
 
@@ -80,7 +80,7 @@ adapter = "postgres"
 url = "postgresql://oidc:changeme@postgres:5432/oidc_exchange"
 ```
 
-## Multi-Architecture Support
+## Multi-architecture support
 
 Images are published for both architectures:
 
@@ -93,7 +93,7 @@ Docker automatically pulls the correct image for your platform. To explicitly sp
 docker pull --platform linux/arm64 ghcr.io/antstanley/oidc-exchange:latest
 ```
 
-## Image Tags
+## Image tags
 
 | Tag | Description |
 |-----|-------------|

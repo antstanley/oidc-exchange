@@ -3,7 +3,7 @@ title: "Identity Providers"
 description: "Configure Google, Apple, and custom OIDC providers."
 ---
 
-oidc-exchange supports three tiers of identity providers. Standard OIDC providers like Google are config-only --- no code required. Providers with non-standard behavior like Apple have dedicated modules. Each provider is registered as a `[providers.<name>]` block in the configuration file, and the name is what clients pass in the `provider` field of `POST /token` requests.
+oidc-exchange supports three tiers of identity providers. Standard OIDC providers like Google are config-only (no code required). Providers with non-standard behavior like Apple have dedicated modules. Each provider is registered as a `[providers.<name>]` block in the configuration file, and the name is what clients pass in the `provider` field of `POST /token` requests.
 
 ## Standard OIDC providers (config-only)
 
@@ -111,8 +111,8 @@ The rest of the flow (JWKS fetching, ID token validation, discovery) reuses the 
 ### Getting your Apple credentials
 
 1. Go to the [Apple Developer Portal](https://developer.apple.com/account)
-2. Create a Services ID under **Certificates, Identifiers & Profiles** --- this is your `client_id`
-3. Create a Sign In with Apple key --- this gives you a `.p8` file, a Key ID, and your Team ID
+2. Create a Services ID under **Certificates, Identifiers & Profiles** (this is your `client_id`)
+3. Create a Sign In with Apple key (this gives you a `.p8` file, a Key ID, and your Team ID)
 4. The `.p8` file is a P-256 private key in PKCS#8 format
 
 ## Provider config format reference

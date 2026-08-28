@@ -5,11 +5,11 @@ description: "Development setup, testing, and code standards."
 
 ## Prerequisites
 
-- **Rust** --- stable toolchain. CI builds and tests on stable rustc 1.98; no MSRV is pinned in the workspace. Install via [rustup](https://rustup.rs/).
-- **cargo-nextest** --- test runner. Install with `cargo install cargo-nextest`.
-- **cargo-lambda** --- required only for building Lambda binaries. Install with `cargo install cargo-lambda`.
-- **Docker** --- required for DynamoDB Local integration tests.
-- **jj (Jujutsu)** --- version control. Install from [martinvonz/jj](https://github.com/martinvonz/jj). This project uses jj exclusively; do not use git CLI commands.
+- **Rust**: stable toolchain. CI builds and tests on stable rustc 1.98; no MSRV is pinned in the workspace. Install via [rustup](https://rustup.rs/).
+- **cargo-nextest**: test runner. Install with `cargo install cargo-nextest`.
+- **cargo-lambda**: required only for building Lambda binaries. Install with `cargo install cargo-lambda`.
+- **Docker**: required for DynamoDB Local integration tests.
+- **jj (Jujutsu)**: version control. Install from [martinvonz/jj](https://github.com/martinvonz/jj). This project uses jj exclusively; do not use git CLI commands.
 
 ## Clone and build
 
@@ -23,7 +23,7 @@ Any editor with rust-analyzer support works. The workspace root `Cargo.toml` def
 
 ## Version control with jj
 
-This project uses **Jujutsu (jj)** for version control. jj is a Git-compatible VCS with a simpler mental model --- there is no staging area, and every working-copy state is automatically committed.
+This project uses **Jujutsu (jj)** for version control. jj is a Git-compatible VCS with a simpler mental model: there is no staging area, and every working-copy state is automatically committed.
 
 ### Common workflows
 
@@ -61,10 +61,10 @@ jj git push --bookmark my-feature
 
 ### Key differences from git
 
-- **No staging area** --- all file changes are part of the current change automatically.
-- **Immutable commits** --- `jj describe`, `jj squash`, and `jj rebase` create new commit IDs. This is safe; jj tracks the rewrite.
-- **Conflict markers in files** --- jj allows conflicted states to exist in the working copy. Resolve conflicts, then `jj status` confirms resolution.
-- **`jj new` instead of `git commit`** --- when your current change is ready, run `jj new` to start a fresh change on top of it.
+- **No staging area**: all file changes are part of the current change automatically.
+- **Immutable commits**: `jj describe`, `jj squash`, and `jj rebase` create new commit IDs. This is safe; jj tracks the rewrite.
+- **Conflict markers in files**: jj allows conflicted states to exist in the working copy. Resolve conflicts, then `jj status` confirms resolution.
+- **`jj new` instead of `git commit`**: when your current change is ready, run `jj new` to start a fresh change on top of it.
 
 ## Testing
 
@@ -104,16 +104,16 @@ cargo nextest run -p oidc-exchange-adapters -- --ignored
 
 The codebase uses hexagonal architecture to make testing straightforward:
 
-- **`crates/test-utils/`** --- provides mock implementations of all port traits (`MockRepository`, `MockKeyManager`, `MockAuditLog`, `MockRateLimiter`, `MockIdentityProvider`, `MockUserSync`). These are in-memory implementations used by core service tests and server E2E tests.
-- **Core tests** (`crates/core/tests/`) --- test business logic in isolation using mocks. No network, no filesystem.
-- **Adapter tests** (`crates/adapters/tests/`) --- test infrastructure integrations. HTTP-based adapters use [wiremock](https://crates.io/crates/wiremock) for deterministic HTTP mocking. DynamoDB tests require DynamoDB Local.
-- **Server E2E tests** (`crates/server/tests/`) --- spin up a full axum router with mock adapters and issue real HTTP requests.
+- **`crates/test-utils/`**: provides mock implementations of all port traits (`MockRepository`, `MockKeyManager`, `MockAuditLog`, `MockRateLimiter`, `MockIdentityProvider`, `MockUserSync`). These are in-memory implementations used by core service tests and server E2E tests.
+- **Core tests** (`crates/core/tests/`): test business logic in isolation using mocks. No network, no filesystem.
+- **Adapter tests** (`crates/adapters/tests/`): test infrastructure integrations. HTTP-based adapters use [wiremock](https://crates.io/crates/wiremock) for deterministic HTTP mocking. DynamoDB tests require DynamoDB Local.
+- **Server E2E tests** (`crates/server/tests/`): spin up a full axum router with mock adapters and issue real HTTP requests.
 
 ### Writing tests
 
 - Place unit tests in the module they test (standard Rust `#[cfg(test)]` blocks).
 - Place integration tests in the crate's `tests/` directory.
-- Use the mock implementations from `test-utils` --- do not duplicate mock logic.
+- Use the mock implementations from `test-utils`; do not duplicate mock logic.
 - Tests that need external services must be `#[ignore]` so the default `cargo nextest run` works without Docker.
 
 ## Code organization
@@ -145,11 +145,11 @@ These boundaries are enforced by the Cargo workspace. If `core` compiles, the do
 2. Implement the relevant port trait from `crates/core/src/ports/`.
 3. Add a builder function (e.g., `from_config()`) that constructs the adapter from the TOML config.
 4. Wire it into the adapter selection in `crates/server/src/bootstrap.rs`.
-5. Add tests --- use wiremock for HTTP-based adapters, Docker services for database adapters.
+5. Add tests: use wiremock for HTTP-based adapters, Docker services for database adapters.
 
 ### Adding a new identity provider
 
-1. If the provider follows standard OIDC, it only needs a config entry --- no code required.
+1. If the provider follows standard OIDC, it only needs a config entry, with no code required.
 2. If the provider has quirks (like Apple), add a module in `crates/providers/src/` implementing `IdentityProvider`.
 3. Add an adapter name and wire it into provider construction in `crates/server/src/bootstrap.rs`.
 
@@ -176,7 +176,7 @@ Both must pass with zero warnings before pushing.
 ### Configuration
 
 - New config fields go in `crates/core/src/config.rs` as strongly-typed structs with serde.
-- All secrets use `${VAR_NAME}` placeholder syntax --- never hardcode secrets in TOML defaults.
+- All secrets use `${VAR_NAME}` placeholder syntax; never hardcode secrets in TOML defaults.
 - New config sections need a corresponding entry in `config/default.toml`.
 
 ### Commit messages

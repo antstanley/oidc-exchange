@@ -70,7 +70,7 @@ The client authenticates through a hosted auth service (Auth0, Cognito, Clerk, F
 
 The SaaS auth service handles the upstream identity provider flow and issues its own ID token back to the client. The client then sends that ID token to your API in the Authorization header, and your API validates it against the SaaS service's JWKS endpoint.
 
-This is a misuse of ID tokens. ID tokens are intended for the client application to learn the user's identity --- they are not designed to be sent as bearer credentials to APIs. Access tokens are the correct token type for API authorization, as defined by OAuth 2.0.
+This is a misuse of ID tokens. ID tokens are intended for the client application to learn the user's identity. They are not designed to be sent as bearer credentials to APIs. Access tokens are the correct token type for API authorization, as defined by OAuth 2.0.
 
 **Pros:**
 - The SaaS service unifies multiple identity providers behind a single token format
@@ -105,13 +105,21 @@ The client authenticates with the identity provider and sends the resulting auth
 
 ## Summary
 
-| Approach | Custom claims | Token control | Provider-agnostic | No external runtime deps | No per-user cost |
-|-|-|-|-|-|-|
-| Provider ID tokens | No | No | No | Yes | Yes |
-| Provider access tokens | No | No | No | No | Yes |
-| SaaS auth service | Yes | Partial | Yes | No | No |
-| SaaS ID tokens | No | No | Yes | Yes | No |
-| **oidc-exchange** | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** |
+| Approach | Custom claims | Token control | Provider-agnostic |
+|-|-|-|-|
+| Provider ID tokens | No | No | No |
+| Provider access tokens | No | No | No |
+| SaaS auth service | Yes | Partial | Yes |
+| SaaS ID tokens | No | No | Yes |
+| **oidc-exchange** | **Yes** | **Yes** | **Yes** |
+
+| Approach | No external runtime deps | No per-user cost |
+|-|-|-|
+| Provider ID tokens | Yes | Yes |
+| Provider access tokens | No | Yes |
+| SaaS auth service | No | No |
+| SaaS ID tokens | Yes | No |
+| **oidc-exchange** | **Yes** | **Yes** |
 
 ## When to use something else
 

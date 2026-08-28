@@ -3,7 +3,7 @@ title: Deployment Overview
 description: Choose a deployment model for oidc-exchange.
 ---
 
-Deployment guides for oidc-exchange across different infrastructure targets. All guides use the same binary; the deployment target is determined by runtime detection and configuration.
+Deployment guides for oidc-exchange across different infrastructure targets. All guides use the same binary; runtime detection and configuration determine the deployment target.
 
 ## Choosing a deployment model
 

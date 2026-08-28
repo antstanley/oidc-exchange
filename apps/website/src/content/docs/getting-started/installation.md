@@ -3,14 +3,13 @@ title: Installation
 description: Install oidc-exchange via one-line script, prebuilt binary, Docker, npm, pip, or from source.
 ---
 
-## Quick Install (Linux / macOS)
+## Quick install (Linux / macOS)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
 The installer verifies the downloaded binary's checksum and, when the GitHub CLI (`gh`) is available, requires GitHub build provenance from `antstanley/oidc-exchange` and `.github/workflows/release.yml`. Without `gh`, it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
-
 
 To install a specific version:
 
@@ -52,7 +51,7 @@ pip install oidc-exchange
 
 See the [Python guide](/guides/python) for framework-specific setup.
 
-## Prebuilt Binaries
+## Prebuilt binaries
 
 Download from [GitHub Releases](https://github.com/antstanley/oidc-exchange/releases):
 
@@ -63,7 +62,7 @@ Download from [GitHub Releases](https://github.com/antstanley/oidc-exchange/rele
 | macOS ARM64 | `oidc-exchange-darwin-arm64` |
 | Windows x86_64 | `oidc-exchange-windows-x64.exe` |
 
-## From Source
+## From source
 
 Requires a recent stable [Rust](https://rustup.rs/) toolchain (CI builds and tests on rustc 1.98):
 

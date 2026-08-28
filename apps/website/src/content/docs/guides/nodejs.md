@@ -17,7 +17,7 @@ For AWS Lambda deployments, install the Lambda adapter instead:
 pnpm add @oidc-exchange/lambda
 ```
 
-## Basic Usage
+## Basic usage
 
 ```typescript
 import { OidcExchange } from "@oidc-exchange/node";
@@ -41,7 +41,7 @@ console.log(response.status); // 200
 
 In 0.3, replace `path` with the raw, percent-encoded path bytes in `rawPath`, pass the still-encoded query bytes separately without `?`, set `pathIsRaw` to describe the source, and `await handleRequest`. Do not decode or strip `server.base_path` in application code. Callers that cannot migrate to async immediately can temporarily use deprecated `handleRequestSync` with the same new request shape; it blocks the calling thread and will be removed after one major release cycle.
 
-## Framework Integration
+## Framework integration
 
 ### Express
 
