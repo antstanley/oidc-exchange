@@ -9,11 +9,11 @@ oidc-exchange is configured entirely via TOML files and environment variables. A
 
 Configuration is loaded and merged in the following order, with later sources overriding earlier ones:
 
-1. **`config/default.toml`** --- baseline defaults shipped with the binary
-2. **`config/{OIDC_EXCHANGE_ENV}.toml`** --- environment-specific overrides. The `OIDC_EXCHANGE_ENV` environment variable selects the file (e.g., `production`, `staging`, `local`). If unset, only `default.toml` is loaded.
-3. **Environment variable overrides** --- structural overrides using double-underscore delimiters: `OIDC_EXCHANGE__{section}__{key}` (e.g., `OIDC_EXCHANGE__SERVER__PORT=9090`)
-4. **`${VAR_NAME}` placeholder resolution** --- any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time; an unset value is a configuration error
-5. **Closed-domain resolution** --- the merged configuration is narrowed into typed values; invalid security-relevant values (including non-HTTPS issuer, provider, and webhook URLs) fail before startup
+1. **`config/default.toml`**: baseline defaults shipped with the binary
+2. **`config/{OIDC_EXCHANGE_ENV}.toml`**: environment-specific overrides. The `OIDC_EXCHANGE_ENV` environment variable selects the file (e.g., `production`, `staging`, `local`). If unset, only `default.toml` is loaded.
+3. **Environment variable overrides**: structural overrides using double-underscore delimiters, `OIDC_EXCHANGE__{section}__{key}` (e.g., `OIDC_EXCHANGE__SERVER__PORT=9090`)
+4. **`${VAR_NAME}` placeholder resolution**: any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time; an unset value is a configuration error
+5. **Closed-domain resolution**: the merged configuration is narrowed into typed values; invalid security-relevant values (including non-HTTPS issuer, provider, and webhook URLs) fail before startup
 
 Secrets (client secrets, API keys, KMS ARNs) should always use `${VAR_NAME}` placeholders and be injected via environment variables. Never hardcode secrets in TOML files.
 

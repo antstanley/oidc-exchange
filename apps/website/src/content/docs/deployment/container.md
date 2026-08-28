@@ -76,7 +76,7 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 
 ## Key management
 
-For containers, you have flexibility in key management:
+Containers give you flexibility in key management:
 
 - **Local keys**: mount a signing key via a volume or Kubernetes secret. Use `adapter = "local"`, which supports Ed25519 (EdDSA) only. ECDSA or RSA signing requires the KMS adapter.
 - **AWS KMS**: if running in AWS (ECS/EKS), use `adapter = "kms"` with IAM roles for service accounts or task roles.

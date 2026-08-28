@@ -3,7 +3,7 @@ title: "Architecture"
 description: "Hexagonal architecture and crate structure."
 ---
 
-oidc-exchange is built with hexagonal architecture (ports and adapters). All infrastructure --- databases, key management, audit systems, identity providers --- sits behind trait interfaces defined in the core crate. The core business logic has zero infrastructure dependencies. Adapters are selected at runtime from configuration.
+oidc-exchange is built with hexagonal architecture (ports and adapters). All infrastructure (databases, key management, audit systems, identity providers) sits behind trait interfaces defined in the core crate. The core business logic has zero infrastructure dependencies. Adapters are selected at runtime from configuration.
 
 ## Crate structure
 

@@ -3,6 +3,7 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import svelte from "@astrojs/svelte";
 import markdownApi from "./integrations/markdown-api.js";
+import mermaid from "astro-mermaid";
 
 // https://astro.build/config
 export default defineConfig({
@@ -11,10 +12,13 @@ export default defineConfig({
     "/": "/getting-started/introduction/",
   },
   integrations: [
+    // Must precede starlight so its rehype plugin transforms mermaid code blocks.
+    mermaid({ autoTheme: true }),
     starlight({
       title: "oidc-exchange",
       description:
         "A Rust service that validates OIDC tokens and exchanges them for self-issued JWTs.",
+      customCss: ["./src/styles/mermaid.css"],
       social: [
         { icon: "github", label: "GitHub", href: "https://github.com/antstanley/oidc-exchange" },
       ],
@@ -27,9 +31,9 @@ export default defineConfig({
           label: "Getting Started",
           items: [
             { slug: "getting-started/introduction" },
+            { slug: "getting-started/why-oidc-exchange" },
             { slug: "getting-started/installation" },
             { slug: "getting-started/quick-start" },
-            { slug: "getting-started/why-oidc-exchange" },
           ],
         },
         {

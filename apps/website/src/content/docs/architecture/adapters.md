@@ -39,7 +39,7 @@ max_connections = 5
 
 ### SQLite
 
-File-based storage using [sqlx](https://github.com/launchbadge/sqlx). Zero external dependencies --- ideal for single-server deployments or development.
+File-based storage using [sqlx](https://github.com/launchbadge/sqlx). Zero external dependencies, ideal for single-server deployments or development.
 
 ```toml
 [repository]
@@ -154,7 +154,7 @@ The `[audit]` section controls where compliance and security events are sent. Ev
 
 ### Noop
 
-Events are not sent to any external system. When the audit provider is down or absent, events are always written to stdout (info and below) or stderr (error and above) as structured JSON --- this fallback happens regardless of adapter.
+Events are not sent to any external system. When the audit provider is down or absent, events are always written to stdout (info and below) or stderr (error and above) as structured JSON. This fallback happens regardless of adapter.
 
 ```toml
 [audit]
@@ -164,7 +164,7 @@ blocking_threshold = "warning"
 
 ### Stdout/Stderr
 
-Audit events are emitted as structured JSON to the process output --- info-and-below to stdout, error-and-above to stderr.
+Audit events are emitted as structured JSON to the process output: info-and-below to stdout, error-and-above to stderr.
 
 ```toml
 [audit]

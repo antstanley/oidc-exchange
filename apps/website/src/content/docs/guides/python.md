@@ -17,7 +17,7 @@ pip install oidc-exchange
 
 Requires **Python 3.10+**. Prebuilt wheels are included for Linux (x64, ARM64), macOS (ARM64), and Windows (x64).
 
-## Basic Usage
+## Basic usage
 
 ```python
 from oidc_exchange import OidcExchange
@@ -37,7 +37,7 @@ print(response["status"])  # 200
 
 The `handle_request_sync` method takes a dict with `method`, `raw_path` (bytes, the still-percent-encoded path when `path_is_raw` is `True`), `query` (bytes without the leading `?`), `headers` (a list of `(name, value)` tuples), `body` (bytes), and `path_is_raw` (bool). It returns a dict with `status` (int), `headers` (a list of `(name, value)` pairs), and `body` (bytes).
 
-## Framework Integration
+## Framework integration
 
 ### FastAPI
 
@@ -108,7 +108,7 @@ urlpatterns = [
 ]
 ```
 
-## Async Support
+## Async support
 
 The `handle_request` method is async and runs the handler in a thread pool executor:
 

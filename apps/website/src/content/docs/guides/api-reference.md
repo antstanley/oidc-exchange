@@ -271,9 +271,9 @@ Soft-deletes the user (sets status to `Deleted`) and revokes all active sessions
 
 Per-user claims are merged on top of config-level `[token.custom_claims]` when issuing access tokens. Per-user claims take precedence over config claims with the same key.
 
-- **PUT** `/internal/users/{id}/claims` --- replaces the entire claims map
-- **PATCH** `/internal/users/{id}/claims` --- merges new claims into existing ones
-- **DELETE** `/internal/users/{id}/claims` --- clears all per-user claims
+- **PUT** `/internal/users/{id}/claims` replaces the entire claims map
+- **PATCH** `/internal/users/{id}/claims` merges new claims into existing ones
+- **DELETE** `/internal/users/{id}/claims` clears all per-user claims
 
 **Example (PUT):**
 

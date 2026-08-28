@@ -11,7 +11,21 @@ This page walks through the most common patterns, explains the pros and cons of 
 
 ### 1. Using identity provider ID tokens directly
 
-![Architecture diagram showing the client authenticating with an identity provider, then sending the provider's ID token directly to your API, which validates it by fetching the provider's JWKS](/anti_pattern_identity_provider_id_tokens.png)
+```mermaid
+sequenceDiagram
+    accTitle: Using identity provider ID tokens directly
+    accDescr: The client authenticates with the identity provider and receives an ID token, then sends that ID token to your API. Your API validates it by fetching the provider's JWKS and checking the signature, expiry, and audience.
+    participant C as End user / Client
+    participant IdP as Identity provider
+    participant API as Your API
+    C->>IdP: Authenticate (OAuth 2.0 / OIDC)
+    IdP-->>C: ID token
+    C->>API: Request with ID token in Authorization header
+    API->>IdP: Fetch JWKS (cached)
+    IdP-->>API: Public keys
+    API->>API: Validate token, read identity claims
+    API-->>C: Response
+```
 
 The simplest possible approach. Your client authenticates with Google, Apple, or another OIDC provider and receives an ID token. The client sends that ID token directly to your API in the Authorization header. Your API validates the token by fetching the provider's public keys (JWKS) and checking the signature, expiry, and audience.
 
@@ -29,7 +43,22 @@ The simplest possible approach. Your client authenticates with Google, Apple, or
 
 ### 2. Using identity provider access tokens directly
 
-![Architecture diagram showing the client authenticating with an identity provider, receiving access and refresh tokens, then sending the provider's access token to your API, which validates it by calling the provider's token introspection or userinfo endpoint](/anti_pattern_identity_provider_access_tokens.png)
+```mermaid
+sequenceDiagram
+    accTitle: Using identity provider access tokens directly
+    accDescr: The client authenticates with the identity provider, exchanges the authorization code for an access token and refresh token, then sends the access token to your API. Your API validates it by calling the provider's introspection or userinfo endpoint, or by verifying the JWT against the provider's JWKS if the access token is a JWT.
+    participant C as End user / Client
+    participant IdP as Identity provider
+    participant API as Your API
+    C->>IdP: Authenticate, receive authorization code
+    C->>IdP: Exchange code at token endpoint
+    IdP-->>C: Access token (plus refresh token)
+    C->>API: Request with access token in Authorization header
+    API->>IdP: Introspect or userinfo (opaque token), or verify JWT via JWKS
+    IdP-->>API: Token status and identity claims
+    API->>API: Authorize request
+    API-->>C: Response
+```
 
 A variation where the client uses the provider's access token instead of the ID token. Your API validates the access token by calling the provider's introspection or userinfo endpoint, or by checking it against the provider's JWKS if the access token is a JWT.
 
@@ -46,7 +75,26 @@ A variation where the client uses the provider's access token instead of the ID 
 
 ### 3. SaaS auth service issuing its own tokens
 
-![Architecture diagram showing the client authenticating through a SaaS auth service like Auth0, Cognito, or Clerk, which proxies to the identity provider, then issues its own access token and refresh token that your API validates using the SaaS service's JWKS](/saas_tokens.png)
+```mermaid
+sequenceDiagram
+    accTitle: SaaS auth service issuing its own tokens
+    accDescr: The client authenticates through a SaaS auth service, which runs the upstream identity provider flow and then returns an authorization code. The client exchanges that code for the SaaS service's own access token and refresh token. Your API validates the access token against the SaaS service's JWKS.
+    participant C as End user / Client
+    participant SaaS as SaaS auth service
+    participant IdP as Identity provider
+    participant API as Your API
+    C->>SaaS: Start authentication
+    SaaS->>IdP: Redirect to identity provider
+    IdP-->>SaaS: ID token (SaaS validates it)
+    SaaS-->>C: Redirect back with authorization code
+    C->>SaaS: Exchange code at token endpoint
+    SaaS-->>C: Access token (JWT) plus refresh token
+    C->>API: Request with access token in Authorization header
+    API->>SaaS: Fetch JWKS (cached)
+    SaaS-->>API: Public keys
+    API->>API: Validate JWT, authorize request
+    API-->>C: Response
+```
 
 The client authenticates through a hosted auth service (Auth0, Cognito, Clerk, Firebase Auth). The SaaS service handles the upstream identity provider flow, then issues its own access token and refresh token. Your API validates tokens using the SaaS service's JWKS endpoint.
 
@@ -66,11 +114,29 @@ The client authenticates through a hosted auth service (Auth0, Cognito, Clerk, F
 
 ### 4. SaaS auth service using ID tokens for API authorization
 
-![Architecture diagram showing the client authenticating through a SaaS auth service which proxies to the identity provider, then the SaaS service issues its own ID token which the client sends to your API for authorization](/anti_pattern_saas_id_tokens.png)
+```mermaid
+sequenceDiagram
+    accTitle: SaaS auth service using ID tokens for API authorization
+    accDescr: The client authenticates through a SaaS auth service, which runs the upstream identity provider flow and issues its own ID token. The client then sends that ID token to your API as a bearer credential, which your API validates against the SaaS service's JWKS. This misuses an ID token as an API credential.
+    participant C as End user / Client
+    participant SaaS as SaaS auth service
+    participant IdP as Identity provider
+    participant API as Your API
+    C->>SaaS: Start authentication
+    SaaS->>IdP: Redirect to identity provider
+    IdP-->>SaaS: Identity provider ID token (SaaS validates it)
+    SaaS-->>C: SaaS ID token
+    Note over C,API: Misuse: an ID token is sent as an API credential
+    C->>API: Request with SaaS ID token in Authorization header
+    API->>SaaS: Fetch JWKS (cached)
+    SaaS-->>API: Public keys
+    API->>API: Validate ID token JWT, authorize request
+    API-->>C: Response
+```
 
 The SaaS auth service handles the upstream identity provider flow and issues its own ID token back to the client. The client then sends that ID token to your API in the Authorization header, and your API validates it against the SaaS service's JWKS endpoint.
 
-This is a misuse of ID tokens. ID tokens are intended for the client application to learn the user's identity --- they are not designed to be sent as bearer credentials to APIs. Access tokens are the correct token type for API authorization, as defined by OAuth 2.0.
+This is a misuse of ID tokens. ID tokens are intended for the client application to learn the user's identity. They are not designed to be sent as bearer credentials to APIs. Access tokens are the correct token type for API authorization, as defined by OAuth 2.0.
 
 **Pros:**
 - The SaaS service unifies multiple identity providers behind a single token format
@@ -85,7 +151,27 @@ This is a misuse of ID tokens. ID tokens are intended for the client application
 
 ### 5. Issuing your own tokens with oidc-exchange
 
-![Architecture diagram showing the client authenticating with an identity provider, then exchanging the provider's authorization code or ID token with oidc-exchange, which validates the identity, issues its own access token (JWT) and refresh token, and your API validates tokens using oidc-exchange's JWKS endpoint](/own_tokens.png)
+```mermaid
+sequenceDiagram
+    accTitle: Issuing your own tokens with oidc-exchange
+    accDescr: The client authenticates with the identity provider and sends the resulting authorization code to oidc-exchange. oidc-exchange exchanges the code with the provider, validates the identity, creates or looks up the user, and issues its own access token and refresh token. Your API validates the access token against oidc-exchange's JWKS at the keys endpoint, with no external calls at request time.
+    participant C as End user / Client
+    participant IdP as Identity provider
+    participant OE as oidc-exchange
+    participant API as Your API
+    Note over OE,API: Your infrastructure
+    C->>IdP: Authenticate, receive authorization code
+    C->>OE: POST /token (grant_type=authorization_code, provider, code, redirect_uri)
+    OE->>IdP: Exchange code at provider token endpoint, validate ID token
+    IdP-->>OE: Provider tokens and identity
+    OE->>OE: Create or look up user, mint tokens
+    OE-->>C: Access token (JWT) plus refresh token
+    C->>API: Request with access token in Authorization header
+    API->>OE: Fetch JWKS at /keys (cached)
+    OE-->>API: Public keys
+    API->>API: Validate JWT locally, read custom claims, authorize
+    API-->>C: Response
+```
 
 The client authenticates with the identity provider and sends the resulting authorization code or ID token to oidc-exchange. The service validates the upstream identity, creates or looks up the user, and issues its own access token (JWT) and refresh token. Your API validates tokens using oidc-exchange's JWKS endpoint - no network calls to external services at request time.
 
@@ -105,13 +191,21 @@ The client authenticates with the identity provider and sends the resulting auth
 
 ## Summary
 
-| Approach | Custom claims | Token control | Provider-agnostic | No external runtime deps | No per-user cost |
-|-|-|-|-|-|-|
-| Provider ID tokens | No | No | No | Yes | Yes |
-| Provider access tokens | No | No | No | No | Yes |
-| SaaS auth service | Yes | Partial | Yes | No | No |
-| SaaS ID tokens | No | No | Yes | Yes | No |
-| **oidc-exchange** | **Yes** | **Yes** | **Yes** | **Yes** | **Yes** |
+| Approach | Custom claims | Token control | Provider-agnostic |
+|-|-|-|-|
+| Provider ID tokens | No | No | No |
+| Provider access tokens | No | No | No |
+| SaaS auth service | Yes | Partial | Yes |
+| SaaS ID tokens | No | No | Yes |
+| **oidc-exchange** | **Yes** | **Yes** | **Yes** |
+
+| Approach | No external runtime deps | No per-user cost |
+|-|-|-|
+| Provider ID tokens | Yes | Yes |
+| Provider access tokens | No | Yes |
+| SaaS auth service | No | No |
+| SaaS ID tokens | Yes | No |
+| **oidc-exchange** | **Yes** | **Yes** |
 
 ## When to use something else
 
