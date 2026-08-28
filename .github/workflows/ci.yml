@@ -3,7 +3,13 @@ on:
   push:
     branches:
       - main
-  pull_request: null
+    # Docs-only changes ship through the blogwright deploy workflows and are
+    # validated by the site build; they do not need the Rust/bindings build.
+    paths-ignore:
+      - "apps/website/src/content/docs/**"
+  pull_request:
+    paths-ignore:
+      - "apps/website/src/content/docs/**"
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings

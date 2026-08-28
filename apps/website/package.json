@@ -10,8 +10,8 @@
     "serve": "node serve.mjs",
     "astro": "astro",
     "lint": "oxlint --deny-warnings",
-    "format": "oxfmt",
-    "format:check": "oxfmt --check",
+    "format": "oxfmt --ignore-path=.oxfmtignore",
+    "format:check": "oxfmt --check --ignore-path=.oxfmtignore",
     "typecheck": "astro check"
   },
   "dependencies": {

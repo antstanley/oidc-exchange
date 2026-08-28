@@ -14,6 +14,12 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
   ["release.yml:publish-npm", new Set(["id-token"])],
   ["release.yml:publish-pypi", new Set(["id-token"])],
   ["release.yml:create-release", new Set(["contents"])],
+  // Docs publishing to oidc-exchange.iamstan.dev via blogwright: keyless AWS
+  // deploys assume the GitHub OIDC role (id-token), and PR previews comment their
+  // URL back on the pull request (pull-requests). No other write scope is granted.
+  ["production.yml:deploy", new Set(["id-token"])],
+  ["preview.yml:deploy", new Set(["id-token", "pull-requests"])],
+  ["preview.yml:destroy", new Set(["id-token", "pull-requests"])],
 ]);
 
 const ACTION_SHA = /^[^\s@]+@[0-9a-f]{40}$/;

@@ -4,6 +4,9 @@
 debug
 target
 
+# Local advisory-scan output (scripts/run-advisory-scans.mjs); regenerated, never committed
+.advisory-results/
+
 # Python build/test artifacts (bindings/python)
 __pycache__/
 *.py[cod]

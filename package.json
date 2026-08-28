@@ -2,7 +2,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prepare": "lefthook install",
+    "prepare": "lefthook install || echo 'lefthook install skipped (no git repo)'",
     "bump-version": "node scripts/bump-version.js",
     "lint": "pnpm -r --no-bail lint",
     "format": "pnpm -r format",
@@ -12,6 +12,7 @@
     "test:supply-chain": "node --test scripts/__tests__/advisory-policy.test.mjs scripts/__tests__/advisory-scan-handoff.test.mjs scripts/__tests__/signing-path-policy.test.mjs scripts/__tests__/supply-chain.test.mjs scripts/__tests__/workflow-policy.test.mjs"
   },
   "devDependencies": {
+    "blogwright": "^0.3.3",
     "lefthook": "2.1.9",
     "yaml": "2.9.0"
   },

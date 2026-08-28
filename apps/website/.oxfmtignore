@@ -1,0 +1,6 @@
+# The docs content collection is authored Markdown/MDX, not code, so oxfmt does
+# not format it. It lives here after moving from a repo-root /docs directory
+# that oxfmt never reached (it was a symlink; oxfmt does not follow directory
+# symlinks). oxfmt reads this file only via --ignore-path, which the format
+# scripts in package.json pass.
+src/content/docs/

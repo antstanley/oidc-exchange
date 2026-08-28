@@ -1,0 +1,68 @@
+{
+  // Production config for publishing the docs site to oidc-exchange.iamstan.dev
+  // with blogwright (https://github.com/antstanley/blogwright). Mirrors how the
+  // blogwright repo publishes its own docs: same region, same AWS accounts, same
+  // MicroVM build model. Production lives in the iamstan.dev production account;
+  // PR previews live in a separate account (see preview.jsonc).
+  "region": "us-east-1",
+
+  // Stable slug used in resource names: production-oidc-exchange-<accountId>,
+  // and the GitHub OIDC deploy role production-oidc-exchange-gh.
+  "siteName": "oidc-exchange",
+
+  // `app` tag on every created AWS resource; identical across environments.
+  "app": "oidc-exchange",
+
+  // Custom domain. The hosted zone lives in this account. Main-site DNS is
+  // manual: `blogwright bootstrap production` prints the ACM validation CNAMEs,
+  // then point the apex at the distribution's *.cloudfront.net domain with an
+  // ALIAS A record (an apex cannot be a CNAME).
+  "domain": "oidc-exchange.iamstan.dev",
+
+  // The docs site is the apps/website workspace (Astro + Starlight). Its
+  // src/content/docs symlinks the repo's /docs tree, so the canonical docs are
+  // the single source. The MicroVM runs `pnpm install && pnpm build` in
+  // paths.app and publishes paths.dist (astro build emits apps/website/dist).
+  "paths": {
+    "app": "apps/website",
+    "dist": "apps/website/dist"
+  },
+
+  // Starlight is prerendered, not a client-side SPA: 404s map to /404.html.
+  "spa": false,
+
+  // Builder MicroVM sizing + lifecycle (2 GB covers pnpm install + astro build).
+  "microvm": {
+    "memory": 2,
+    "maxDurationSeconds": 1800,
+    "idle": {
+      "autoResumeEnabled": false,
+      "maxIdleDurationSeconds": 1500,
+      "suspendedDurationSeconds": 120
+    }
+  },
+
+  // CloudWatch retention: build logs 1 year, CloudFront access logs 3 months.
+  "retention": {
+    "microvmDays": 365,
+    "cloudfrontDays": 90
+  },
+
+  // Keep the whole workspace in the source zip so `pnpm install --frozen-lockfile`
+  // inside the MicroVM matches the committed lockfile (apps/* and bindings/* are
+  // workspace members, and /docs is symlinked into apps/website). Only exclude
+  // VCS metadata and build output.
+  "sourceIgnore": [".git/", ".jj/", "node_modules/", "dist/", ".astro/"],
+
+  "defaultRootObject": "index.html",
+
+  // Each deploy invalidates only the CloudFront paths whose content changed.
+  "invalidationMaxPaths": 1000,
+
+  // Production is indexable and emits a sitemap.
+  "seo": { "robots": "index", "sitemap": "on" },
+
+  // owner/repo scoping the production GitHub OIDC deploy role's trust policy (the
+  // `production` GitHub environment). Re-run `blogwright bootstrap` after changing.
+  "githubRepo": "antstanley/oidc-exchange"
+}

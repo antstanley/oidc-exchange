@@ -23,7 +23,7 @@ function fixture(name) {
 
 test("all workflows parse and satisfy structural release policy", () => {
   const workflowNames = readdirSync(WORKFLOW_DIRECTORY).filter((name) => name.endsWith(".yml"));
-  assert.equal(workflowNames.length, 4);
+  assert.equal(workflowNames.length, 6);
   for (const workflowName of workflowNames) {
     assert.deepEqual(
       validateWorkflowFile(join(WORKFLOW_DIRECTORY, workflowName), workflowName),

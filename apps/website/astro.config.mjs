@@ -6,7 +6,7 @@ import markdownApi from "./integrations/markdown-api.js";
 
 // https://astro.build/config
 export default defineConfig({
-  site: "https://oidc-exchange.dev",
+  site: "https://oidc-exchange.iamstan.dev",
   redirects: {
     "/": "/getting-started/introduction/",
   },
@@ -16,10 +16,11 @@ export default defineConfig({
       description:
         "A Rust service that validates OIDC tokens and exchanges them for self-issued JWTs.",
       social: [
-        { icon: "github", label: "GitHub", href: "https://github.com/example/oidc-exchange" },
+        { icon: "github", label: "GitHub", href: "https://github.com/antstanley/oidc-exchange" },
       ],
       editLink: {
-        baseUrl: "https://github.com/example/oidc-exchange/edit/main/website/",
+        baseUrl:
+          "https://github.com/antstanley/oidc-exchange/edit/main/apps/website/src/content/docs/",
       },
       sidebar: [
         {

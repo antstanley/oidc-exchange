@@ -6,6 +6,9 @@ packages:
 linkWorkspacePackages: true
 minimumReleaseAge: 1440
 allowBuilds:
+  # core-js (transitive via blogwright -> @atproto/oauth-client-node) postinstall
+  # only prints a funding banner. Never run it.
+  core-js: false
   esbuild: true
   lefthook: true
   sharp: true
