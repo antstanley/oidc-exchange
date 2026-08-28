@@ -14,7 +14,7 @@ docker pull ghcr.io/antstanley/oidc-exchange:latest
 From Docker Hub:
 
 ```bash
-docker pull antstanley/oidc-exchange:latest
+docker pull antstanley80/oidc-exchange:latest
 ```
 
 ## Run with Config Volume
@@ -73,8 +73,10 @@ volumes:
 To use PostgreSQL as the storage backend, update your config to point at the `postgres` service:
 
 ```toml
-[storage]
+[repository]
 adapter = "postgres"
+
+[repository.postgres]
 url = "postgresql://oidc:changeme@postgres:5432/oidc_exchange"
 ```
 
@@ -96,14 +98,14 @@ docker pull --platform linux/arm64 ghcr.io/antstanley/oidc-exchange:latest
 | Tag | Description |
 |-----|-------------|
 | `latest` | Most recent stable release |
-| `v1.0.0` | Exact version pin |
-| `v1.0` | Latest patch release in the 1.0.x line |
-| `v1` | Latest minor and patch release in the 1.x line |
+| `1.0.0` | Exact version pin |
+| `1.0` | Latest patch release in the 1.0.x line |
+| `1` | Latest minor and patch release in the 1.x line |
 
 Pin to an exact version in production for reproducible deployments:
 
 ```yaml
-image: ghcr.io/antstanley/oidc-exchange:v1.0.0
+image: ghcr.io/antstanley/oidc-exchange:1.0.0
 ```
 
 ## Custom Dockerfile

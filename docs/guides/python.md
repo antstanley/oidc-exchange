@@ -26,13 +26,16 @@ oidc = OidcExchange(config="./config.toml")
 
 response = oidc.handle_request_sync({
     "method": "GET",
-    "path": "/health",
-    "headers": {},
+    "raw_path": b"/health",
+    "query": b"",
+    "headers": [],
+    "body": b"",
+    "path_is_raw": True,
 })
 print(response["status"])  # 200
 ```
 
-The `handle_request_sync` method takes a dict with `method`, `path`, `headers` (dict), and optional `body` (bytes or str). It returns a dict with `status` (int), `headers` (dict), and `body` (bytes).
+The `handle_request_sync` method takes a dict with `method`, `raw_path` (bytes, the still-percent-encoded path when `path_is_raw` is `True`), `query` (bytes without the leading `?`), `headers` (a list of `(name, value)` tuples), `body` (bytes), and `path_is_raw` (bool). It returns a dict with `status` (int), `headers` (a list of `(name, value)` pairs), and `body` (bytes).
 
 ## Framework Integration
 
@@ -74,29 +77,29 @@ from oidc_exchange import OidcExchange
 oidc = OidcExchange(config=os.path.join(os.path.dirname(__file__), "..", "..", "config.toml"))
 
 def oidc_view(request, oidc_path=""):
-    headers = {}
+    headers = []
     for key, value in request.META.items():
         if key.startswith("HTTP_"):
             header_name = key[5:].replace("_", "-").lower()
-            headers[header_name] = value
+            headers.append((header_name, value))
     if "CONTENT_TYPE" in request.META:
-        headers["content-type"] = request.META["CONTENT_TYPE"]
+        headers.append(("content-type", request.META["CONTENT_TYPE"]))
     if "CONTENT_LENGTH" in request.META:
-        headers["content-length"] = request.META["CONTENT_LENGTH"]
+        headers.append(("content-length", request.META["CONTENT_LENGTH"]))
 
-    req_path = f"/{oidc_path}"
-    if request.META.get("QUERY_STRING"):
-        req_path = f"{req_path}?{request.META['QUERY_STRING']}"
-
+    # Django hands you an already-decoded path segment, so mark path_is_raw False
+    # and pass the raw query string separately.
     response = oidc.handle_request_sync({
         "method": request.method,
-        "path": req_path,
+        "raw_path": f"/{oidc_path}".encode("utf-8"),
+        "query": request.META.get("QUERY_STRING", "").encode("latin-1"),
         "headers": headers,
         "body": request.body,
+        "path_is_raw": False,
     })
 
     django_response = HttpResponse(content=response["body"], status=response["status"])
-    for name, value in response["headers"].items():
+    for name, value in response["headers"]:
         django_response[name] = value
     return django_response
 
@@ -112,8 +115,11 @@ The `handle_request` method is async and runs the handler in a thread pool execu
 ```python
 response = await oidc.handle_request({
     "method": "GET",
-    "path": "/health",
-    "headers": {},
+    "raw_path": b"/health",
+    "query": b"",
+    "headers": [],
+    "body": b"",
+    "path_is_raw": True,
 })
 ```
 

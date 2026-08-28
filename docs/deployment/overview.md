@@ -3,7 +3,7 @@ title: Deployment Overview
 description: Choose a deployment model for oidc-exchange.
 ---
 
-Deployment guides for oidc-exchange across different infrastructure targets. All guides use the same binary — the deployment target is determined by runtime detection and configuration.
+Deployment guides for oidc-exchange across different infrastructure targets. All guides use the same binary; the deployment target is determined by runtime detection and configuration.
 
 ## Choosing a deployment model
 
@@ -40,10 +40,10 @@ cargo lambda build --release
 
 oidc-exchange loads configuration in order:
 
-1. `config/default.toml` — baseline defaults
-2. `config/{OIDC_EXCHANGE_ENV}.toml` — environment-specific overrides
-3. Environment variables — `OIDC_EXCHANGE__{section}__{key}` (double underscore delimiters)
-4. `${VAR_NAME}` placeholders — resolved from environment at load time
+1. `config/default.toml` (baseline defaults)
+2. `config/{OIDC_EXCHANGE_ENV}.toml` (environment-specific overrides)
+3. Environment variables, `OIDC_EXCHANGE__{section}__{key}` (double underscore delimiters)
+4. `${VAR_NAME}` placeholders, resolved from environment at load time
 
 Secrets (client secrets, API keys) should always use `${VAR_NAME}` placeholders and be injected via environment variables, never hardcoded in TOML files.
 

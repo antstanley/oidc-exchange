@@ -159,8 +159,8 @@ Modify `variables.tf` defaults or override in `terraform.tfvars` to tune scaling
 |----------|---------|----------|
 | ALB (`sg-alb`) | 80,443/tcp from 0.0.0.0/0 | 8080/tcp to `sg-task` |
 | Fargate tasks (`sg-task`) | 8080/tcp from `sg-alb` | 443/tcp to 0.0.0.0/0 (OIDC providers, AWS APIs) |
-| Fargate tasks (`sg-task`) | — | 6379/tcp to `sg-valkey` |
-| ElastiCache (`sg-valkey`) | 6379/tcp from `sg-task` | — |
+| Fargate tasks (`sg-task`) | (none) | 6379/tcp to `sg-valkey` |
+| ElastiCache (`sg-valkey`) | 6379/tcp from `sg-task` | (none) |
 
 DynamoDB, KMS, SQS, and Secrets Manager are accessed via AWS service endpoints (HTTPS over port 443). For private networking, add VPC endpoints for these services.
 
@@ -168,12 +168,12 @@ DynamoDB, KMS, SQS, and Secrets Manager are accessed via AWS service endpoints (
 
 Terraform creates two IAM roles:
 
-**Task execution role** — used by ECS to pull images, read secrets, and write logs:
+**Task execution role**, used by ECS to pull images, read secrets, and write logs:
 - `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`
 - `secretsmanager:GetSecretValue` (scoped to `oidc-exchange/*`)
 - `logs:CreateLogStream`, `logs:PutLogEvents`
 
-**Task role** — used by the running container to access AWS services:
+**Task role**, used by the running container to access AWS services:
 - DynamoDB: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchWriteItem`
 - KMS: `Sign`, `GetPublicKey`
 - SQS: `SendMessage`

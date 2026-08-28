@@ -15,7 +15,7 @@ The installer verifies the downloaded binary's checksum and, when the GitHub CLI
 To install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash -s -- --version v0.4.0
 ```
 
 ## Docker
@@ -27,7 +27,7 @@ docker pull ghcr.io/antstanley/oidc-exchange:latest
 Or from Docker Hub:
 
 ```bash
-docker pull antstanley/oidc-exchange:latest
+docker pull antstanley80/oidc-exchange:latest
 ```
 
 Run with a config file:
@@ -65,7 +65,7 @@ Download from [GitHub Releases](https://github.com/antstanley/oidc-exchange/rele
 
 ## From Source
 
-Requires [Rust 1.75+](https://rustup.rs/):
+Requires a recent stable [Rust](https://rustup.rs/) toolchain (CI builds and tests on rustc 1.98):
 
 ```bash
 git clone https://github.com/antstanley/oidc-exchange.git
@@ -75,4 +75,4 @@ cargo build --release
 
 The binary is at `target/release/oidc-exchange`.
 
-When GitHub CLI is unavailable, the installer reports whether checksum verification actually succeeded. If checksum tooling is also unavailable, the current installer warns loudly that neither checksum nor provenance authenticity was verified and continues; fail-closed handling for that missing-tool case is tracked separately. Whenever `gh` is present, provenance failure aborts installation even when checksum tools are unavailable.
+When GitHub CLI is unavailable, the installer reports whether checksum verification actually succeeded. If checksum tooling is also unavailable (neither `sha256sum` nor `shasum` is present), the installer aborts before downloading anything rather than installing an unverified binary. Whenever `gh` is present, provenance failure aborts installation.

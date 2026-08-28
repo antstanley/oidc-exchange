@@ -7,7 +7,7 @@ oidc-exchange is built with hexagonal architecture (ports and adapters). All inf
 
 ## Crate structure
 
-The project is a Cargo workspace with five crates:
+The project is a Cargo workspace with six crates:
 
 ```
 crates/
@@ -15,15 +15,17 @@ crates/
 ├── adapters/       # DynamoDB, KMS, SQS, OIDC, webhook implementations
 ├── providers/      # Non-standard provider modules (Apple; atproto planned)
 ├── server/         # Axum routes, middleware, telemetry, bootstrap
+├── ffi/            # Language-agnostic request/response FFI wrapper
 └── test-utils/     # Mock implementations for all ports
 ```
 
 | Crate | Package name | Purpose |
 |---|---|---|
-| `crates/core` | `oidc-exchange-core` | Domain types, port traits, and service logic. Zero infrastructure dependencies --- only std, serde, thiserror, async-trait, and tracing. |
+| `crates/core` | `oidc-exchange-core` | Domain types, port traits, and service logic. No infrastructure crates (no AWS SDKs, HTTP clients, or database drivers). |
 | `crates/adapters` | `oidc-exchange-adapters` | Implementations of port traits for DynamoDB, PostgreSQL, SQLite, Valkey, LMDB, KMS, SQS, standard OIDC, and webhooks. |
 | `crates/providers` | `oidc-exchange-providers` | Non-standard identity provider modules (Apple; atproto planned) that need custom logic beyond the generic OIDC adapter. |
 | `crates/server` | `oidc-exchange` | HTTP layer (axum), middleware, telemetry setup, configuration loading, and the binary entrypoint. |
+| `crates/ffi` | `oidc-exchange-ffi` | Language-agnostic request/response wrapper over the server's router construction. Reused by the Node.js and Python bindings via FFI. |
 | `crates/test-utils` | `oidc-exchange-test-utils` | In-memory mock implementations of all ports. Dev-dependency only. |
 
 ## Hexagonal architecture
@@ -66,12 +68,13 @@ Ports are async trait interfaces defined in `crates/core/src/ports/`. They defin
 
 | Port | Trait | Purpose | Adapters |
 |---|---|---|---|
-| User and session storage | `Repository` | CRUD for users, store/retrieve/revoke refresh token sessions | DynamoDB, PostgreSQL, SQLite |
+| User storage | `UserRepository` | CRUD for user records | DynamoDB, PostgreSQL, SQLite |
 | Session-only storage | `SessionRepository` | Optional override for session operations only | Valkey, LMDB |
-| Key management | `KeyManager` | JWT signing and public key export | Local (Ed25519/ECDSA), AWS KMS (ECC_NIST_P256) |
+| Key management | `KeyManager` | JWT signing and public key export | Local (Ed25519), AWS KMS (RSA, ECDSA), Noop |
 | Audit logging | `AuditLog` | Compliance and security event recording | Noop, Stdout/Stderr, SQS |
 | Identity provider | `IdentityProvider` | Code exchange, ID token validation, revocation | Standard OIDC, Apple, atproto (planned) |
 | User sync | `UserSync` | Notify external systems of user lifecycle events | Webhook, Noop |
+| Rate limiting | `RateLimiter` | Request and failed-authentication budgets | In-process fixed window, Noop |
 
 All ports return `Result<T>` using a domain-specific error type. Adapters map their internal errors (AWS SDK errors, database errors, HTTP errors) into domain errors at the boundary. No adapter-specific types leak into the core.
 
@@ -79,7 +82,7 @@ All ports return `Result<T>` using a domain-specific error type. Adapters map th
 
 The dependency graph enforces strict layering:
 
-- **`core`** depends on nothing infrastructure-specific. No AWS SDKs, no HTTP clients, no database drivers. Only std + serde + async-trait + thiserror + tracing.
+- **`core`** depends on nothing infrastructure-specific: no AWS SDKs, no HTTP clients, no database drivers. Its dependencies are pure-Rust utility crates (serde, thiserror, async-trait, chrono, tracing, and similar), never infrastructure clients.
 - **`adapters`** and **`providers`** depend on `core` for trait definitions. They implement the port traits using real infrastructure clients.
 - **`server`** depends on `core`, `adapters`, and `providers`. It wires everything together at startup.
 - **`test-utils`** depends only on `core`. It provides in-memory mock implementations used as dev-dependencies by all other crates.
@@ -102,12 +105,14 @@ The `AppService` struct in the core crate is the central orchestrator. It holds 
 
 ```rust
 pub struct AppService {
-    repo: Box<dyn Repository>,
+    user_repo: Box<dyn UserRepository>,
+    session_repo: Box<dyn SessionRepository>,
     keys: Box<dyn KeyManager>,
     audit: Box<dyn AuditLog>,
     user_sync: Box<dyn UserSync>,
+    rate_limiter: Box<dyn RateLimiter>,
     providers: HashMap<String, Box<dyn IdentityProvider>>,
-    config: AppConfig,
+    config: Config,
 }
 ```
 
@@ -117,14 +122,14 @@ The server crate constructs `AppService` at startup by reading the configuration
 
 ## Runtime bootstrap
 
-The `main.rs` in the server crate follows this sequence:
+The server crate's `main.rs` is the entrypoint: it loads configuration, initializes telemetry, and selects the transport, then delegates adapter wiring and router construction to `bootstrap.rs` (`build_service` and `build_router`). The full startup sequence is:
 
 1. Load configuration (TOML file + environment variable overrides)
 2. Initialize the telemetry subscriber based on `[telemetry]` config
 3. Detect runtime mode: if `AWS_LAMBDA_RUNTIME_API` is set, Lambda mode; otherwise, server mode
-4. Instantiate adapters based on config (repository, key manager, audit, providers, user sync)
-5. Construct `AppService` with injected ports
-6. Build the axum `Router` with routes and middleware
+4. Instantiate adapters based on config in `bootstrap::build_service` (user repository, session repository, key manager, audit, rate limiter, providers, user sync)
+5. Construct `AppService` with injected ports, also in `bootstrap::build_service`
+6. Build the axum `Router` with routes and middleware in `bootstrap::build_router`
 7. Lambda mode: wrap the router with `lambda_http` and run `lambda_runtime`. Server mode: bind to the configured address and run with hyper.
 
 The same binary, the same router, and the same code paths run in both modes. Only the outermost transport layer differs.

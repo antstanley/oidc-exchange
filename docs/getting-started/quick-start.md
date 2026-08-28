@@ -57,7 +57,7 @@ pip install oidc-exchange
 
 ### Option 5: Build from source
 
-Requires Rust 1.75+ and optionally [cargo-nextest](https://nexte.st) for testing.
+Requires a recent stable Rust toolchain (CI builds and tests on rustc 1.98) and optionally [cargo-nextest](https://nexte.st) for testing.
 
 ```bash
 cargo build --release
@@ -112,7 +112,7 @@ scopes = ["openid", "email", "profile"]
 endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
 
-`endpoint_origins` pins which origins a provider's discovery document is allowed to name — Google serves its token and revocation endpoints from `oauth2.googleapis.com` and its JWKS URI from `www.googleapis.com`. See the [Identity Providers guide](/guides/providers/) for how origin pinning works.
+`endpoint_origins` pins which origins a provider's discovery document is allowed to name. Google serves its token and revocation endpoints from `oauth2.googleapis.com` and its JWKS URI from `www.googleapis.com`. See the [Identity Providers guide](/guides/providers/) for how origin pinning works.
 
 ## Generate a signing key
 
@@ -156,6 +156,6 @@ curl http://localhost:8080/keys
 
 ## Next steps
 
-- [Configuration reference](/guides/configuration/) — all config options
-- [API reference](/guides/api-reference/) — endpoints and request formats
-- [Deployment guides](/deployment/overview/) — production deployment options
+- [Configuration reference](/guides/configuration/): all config options
+- [API reference](/guides/api-reference/): endpoints and request formats
+- [Deployment guides](/deployment/overview/): production deployment options

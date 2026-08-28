@@ -19,7 +19,7 @@ Secrets (client secrets, API keys, KMS ARNs) should always use `${VAR_NAME}` pla
 
 ## Full annotated config example
 
-The following shows every configuration section with all available options. In practice, most deployments only need a subset.
+The following shows the configuration sections and the most common options. In practice, most deployments only need a subset.
 
 ```toml
 # ─── Server ───────────────────────────────────────────────────────
@@ -27,17 +27,20 @@ The following shows every configuration section with all available options. In p
 host = "0.0.0.0"                       # bind address
 port = 8080                            # listen port
 issuer = "https://auth.example.com"    # issuer URL for JWTs (iss claim)
-role = "exchange"                      # "exchange" (default), "admin", or "all" — see Upgrading below
+role = "exchange"                      # "exchange" (default), "admin", or "all" (see Upgrading below)
+request_timeout = "30s"                # per-request timeout enforced by the server
+max_request_body_bytes = 2097152       # max request body (2 MiB) buffered before processing
+# base_path = "/prod"                  # optional path prefix stripped from request paths before routing
 # Trust X-Forwarded-For only from these peer CIDRs. Empty means never trust it.
 trusted_proxies = ["10.0.0.0/8"]
 trusted_proxy_hops = 1                 # select this many entries from X-Forwarded-For's right side
 
 # ─── Registration policy ──────────────────────────────────────────
 [registration]
-# "open" — any authenticated user gets a record created
-# "existing_users_only" — user must already exist (created via /internal/users)
+# "open": any authenticated user gets a record created
+# "existing_users_only": user must already exist (created via /internal/users)
 mode = "open"
-# Optional — if set, only these email domains are allowed (applies in both modes)
+# Optional. If set, only these email domains are allowed (applies in both modes)
 # Exact match: "example.com"
 # Wildcard: "*.acme.corp" (matches any subdomain depth)
 # domain_allowlist = ["example.com", "*.acme.corp"]
@@ -47,6 +50,9 @@ mode = "open"
 access_token_ttl = "15m"               # short-lived JWT lifetime
 refresh_token_ttl = "30d"              # long-lived refresh token lifetime
 audience = "https://api.example.com"   # aud claim in access tokens
+refresh_rotation = true                # rotate the refresh token on every redemption (default)
+refresh_rotation_grace = "10s"         # window the just-superseded token still redeems (max 60s)
+refresh_reuse_retention = "24h"        # how long a retired token is remembered for reuse detection
 
 # Custom claims added to every access token JWT.
 # Static values are used as-is.
@@ -59,17 +65,25 @@ org = "example"
 role = "{{ user.metadata.role | default: 'user' }}"
 tier = "{{ user.metadata.membership | default: 'free' }}"
 
+# ─── Grants ───────────────────────────────────────────────────────
+# authorization_code and refresh_token are always served. The direct
+# ID-token grant is opt-in and also gates the POST /nonce route.
+[grants]
+id_token = false                       # serve the direct ID-token assertion grant (default off)
+nonce_ttl = "10m"                      # how long a minted nonce stays claimable
+max_assertion_lifetime = "1h"          # ceiling on an accepted provider ID token's remaining life
+
 # ─── Key management ───────────────────────────────────────────────
 [key_manager]
 adapter = "local"                      # "local" or "kms"
 
-# Local key signing — load a PEM private key from disk
+# Local key signing: load a PEM private key from disk
 [key_manager.local]
 private_key_path = "./keys/ed25519.pem"
 algorithm = "EdDSA"                    # EdDSA only: the local adapter signs Ed25519 keys
 kid = "key-1"                          # key ID for JWT kid header
 
-# AWS KMS — sign with a KMS asymmetric key
+# AWS KMS: sign with a KMS asymmetric key
 [key_manager.kms]
 key_id = "arn:aws:kms:us-east-1:123456789:key/abcd-1234"
 algorithm = "ES256"                    # JWS signing algorithm (ECC_NIST_P256)
@@ -86,6 +100,7 @@ region = "us-east-1"                   # optional, uses SDK default if omitted
 [repository.postgres]
 url = "postgres://user:pass@localhost:5432/oidc_exchange"
 max_connections = 5
+run_migrations = true                  # run schema migrations at startup (default true)
 
 [repository.sqlite]
 path = "./data/oidc-exchange.db"
@@ -96,6 +111,7 @@ path = "./data/oidc-exchange.db"
 # a fast session store.
 [session_repository]
 adapter = "valkey"                     # "valkey" or "lmdb"
+cleanup_interval = "1h"                # how often expired sessions/retirement records are swept
 
 [session_repository.valkey]
 url = "redis://localhost:6379"
@@ -107,7 +123,7 @@ max_size_mb = 64
 
 # ─── Audit logging ────────────────────────────────────────────────
 [audit]
-adapter = "stdout"                     # "noop", "stdout", or "sqs" (default: stdout)
+adapter = "stdout"                     # "noop", "stdout", "stderr", "auto", or "sqs" (default: stdout)
 # Best-effort events below this severity are not dispatched. Shipped security events use
 # the mandatory channel, which no threshold suppresses.
 emit_threshold = "info"
@@ -128,9 +144,10 @@ per_provider = 600
 max_concurrent_requests = 256
 max_entries = 10000
 
-# SQS adapter — send audit events to an SQS queue (e.g., for Firehose → S3/Iceberg pipeline)
+# SQS adapter: send audit events to an SQS queue (e.g., for a Firehose to S3/Iceberg pipeline)
 [audit.sqs]
 queue_url = "https://sqs.us-east-1.amazonaws.com/123456789/audit-queue"
+region = "us-east-1"                   # optional, uses SDK default if omitted
 
 # ─── User sync (webhook) ──────────────────────────────────────────
 [user_sync]
@@ -146,7 +163,7 @@ retries = 2
 # ─── Telemetry (OpenTelemetry) ────────────────────────────────────
 [telemetry]
 enabled = true
-exporter = "otlp"                      # "otlp", "stdout", "xray", or "none"
+exporter = "otlp"                      # "otlp", "stdout", "xray", "prometheus", or "none"
 endpoint = "http://localhost:4317"     # OTLP collector endpoint
 service_name = "oidc-exchange"
 sample_rate = 1.0                      # 0.0 to 1.0
@@ -162,7 +179,7 @@ port = 8081
 # `auth_method` key is still accepted and read as a one-element list.
 auth_methods = ["operator_token"]
 # Shared secret for the "shared_secret" compatibility mechanism. While that
-# mechanism is enabled it must be at least 32 bytes — non-empty is not enough.
+# mechanism is enabled it must be at least 32 bytes, non-empty is not enough.
 shared_secret = "${INTERNAL_API_SECRET}"
 
 # "operator_token" mechanism: operator JWTs are verified against THIS
@@ -211,7 +228,7 @@ team_id = "${APPLE_TEAM_ID}"
 key_id = "${APPLE_KEY_ID}"
 private_key_path = "/secrets/apple.p8"
 
-# atproto is a planned provider — see .specs/changes/2026-06-24-add_atproto_provider.md
+# atproto is a planned provider; see .specs/changes/2026-06-24-add_atproto_provider.md
 ```
 
 ## Environment variable overrides
@@ -257,6 +274,10 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 | `registration.domain_allowlist` | none (all domains allowed) |
 | `token.access_token_ttl` | `15m` |
 | `token.refresh_token_ttl` | `30d` |
+| `token.refresh_rotation` / `refresh_rotation_grace` / `refresh_reuse_retention` | `true` / `10s` / `24h` |
+| `grants.id_token` / `nonce_ttl` / `max_assertion_lifetime` | `false` / `10m` / `1h` |
+| `server.request_timeout` / `max_request_body_bytes` | `30s` / `2097152` (2 MiB) |
+| `session_repository.cleanup_interval` | `1h` |
 | `telemetry.enabled` | `false` |
 | `telemetry.exporter` | `none` |
 | `telemetry.sample_rate` | `1.0` |
@@ -267,11 +288,11 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 | `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
 | `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `audit.blocking_threshold` | `warning` |
-| `providers.<name>.endpoint_origins` | none — the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
+| `providers.<name>.endpoint_origins` | none; the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
 | `internal_api.enabled` | `false` |
 | `internal_api.host` / `.port` | `127.0.0.1:8081` |
-| `internal_api.auth_methods` | `["shared_secret"]` |
+| `internal_api.auth_methods` | none (empty; must be set explicitly when the internal API is served, or startup fails) |
 | `internal_api.token_audience` | `"internal"` |
 | `internal_api.required_claim` / `.required_value` | `"role"` / `"admin"` |
 | `internal_api.mtls.subject_header` | `"x-client-cert-subject"` |
@@ -285,7 +306,7 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 Earlier releases defaulted `server.role` to `all`: a deployment that only set
 `internal_api.enabled = true` got the internal admin API served on the same
 process as the public `/token` endpoint without ever naming that decision. The
-default is now `exchange`, which serves only the public exchange plane —
+default is now `exchange`, which serves only the public exchange plane;
 admin reachability must be a deliberate deployment decision, visible in
 configuration.
 

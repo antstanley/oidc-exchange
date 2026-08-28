@@ -54,37 +54,7 @@ CREATE DATABASE oidc_exchange OWNER oidc_exchange;
 SQL
 ```
 
-oidc-exchange runs its own migrations on startup. The tables created are:
-
-```sql
-CREATE TABLE users (
-    id              TEXT PRIMARY KEY,
-    external_id     TEXT NOT NULL,
-    provider        TEXT NOT NULL,
-    email           TEXT,
-    display_name    TEXT,
-    metadata        JSONB NOT NULL DEFAULT '{}',
-    claims          JSONB NOT NULL DEFAULT '{}',
-    status          TEXT NOT NULL DEFAULT 'active',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE UNIQUE INDEX idx_users_external_id ON users (external_id);
-
-CREATE TABLE sessions (
-    refresh_token_hash TEXT PRIMARY KEY,
-    user_id            TEXT NOT NULL,
-    provider           TEXT NOT NULL,
-    expires_at         TIMESTAMPTZ NOT NULL,
-    device_id          TEXT,
-    user_agent         TEXT,
-    ip_address         TEXT,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_sessions_user_id ON sessions (user_id);
-```
+oidc-exchange runs its own migrations on startup, creating and updating the `users`, `sessions`, `retired_refresh_tokens`, and `single_use` tables. The authoritative schema is the adapter's `MIGRATIONS` block in `crates/adapters/src/postgres/mod.rs`, applied idempotently on every start, so you never create tables by hand. If you must pre-create the schema (for example, when the application role lacks DDL permission), copy that migration verbatim rather than an approximation. In particular the users uniqueness constraint is a partial unique index on `(external_id, provider) WHERE status != 'deleted'`, not a full unique index on `external_id` alone; the wrong shape blocks re-registration of a soft-deleted identity and collides the same `external_id` across two providers.
 
 ### 2. Generate a signing key
 
@@ -120,7 +90,8 @@ url = "${DATABASE_URL}"
 max_connections = 10
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
+durability = "observe"
 
 [telemetry]
 enabled = true
@@ -175,7 +146,8 @@ url = "${VALKEY_URL}"
 key_prefix = "oidc:"
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
+durability = "observe"
 
 [telemetry]
 enabled = true
@@ -257,9 +229,9 @@ The `max_connections` setting in `[repository.postgres]` controls the sqlx conne
 
 - **Single instance**: 10-20 connections is typical
 - **Multiple instances**: divide your PostgreSQL `max_connections` (minus overhead) across instances
-- **Valkey sessions**: when using Valkey for sessions, PostgreSQL handles only user CRUD — fewer connections needed (5-10)
+- **Valkey sessions**: when using Valkey for sessions, PostgreSQL handles only user CRUD, so fewer connections are needed (5-10)
 
 ## Backup considerations
 
 - **PostgreSQL**: standard `pg_dump` / WAL archiving covers all user data and (if not using Valkey) session data
-- **Valkey sessions**: sessions are ephemeral by design (30-day default TTL). Valkey persistence (RDB/AOF) is optional — losing session data forces users to re-authenticate but does not lose accounts
+- **Valkey sessions**: sessions are ephemeral by design (30-day default TTL). Valkey persistence (RDB/AOF) is optional; losing session data forces users to re-authenticate but does not lose accounts

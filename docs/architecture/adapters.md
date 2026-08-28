@@ -102,7 +102,7 @@ The `[key_manager]` section controls how access token JWTs are signed.
 
 ### Local key signing
 
-Load a private key from disk and sign tokens in-process. Supports Ed25519 (EdDSA) and P-256 (ES256) keys.
+Load a private key from disk and sign tokens in-process. Supports Ed25519 (EdDSA) keys only; the local key manager rejects any other algorithm at startup.
 
 ```toml
 [key_manager]
@@ -110,7 +110,7 @@ adapter = "local"
 
 [key_manager.local]
 private_key_path = "./keys/ed25519.pem"
-algorithm = "EdDSA"        # "EdDSA" (Ed25519) or "ES256" (P-256)
+algorithm = "EdDSA"        # Ed25519; the only algorithm the local key manager accepts
 kid = "key-1"
 ```
 
@@ -119,16 +119,13 @@ Generate a key:
 ```bash
 # Ed25519
 openssl genpkey -algorithm ed25519 -out keys/ed25519.pem
-
-# P-256 (ECDSA)
-openssl ecparam -name prime256v1 -genkey -noout -out keys/p256.pem
 ```
 
 Local key management is suitable for development and single-server deployments. For production, consider KMS for automatic key protection and access control.
 
 ### AWS KMS
 
-Sign tokens using an AWS KMS asymmetric key (ECC_NIST_P256). The private key never leaves KMS --- signing is a remote API call.
+Sign tokens using an AWS KMS asymmetric key. Both RSA (RS256/RS384/RS512 and PS256/PS384/PS512) and ECDSA (ES256/ES384/ES512) signing algorithms are supported. The private key never leaves KMS, signing is a remote API call.
 
 ```toml
 [key_manager]
@@ -141,6 +138,15 @@ kid = "prod-key-1"
 ```
 
 KMS handles key rotation transparently. The service uses standard AWS SDK credential resolution (environment variables, instance profile, ECS task role, etc.).
+
+### Noop
+
+Every signing operation errors. Selected for admin-only deployments (the `admin` role) that never issue access tokens and so need no signing key.
+
+```toml
+[key_manager]
+adapter = "noop"
+```
 
 ## Audit logging
 
@@ -189,6 +195,36 @@ For example, with `blocking_threshold = "warning"`:
 - A failed `TokenExchange` audit (severity: notice) logs to stdout and the token exchange succeeds
 - A failed `RegistrationDenied` audit (severity: warning) causes the request to fail with a 500 error
 
+## Rate limiting
+
+The `[rate_limit]` section bounds per-request and failed-authentication budgets. Two adapters are available.
+
+### In-process fixed window
+
+A per-process fixed-window limiter over a bounded, expiry-evicted map of keys. Suitable for single-instance deployments; budgets are not shared across instances.
+
+```toml
+[rate_limit]
+enabled = true
+store = "in_process"
+window = "1m"
+per_ip = 60
+per_ip_failures = 10
+per_subject = 10
+per_provider = 600
+max_concurrent_requests = 256
+max_entries = 10000
+```
+
+### Noop
+
+Every check returns `Allow`. Selected when `rate_limit.enabled = false`.
+
+```toml
+[rate_limit]
+enabled = false
+```
+
 ## User sync
 
 The `[user_sync]` section enables outbound notifications when users are created, updated, or deleted.
@@ -234,7 +270,7 @@ Each delivery is authenticated and identified by three headers:
 The signature and delivery id are minted **once** per logical delivery, outside
 the retry loop: every attempt in a retry burst carries the same id, timestamp,
 and signature, and byte-identical bodies. A repeated `X-Webhook-Delivery-Id` is
-therefore a retry of one delivery — treat it as such, not as an anomaly.
+therefore a retry of one delivery; treat it as such, not as an anomaly.
 
 A conforming receiver **must**:
 
@@ -244,7 +280,7 @@ A conforming receiver **must**:
    receiver's clock. This bounds replay of a captured delivery to the tolerance
    window.
 3. Deduplicate on `X-Webhook-Delivery-Id`, retaining seen ids for at least that
-   ±5-minute window — at least as long as timestamps are trusted, so no expired
+   ±5-minute window, at least as long as timestamps are trusted, so no expired
    delivery can be replayed past the dedup memory.
 4. Treat any 2xx as success. 5xx and timeout responses are retried by the sender
    up to the configured `retries` count with exponential backoff; 4xx is not
@@ -256,7 +292,7 @@ Worked receiver example (Node.js):
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export function verifyDelivery(req, rawBody, secret, seenIds, now = Date.now()) {
-  // 1. Signature first, over exactly the documented input — before any JSON.parse.
+  // 1. Signature first, over exactly the documented input, before any JSON.parse.
   const expected =
     "sha256=" +
     createHmac("sha256", secret)
@@ -281,7 +317,7 @@ export function verifyDelivery(req, rawBody, secret, seenIds, now = Date.now()) 
   // 3. Dedup: one id is one delivery; repeats are retries, not new events.
   const deliveryId = req.header("x-webhook-delivery-id");
   if (seenIds.has(deliveryId)) {
-    return { ok: true, reason: "retry of a delivered id — acknowledged, not reprocessed" };
+    return { ok: true, reason: "retry of a delivered id (acknowledged, not reprocessed)" };
   }
   seenIds.add(deliveryId); // retain ids for AT LEAST the tolerance window
 
@@ -301,7 +337,7 @@ signed input and the `X-Signature-256` value format changed:
   receivers must additionally check `X-Webhook-Timestamp` freshness (±5 minutes)
   and deduplicate on `X-Webhook-Delivery-Id`.
 
-Every existing receiver rejects every delivery until it is updated — there is no
+Every existing receiver rejects every delivery until it is updated; there is no
 negotiation or compatibility mode. The failure is quiet on the receiver side (a
 4xx is not retried, and sync failures are logged-and-swallowed upstream), so plan
 the receiver deploy together with this upgrade. `user_sync.enabled` defaults to
@@ -327,8 +363,8 @@ signature itself is unchanged):
   validates (two *eligible* entries under one `kid` remain an error).
 - **Discovery endpoint origins**: each provider's discovery document may name
   only origins pinned at config load (`endpoint_origins`, plus the issuer's own).
-  The check currently ships in warning mode — undeclared origins log a warning
-  and are served — and rejecting them (`Warn` → `Enforce`) is a separate future
+  The check currently ships in warning mode (undeclared origins log a warning
+  and are served), and rejecting them (`Warn` to `Enforce`) is a separate future
   release-owner decision after one release of that telemetry, not part of this
   version.
 - Every outbound provider request goes through `ProviderTransport` (status read

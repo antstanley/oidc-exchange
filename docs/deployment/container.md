@@ -10,19 +10,23 @@ A runnable example is in [`examples/container/`](https://github.com/example/oidc
 ## Dockerfile
 
 ```dockerfile
-FROM rust:1.85-slim AS builder
+FROM rust:1.96-slim AS builder
 WORKDIR /app
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release
+RUN cargo build --release --bin oidc-exchange
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/oidc-exchange /usr/local/bin/
 COPY config/ /app/config/
+WORKDIR /app
 EXPOSE 8080
 ENV OIDC_EXCHANGE_ENV=production
 CMD ["oidc-exchange"]
 ```
+
+The build needs `pkg-config` and `libssl-dev` because the HTTP client links the system OpenSSL. `WORKDIR /app` matters at runtime: the binary loads config from `config/` relative to its working directory, so the process must run in the directory that holds the copied `config/` tree. For a prebuilt image, the published `ghcr.io/antstanley/oidc-exchange` (pinned by digest) already handles all of this.
 
 ## Configuration
 
@@ -74,8 +78,8 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 
 For containers, you have flexibility in key management:
 
-- **Local keys** — mount a signing key via a volume or Kubernetes secret. Use `adapter = "local"` with Ed25519 or ECDSA.
-- **AWS KMS** — if running in AWS (ECS/EKS), use `adapter = "kms"` with IAM roles for service accounts or task roles.
+- **Local keys**: mount a signing key via a volume or Kubernetes secret. Use `adapter = "local"`, which supports Ed25519 (EdDSA) only. ECDSA or RSA signing requires the KMS adapter.
+- **AWS KMS**: if running in AWS (ECS/EKS), use `adapter = "kms"` with IAM roles for service accounts or task roles.
 
 ## Docker Compose
 
@@ -139,9 +143,22 @@ spec:
       labels:
         app: oidc-exchange
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: oidc-exchange
-          image: your-registry/oidc-exchange:latest
+          image: your-registry/oidc-exchange@sha256:<pin-to-a-published-digest>
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           ports:
             - containerPort: 8080
           env:
@@ -161,6 +178,8 @@ spec:
             - name: signing-key
               mountPath: /etc/secrets
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           livenessProbe:
             httpGet:
               path: /health
@@ -184,6 +203,9 @@ spec:
         - name: signing-key
           secret:
             secretName: oidc-exchange-signing-key
+            defaultMode: 0440
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -200,4 +222,4 @@ spec:
 
 ## Scaling
 
-oidc-exchange is stateless (all state is in the configured database). Scale horizontally without coordination. Each instance holds an in-memory JWKS cache for upstream providers — this warms up on first request per provider and refreshes automatically.
+oidc-exchange is stateless (all state is in the configured database). Scale horizontally without coordination. Each instance holds an in-memory JWKS cache for upstream providers; this warms up on first request per provider and refreshes automatically.

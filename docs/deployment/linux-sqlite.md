@@ -3,7 +3,7 @@ title: "Linux + SQLite"
 description: Deploy oidc-exchange with SQLite for embedded storage and optional LMDB for sessions.
 ---
 
-Run oidc-exchange on a single Linux host using SQLite for all persistent storage. No external database services needed. This is the simplest production deployment — one binary, one config file, one database file.
+Run oidc-exchange on a single Linux host using SQLite for all persistent storage. No external database services needed. This is the simplest production deployment: one binary, one config file, one database file.
 
 Optionally, use LMDB for session storage when you want faster session lookups without adding a network service.
 
@@ -92,7 +92,8 @@ adapter = "sqlite"
 path = "/var/lib/oidc-exchange/data/oidc-exchange.db"
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
+durability = "observe"
 
 [telemetry]
 enabled = true
@@ -114,7 +115,7 @@ SQLite runs with WAL journal mode and foreign keys enabled automatically. The da
 
 ### 4. Configure (SQLite + LMDB for sessions)
 
-LMDB is an embedded key-value store optimized for read-heavy workloads. Session lookups (every token refresh) are the hottest path in oidc-exchange — LMDB serves these from memory-mapped files with zero-copy reads.
+LMDB is an embedded key-value store optimized for read-heavy workloads. Session lookups (every token refresh) are the hottest path in oidc-exchange, and LMDB serves these from memory-mapped files with zero-copy reads.
 
 ```toml
 [server]
@@ -146,7 +147,8 @@ path = "/var/lib/oidc-exchange/lmdb"
 max_size_mb = 256
 
 [audit]
-adapter = "noop"
+adapter = "stdout"
+durability = "observe"
 
 [telemetry]
 enabled = true
@@ -160,7 +162,7 @@ client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
 ```
 
-The `max_size_mb` setting controls the LMDB memory map size. 256 MB is generous for session data — each session is roughly 500 bytes, so 256 MB supports ~500,000 concurrent sessions. The space is reserved but not allocated until used.
+The `max_size_mb` setting controls the LMDB memory map size. 256 MB is generous for session data: each session is roughly 500 bytes, so 256 MB supports ~500,000 concurrent sessions. The space is reserved but not allocated until used.
 
 ### 5. Create the environment file
 
@@ -206,7 +208,7 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-Note `ReadWritePaths=/var/lib/oidc-exchange` — the service needs write access to the SQLite and LMDB data directories.
+Note `ReadWritePaths=/var/lib/oidc-exchange`: the service needs write access to the SQLite and LMDB data directories.
 
 ### 7. Install and start
 
@@ -226,16 +228,16 @@ See the [generic Linux server guide](/deployment/linux-server/#reverse-proxy-ngi
 All state lives in `/var/lib/oidc-exchange/`. To back up:
 
 ```bash
-# SQLite — use the .backup command for a consistent snapshot
+# SQLite: use the .backup command for a consistent snapshot
 sqlite3 /var/lib/oidc-exchange/data/oidc-exchange.db ".backup /tmp/oidc-exchange-backup.db"
 ```
 
-For LMDB, copy the directory while the service is running — LMDB's copy-on-write design means readers never block writers and file copies are crash-consistent. Alternatively, stop the service and copy `/var/lib/oidc-exchange/lmdb/`.
+For LMDB, copy the directory while the service is running; LMDB's copy-on-write design means readers never block writers and file copies are crash-consistent. Alternatively, stop the service and copy `/var/lib/oidc-exchange/lmdb/`.
 
 LMDB session data is ephemeral (sessions expire). Losing it only forces users to re-authenticate.
 
 ## Limitations
 
-- **Single-server only** — SQLite and LMDB do not support concurrent access from multiple processes on different hosts. For multi-server deployments, use [PostgreSQL](/deployment/linux-postgres/) or [DynamoDB](/deployment/aws-lambda/).
-- **Write throughput** — SQLite with WAL handles hundreds of writes per second. If you need thousands, consider PostgreSQL.
-- **No horizontal scaling** — you cannot add more oidc-exchange instances behind a load balancer with SQLite/LMDB. Each instance would have its own database.
+- **Single-server only**: SQLite and LMDB do not support concurrent access from multiple processes on different hosts. For multi-server deployments, use [PostgreSQL](/deployment/linux-postgres/) or [DynamoDB](/deployment/aws-lambda/).
+- **Write throughput**: SQLite with WAL handles hundreds of writes per second. If you need thousands, consider PostgreSQL.
+- **No horizontal scaling**: you cannot add more oidc-exchange instances behind a load balancer with SQLite/LMDB. Each instance would have its own database.
