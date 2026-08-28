@@ -1,0 +1,6 @@
+/* Mermaid diagrams render with a subtle tinted container background by default.
+   Force it transparent so the diagrams blend with the page in both the light
+   and dark Starlight themes. The SVG itself is already transparent. */
+.mermaid {
+  background-color: transparent !important;
+}
