@@ -539,11 +539,22 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
-          if [ -n "$PREV_TAG" ]; then
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)" "$PREV_TAG"..HEAD)
-          else
-            CHANGELOG=$(git log --pretty=format:"- %s (%h)")
+          VERSION="${{ needs.validate.outputs.version }}"
+          # Prefer the Changesets-curated section for this version (the @oidc-exchange/node
+          # CHANGELOG is the canonical one for the fixed package group). Fall back to a
+          # git-log summary for releases cut before Changesets or with no CHANGELOG section.
+          CHANGELOG=""
+          CL="bindings/nodejs/CHANGELOG.md"
+          if [ -f "$CL" ]; then
+            CHANGELOG=$(awk -v h="## $VERSION" 'index($0,h)==1{f=1;next} /^## /{f=0} f' "$CL" | sed '/./,$!d')
+          fi
+          if [ -z "$CHANGELOG" ]; then
+            PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+            if [ -n "$PREV_TAG" ]; then
+              CHANGELOG=$(git log --pretty=format:"- %s (%h)" "$PREV_TAG"..HEAD)
+            else
+              CHANGELOG=$(git log --pretty=format:"- %s (%h)")
+            fi
           fi
           {
             echo "changelog<<EOF"

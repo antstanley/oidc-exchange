@@ -350,25 +350,42 @@ publishing** — there are no long-lived registry tokens in the repo.
 | `oidc-exchange` (abi3 wheels + sdist) | PyPI | trusted publishing |
 | `antstanley80/oidc-exchange` | Docker Hub + `ghcr.io` | multi-arch (amd64 + arm64) |
 
-### Step 1 — bump the version
+### Authoring changesets
 
-Every manifest must agree on the version or the release workflow's `validate` job aborts.
-Use the bump script rather than editing by hand:
+Every user-facing change ships a [changeset](.changeset/README.md) describing the release
+impact:
 
 ```bash
-pnpm bump-version 0.1.2      # or: node scripts/bump-version.js 0.1.2
+pnpm changeset
 ```
 
-It updates, in lockstep:
+Select **`@oidc-exchange/node`** for any release-worthy change (Rust, Python, or Node), pick
+the impact (patch / minor / major), and write a one-line summary that becomes the changelog
+entry. The published npm packages are a `fixed` group, so they always share one version, and
+that number is also the canonical Rust workspace version. Commit the `.changeset/*.md` file
+with your change.
+
+### Step 1 — apply the pending changesets
+
+When you are ready to release, consume the pending changesets to bump every manifest and
+write the changelogs:
+
+```bash
+pnpm changeset:version
+```
+
+This runs `changeset version` (bumps the six `@oidc-exchange/*` packages and writes their
+`CHANGELOG.md`), then `scripts/post-changeset-version.mjs`, which projects the resolved
+version onto the rest of the polyglot repo, in lockstep:
 
 - `Cargo.toml` (workspace version) and regenerates `Cargo.lock`
 - `bindings/python/pyproject.toml` and regenerates `bindings/python/uv.lock`
-- `bindings/nodejs/package.json` (version + the four `@oidc-exchange/*` `optionalDependencies`)
-- `bindings/nodejs/npm/<triple>/package.json` (all four platform packages)
-- `bindings/lambda/package.json` (version + the `@oidc-exchange/node` peer floor)
+- `pnpm-lock.yaml` (refreshed), mirrored into `bindings/nodejs/` and `bindings/lambda/`
+- `apps/website/src/versions.json` (the docs Versions page)
 
-It deliberately does **not** touch `pnpm-lock.yaml`, and it does **not** commit, tag, or
-push — see steps 2, 3, and 5.
+`Cargo.toml` stays the source of truth for the number; the release workflow's `validate` job
+re-checks that Cargo, node, and python all agree. Requires `cargo` and `uv` on `PATH`. It
+does **not** commit, tag, or push — see steps 2 and 3.
 
 ### Step 2 — land the bump on `main`
 

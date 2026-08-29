@@ -3,15 +3,17 @@
   "type": "module",
   "scripts": {
     "prepare": "lefthook install || echo 'lefthook install skipped (no git repo)'",
-    "bump-version": "node scripts/bump-version.js",
+    "changeset": "changeset",
+    "changeset:version": "changeset version && node scripts/post-changeset-version.mjs",
     "lint": "pnpm -r --no-bail lint",
     "format": "pnpm -r format",
     "format:check": "pnpm -r --no-bail format:check",
     "typecheck": "pnpm -r --no-bail typecheck",
-    "check:release-version": "node scripts/check-release-version.mjs",
     "test:supply-chain": "node --test scripts/__tests__/advisory-policy.test.mjs scripts/__tests__/advisory-scan-handoff.test.mjs scripts/__tests__/signing-path-policy.test.mjs scripts/__tests__/supply-chain.test.mjs scripts/__tests__/workflow-policy.test.mjs"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^1.0.0",
+    "@changesets/cli": "^3.0.1",
     "blogwright": "^0.3.3",
     "lefthook": "2.1.9",
     "yaml": "2.9.0"
