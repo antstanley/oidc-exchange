@@ -9,19 +9,19 @@
 
 ## Steps
 
-- [ ] In the `StoreError` arm, before returning, assemble one event via `create_audit_event`: `event_type: AuditEventType::StoreError`, `severity: AuditSeverity::Error`, `outcome: AuditOutcome::Failure(AuditFailure::StoreError)`, `actor: None`, `provider: Some(request.provider.clone())`, the request's `client_addr` and `user_agent`.
-- [ ] Insert the `StoreError`'s `detail` string into the event's `detail` map under the key `store_detail` (namespaced so the JSON does not read `"detail":{"detail":…}`).
-- [ ] Emit through best-effort `emit_audit` and discard the emission result with a comment recording why: the fallback has already logged the serialized event, and the original `StoreError` — never an `AuditError` — is what the caller must receive.
-- [ ] Return the original error; keep the arm's classification comment (infrastructure ≠ client fault) and stay clear of `emit_security_event`/`emit_mandatory_audit_event`.
-- [ ] Add flow tests beside `crates/core/tests/exchange.rs`: failing store → `StoreError` returned and the recording sink holds exactly one `store_error` event (severity `error`, outcome `failure`/`store_error`, provider named, `actor` absent, `ip_address`/`user_agent` from the request, `detail.store_detail` non-empty) and no terminal `SecurityEvent`.
-- [ ] Add the negative-space tests: `emit_threshold = "critical"` → no event, response unchanged; failing store plus failing audit sink → still `StoreError`, never `AuditError`; `audit.durability = "enforce"` plus failing sink → still `StoreError` (the mandatory-channel durability contract does not govern this event).
-- [ ] Update `exchange_non_conflict_create_error_propagates_without_relookup` — its empty-events assertion becomes exactly-one-`store_error`-event, preserving its intent that infrastructure faults are never client-attributed.
+- [x] In the `StoreError` arm, before returning, assemble one event via `create_audit_event`: `event_type: AuditEventType::StoreError`, `severity: AuditSeverity::Error`, `outcome: AuditOutcome::Failure(AuditFailure::StoreError)`, `actor: None`, `provider: Some(request.provider.clone())`, the request's `client_addr` and `user_agent`.
+- [x] Insert the `StoreError`'s `detail` string into the event's `detail` map under the key `store_detail` (namespaced so the JSON does not read `"detail":{"detail":…}`).
+- [x] Emit through best-effort `emit_audit` and discard the emission result with a comment recording why: the fallback has already logged the serialized event, and the original `StoreError` — never an `AuditError` — is what the caller must receive.
+- [x] Return the original error; keep the arm's classification comment (infrastructure ≠ client fault) and stay clear of `emit_security_event`/`emit_mandatory_audit_event`.
+- [x] Add flow tests beside `crates/core/tests/exchange.rs`: failing store → `StoreError` returned and the recording sink holds exactly one `store_error` event (severity `error`, outcome `failure`/`store_error`, provider named, `actor` absent, `ip_address`/`user_agent` from the request, `detail.store_detail` non-empty) and no terminal `SecurityEvent`.
+- [x] Add the negative-space tests: `emit_threshold = "critical"` → no event, response unchanged; failing store plus failing audit sink → still `StoreError`, never `AuditError`; `audit.durability = "enforce"` plus failing sink → still `StoreError` (the mandatory-channel durability contract does not govern this event).
+- [x] Update `exchange_non_conflict_create_error_propagates_without_relookup` — its empty-events assertion becomes exactly-one-`store_error`-event, preserving its intent that infrastructure faults are never client-attributed.
 
 ## Definition of done
 
-- [ ] The happy-path fault test proves one `store_error` event with the full specified shape and no terminal `SecurityEvent` alongside the propagated `StoreError`.
-- [ ] Best-effort semantics pinned: with `emit_threshold` above `Error`, no event is emitted and the response is unchanged.
-- [ ] The discard is pinned twice: a failing audit sink (observe mode) and a failing sink under `durability = "enforce"` both still return the original `StoreError`.
-- [ ] `crates/core/tests/exchange_mandatory_outcomes.rs` passes unchanged — client-fault outcomes gain no store-fault event — and the updated relookup test preserves its store/lookup assertions.
-- [ ] Meets the repo definition of done (`cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace` — see plan.md baseline).
-- [ ] Reviewable: run the core exchange test suite and inspect the recorded `store_error` event's JSON shape in the new test's assertions.
+- [x] The happy-path fault test proves one `store_error` event with the full specified shape and no terminal `SecurityEvent` alongside the propagated `StoreError`.
+- [x] Best-effort semantics pinned: with `emit_threshold` above `Error`, no event is emitted and the response is unchanged.
+- [x] The discard is pinned twice: a failing audit sink (observe mode) and a failing sink under `durability = "enforce"` both still return the original `StoreError`.
+- [x] `crates/core/tests/exchange_mandatory_outcomes.rs` passes unchanged — client-fault outcomes gain no store-fault event — and the updated relookup test preserves its store/lookup assertions.
+- [x] Meets the repo definition of done (`cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace` — see plan.md baseline).
+- [x] Reviewable: run the core exchange test suite and inspect the recorded `store_error` event's JSON shape in the new test's assertions.
