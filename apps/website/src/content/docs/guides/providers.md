@@ -42,21 +42,30 @@ To add a new provider, create a `[providers.<name>]` block with the following fi
 | `token_endpoint` | No | Override discovered token endpoint |
 | `revocation_endpoint` | No | Override discovered revocation endpoint |
 | `endpoint_origins` | No | Extra origins (bare `https://host[:port]`) the provider's discovery document may name beyond the issuer's origin and configured-endpoint origins; defaults to empty |
+| `email_verified_claim` | No | oidc adapter only. String, no default. Name of a claim to read (bool-or-string coerced) when the token has no `email_verified` claim of its own, e.g. Entra's `xms_edov`. Must be a non-empty string of at most 64 characters. Mutually exclusive with `trust_email_verified` |
+| `trust_email_verified` | No | oidc adapter only. Boolean, defaults to `false`. When `true`, a token whose `email_verified` claim is absent counts as verified iff it carries a non-empty `email` string claim. An explicit `false` is identical to omitting the key. Mutually exclusive with `email_verified_claim` |
 
 For most Tier 1 providers, `issuer`, `client_id`, and `client_secret` are the fields you set. Endpoint fields are populated from the issuer's `.well-known/openid-configuration` at startup. If provided in config, they override the discovered values. If you override an endpoint onto another host, its origin joins the pinned set automatically; use `endpoint_origins` for extra origins only the *discovered* document names.
+
+The two email-verification overrides only fill absence: an explicit `email_verified` claim from the provider always takes precedence over either key, in both directions — an override never overturns a value the provider sent, whether `true` or `false`. Setting both keys on one provider block is a configuration error (the provider registry fails to build at startup). A provider running either non-default mode logs one structured warning at startup, so the relaxed trust posture is visible in the logs.
 
 ### Examples
 
 **Microsoft Entra ID:**
 
 ```toml
-[providers.microsoft]
+[providers.entra]
 adapter = "oidc"
-issuer = "https://login.microsoftonline.com/{tenant-id}/v2.0"
-client_id = "${MICROSOFT_CLIENT_ID}"
-client_secret = "${MICROSOFT_CLIENT_SECRET}"
+issuer = "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0"
+client_id = "${ENTRA_CLIENT_ID}"
+client_secret = "${ENTRA_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
+email_verified_claim = "xms_edov"
 ```
+
+The `email_verified_claim` line is what makes this block admit anyone. Entra v2.0 ID tokens carry an `email` claim but no `email_verified` claim, so under the default behaviour the service never sees an Entra email as verified and denies every sign-in. Mapping Entra's optional `xms_edov` ("email domain owner verified") claim fills that gap: when the token has no `email_verified` claim of its own, the adapter reads `xms_edov` instead (bool-or-string coerced). Note that `xms_edov` is off by default — a tenant administrator must enable the optional claim on the app registration before Entra will emit it.
+
+If your tenant cannot enable `xms_edov`, set `trust_email_verified = true` instead (and drop the `email_verified_claim` line — the two keys are mutually exclusive). That counts any token carrying a non-empty `email` claim as verified. The caveat: Entra's `email` claim can be user-mutable in some tenant configurations, so prefer the `xms_edov` claim mapping wherever the tenant permits it.
 
 **GitHub (via OIDC-compatible endpoint):**
 

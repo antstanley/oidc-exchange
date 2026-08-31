@@ -60,6 +60,7 @@ async fn oidc_provider(
         ),
         revocation_endpoint,
         endpoint_origins: Vec::new(),
+        email_verification: oidc_exchange_core::domain::EmailVerification::default(),
         scopes: Vec::new(),
         additional_params: HashMap::new(),
     };
@@ -182,6 +183,7 @@ async fn exchange_non_2xx_leaks_no_code_or_secret() {
         ),
         revocation_endpoint: None,
         endpoint_origins: Vec::new(),
+        email_verification: oidc_exchange_core::domain::EmailVerification::default(),
         scopes: Vec::new(),
         additional_params: HashMap::new(),
     };

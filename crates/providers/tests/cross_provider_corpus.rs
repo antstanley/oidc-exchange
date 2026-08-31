@@ -203,6 +203,7 @@ fn oidc_config(server_uri: &str) -> OidcProviderConfig {
         ),
         revocation_endpoint: None,
         endpoint_origins: Vec::new(),
+        email_verification: oidc_exchange_core::domain::EmailVerification::default(),
         scopes: vec!["openid".into()],
         additional_params: HashMap::new(),
     }

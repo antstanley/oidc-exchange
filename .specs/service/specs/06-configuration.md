@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
+**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
 
 One TOML file drives the whole service. `RawConfig` mirrors the merged TOML input; `AppConfig`
 is the resolved configuration held by the service. Every entry point that constructs a running
@@ -279,7 +279,20 @@ It defaults to empty, which pins a provider to its issuer's origin. While the
 endpoint-origin check runs in its shipped warning mode, an undeclared origin logs a
 structured warning naming the endpoint and the permitted set and the deployment is served
 unchanged; rejecting undeclared origins is a separate future release-owner decision after
-one release of that telemetry. See [05-provider-system.md](05-provider-system.md).
+one release of that telemetry.
+
+Two optional oidc-adapter keys govern how the adapter derives
+`IdentityClaims.email_verified` for providers that do not emit the standard
+`email_verified` claim (Microsoft Entra ID v2.0 is the motivating case):
+`email_verified_claim` (non-empty string, at most 64 characters — read the named claim,
+bool-or-string coerced, when the standard claim is absent) and `trust_email_verified`
+(TOML boolean, default `false` — treat a non-empty `email` claim as verified when the
+standard claim is absent). An explicit `email_verified` claim from the provider always
+takes precedence, setting both keys on one provider block is a config error, and both
+are validated in the same `provider_config_to_oidc` lift as the other adapter-specific
+fields — a set-but-mistyped value fails registry build rather than being coerced or
+ignored. See
+[05-provider-system.md](05-provider-system.md#email-verification-overrides).
 
 ## Validation at load
 

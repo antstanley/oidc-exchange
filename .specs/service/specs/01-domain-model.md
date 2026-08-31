@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -131,9 +131,13 @@ captures them at the HTTP edge and the exchange flow threads them into the store
 - **`ProviderTokens`** — what a provider returns from code exchange: `id_token`, optional
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
-  `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag; `None`
-  for other providers), `signing_alg` (the algorithm the resolved JWK verified with, e.g.
-  `"ES256"`), and `raw_claims`.
+  `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag;
+  `None` for other providers), `signing_alg` (the algorithm the resolved JWK verified
+  with, e.g. `"ES256"`), and `raw_claims`. `email_verified` is the adapter-derived
+  verification signal the registration policy reads: an explicit `email_verified`
+  claim passes through (bool-or-string coerced), and for the generic OIDC adapter an
+  absent claim may be filled by that provider's configured email-verification override
+  ([05-provider-system.md](05-provider-system.md#email-verification-overrides)).
 
 ### Exchange request types (`service/exchange.rs`)
 
@@ -202,7 +206,9 @@ The normalized config the standard OIDC adapter consumes: `provider_id`, `issuer
 `client_id`, optional `client_secret` (a `Secret<String>` — unprintable by type), optional
 `jwks_uri` / `token_endpoint` / `revocation_endpoint` (discovered from the issuer if
 absent), optional `endpoint_origins` (extra origins a discovery document may name; see
-[05-provider-system.md](05-provider-system.md)), `scopes`, and `additional_params`.
+[05-provider-system.md](05-provider-system.md)), `scopes`, `additional_params`, and
+`email_verification` — the per-provider email-verification derivation mode, default
+`Standard` ([05-provider-system.md](05-provider-system.md#email-verification-overrides)).
 
 ### AdminStats (`service/user_admin.rs`)
 
