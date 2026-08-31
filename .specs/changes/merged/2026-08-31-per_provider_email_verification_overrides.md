@@ -1,6 +1,6 @@
 # Change: Per-provider email-verification overrides for the generic OIDC adapter
 
-**Status:** Proposed · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Target:** crates/adapters (oidc), crates/core (domain), crates/server (bootstrap) — service spec pages 01, 03, 05, 06 + sidecar
+**Status:** Merged · **Date:** 2026-08-31 · **Merged:** 2026-08-31 · **Owner:** Ant Stanley · **Target:** crates/adapters (oidc), crates/core (domain), crates/server (bootstrap) — service spec pages 01, 03, 05, 06 + sidecar
 
 Give each `[providers.<name>]` block using the generic `oidc` adapter an explicit,
 opt-in way to derive `IdentityClaims.email_verified` when the provider's id_tokens do not
@@ -48,12 +48,12 @@ override keeps the strict default while making a common upstream usable.
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/service/specs/05-provider-system.md`](../service/specs/05-provider-system.md) | Add: an `## Email-verification overrides` section (modes, precedence, validation, startup warning, Entra recipe) and a pointer sentence in the Tier 1 paragraph; Modify: the `validate_id_token` behaviour bullet names the derivation; Add: three Decisions |
-| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md) | Modify: the `[providers.<name>]` section documents the two oidc-adapter keys (prose only — the keys are validated in `provider_config_to_oidc`, like `endpoint_origins`, so no closed-domain table row) |
-| [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md) | Modify: step 4's two registration-policy bullets name the adapter-derived signal (the republished Found-active bullet also drops its allowlist-conditional framing, which the code has not matched since the unconditional predicate shipped — see the *Republished-text accuracy* Decision); Modify: the *Registration demands a verified email* Decision records that the overrides do not weaken the predicate |
-| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md) | Modify: the `IdentityClaims` bullet describes `email_verified` as the adapter-derived verification signal; Modify: the `OidcProviderConfig` field enumeration gains `email_verification` (keeping the prose field list in step with the sidecar `$def`) |
-| [`.specs/service/specs/canonical-types.schema.json`](../service/specs/canonical-types.schema.json) | Add: `EmailVerification` `$def`; Modify: `OidcProviderConfig` gains the optional `email_verification` property |
-| [`.specs/service/specs/02-ports-and-adapters.md`](../service/specs/02-ports-and-adapters.md) | None — the `IdentityProvider` port signature is unchanged; derivation happens inside `validate_id_token`, behind the same contract |
+| [`.specs/service/specs/05-provider-system.md`](../../service/specs/05-provider-system.md) | Add: an `## Email-verification overrides` section (modes, precedence, validation, startup warning, Entra recipe) and a pointer sentence in the Tier 1 paragraph; Modify: the `validate_id_token` behaviour bullet names the derivation; Add: three Decisions |
+| [`.specs/service/specs/06-configuration.md`](../../service/specs/06-configuration.md) | Modify: the `[providers.<name>]` section documents the two oidc-adapter keys (prose only — the keys are validated in `provider_config_to_oidc`, like `endpoint_origins`, so no closed-domain table row) |
+| [`.specs/service/specs/03-service-flows.md`](../../service/specs/03-service-flows.md) | Modify: step 4's two registration-policy bullets name the adapter-derived signal (the republished Found-active bullet also drops its allowlist-conditional framing, which the code has not matched since the unconditional predicate shipped — see the *Republished-text accuracy* Decision); Modify: the *Registration demands a verified email* Decision records that the overrides do not weaken the predicate |
+| [`.specs/service/specs/01-domain-model.md`](../../service/specs/01-domain-model.md) | Modify: the `IdentityClaims` bullet describes `email_verified` as the adapter-derived verification signal; Modify: the `OidcProviderConfig` field enumeration gains `email_verification` (keeping the prose field list in step with the sidecar `$def`) |
+| [`.specs/service/specs/canonical-types.schema.json`](../../service/specs/canonical-types.schema.json) | Add: `EmailVerification` `$def`; Modify: `OidcProviderConfig` gains the optional `email_verification` property |
+| [`.specs/service/specs/02-ports-and-adapters.md`](../../service/specs/02-ports-and-adapters.md) | None — the `IdentityProvider` port signature is unchanged; derivation happens inside `validate_id_token`, behind the same contract |
 
 ---
 
@@ -485,7 +485,7 @@ docs:
 References: issue #48 (observed Entra v2.0 claim set; 0.4.0); Microsoft Entra optional
 claims documentation for `xms_edov` and the mutability caveat on `email`; the Apple
 coercion change
-([`merged/2026-07-01-require_iss_aud_in_token_validation.md`](merged/2026-07-01-require_iss_aud_in_token_validation.md))
+([`2026-07-01-require_iss_aud_in_token_validation.md`](2026-07-01-require_iss_aud_in_token_validation.md))
 as the precedent for provider-dialect handling at the adapter boundary.
 
 ---

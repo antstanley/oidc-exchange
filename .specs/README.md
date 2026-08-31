@@ -32,12 +32,12 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 
 | Change spec | Status | Targets |
 |---|---|---|
-| [changes/2026-08-31-per_provider_email_verification_overrides.md](changes/2026-08-31-per_provider_email_verification_overrides.md) | Proposed | service: per-provider `email_verified` derivation for the generic OIDC adapter (`email_verified_claim` / `trust_email_verified`), Entra ID recipe (issue #48) |
 | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) | Proposed | service: reachable Apple adapter, explicit falsy config overrides, refresh flow on the mandatory audit channel, real client provenance, throttled `/nonce`, datamodel schema catch-up, prometheus init arm |
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
 | [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) | Merged | admin UI: verified discovery/JWKS session JWTs, hardened host cookie, security tests and CI gate |
 | [changes/2026-06-24-complete_telemetry_exporters.md](changes/2026-06-24-complete_telemetry_exporters.md) | Proposed | service: OTLP/X-Ray exporters + OTEL span layer |
 | [changes/2026-08-05-baseline_reference_deployments.md](changes/2026-08-05-baseline_reference_deployments.md) | Proposed | examples, distribution: a named deployment security baseline enforced by a CI conformance gate |
+| [changes/merged/2026-08-31-per_provider_email_verification_overrides.md](changes/merged/2026-08-31-per_provider_email_verification_overrides.md) | Merged | service: per-provider `email_verified` derivation for the generic OIDC adapter (`email_verified_claim` / `trust_email_verified`), Entra ID recipe (issue #48) |
 | [changes/merged/2026-08-05-validate_revoke_token_claims.md](changes/merged/2026-08-05-validate_revoke_token_claims.md) | Merged | service: full claim validation on `/revoke`, `sid` claim binding revocation to one session |
 | [changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md](changes/merged/2026-08-05-bind_id_token_grant_replay_protection.md) | Merged | service: server-issued nonce, `azp`/`at_hash`, single-use assertions, `[grants] id_token` switch |
 | [changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md](changes/merged/2026-08-05-bind_grant_type_at_token_endpoint.md) | Merged | service: `grant_type` selects the flow, `ExchangeCredential` enum, closed per-grant parameter sets |
@@ -110,7 +110,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-baseline_reference_deployments/plan.md](plans/2026-08-05-baseline_reference_deployments/plan.md) | Draft | [changes/2026-08-05-baseline_reference_deployments.md](changes/2026-08-05-baseline_reference_deployments.md) |
 | [plans/2026-08-05-index_change_specs/plan.md](plans/2026-08-05-index_change_specs/plan.md) | Done | index-only documentation change (this README's change/plan tables); no change spec |
 | [plans/2026-08-25-close_r2_audit_code_divergences/plan.md](plans/2026-08-25-close_r2_audit_code_divergences/plan.md) | Draft | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) |
-| [plans/2026-08-31-per_provider_email_verification_overrides/plan.md](plans/2026-08-31-per_provider_email_verification_overrides/plan.md) | Draft | [changes/2026-08-31-per_provider_email_verification_overrides.md](changes/2026-08-31-per_provider_email_verification_overrides.md) |
+| [plans/2026-08-31-per_provider_email_verification_overrides/plan.md](plans/2026-08-31-per_provider_email_verification_overrides/plan.md) | Draft | [changes/merged/2026-08-31-per_provider_email_verification_overrides.md](changes/merged/2026-08-31-per_provider_email_verification_overrides.md) |
 
 ## Conventions
 

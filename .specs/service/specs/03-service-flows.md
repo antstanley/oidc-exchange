@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, the configured retained `rate_limiter`, a `providers` map, and `config`. The
@@ -70,17 +70,23 @@ losing JIT-registration racer emits none.
    audit is emitted for them.
 4. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
    - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
-   - **Found, active** → when `registration.domain_allowlist` is set, re-apply it against the
-     assertion's current claims: `email_verified == Some(true)` and a matching domain, using
-     the same predicate as the Not-found arm. A failure → `AccessDenied` (audited
-     `RegistrationDenied`, naming the user id). The live ID-token claims are used rather than
-     the stored `user.email`, which is frozen at first login. `registration.mode` is not
-     re-evaluated here: it is an admission gate and is trivially satisfied by an existing user.
+   - **Found, active** → re-apply the registration policy against the assertion's current
+     claims, through the same predicate as the Not-found arm: a verified email
+     (`email_verified == Some(true)`) is always required, and when
+     `registration.domain_allowlist` is set the email's domain must also match it. A
+     failure → `AccessDenied` (audited `RegistrationDenied`, naming the user id). The live
+     ID-token claims are used rather than the stored `user.email`, which is frozen at
+     first login. `registration.mode` is not re-evaluated here: it is an admission gate
+     and is trivially satisfied by an existing user.
    - **Not found** → apply policy. The policy value is a `RegistrationMode`, matched
      exhaustively; there is no unrecognised case because config load rejected it.
      - The ID token must carry a **verified** email (`email_verified == Some(true)`) — a
-       requirement of accepting the claim at all, not merely of the allowlist branch. A missing
-       or unverified email → `AccessDenied` (audited `RegistrationDenied`).
+       requirement of accepting the claim at all, not merely of the allowlist branch. A
+       missing or unverified email → `AccessDenied` (audited `RegistrationDenied`).
+       `email_verified` is the signal the provider adapter derived — for the generic OIDC
+       adapter, per that provider's configured email-verification mode
+       ([05-provider-system.md](05-provider-system.md#email-verification-overrides)); the
+       policy itself never reads raw claims.
      - If `registration.domain_allowlist` is set, the email's domain must match it — exact
        (`example.com`) or wildcard (`*.example.com`, at least one subdomain, ASCII
        case-insensitive). A non-matching domain → `AccessDenied` (audited
@@ -410,9 +416,14 @@ operations carry no client `ip_address`/`user_agent` context.
   hash and access-token revocation would silently become a no-op. A rotation-independent
   identifier keeps the `sid` resolvable for the token's full TTL.
 - *Registration demands a verified email.* **Every just-in-time user creation requires
-  `email_verified == true`, whether or not an allowlist is configured.** The requirement is a
-  property of accepting the email claim, not of the allowlist; nesting it inside an optional
-  feature's branch meant turning the allowlist off turned identity verification off with it.
+  `email_verified == true`, whether or not an allowlist is configured.** The
+  requirement is a property of accepting the email claim, not of the allowlist; nesting
+  it inside an optional feature's branch meant turning the allowlist off turned
+  identity verification off with it. The per-provider email-verification overrides
+  ([05-provider-system.md](05-provider-system.md#email-verification-overrides)) do not
+  weaken this predicate: they govern how the generic OIDC adapter derives
+  `email_verified` from a provider's claims, and the core still refuses anything short
+  of `Some(true)`.
 - *The allowlist is an authorization predicate; the mode is an admission gate.* **The domain
   allowlist is re-evaluated on every exchange, for existing users as well as new ones;
   `registration.mode` applies only at creation.** An operator who tightens the allowlist is

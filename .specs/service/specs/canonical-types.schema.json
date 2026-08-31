@@ -475,6 +475,26 @@
         }
       }
     },
+    "EmailVerification": {
+      "description": "How the generic OIDC adapter derives IdentityClaims.email_verified when the token's own email_verified claim is absent; an explicit claim always passes through and can never be overturned. standard: absent stays null. trust_email: a non-empty email claim counts as verified. claim: read the named claim, bool-or-string coerced.",
+      "default": "standard",
+      "oneOf": [
+        { "const": "standard" },
+        { "const": "trust_email" },
+        {
+          "type": "object",
+          "required": ["claim"],
+          "additionalProperties": false,
+          "properties": {
+            "claim": {
+              "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString",
+              "maxLength": 64,
+              "description": "Claim name to read, e.g. Entra's xms_edov."
+            }
+          }
+        }
+      ]
+    },
     "OidcProviderConfig": {
       "type": "object",
       "required": [
@@ -538,6 +558,11 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "email_verification": {
+          "$ref": "#/$defs/EmailVerification",
+          "default": "standard",
+          "description": "Per-provider email-verification derivation mode; configured via the email_verified_claim / trust_email_verified provider keys."
         }
       }
     },
