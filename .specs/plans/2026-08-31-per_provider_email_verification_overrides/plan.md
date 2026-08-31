@@ -1,6 +1,6 @@
 # Plan: Per-provider email-verification overrides for the generic OIDC adapter
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Source spec:** [changes/2026-08-31-per_provider_email_verification_overrides.md](../../changes/2026-08-31-per_provider_email_verification_overrides.md)
+**Status:** In progress · **Layout:** kanban · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Source spec:** [changes/2026-08-31-per_provider_email_verification_overrides.md](../../changes/2026-08-31-per_provider_email_verification_overrides.md)
 
 Five tasks build the opt-in per-provider email-verification overrides (issue #48) in
 three code stages and two documentation stages. The typed form lands first (01), then the
