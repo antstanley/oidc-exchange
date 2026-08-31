@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [02-adapter_email_verified_derivation-certificate.md](02-adapter_email_verified_derivation-certificate.md)
 
-**Implements:** change spec [§The delta → Derivation in the adapter and §Tests (adapter bullet)](../../../changes/2026-08-31-per_provider_email_verification_overrides.md); [05-provider-system.md](../../../service/specs/05-provider-system.md) §OidcProvider behaviour — the `validate_id_token` derivation the new §Email-verification overrides section will describe (prose republished by task 04)
+**Implements:** change spec [§The delta → Derivation in the adapter and §Tests (adapter bullet)](../../../changes/merged/2026-08-31-per_provider_email_verification_overrides.md); [05-provider-system.md](../../../service/specs/05-provider-system.md) §OidcProvider behaviour — the `validate_id_token` derivation the new §Email-verification overrides section will describe (prose republished by task 04)
 **Depends on:** 01 (build — the enum and config field)
 **Produces:** `validate_id_token` derives `email_verified` per the provider's configured mode under the two-step precedence rule; a ten-case wiremock matrix pins every mode, the both-directions passthrough, and the coercion negative space; `Standard` is byte-identical to 0.4.0.
 **Pointers:** `crates/adapters/src/oidc/mod.rs:34-42` (`OidcProvider` struct — add the mode field), `:114-123` (`from_config` — copy the mode from config), `:187-201` (`validate_id_token` — replace the single `coerce_bool` at `:190`), `:338-356` (`make_config` test helper); `crates/adapters/src/shared/claims.rs:14` (`coerce_bool`, reused as-is); `crates/providers/src/apple.rs` (untouched)

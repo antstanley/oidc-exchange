@@ -2,7 +2,7 @@
 
 **Plan:** [plan.md](../plan.md) · **Certificate:** [01-email_verification_typed_form-certificate.md](01-email_verification_typed_form-certificate.md)
 
-**Implements:** change spec [§The delta → Typed form](../../../changes/2026-08-31-per_provider_email_verification_overrides.md); [01-domain-model.md](../../../service/specs/01-domain-model.md) §OidcProviderConfig (the code side — the prose and sidecar are republished by task 04)
+**Implements:** change spec [§The delta → Typed form](../../../changes/merged/2026-08-31-per_provider_email_verification_overrides.md); [01-domain-model.md](../../../service/specs/01-domain-model.md) §OidcProviderConfig (the code side — the prose and sidecar are republished by task 04)
 **Depends on:** —
 **Produces:** `EmailVerification` (default `Standard`) and `OidcProviderConfig.email_verification` exist, re-exported, set in every struct-literal constructor and emitted by the hand-written Debug; the workspace is green and behaviour is byte-identical to before.
 **Pointers:** `crates/core/src/domain/provider.rs:8-59` (struct and Debug), `:67-81` (`sample_config`); `crates/core/src/domain/mod.rs:18` (re-export); constructors to update: `crates/server/src/bootstrap.rs:1702` (`provider_config_to_oidc` — set `EmailVerification::default()` until task 03), `crates/adapters/src/oidc/mod.rs:338-356` (`make_config`), `crates/providers/tests/cross_provider_corpus.rs:193`, `crates/providers/tests/upstream_error_leak_corpus.rs:50` and `:172`, `crates/server/tests/request_leak_oracle.rs:599`
