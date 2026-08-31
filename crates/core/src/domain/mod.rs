@@ -15,7 +15,7 @@ pub use audit::{
 pub use operator::{
     OperatorAuthFailureReason, OperatorAuthMechanism, OperatorPrincipal, UNATTRIBUTED_OPERATOR_ID,
 };
-pub use provider::OidcProviderConfig;
+pub use provider::{EmailVerification, OidcProviderConfig};
 pub use session::{
     is_valid_family_id, new_family_id, RefreshResolution, RetiredRefreshToken, Session,
     FAMILY_ID_PREFIX, ULID_CHAR_LEN,

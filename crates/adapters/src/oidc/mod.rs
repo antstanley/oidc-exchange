@@ -350,6 +350,7 @@ mod tests {
             token_endpoint: token_endpoint.map(test_endpoint),
             revocation_endpoint: revocation_endpoint.map(test_endpoint),
             endpoint_origins: Vec::new(),
+            email_verification: oidc_exchange_core::domain::EmailVerification::default(),
             scopes: vec!["openid".into()],
             additional_params: HashMap::new(),
         }

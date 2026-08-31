@@ -1708,6 +1708,9 @@ fn provider_config_to_oidc(
         token_endpoint: config.token_endpoint.clone(),
         revocation_endpoint: config.revocation_endpoint.clone(),
         endpoint_origins,
+        // Placeholder until the config keys are lifted: every provider stays on
+        // the standard `email_verified` reading, so behaviour is unchanged.
+        email_verification: oidc_exchange_core::domain::EmailVerification::default(),
         scopes,
         additional_params: HashMap::new(),
     })
