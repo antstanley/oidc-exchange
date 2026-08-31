@@ -110,6 +110,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-baseline_reference_deployments/plan.md](plans/2026-08-05-baseline_reference_deployments/plan.md) | Draft | [changes/2026-08-05-baseline_reference_deployments.md](changes/2026-08-05-baseline_reference_deployments.md) |
 | [plans/2026-08-05-index_change_specs/plan.md](plans/2026-08-05-index_change_specs/plan.md) | Done | index-only documentation change (this README's change/plan tables); no change spec |
 | [plans/2026-08-25-close_r2_audit_code_divergences/plan.md](plans/2026-08-25-close_r2_audit_code_divergences/plan.md) | Draft | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) |
+| [plans/2026-08-31-per_provider_email_verification_overrides/plan.md](plans/2026-08-31-per_provider_email_verification_overrides/plan.md) | Draft | [changes/2026-08-31-per_provider_email_verification_overrides.md](changes/2026-08-31-per_provider_email_verification_overrides.md) |
 
 ## Conventions
 
