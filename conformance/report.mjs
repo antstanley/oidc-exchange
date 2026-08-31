@@ -50,7 +50,12 @@ async function execute(shape, fixtures, variant = "faithful", runnerOverride) {
     command = join(root, "bindings/python/.venv/bin/python");
     args = [runnerOverride ?? join(root, "conformance/python_runner.py"), shape, config, pyArtifact, variant];
   }
-  const child = spawn(command, args, { cwd: root, stdio: ["pipe", "pipe", "inherit"] });
+  // Every runner constructs the service, which now installs a JSON tracing
+  // subscriber (the FFI/embedded telemetry install). That subscriber writes to
+  // the process's stdout — the exact channel this harness uses to read one JSON
+  // conformance record per line. Force the subscriber to emit nothing so the
+  // data channel stays clean; the config already sets `[telemetry] enabled=false`.
+  const child = spawn(command, args, { cwd: root, stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, RUST_LOG: "off" } });
   const output = [];
   createInterface({ input: child.stdout }).on("line", (line) => output.push(JSON.parse(line)));
   for (const fixture of fixtures) child.stdin.write(`${JSON.stringify(input(fixture, shape, variant))}\n`);
