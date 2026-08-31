@@ -1595,6 +1595,11 @@ async fn build_single_provider(
     match config.adapter {
         IdentityProviderAdapter::Oidc => {
             let oidc_config = provider_config_to_oidc(name, config)?;
+            // Announce a weakened email-verification mode here, immediately
+            // after the synchronous lift and before the async construction, so
+            // the warning appears exactly once per configured provider at
+            // registry build even when discovery later fails.
+            warn_nonstandard_email_verification(name, &oidc_config.email_verification);
             let provider =
                 oidc_exchange_adapters::oidc::OidcProvider::from_config(name, &oidc_config).await?;
             Ok(Box::new(provider))
@@ -1605,6 +1610,113 @@ async fn build_single_provider(
             Ok(Box::new(provider))
         }
     }
+}
+
+/// Emit the boot-visibility warning for a provider whose resolved
+/// email-verification mode is not `Standard`.
+///
+/// Both overrides weaken an identity control — a token without an
+/// `email_verified` claim can count as verified — so the choice must be
+/// visible in boot logs the way the endpoint-origin warning-mode and the
+/// role/listener collapse warnings are. `Standard` is the default and today's
+/// behaviour, so it announces nothing.
+fn warn_nonstandard_email_verification(
+    provider_id: &str,
+    mode: &oidc_exchange_core::domain::EmailVerification,
+) {
+    use oidc_exchange_core::domain::EmailVerification;
+
+    match mode {
+        EmailVerification::Standard => {}
+        EmailVerification::TrustEmail => {
+            tracing::warn!(
+                provider = provider_id,
+                mode = "trust_email_verified",
+                "provider counts a token with no email_verified claim as verified whenever it \
+                 carries a non-empty email claim; this weakens email verification for this \
+                 provider — remove trust_email_verified to restore standard behaviour"
+            );
+        }
+        EmailVerification::Claim(claim) => {
+            tracing::warn!(
+                provider = provider_id,
+                mode = "email_verified_claim",
+                claim = claim.as_str(),
+                "provider reads a mapped claim when the token's own email_verified claim is \
+                 absent; this widens which claims establish email verification for this \
+                 provider — remove email_verified_claim to restore standard behaviour"
+            );
+        }
+    }
+}
+
+/// Cap on the configured `email_verified_claim` name, counted in Unicode code
+/// points (the change spec's schema `maxLength: 64` semantics), not bytes — a
+/// name of 64 two-byte code points is valid even though it spans 128 bytes.
+const MAX_EMAIL_VERIFIED_CLAIM_LEN: usize = 64;
+
+/// Lift the optional `email_verified_claim` / `trust_email_verified` keys from
+/// a provider's `extra` map into the typed [`EmailVerification`] mode.
+///
+/// Validation is fail-closed: a set-but-wrong-typed value is a `ConfigError`
+/// naming the provider, never a coercion, because both keys weaken an identity
+/// control and a silently misread value would weaken it invisibly. Setting
+/// both keys is two competing instructions for the same decision, so their
+/// mere presence together is rejected regardless of the values carried.
+fn lift_email_verification(
+    name: &str,
+    extra: &HashMap<String, toml::Value>,
+) -> Result<oidc_exchange_core::domain::EmailVerification, Error> {
+    use oidc_exchange_core::domain::EmailVerification;
+
+    let claim_value = extra.get("email_verified_claim");
+    let trust_value = extra.get("trust_email_verified");
+
+    if claim_value.is_some() && trust_value.is_some() {
+        return Err(Error::ConfigError {
+            detail: format!(
+                "provider '{name}': 'email_verified_claim' and 'trust_email_verified' are \
+                 mutually exclusive; set at most one"
+            ),
+        });
+    }
+
+    if let Some(value) = trust_value {
+        let trust = value.as_bool().ok_or_else(|| Error::ConfigError {
+            detail: format!("provider '{name}': 'trust_email_verified' must be a boolean"),
+        })?;
+        // An explicit `false` is identical to the key being absent, so only
+        // `true` leaves the default mode.
+        return Ok(if trust {
+            EmailVerification::TrustEmail
+        } else {
+            EmailVerification::Standard
+        });
+    }
+
+    let Some(value) = claim_value else {
+        // Neither key set is the default and preserves today's behaviour.
+        return Ok(EmailVerification::Standard);
+    };
+    let claim = value.as_str().ok_or_else(|| Error::ConfigError {
+        detail: format!("provider '{name}': 'email_verified_claim' must be a string"),
+    })?;
+    if claim.is_empty() {
+        return Err(Error::ConfigError {
+            detail: format!("provider '{name}': 'email_verified_claim' must not be empty"),
+        });
+    }
+    if claim.chars().count() > MAX_EMAIL_VERIFIED_CLAIM_LEN {
+        // Rejected before use, and the message never echoes the oversized
+        // name, so hostile config text does not become log or error text.
+        return Err(Error::ConfigError {
+            detail: format!(
+                "provider '{name}': 'email_verified_claim' exceeds \
+                 {MAX_EMAIL_VERIFIED_CLAIM_LEN} characters"
+            ),
+        });
+    }
+    Ok(EmailVerification::Claim(claim.to_string()))
 }
 
 /// Convert the generic `ProviderConfig` (with its `extra` map) into the typed
@@ -1708,22 +1820,22 @@ fn provider_config_to_oidc(
         token_endpoint: config.token_endpoint.clone(),
         revocation_endpoint: config.revocation_endpoint.clone(),
         endpoint_origins,
-        // Placeholder until the config keys are lifted: every provider stays on
-        // the standard `email_verified` reading, so behaviour is unchanged.
-        email_verification: oidc_exchange_core::domain::EmailVerification::default(),
+        email_verification: lift_email_verification(name, &config.extra)?,
         scopes,
         additional_params: HashMap::new(),
     })
 }
 
 // ---------------------------------------------------------------------------
-// provider_config_to_oidc: endpoint_origins lifting and validation tests
+// provider_config_to_oidc: endpoint_origins and email-verification lifting and
+// validation tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod provider_config_to_oidc_tests {
     use super::*;
     use oidc_exchange_core::config::HttpsUrl;
+    use oidc_exchange_core::domain::EmailVerification;
 
     /// Build a minimal valid OIDC `ProviderConfig`, with optional extra keys
     /// merged in (e.g. an `endpoint_origins` array).
@@ -1905,6 +2017,338 @@ mod provider_config_to_oidc_tests {
         .expect("exactly MAX_ENDPOINT_ORIGINS entries must be accepted");
 
         assert_eq!(converted.endpoint_origins.len(), MAX_ENDPOINT_ORIGINS);
+    }
+
+    #[test]
+    fn email_verified_claim_lifts_to_the_claim_variant() {
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "email_verified_claim",
+                toml::Value::from("xms_edov"),
+            )]),
+        )
+        .expect("a valid mapped-claim key must convert");
+
+        assert_eq!(
+            converted.email_verification,
+            EmailVerification::Claim("xms_edov".to_string()),
+            "the key must lift to the Claim variant carrying the configured name"
+        );
+        // The other lifted fields are untouched by the new key.
+        assert_eq!(converted.client_id, "client-id");
+    }
+
+    #[test]
+    fn trust_email_verified_true_lifts_to_trust_email() {
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![("trust_email_verified", toml::Value::Boolean(true))]),
+        )
+        .expect("a boolean trust key must convert");
+
+        assert_eq!(converted.email_verification, EmailVerification::TrustEmail);
+        assert_eq!(converted.issuer.as_str(), "https://accounts.google.com");
+    }
+
+    #[test]
+    fn absent_keys_and_explicit_false_trust_both_lift_to_standard() {
+        // Neither key set is the default and preserves today's behaviour.
+        let absent = provider_config_to_oidc("google", &oidc_provider_config(vec![]))
+            .expect("a config without either key must convert");
+        assert_eq!(absent.email_verification, EmailVerification::Standard);
+
+        // An explicit `false` is identical to the key being absent.
+        let explicit_false = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![("trust_email_verified", toml::Value::Boolean(false))]),
+        )
+        .expect("an explicit false trust key must convert");
+        assert_eq!(
+            explicit_false.email_verification,
+            EmailVerification::Standard
+        );
+    }
+
+    #[test]
+    fn both_email_verification_keys_set_is_rejected_naming_the_provider() {
+        // Presence is what conflicts: even an explicit `false` beside a mapped
+        // claim is two competing instructions for one decision, so the pair is
+        // rejected fail-closed regardless of the values carried.
+        for trust in [toml::Value::Boolean(true), toml::Value::Boolean(false)] {
+            let err = provider_config_to_oidc(
+                "google",
+                &oidc_provider_config(vec![
+                    ("email_verified_claim", toml::Value::from("xms_edov")),
+                    ("trust_email_verified", trust),
+                ]),
+            )
+            .expect_err("both keys on one provider block must be rejected");
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains("google"),
+                        "the error names the provider: {detail}"
+                    );
+                    assert!(
+                        detail.contains("email_verified_claim")
+                            && detail.contains("trust_email_verified"),
+                        "the error names both conflicting keys: {detail}"
+                    );
+                }
+                other => panic!("expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_boolean_trust_email_verified_is_rejected_never_coerced() {
+        // The truthy-looking string is exactly the value a coercion would
+        // accept; pinning it as an error proves the key is never coerced.
+        let cases: Vec<(&str, toml::Value)> = vec![
+            ("string true", toml::Value::from("true")),
+            ("integer one", toml::Value::Integer(1)),
+        ];
+
+        for (label, value) in cases {
+            let err = provider_config_to_oidc(
+                "google",
+                &oidc_provider_config(vec![("trust_email_verified", value)]),
+            )
+            .expect_err(&format!("{label} must be rejected, never coerced"));
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains("google"),
+                        "{label}: the error names the provider: {detail}"
+                    );
+                    assert!(
+                        detail.contains("trust_email_verified"),
+                        "{label}: the error names the offending key: {detail}"
+                    );
+                }
+                other => panic!("{label}: expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_email_verified_claim_values_are_rejected_naming_the_provider() {
+        let cases: Vec<(&str, toml::Value)> = vec![
+            ("non-string value", toml::Value::Integer(7)),
+            ("boolean value", toml::Value::Boolean(true)),
+            ("empty string", toml::Value::from("")),
+            (
+                "name over the cap",
+                toml::Value::from("x".repeat(MAX_EMAIL_VERIFIED_CLAIM_LEN + 1)),
+            ),
+        ];
+
+        for (label, value) in cases {
+            let err = provider_config_to_oidc(
+                "google",
+                &oidc_provider_config(vec![("email_verified_claim", value)]),
+            )
+            .expect_err(&format!("{label} must be rejected at the config boundary"));
+
+            match err {
+                Error::ConfigError { detail } => {
+                    assert!(
+                        detail.contains("google"),
+                        "{label}: the error names the provider: {detail}"
+                    );
+                    assert!(
+                        detail.contains("email_verified_claim"),
+                        "{label}: the error names the offending key: {detail}"
+                    );
+                }
+                other => panic!("{label}: expected ConfigError, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn claim_name_exactly_at_the_cap_is_accepted_and_one_over_rejected() {
+        // Boundary: AT the cap is valid; only above it is a config error.
+        let at_cap = "x".repeat(MAX_EMAIL_VERIFIED_CLAIM_LEN);
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "email_verified_claim",
+                toml::Value::from(at_cap.clone()),
+            )]),
+        )
+        .expect("a name of exactly MAX_EMAIL_VERIFIED_CLAIM_LEN code points must be accepted");
+        assert_eq!(
+            converted.email_verification,
+            EmailVerification::Claim(at_cap)
+        );
+
+        let err = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "email_verified_claim",
+                toml::Value::from("x".repeat(MAX_EMAIL_VERIFIED_CLAIM_LEN + 1)),
+            )]),
+        )
+        .expect_err("a name one code point over the cap must be rejected");
+        assert!(
+            matches!(err, Error::ConfigError { .. }),
+            "expected ConfigError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn claim_name_cap_counts_code_points_not_bytes() {
+        // 64 two-byte code points: exactly at the cap in code points while
+        // spanning 128 bytes — accepted, pinning that the cap is counted in
+        // code points and a byte-length check would wrongly reject it.
+        let multibyte = "é".repeat(MAX_EMAIL_VERIFIED_CLAIM_LEN);
+        assert!(
+            multibyte.len() > MAX_EMAIL_VERIFIED_CLAIM_LEN,
+            "precondition: the byte length must exceed the cap"
+        );
+        assert_eq!(
+            multibyte.chars().count(),
+            MAX_EMAIL_VERIFIED_CLAIM_LEN,
+            "precondition: the code-point count sits exactly at the cap"
+        );
+
+        let converted = provider_config_to_oidc(
+            "google",
+            &oidc_provider_config(vec![(
+                "email_verified_claim",
+                toml::Value::from(multibyte.clone()),
+            )]),
+        )
+        .expect("a name within the code-point cap must be accepted regardless of byte length");
+        assert_eq!(
+            converted.email_verification,
+            EmailVerification::Claim(multibyte)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Email-verification overrides: boot-visibility warning and resolve-level
+// boot shape (an Entra-shaped block resolves through resolve_config_toml).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod email_verification_boot_tests {
+    use super::*;
+    use oidc_exchange_core::domain::EmailVerification;
+    use oidc_exchange_test_utils::telemetry::{install_span_capture, SharedBuffer};
+
+    /// Run the registry-build warning for one provider under a capturing
+    /// subscriber and return the rendered telemetry stream.
+    fn rendered_warning_for(mode: &EmailVerification) -> String {
+        let capture = install_span_capture(SharedBuffer::default());
+        warn_nonstandard_email_verification("myidp", mode);
+        capture.rendered()
+    }
+
+    /// Count rendered WARN event lines, so "exactly one" is asserted against
+    /// what a boot log would actually show rather than against call counts.
+    fn warn_line_count(rendered: &str) -> usize {
+        rendered
+            .lines()
+            .filter(|line| line.contains("WARN"))
+            .count()
+    }
+
+    #[test]
+    fn claim_mode_logs_exactly_one_warning_naming_provider_and_claim() {
+        let rendered = rendered_warning_for(&EmailVerification::Claim("xms_edov".to_string()));
+
+        assert_eq!(
+            warn_line_count(&rendered),
+            1,
+            "a mapped-claim provider must log exactly one warning: {rendered}"
+        );
+        assert!(
+            rendered.contains("myidp"),
+            "the warning names the provider id: {rendered}"
+        );
+        assert!(
+            rendered.contains("email_verified_claim") && rendered.contains("xms_edov"),
+            "the warning names the mode and the mapped claim: {rendered}"
+        );
+    }
+
+    #[test]
+    fn trust_email_mode_logs_exactly_one_warning_naming_provider_and_mode() {
+        let rendered = rendered_warning_for(&EmailVerification::TrustEmail);
+
+        assert_eq!(
+            warn_line_count(&rendered),
+            1,
+            "a trust-email provider must log exactly one warning: {rendered}"
+        );
+        assert!(
+            rendered.contains("myidp"),
+            "the warning names the provider id: {rendered}"
+        );
+        assert!(
+            rendered.contains("trust_email_verified"),
+            "the warning names the mode: {rendered}"
+        );
+    }
+
+    #[test]
+    fn standard_mode_logs_no_warning() {
+        let rendered = rendered_warning_for(&EmailVerification::Standard);
+
+        assert_eq!(
+            warn_line_count(&rendered),
+            0,
+            "the default mode must stay silent at boot: {rendered}"
+        );
+        assert!(
+            !rendered.contains("myidp"),
+            "no telemetry at all is emitted for the default mode: {rendered}"
+        );
+    }
+
+    /// An Entra-shaped provider block — a v2.0 `login.microsoftonline.com`
+    /// issuer with a mapped `xms_edov` claim — resolves through the
+    /// side-effect-free resolver, and the resolved block lifts to the Claim
+    /// variant exactly as registry build would, pinning the documented Entra
+    /// configuration end to end.
+    #[test]
+    fn entra_shaped_block_with_mapped_claim_resolves() {
+        let config = resolve_config_toml(
+            "[providers.entra]\n\
+             adapter = \"oidc\"\n\
+             issuer = \"https://login.microsoftonline.com/common/v2.0\"\n\
+             client_id = \"11111111-2222-3333-4444-555555555555\"\n\
+             scopes = [\"openid\", \"email\", \"profile\"]\n\
+             email_verified_claim = \"xms_edov\"\n",
+        )
+        .expect("an Entra-shaped provider block must resolve");
+
+        let provider = config
+            .providers
+            .get("entra")
+            .expect("the resolved config must carry the entra provider");
+        let lifted = provider_config_to_oidc("entra", provider)
+            .expect("the resolved Entra block must lift into the typed OIDC config");
+        assert_eq!(
+            lifted.email_verification,
+            EmailVerification::Claim("xms_edov".to_string()),
+            "the mapped claim must survive resolution and lift to the Claim variant"
+        );
+        assert_eq!(
+            lifted.scopes,
+            vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string()
+            ],
+            "the configured scopes must lift unchanged beside the new key"
+        );
     }
 }
 
