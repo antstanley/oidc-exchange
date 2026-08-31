@@ -32,6 +32,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 
 | Change spec | Status | Targets |
 |---|---|---|
+| [changes/2026-08-31-per_provider_email_verification_overrides.md](changes/2026-08-31-per_provider_email_verification_overrides.md) | Proposed | service: per-provider `email_verified` derivation for the generic OIDC adapter (`email_verified_claim` / `trust_email_verified`), Entra ID recipe (issue #48) |
 | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) | Proposed | service: reachable Apple adapter, explicit falsy config overrides, refresh flow on the mandatory audit channel, real client provenance, throttled `/nonce`, datamodel schema catch-up, prometheus init arm |
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
 | [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) | Merged | admin UI: verified discovery/JWKS session JWTs, hardened host cookie, security tests and CI gate |
