@@ -1887,4 +1887,30 @@ mod tests {
         );
         assert_eq!(identity.email.as_deref(), Some("user@example.com"));
     }
+
+    // Case 11 — TrustEmail: a present but NON-COERCIBLE explicit
+    // `email_verified` (the JSON number 0 — coerce_bool never guesses at
+    // numbers) yields nothing at step 1, so it counts as absence and the
+    // truthy override fills the gap: the derived value is Some(true). The
+    // "explicit false wins" guarantee covers coercible values only; this
+    // pins that boundary as intended behaviour.
+    #[tokio::test]
+    async fn trust_email_mode_non_coercible_explicit_claim_is_filled_by_override() {
+        let identity = validate_with_mode(
+            EmailVerification::TrustEmail,
+            json!({ "email": "user@example.com", "email_verified": 0 }),
+        )
+        .await;
+
+        assert_eq!(
+            identity.email_verified,
+            Some(true),
+            "a non-coercible explicit claim is absence to step 1; TrustEmail fills it"
+        );
+        assert_eq!(
+            identity.raw_claims.get("email_verified"),
+            Some(&json!(0)),
+            "the non-coercible value really was in the token, and was refused as a signal"
+        );
+    }
 }
