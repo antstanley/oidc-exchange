@@ -1,0 +1,26 @@
+# Task 02 — FFI constructor installs the telemetry subscriber
+
+**Plan:** [plan.md](../plan.md) · **Certificate:** [02-ffi_constructor_installs_telemetry-certificate.md](02-ffi_constructor_installs_telemetry-certificate.md)
+
+**Implements:** [Change spec §The delta → G1](../../../changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md#g1--install-the-telemetry-subscriber-on-the-embedded-entrypoint), second through fourth bullets (the constructor call site, no dependency changes, no binding changes) and the two per-process FFI tests. Makes true [01-ffi-core.md §Responsibilities](../../../bindings/specs/01-ffi-core.md) (the telemetry-install bullet), its Request-flow global-state sentence, and the embedded-destination sentence of [07-telemetry-and-audit.md §Telemetry](../../../service/specs/07-telemetry-and-audit.md).
+**Depends on:** 01
+**Produces:** Every embedded deployment gets operator-visible diagnostics: constructing `OidcExchange` installs the process-wide subscriber (JSON lines on the host's stdout, `RUST_LOG`-filtered, default `info`), a second instance constructs and serves without panicking, and a host-owned subscriber is retained and receives the FFI's boundary diagnostics. Node, Lambda, and Python inherit through this one call site with no binding-code changes.
+**Pointers:** `crates/ffi/src/lib.rs:102-184` (`new_with_base_path`; insert the call after the base-path override ending at line 126, before the `NormalisationLimits`/`Runtime::new` block at lines 127-133); `crates/server/src/lib.rs:9` (`pub mod telemetry` — the call is `oidc_exchange::telemetry::init_telemetry(&config.telemetry)`); `crates/ffi/src/lib.rs:218-227` (the panic-boundary `tracing::error!` this makes visible); `crates/ffi/src/lib.rs:311-315` (the deterministic `invalid request headers dropped at FFI boundary` warning the host-respect test captures); `crates/ffi/src/lib.rs:620-671` (`embedder_tests` — the minimal admin-role SQLite config fixture shape to reuse); `crates/ffi/src/lib.rs:335` (`with_router_for_test` bypasses `new`, so in-crate unit tests stay uninstalled); `crates/ffi/Cargo.toml:10-29` (no `[dependencies]` change; `tracing-subscriber` stays dev-only at line 29); `bindings/nodejs/src/lib.rs:77-100` (napi constructor — confirms inheritance, no edit).
+
+## Steps
+
+- [x] Call `oidc_exchange::telemetry::init_telemetry(&config.telemetry)` in `new_with_base_path`, immediately after config resolution and the base-path override (after `lib.rs:126`) and before the runtime is created and `build_service` runs, so bootstrap-time warnings (e.g. the single-plane `role = "all"` warning) are captured.
+- [x] Map a returned error — practically unreachable once already-set maps to `Ok` — to `FfiError { code: "SERVICE_ERROR" }`, the same class as a `build_service` failure; config-parse failures precede the install and keep reaching the host as `CONFIG_ERROR`.
+- [x] Add `crates/ffi/tests/telemetry_install.rs` (its own binary — the global dispatcher is process-wide): construct an instance over the minimal admin-role SQLite config (the `embedder_tests` fixture shape); assert `tracing::dispatcher::has_been_set()` is true; construct a second instance and assert it neither panics nor fails — it serves `/health`.
+- [x] Add `crates/ffi/tests/telemetry_host_respect.rs`: install a capturing subscriber via `tracing::subscriber::set_global_default` before construction; construction succeeds; a request carrying an invalid header name is answered while the host's subscriber captures the `invalid request headers dropped at FFI boundary` warning.
+- [x] Make no `[dependencies]` change in `crates/ffi/Cargo.toml` — the install rides the existing server-crate dependency — and no change in `bindings/nodejs`, `bindings/lambda`, or `bindings/python`.
+- [x] Confirm the in-crate unit tests still pass unmodified: `with_router_for_test` bypasses `new`, so scoped `set_default` captures stay valid; the existing `embedder_tests` binary now installs the global subscriber for its process, which is harmless.
+
+## Definition of done
+
+- [x] `telemetry_install.rs` proves construction installs the subscriber (`has_been_set()` true) and that a second construction succeeds and serves `/health` — `try_init` idempotency pinned across instances.
+- [x] `telemetry_host_respect.rs` proves a pre-installed host subscriber survives construction and captures the deterministic FFI boundary warning during a real request — host-respect and the end-to-end operator signal pinned.
+- [x] `crates/ffi/Cargo.toml` `[dependencies]` is unchanged (`tracing-subscriber` remains dev-only) and no file under `bindings/` is touched.
+- [x] Existing FFI suites — the in-crate unit tests, `embedder_tests`, and `crates/ffi/tests/integration.rs` — pass unmodified, and config-parse failures still surface as `CONFIG_ERROR` (negative space for the install's placement after parsing).
+- [x] Meets the repo definition of done (`cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace` — see plan.md baseline).
+- [x] Reviewable: run the two new FFI test binaries and observe both scenarios pass; optionally run any embedded example with `RUST_LOG=info` and see JSON tracing lines on stdout.
