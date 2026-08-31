@@ -1,7 +1,7 @@
 # Done Certificate — Task 03: StoreError joins the audit vocabulary and datamodel schema
 
 **Task:** [03-store_error_audit_vocabulary.md](03-store_error_audit_vocabulary.md) · **Plan:** [plan.md](../plan.md)
-**State:** Authored 2026-08-31 — unverified
+**State:** Validated 2026-08-31
 
 > Verification protocol for Task 03. A validating agent discharges it: collect each obligation's
 > evidence, run its checks, set the Status, then derive the Conclusion by the rubric. Do not mark
@@ -44,7 +44,13 @@ names (a file location, a test result, or an execution trace) — not by asserti
     `vec![...]` constructions the compiler ties to the enum (an added variant missing from a
     builder must be a test failure, not silently absent). If the builders use a pattern that does
     not force exhaustiveness, flag it.
-  - *Status:* ☐ unverified
+  - *Status:* ☑ SATISFIED — `StoreError` appended last to `AuditEventType` (audit.rs:82-86, doc
+    comment records the operational, non-security classification and the deliberate exclusion
+    from `SecurityEvent`) and to `AuditFailure` (audit.rs:378-381); `store_error` appended to
+    `event_type` (schema:69) and `outcome.reason` (schema:85, before the trailing `null`);
+    builders list it (mirror test:47, :74) with wildcard-free `match` guards (:50-56, :77-81 —
+    a missing variant is a compile error, exhaustiveness confirmed).
+    `cargo nextest run -p oidc-exchange-core -E 'binary(datamodel_schema_mirror)'` → 3 passed.
 
 - **O2 — Both new variants serialize to `store_error`.**
   - *Claim:* serde renders `AuditEventType::StoreError` and `AuditFailure::StoreError` as
@@ -54,7 +60,11 @@ names (a file location, a test result, or an execution trace) — not by asserti
     was added; confirm the mirror test's rendering helper (the `rendered` mapping) produces
     `store_error` for both — the mirror equality in O1 is the executable proof; cite the relevant
     assertion lines.
-  - *Status:* ☐ unverified
+  - *Status:* ☑ SATISFIED — the diff adds no per-variant `#[serde(rename)]` and no custom
+    `Serialize` (only variants + doc comments); both enums keep their existing
+    `#[serde(rename_all = "snake_case")]`. The mirror's `rendered()` (test:16-22) serde-renders
+    each variant; the order-exact equality assertions (test:101-105, :127-131) passed, proving
+    both new variants render `"store_error"`.
 
 - **O3 — Negative space: `SecurityEvent` unchanged; no existing enum value or serialized name changes; existing suites pass unmodified.**
   - *Claim:* the closed security-outcome set is not extended and nothing existing is renamed or
@@ -67,7 +77,14 @@ names (a file location, a test result, or an execution trace) — not by asserti
     `exchange_mandatory_outcomes.rs`, `refresh.rs`, `refresh_mandatory_outcomes.rs`, and
     `revoke.rs` suites green without edits.
   - *Checks:* grep `SecurityEvent` for `StoreError` — expect no match.
-  - *Status:* ☐ unverified
+  - *Status:* ☑ SATISFIED — `jj diff` touches only audit.rs (+8: the two variants and doc
+    comments), the mirror test builders, and the two schema enum lines; `SecurityEvent` and
+    `into_audit_event` (audit.rs:263) untouched; the `SecurityEvent` enum body greps clean for
+    `StoreError` (0 matches). The audit, exchange, exchange_mandatory_outcomes, refresh,
+    refresh_mandatory_outcomes, and revoke binaries ran unmodified: 91 tests, 91 passed.
+    The only wildcard-free matches over either enum in the workspace are the mirror builders
+    (both updated); all other matches carry `_` arms (operator_auth.rs:62-66,
+    internal_auth.rs:198-201).
 
 - **O4 — Meets the repo definition of done.**
   - *Claim:* format, lint, and the workspace test suite pass.
@@ -76,7 +93,10 @@ names (a file location, a test result, or an execution trace) — not by asserti
     `cargo nextest run --workspace` — expect all clean/green. (The domain-type change's canonical
     sidecar update travels with the change spec's Merge plan, per the plan's Decisions — do not
     fail this obligation on the sidecar.)
-  - *Status:* ☐ unverified
+  - *Status:* ☑ SATISFIED — `cargo fmt --check --all` clean (exit 0);
+    `cargo clippy --workspace -- -D warnings` clean (exit 0); `cargo nextest run --workspace`
+    → 927 passed, 0 failed, 78 skipped — identical to the plan's green baseline. Sidecar
+    absent as the residue directs.
 
 - **O5 — Reviewable: run the mirror test and inspect the schema diff — exactly two enum entries added (Reviewable).**
   - *Claim:* a reviewer can run the mirror test and read the `schemas/datamodel.schema.json`
@@ -85,15 +105,22 @@ names (a file location, a test result, or an execution trace) — not by asserti
   - *Evidence to collect:* run
     `cargo nextest run -p oidc-exchange-core -E 'binary(datamodel_schema_mirror)'` — expect PASS;
     produce the schema diff and confirm its shape.
-  - *Status:* ☐ unverified
+  - *Status:* ☑ SATISFIED — exercised: mirror binary run → 3 tests, 3 passed. The
+    `schemas/datamodel.schema.json` diff (`jj diff -r @ --git`) contains exactly two changed
+    lines, each appending one entry: `"store_error"` at the end of `event_type` and
+    `"store_error"` before the trailing `null` in `outcome.reason` — nothing else.
 
 ## Regression check
 
 - The stdout audit adapter (`crates/adapters/src/stdout_audit/mod.rs`) serializes an
   `AuditEvent` carrying an existing type (e.g. `TokenExchange`) → expect identical wire output
-  to before the change : ☐ (PRESERVED / REGRESSION)
+  to before the change : ☑ PRESERVED — both enums keep derived
+  `#[serde(rename_all = "snake_case")]`; an end-appended variant changes no existing variant's
+  wire name, and the adapter's own serialization tests passed in the 927-green workspace run.
 - `crates/core/tests/exchange_mandatory_outcomes.rs` consumes the terminal-event mapping over
-  the unchanged `SecurityEvent` set → expect the suite passes unmodified : ☐ (PRESERVED / REGRESSION)
+  the unchanged `SecurityEvent` set → expect the suite passes unmodified : ☑ PRESERVED — the
+  suite file is untouched by the diff and passed in the targeted six-binary run (91/91) and the
+  workspace run; `SecurityEvent` gains no variant, so its terminal-event mapping is unchanged.
 
 ## Residue
 
@@ -109,6 +136,10 @@ names (a file location, a test result, or an execution trace) — not by asserti
 NOT_DONE — any load-bearing obligation UNSATISFIED, or a REGRESSION found.
 PARTIAL — all obligations SATISFIED except one or more UNVERIFIED, and no regression.
 DONE — every obligation SATISFIED, regression PRESERVED, evidence sufficient for each. -->
-VERDICT: ☐ (DONE | PARTIAL | NOT_DONE)
-CONFIDENCE: ☐ (high | medium | low)
-SUMMARY: ☐
+VERDICT: DONE
+CONFIDENCE: high
+SUMMARY: O1–O5 are all SATISFIED on collected evidence — mirror binary 3/3 green, both
+variants serde-render `store_error` via the existing snake_case derives, the diff is exactly
+the two end-appended variants plus the two schema entries with `SecurityEvent` untouched, and
+fmt/clippy/workspace (927 passed, 78 skipped, baseline-identical) are clean — with both named
+regression callers PRESERVED.

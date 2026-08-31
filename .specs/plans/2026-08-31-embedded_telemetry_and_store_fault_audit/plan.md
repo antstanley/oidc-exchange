@@ -1,6 +1,6 @@
 # Plan: Embedded telemetry install and the exchange store-fault audit record
 
-**Status:** Draft · **Layout:** kanban · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md](../../changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md)
+**Status:** In progress · **Layout:** kanban · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md](../../changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md)
 
 Four tasks in two independent two-task chains close GitHub issue #47's two gaps. The G1 chain
 (01 → 02) makes `init_telemetry` idempotent and host-respecting via `try_init`, then installs it
