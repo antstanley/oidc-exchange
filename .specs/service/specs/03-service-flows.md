@@ -17,10 +17,14 @@ already parsed the form into a `TokenGrant`, so `AppService::exchange` receives 
 ([04-http-api.md](04-http-api.md)). Emission is terminal and single: the flow maps its result
 to exactly one `SecurityEvent`, with fixed classification strings rather than upstream error
 text (an assertion-binding rejection's detail-enriched `ValidationFailed` record is that
-terminal event, and infrastructure store failures are 5xx conditions, not recorded
-authentication outcomes). Success is emitted after storing the session and signing the access
-token; under `audit.durability = "enforce"`, a failed terminal emit revokes that just-stored
-session before returning the error. Principal creation is a separate state-change event, so a
+terminal event). Infrastructure store failures remain 5xx conditions and are never recorded
+as authentication outcomes; instead of returning silently, the flow records one operational
+`StoreError` audit event for them — `Error` severity, outcome `failure`/`store_error`,
+`detail.store_detail` carrying the store's diagnostic — through best-effort `emit_audit`,
+whose own failure is discarded so the original `StoreError` always reaches the caller.
+Success is emitted after storing the session and signing the access token; under
+`audit.durability = "enforce"`, a failed terminal emit revokes that just-stored session
+before returning the error. Principal creation is a separate state-change event, so a
 losing JIT-registration racer emits none.
 
 1. **Resolve provider** — look up `request.provider` in the `providers` map; missing →
@@ -67,7 +71,8 @@ losing JIT-registration racer emits none.
 
    Store failures during the two atomic operations propagate as typed infrastructure
    errors (`StoreError` → 5xx), never disguised as client-fault rejections; no rejection
-   audit is emitted for them.
+   audit is emitted for them — the exchange wrapper records them as the flow's single
+   operational `StoreError` event instead.
 4. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
    - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
    - **Found, active** → re-apply the registration policy against the assertion's current
@@ -319,11 +324,14 @@ emit_audit(AuditEvent)                      — best-effort
 ```
 
 Severity follows RFC 5424 (emergency 0 … debug 7); lower is more severe. Every shipped flow
-uses the mandatory channel. The HTTP public per-IP throttle also emits `ThrottleExceeded`
-through this same API before returning its terminal `429`; the middleware
-logs an enforce-mode emission error but preserves the `429`, so audit-sink behavior cannot make
-the denial unsafe. `emit_audit` remains available for operational events supplied by embedders,
-and only that best-effort channel is governed by `emit_threshold` and `blocking_threshold`.
+emits its security outcomes on the mandatory channel. The HTTP public per-IP throttle also
+emits `ThrottleExceeded` through this same API before returning its terminal `429`; the
+middleware logs an enforce-mode emission error but preserves the `429`, so audit-sink
+behavior cannot make the denial unsafe. `emit_audit` carries operational events — the
+exchange flow's infrastructure `StoreError` record, and events supplied by embedders — and
+only that best-effort channel is governed by `emit_threshold` and `blocking_threshold`; the
+exchange wrapper discards a store-fault emission failure (already logged by the fallback) so
+an audit-sink error can never displace the `StoreError` the caller must receive.
 
 ## Admin operations (`user_admin.rs`)
 

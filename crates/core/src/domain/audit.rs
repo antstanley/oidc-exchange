@@ -78,6 +78,11 @@ pub enum AuditEventType {
     InvalidCredential,
     /// A rejected operator authentication: no mechanism usable/configured.
     NotConfigured,
+    /// An infrastructure store fault surfaced while serving a request: an
+    /// operational event about the deployment's health, not a judgement about
+    /// a caller or credential — so it is deliberately not a [`SecurityEvent`]
+    /// and never joins the closed security-outcome set.
+    StoreError,
 }
 
 /// The server's confidence in the address recorded on an audit event.
@@ -373,6 +378,9 @@ pub enum AuditFailure {
     InvalidCredential,
     /// A rejected operator authentication: no mechanism usable/configured.
     NotConfigured,
+    /// An infrastructure store fault: the backing store failed, so the
+    /// operation's outcome names the fault rather than a caller's error.
+    StoreError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

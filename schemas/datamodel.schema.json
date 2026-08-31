@@ -66,7 +66,7 @@
         "id": { "type": "string", "description": "ULID" },
         "timestamp": { "type": "string", "format": "date-time" },
         "severity": { "enum": ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug"] },
-        "event_type": { "enum": ["token_exchange", "token_refresh", "token_revocation", "session_revoked", "all_sessions_revoked", "user_created", "user_updated", "user_suspended", "user_deleted", "validation_failed", "registration_denied", "provider_error", "unauthorized", "throttle_exceeded", "refresh_token_reuse", "missing_credential", "invalid_credential", "not_configured"] },
+        "event_type": { "enum": ["token_exchange", "token_refresh", "token_revocation", "session_revoked", "all_sessions_revoked", "user_created", "user_updated", "user_suspended", "user_deleted", "validation_failed", "registration_denied", "provider_error", "unauthorized", "throttle_exceeded", "refresh_token_reuse", "missing_credential", "invalid_credential", "not_configured", "store_error"] },
         "actor": { "type": ["string", "null"], "description": "User ID if known" },
         "provider": { "type": ["string", "null"] },
         "operator": {
@@ -82,7 +82,7 @@
           "required": ["status"],
           "properties": {
             "status": { "enum": ["success", "failure"] },
-            "reason": { "enum": ["authentication_failed", "registration_denied", "principal_suspended", "provider_rejected", "throttle_exceeded", "refresh_token_reuse", "missing_credential", "invalid_credential", "not_configured", null] }
+            "reason": { "enum": ["authentication_failed", "registration_denied", "principal_suspended", "provider_rejected", "throttle_exceeded", "refresh_token_reuse", "missing_credential", "invalid_credential", "not_configured", "store_error", null] }
           }
         }
       }

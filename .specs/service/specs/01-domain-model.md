@@ -183,7 +183,8 @@ struct AuditEvent {
 `AuditEventType` variants: `TokenExchange`, `TokenRefresh`, `TokenRevocation`,
 `SessionRevoked`, `AllSessionsRevoked`, `UserCreated`, `UserUpdated`, `UserSuspended`,
 `UserDeleted`, `ValidationFailed`, `RegistrationDenied`, `ProviderError`, `Unauthorized`,
-`ThrottleExceeded`, `RefreshTokenReuse`. `ip_address_source` records whether the optional address was server-observed
+`ThrottleExceeded`, `RefreshTokenReuse`, `MissingCredential`, `InvalidCredential`,
+`NotConfigured`, `StoreError`. `ip_address_source` records whether the optional address was server-observed
 (`peer`), established by a trusted proxy (`forwarded`), client-asserted (`asserted`), or unavailable
 (`unknown`). `AuditOutcome` serializes to `{ "status": "success" }` or
 `{ "status": "failure", "reason": … }`.

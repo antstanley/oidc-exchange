@@ -124,6 +124,22 @@ impl OidcExchange {
             // `Config::resolve` would: absolute, non-root, no trailing slash.
             config.server.base_path = Some(base_path.to_string());
         }
+        // Install the process-wide telemetry subscriber at the one FFI
+        // construction seam, so every embedded deployment (Node, Lambda,
+        // Python) inherits operator-visible diagnostics with no binding-code
+        // changes. Placement matters twice over: after config resolution, so
+        // parse failures above still reach the host as `CONFIG_ERROR` values;
+        // before the runtime is created and `build_service` runs, so
+        // bootstrap-time warnings (e.g. the single-plane `role = "all"`
+        // warning) are captured too. `init_telemetry` is idempotent and
+        // host-respecting — an already-set global dispatcher (a second
+        // instance, or a host-owned subscriber) is retained and maps to
+        // `Ok(())` — so a returned error is practically unreachable and
+        // shares the `SERVICE_ERROR` class of a `build_service` failure.
+        oidc_exchange::telemetry::init_telemetry(&config.telemetry).map_err(|e| FfiError {
+            code: "SERVICE_ERROR".to_string(),
+            message: e.to_string(),
+        })?;
         let limits = NormalisationLimits {
             max_body_bytes: config.server.max_request_body_bytes as u64,
         };
