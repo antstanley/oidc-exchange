@@ -112,7 +112,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-index_change_specs/plan.md](plans/2026-08-05-index_change_specs/plan.md) | Done | index-only documentation change (this README's change/plan tables); no change spec |
 | [plans/2026-08-25-close_r2_audit_code_divergences/plan.md](plans/2026-08-25-close_r2_audit_code_divergences/plan.md) | Draft | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) |
 | [plans/2026-08-31-per_provider_email_verification_overrides/plan.md](plans/2026-08-31-per_provider_email_verification_overrides/plan.md) | Done | [changes/merged/2026-08-31-per_provider_email_verification_overrides.md](changes/merged/2026-08-31-per_provider_email_verification_overrides.md) |
-| [plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md](plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md) | Draft | [changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md) |
+| [plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md](plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md) | Done | [changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md) |
 
 ## Conventions
 
