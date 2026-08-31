@@ -9,16 +9,16 @@
 
 ## Steps
 
-- [ ] Add `StoreError` to `AuditEventType` (serde `snake_case` renders it `store_error`), with a doc comment recording why it is an operational event and never a `SecurityEvent`.
-- [ ] Add `StoreError` to `AuditFailure` so an outcome can name the reason.
-- [ ] Add `store_error` to the `event_type` enum and the `outcome.reason` enum in `schemas/datamodel.schema.json`.
-- [ ] Add the new variants to the mirror test's exhaustive `all_event_types` and `all_failures` builders — the compiler forces this once the enums grow; the mirror equality then forces the schema edit. Append `StoreError`/`store_error` at the END of both Rust enums and both schema arrays — the mirror asserts equality exactly, in declaration order (`datamodel_schema_mirror.rs:99-103`).
-- [ ] Leave `SecurityEvent` and every `into_audit_event` mapping unchanged — the closed security-outcome set this change deliberately does not extend.
+- [x] Add `StoreError` to `AuditEventType` (serde `snake_case` renders it `store_error`), with a doc comment recording why it is an operational event and never a `SecurityEvent`.
+- [x] Add `StoreError` to `AuditFailure` so an outcome can name the reason.
+- [x] Add `store_error` to the `event_type` enum and the `outcome.reason` enum in `schemas/datamodel.schema.json`.
+- [x] Add the new variants to the mirror test's exhaustive `all_event_types` and `all_failures` builders — the compiler forces this once the enums grow; the mirror equality then forces the schema edit. Append `StoreError`/`store_error` at the END of both Rust enums and both schema arrays — the mirror asserts equality exactly, in declaration order (`datamodel_schema_mirror.rs:99-103`).
+- [x] Leave `SecurityEvent` and every `into_audit_event` mapping unchanged — the closed security-outcome set this change deliberately does not extend.
 
 ## Definition of done
 
-- [ ] `cargo nextest run -p oidc-exchange-core -E 'binary(datamodel_schema_mirror)'` passes with `store_error` present in both enum mirrors — the schema and the code cannot drift.
-- [ ] `AuditEventType::StoreError` and `AuditFailure::StoreError` serialize to `store_error` (covered by the mirror test's serde rendering; no bespoke serializer added).
-- [ ] Negative space: `SecurityEvent` gains no store-fault variant and no existing enum value or serialized name changes — the existing audit, exchange, refresh, and revoke suites pass unmodified.
-- [ ] Meets the repo definition of done (`cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace` — see plan.md baseline).
-- [ ] Reviewable: run the mirror test and inspect the `schemas/datamodel.schema.json` diff — exactly two enum entries added, nothing else.
+- [x] `cargo nextest run -p oidc-exchange-core -E 'binary(datamodel_schema_mirror)'` passes with `store_error` present in both enum mirrors — the schema and the code cannot drift.
+- [x] `AuditEventType::StoreError` and `AuditFailure::StoreError` serialize to `store_error` (covered by the mirror test's serde rendering; no bespoke serializer added).
+- [x] Negative space: `SecurityEvent` gains no store-fault variant and no existing enum value or serialized name changes — the existing audit, exchange, refresh, and revoke suites pass unmodified.
+- [x] Meets the repo definition of done (`cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo nextest run --workspace` — see plan.md baseline).
+- [x] Reviewable: run the mirror test and inspect the `schemas/datamodel.schema.json` diff — exactly two enum entries added, nothing else.

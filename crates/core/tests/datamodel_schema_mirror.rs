@@ -44,6 +44,7 @@ fn all_event_types() -> Vec<AuditEventType> {
         MissingCredential,
         InvalidCredential,
         NotConfigured,
+        StoreError,
     ];
     for variant in &all {
         match variant {
@@ -51,7 +52,7 @@ fn all_event_types() -> Vec<AuditEventType> {
             | AllSessionsRevoked | UserCreated | UserUpdated | UserSuspended | UserDeleted
             | ValidationFailed | RegistrationDenied | ProviderError | Unauthorized
             | ThrottleExceeded | RefreshTokenReuse | MissingCredential | InvalidCredential
-            | NotConfigured => {}
+            | NotConfigured | StoreError => {}
         }
     }
     all
@@ -70,12 +71,13 @@ fn all_failures() -> Vec<AuditFailure> {
         MissingCredential,
         InvalidCredential,
         NotConfigured,
+        StoreError,
     ];
     for variant in &all {
         match variant {
             AuthenticationFailed | RegistrationDenied | PrincipalSuspended | ProviderRejected
             | ThrottleExceeded | RefreshTokenReuse | MissingCredential | InvalidCredential
-            | NotConfigured => {}
+            | NotConfigured | StoreError => {}
         }
     }
     all
