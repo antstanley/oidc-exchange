@@ -390,7 +390,11 @@
         "provider_error",
         "unauthorized",
         "throttle_exceeded",
-        "refresh_token_reuse"
+        "refresh_token_reuse",
+        "missing_credential",
+        "invalid_credential",
+        "not_configured",
+        "store_error"
       ]
     },
     "AuditOutcome": {

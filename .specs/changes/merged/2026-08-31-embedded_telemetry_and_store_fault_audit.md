@@ -1,6 +1,6 @@
 # Change: Give embedded deployments an operator-visible signal for internal exchange faults
 
-**Status:** Proposed · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Target:** crates/ffi, crates/server, crates/core, schemas (service, bindings)
+**Status:** Merged · **Date:** 2026-08-31 · **Merged:** 2026-08-31 · **Owner:** Ant Stanley · **Target:** crates/ffi, crates/server, crates/core, schemas (service, bindings)
 
 Close the two independent gaps behind GitHub issue #47 (affects `@oidc-exchange/*` 0.4.0,
 tag `v0.4.0`): in an embedded deployment — the Node/Lambda/Python bindings over
@@ -54,15 +54,15 @@ deliberately does not emit.
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/service/specs/07-telemetry-and-audit.md`](../service/specs/07-telemetry-and-audit.md) | Modify: the subscriber-install paragraph names both entrypoints and the idempotent, host-respecting install; the `RUST_LOG` paragraph names the embedded log destination; the Audit section's channel sentence records the exchange flow's operational `StoreError` event on the best-effort channel |
-| [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md) | Modify: the exchange intro's emission paragraph records the operational `StoreError` event; step 3's store-failure paragraph points at it; the Audit-emission closing paragraph stops describing `emit_audit` as embedder-only |
-| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md) | Modify: the `AuditEventType` variant list gains `StoreError` (and, per the republished-list completeness rule, the three shipped operator-auth variants it predates) |
-| [`.specs/service/specs/canonical-types.schema.json`](../service/specs/canonical-types.schema.json) | Modify: the `AuditEventType` `$def` enum — the only entity this change alters (the sidecar's `AuditOutcome.reason` is an untyped string and needs no edit) |
-| [`.specs/bindings/specs/01-ffi-core.md`](../bindings/specs/01-ffi-core.md) | Add: a telemetry-install responsibility. Modify: the "no global state" sentence names the one deliberate piece of process-global state. Add: a constructor-installed-telemetry Decision |
-| [`.specs/bindings/specs/02-nodejs.md`](../bindings/specs/02-nodejs.md) | None — the binding marshals only; telemetry install is inherited from the FFI core it already defers to, with no API or code change |
-| [`.specs/bindings/specs/04-lambda.md`](../bindings/specs/04-lambda.md) | None — pure-TS adapter over the Node binding; the host process's stdout (CloudWatch) receives the inherited JSON lines |
-| [`.specs/bindings/specs/03-python.md`](../bindings/specs/03-python.md) | None — same inheritance through `crates/ffi` |
-| [`.specs/service/specs/00-overview.md`](../service/specs/00-overview.md) | None — its audit goal (security outcomes mandatory, "operational events on a best-effort channel") becomes true of a shipped in-tree operational event exactly as written |
+| [`.specs/service/specs/07-telemetry-and-audit.md`](../../service/specs/07-telemetry-and-audit.md) | Modify: the subscriber-install paragraph names both entrypoints and the idempotent, host-respecting install; the `RUST_LOG` paragraph names the embedded log destination; the Audit section's channel sentence records the exchange flow's operational `StoreError` event on the best-effort channel |
+| [`.specs/service/specs/03-service-flows.md`](../../service/specs/03-service-flows.md) | Modify: the exchange intro's emission paragraph records the operational `StoreError` event; step 3's store-failure paragraph points at it; the Audit-emission closing paragraph stops describing `emit_audit` as embedder-only |
+| [`.specs/service/specs/01-domain-model.md`](../../service/specs/01-domain-model.md) | Modify: the `AuditEventType` variant list gains `StoreError` (and, per the republished-list completeness rule, the three shipped operator-auth variants it predates) |
+| [`.specs/service/specs/canonical-types.schema.json`](../../service/specs/canonical-types.schema.json) | Modify: the `AuditEventType` `$def` enum — the only entity this change alters (the sidecar's `AuditOutcome.reason` is an untyped string and needs no edit) |
+| [`.specs/bindings/specs/01-ffi-core.md`](../../bindings/specs/01-ffi-core.md) | Add: a telemetry-install responsibility. Modify: the "no global state" sentence names the one deliberate piece of process-global state. Add: a constructor-installed-telemetry Decision |
+| [`.specs/bindings/specs/02-nodejs.md`](../../bindings/specs/02-nodejs.md) | None — the binding marshals only; telemetry install is inherited from the FFI core it already defers to, with no API or code change |
+| [`.specs/bindings/specs/04-lambda.md`](../../bindings/specs/04-lambda.md) | None — pure-TS adapter over the Node binding; the host process's stdout (CloudWatch) receives the inherited JSON lines |
+| [`.specs/bindings/specs/03-python.md`](../../bindings/specs/03-python.md) | None — same inheritance through `crates/ffi` |
+| [`.specs/service/specs/00-overview.md`](../../service/specs/00-overview.md) | None — its audit goal (security outcomes mandatory, "operational events on a best-effort channel") becomes true of a shipped in-tree operational event exactly as written |
 
 `schemas/datamodel.schema.json` is a code-side artifact, not a canonical page; its delta is
 in [The delta → G2](#g2--record-the-exchange-flows-infrastructure-store-fault) below.
@@ -230,7 +230,7 @@ The paragraph's closing sentence — "Shipped flows use the mandatory channel." 
 > of a 5xx condition, deliberately not a `SecurityEvent`
 > ([03-service-flows.md](03-service-flows.md)).
 
-(The pending [`2026-08-25-close_r2_audit_code_divergences.md`](2026-08-25-close_r2_audit_code_divergences.md)
+(The pending [`2026-08-25-close_r2_audit_code_divergences.md`](../2026-08-25-close_r2_audit_code_divergences.md)
 rewrites the same sentence to name the refresh flow's Debug-level `ValidationFailed`
 exception; whichever merges second composes both qualifications — see the Merge plan.)
 
@@ -443,13 +443,13 @@ needed is `bindings/nodejs/src/lib.rs:78-100`. GitHub issue #47 is the incident 
 2. Coordinate the shared pens before applying mechanically:
    - `03-service-flows.md` → Audit emission and `07-telemetry-and-audit.md` → Audit are
      also rewritten by the pending
-     [`2026-08-25-close_r2_audit_code_divergences.md`](2026-08-25-close_r2_audit_code_divergences.md)
+     [`2026-08-25-close_r2_audit_code_divergences.md`](../2026-08-25-close_r2_audit_code_divergences.md)
      (the refresh flow's Debug-level `ValidationFailed` exception). Whichever spec merges
      second must re-verify both paragraphs against `service/mod.rs` and compose the two
      qualifications — the refresh exception and the exchange `StoreError` operational
      record — rather than overwrite one with the other.
    - `07-telemetry-and-audit.md` → Telemetry's exporter list is rewritten by the pending
-     [`2026-06-24-complete_telemetry_exporters.md`](2026-06-24-complete_telemetry_exporters.md)
+     [`2026-06-24-complete_telemetry_exporters.md`](../2026-06-24-complete_telemetry_exporters.md)
      and gains a `prometheus` row from the R2 spec; this change's two Telemetry blocks
      touch only the flanking paragraphs, but the merger must confirm the list between
      them still matches `init_telemetry` after all pens have landed. The 2026-06-24 pen
@@ -562,7 +562,7 @@ needed is `bindings/nodejs/src/lib.rs:78-100`. GitHub issue #47 is the incident 
 - Should the operational `StoreError` record extend to the refresh and revoke flows (and
   the nonce mint's collision `StoreError`), now that the event type exists?
 - When the OTLP/X-Ray exporters land
-  ([`2026-06-24-complete_telemetry_exporters.md`](2026-06-24-complete_telemetry_exporters.md)),
+  ([`2026-06-24-complete_telemetry_exporters.md`](../2026-06-24-complete_telemetry_exporters.md)),
   embedded Lambda deployments (the TS binding over `crates/ffi`) will have no
   per-invocation `flush_telemetry` seam — the server binary's Lambda mode flushes via
   `run_lambda`, but the FFI exposes no flush. Does the FFI need one before a buffering

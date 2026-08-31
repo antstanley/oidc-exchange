@@ -1,6 +1,6 @@
 # FFI Core (`crates/ffi`)
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/ffi
+**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/ffi
 
 The shared Rust layer the language bindings consume. It wraps the server's axum router behind
 a small synchronous interface and owns the tokio runtime so a non-async host can call it.
@@ -18,6 +18,13 @@ a small synchronous interface and owns the tokio runtime so a non-async host can
 - Convert a primitive HTTP request into an axum request, route it, and convert the response
   back to primitives.
 - Map every error into a stable `FfiError`; never let a panic cross the FFI boundary.
+- Install the process-wide `tracing` subscriber at construction — the same `init_telemetry`
+  the server binary runs at startup
+  ([07-telemetry-and-audit.md](../../service/specs/07-telemetry-and-audit.md)) — after
+  config resolution and before any adapter is built, so internal diagnostics (the 500 error
+  mapping's log line, the panic-boundary record, adapter warnings) reach the embedder's
+  stdout under `RUST_LOG` control. The install is idempotent and host-respecting: an
+  already-set global dispatcher is retained untouched.
 
 ## Public API (`crates/ffi/src/lib.rs`)
 
@@ -47,7 +54,10 @@ pub struct FfiError    { pub code: String, pub message: String }   // impl Error
 owned runtime via `runtime.block_on`, and collects the response status, headers, and body into
 an `FfiResponse`. The router is built once in `new`/`from_file` and cloned per request (axum
 routers are cheap to clone). Multiple `OidcExchange` instances with different configs can
-coexist; there is no global state.
+coexist; the one deliberate piece of process-global state is the `tracing` dispatcher — the
+first construction (or the host) installs it, and every later instance observes it
+unchanged, so the `[telemetry]` table of any instance after the first installer does not
+re-route logs.
 
 ## Implementation layout
 
@@ -73,6 +83,14 @@ Depends on `crates/server` (router construction), `crates/core`, and `tokio`/`ax
   source set differs — the supplied document plus `OIDC_EXCHANGE__…` overrides, with no
   `OIDC_EXCHANGE_ENV` file overlay.** A second config pipeline is exactly how the published
   Node, Python, and Lambda packages came to load documented secret placeholders as literal text.
+- *Constructor-installed telemetry, not a host-called hook.* **`OidcExchange` construction
+  installs the subscriber itself, through the server's idempotent `init_telemetry`.** An
+  exported `initTelemetry()` that Node, Lambda, and Python hosts must remember to call at
+  cold start recreates the silent-discard bug for every host that forgets; installing at
+  construction is fail-safe, and `try_init` keeps it correct when the host already owns a
+  subscriber. Reusing the server's function keeps one telemetry pipeline for both
+  entrypoints and adds no `tracing-subscriber` dependency to `crates/ffi` — the install
+  rides the existing server-crate dependency.
 
 ### Open questions
 

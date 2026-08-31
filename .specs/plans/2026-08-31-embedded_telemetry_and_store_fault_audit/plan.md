@@ -1,6 +1,6 @@
 # Plan: Embedded telemetry install and the exchange store-fault audit record
 
-**Status:** Done · **Layout:** kanban · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md](../../changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md)
+**Status:** Done · **Layout:** kanban · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Source spec:** [.specs/changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md](../../changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md)
 
 Four tasks in two independent two-task chains close GitHub issue #47's two gaps. The G1 chain
 (01 → 02) makes `init_telemetry` idempotent and host-respecting via `try_init`, then installs it
@@ -18,7 +18,7 @@ and the `canonical-types.schema.json` fold-in stay with the change spec's own Me
 
 ## Source and definition-of-done baseline
 
-- **Spec.** [2026-08-31-embedded_telemetry_and_store_fault_audit.md](../../changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md) —
+- **Spec.** [2026-08-31-embedded_telemetry_and_store_fault_audit.md](../../changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md) —
   the executable deltas G1 and G2 under its *The delta* section, including
   `schemas/datamodel.schema.json` (a code-side artifact, per the spec). Canonical targets whose
   prose the code makes true: [07-telemetry-and-audit](../../service/specs/07-telemetry-and-audit.md),

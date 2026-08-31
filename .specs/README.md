@@ -32,7 +32,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 
 | Change spec | Status | Targets |
 |---|---|---|
-| [changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md) | Proposed | service, bindings: tracing subscriber installed by the FFI entrypoint (idempotent `try_init`), operational `store_error` audit event for the exchange flow's infrastructure fault (issue #47) |
+| [changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md) | Merged | service, bindings: tracing subscriber installed by the FFI entrypoint (idempotent `try_init`), operational `store_error` audit event for the exchange flow's infrastructure fault (issue #47) |
 | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) | Proposed | service: reachable Apple adapter, explicit falsy config overrides, refresh flow on the mandatory audit channel, real client provenance, throttled `/nonce`, datamodel schema catch-up, prometheus init arm |
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |
 | [changes/merged/2026-08-05-verify_admin_ui_session_jwt.md](changes/merged/2026-08-05-verify_admin_ui_session_jwt.md) | Merged | admin UI: verified discovery/JWKS session JWTs, hardened host cookie, security tests and CI gate |
@@ -112,7 +112,7 @@ board (`backlog/` · `in-progress/` · `blocked/` · `done/`).
 | [plans/2026-08-05-index_change_specs/plan.md](plans/2026-08-05-index_change_specs/plan.md) | Done | index-only documentation change (this README's change/plan tables); no change spec |
 | [plans/2026-08-25-close_r2_audit_code_divergences/plan.md](plans/2026-08-25-close_r2_audit_code_divergences/plan.md) | Draft | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) |
 | [plans/2026-08-31-per_provider_email_verification_overrides/plan.md](plans/2026-08-31-per_provider_email_verification_overrides/plan.md) | Done | [changes/merged/2026-08-31-per_provider_email_verification_overrides.md](changes/merged/2026-08-31-per_provider_email_verification_overrides.md) |
-| [plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md](plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md) | Done | [changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/2026-08-31-embedded_telemetry_and_store_fault_audit.md) |
+| [plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md](plans/2026-08-31-embedded_telemetry_and_store_fault_audit/plan.md) | Done | [changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md) |
 
 ## Conventions
 
