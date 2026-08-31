@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 use oidc_exchange_core::domain::provider::OidcProviderConfig;
-use oidc_exchange_core::domain::{IdentityClaims, ProviderTokens};
+use oidc_exchange_core::domain::{EmailVerification, IdentityClaims, ProviderTokens};
 use oidc_exchange_core::error::{Error, Result};
 use oidc_exchange_core::ports::IdentityProvider;
 use oidc_exchange_core::secret::Secret;
@@ -39,6 +39,9 @@ pub struct OidcProvider {
     jwks_cache: JwksCache,
     revocation_endpoint: Option<oidc_exchange_core::config::HttpsUrl>,
     issuer: oidc_exchange_core::config::HttpsUrl,
+    /// How this provider's `email_verified` fact is established; copied from
+    /// config at construction and fixed for the provider's life.
+    email_verification: EmailVerification,
 }
 
 impl OidcProvider {
@@ -119,8 +122,53 @@ impl OidcProvider {
             jwks_cache: JwksCache::new(jwks_uri.as_str().to_string(), OIDC_ADMITTED_ALGORITHMS),
             revocation_endpoint,
             issuer: config.issuer.clone(),
+            email_verification: config.email_verification.clone(),
         })
     }
+}
+
+/// Derive the `email_verified` fact from the token claims under the provider's
+/// configured verification mode, with explicit-claim precedence.
+///
+/// Step 1: an explicit `email_verified` claim (coercing to `Some(true)` or
+/// `Some(false)`) always passes through — the configured overrides fill
+/// absence, they never overturn the provider's own signal, so an explicit
+/// `email_verified: false` is unverified in every mode. Step 2, only when step
+/// 1 yields `None`: `Standard` stays `None`, `Claim(name)` reads the named
+/// claim through the same bool-or-string coercion, and `TrustEmail` treats a
+/// non-empty `email` string claim as verified.
+fn derive_email_verified(mode: &EmailVerification, claims: &serde_json::Value) -> Option<bool> {
+    // Step 1: explicit-claim precedence. The provider's own signal always
+    // wins, whatever mode is configured.
+    if let Some(explicit) = coerce_bool(&claims["email_verified"]) {
+        return Some(explicit);
+    }
+
+    // Step 2: the explicit claim was absent (or not coercible), so the
+    // configured mode decides how — and whether — to fill the gap.
+    let derived = match mode {
+        EmailVerification::Standard => None,
+        EmailVerification::Claim(name) => coerce_bool(&claims[name.as_str()]),
+        EmailVerification::TrustEmail => match claims["email"].as_str() {
+            Some(email) if !email.is_empty() => Some(true),
+            _ => None,
+        },
+    };
+
+    // Reaching step 2 at all means step 1 found nothing to pass through: the
+    // override can only be filling absence, never overturning a signal.
+    debug_assert!(
+        coerce_bool(&claims["email_verified"]).is_none(),
+        "step 2 must only run when the explicit claim yields nothing"
+    );
+    // Standard never fabricates a value: with no explicit claim it must stay
+    // `None`, byte-identical to the behaviour before modes existed.
+    debug_assert!(
+        *mode != EmailVerification::Standard || derived.is_none(),
+        "Standard mode must never derive a value the token did not carry"
+    );
+
+    derived
 }
 
 #[async_trait]
@@ -187,7 +235,7 @@ impl IdentityProvider for OidcProvider {
         Ok(IdentityClaims {
             subject,
             email: claims["email"].as_str().map(String::from),
-            email_verified: coerce_bool(&claims["email_verified"]),
+            email_verified: derive_email_verified(&self.email_verification, claims),
             name: claims["name"].as_str().map(String::from),
             is_private_email: None,
             // The algorithm this token actually verified with (carried by the
@@ -341,6 +389,25 @@ mod tests {
         jwks_uri: Option<String>,
         revocation_endpoint: Option<String>,
     ) -> OidcProviderConfig {
+        make_config_with_mode(
+            server_uri,
+            token_endpoint,
+            jwks_uri,
+            revocation_endpoint,
+            EmailVerification::default(),
+        )
+    }
+
+    /// The one fixture behind every provider config in this module: `make_config`
+    /// delegates here with the default (`Standard`) mode, and the mode-matrix
+    /// tests pass their mode explicitly without duplicating the fixture.
+    fn make_config_with_mode(
+        server_uri: &str,
+        token_endpoint: Option<String>,
+        jwks_uri: Option<String>,
+        revocation_endpoint: Option<String>,
+        email_verification: EmailVerification,
+    ) -> OidcProviderConfig {
         OidcProviderConfig {
             provider_id: "test-provider".into(),
             issuer: test_endpoint(server_uri),
@@ -350,7 +417,7 @@ mod tests {
             token_endpoint: token_endpoint.map(test_endpoint),
             revocation_endpoint: revocation_endpoint.map(test_endpoint),
             endpoint_origins: Vec::new(),
-            email_verification: oidc_exchange_core::domain::EmailVerification::default(),
+            email_verification,
             scopes: vec!["openid".into()],
             additional_params: HashMap::new(),
         }
@@ -1602,5 +1669,222 @@ mod tests {
             !message.contains("SENTINEL-STRUCT-ECHO"),
             "an echoed pair inside error_description must be masked, got: {message}"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Email-verification mode matrix (issue #48): validate_id_token derives
+    // `email_verified` under the two-step precedence rule. Step 1: an
+    // explicit `email_verified` claim always passes through. Step 2, only on
+    // absence: the configured mode may fill the gap. The false-beside-
+    // override cases are the proof that configuration can never overturn the
+    // provider's own signal.
+    // -------------------------------------------------------------------
+
+    /// Drive one mode-matrix case end to end: sign a token carrying the base
+    /// claims merged with `extra_claims`, validate it through a provider
+    /// configured with `mode`, and return the resulting identity. The base
+    /// claims deliberately carry neither `email` nor `email_verified`, so a
+    /// case controls the entire negative space by what it merges in.
+    async fn validate_with_mode(
+        mode: EmailVerification,
+        extra_claims: serde_json::Value,
+    ) -> IdentityClaims {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+
+        let (encoding_key, jwks, kid) = generate_rsa_test_keys();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+            .mount(&server)
+            .await;
+
+        let now = now_epoch();
+        let mut claims = json!({
+            "iss": &uri,
+            "aud": "test-client-id",
+            "sub": "user-mode-matrix",
+            "iat": now,
+            "exp": now + 3600,
+        });
+        for (key, value) in extra_claims
+            .as_object()
+            .expect("extra claims must be a JSON object")
+        {
+            claims[key.as_str()] = value.clone();
+        }
+
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(kid);
+        let id_token = encode(&header, &claims, &encoding_key).unwrap();
+
+        let config = make_config_with_mode(
+            &uri,
+            Some(format!("{uri}/oauth/token")),
+            Some(format!("{uri}/.well-known/jwks.json")),
+            None,
+            mode,
+        );
+        let provider = OidcProvider::from_config("mode-matrix", &config)
+            .await
+            .expect("from_config should succeed");
+
+        provider
+            .validate_id_token(&id_token)
+            .await
+            .expect("a well-formed token must validate in every mode")
+    }
+
+    /// The `Claim` mode used across the matrix: Entra's real-world
+    /// domain-ownership-verified claim name.
+    fn xms_edov_mode() -> EmailVerification {
+        EmailVerification::Claim("xms_edov".to_string())
+    }
+
+    // Case 1 — Claim("xms_edov"): a JSON `true` override claim fills absence.
+    #[tokio::test]
+    async fn claim_mode_derives_true_from_json_bool_override() {
+        let identity = validate_with_mode(xms_edov_mode(), json!({ "xms_edov": true })).await;
+
+        assert_eq!(identity.email_verified, Some(true));
+        assert_eq!(
+            identity.raw_claims.get("xms_edov"),
+            Some(&json!(true)),
+            "the override claim itself must still be visible in raw_claims"
+        );
+    }
+
+    // Case 2 — Claim("xms_edov"): the string "true" coerces exactly like the
+    // standard claim would (shared coerce_bool).
+    #[tokio::test]
+    async fn claim_mode_coerces_string_true_override() {
+        let identity = validate_with_mode(xms_edov_mode(), json!({ "xms_edov": "true" })).await;
+
+        assert_eq!(identity.email_verified, Some(true));
+        assert_eq!(identity.subject, "user-mode-matrix");
+    }
+
+    // Case 3 — Claim("xms_edov"): with neither the standard claim nor the
+    // override present, nothing is fabricated.
+    #[tokio::test]
+    async fn claim_mode_absent_override_stays_none() {
+        let identity = validate_with_mode(xms_edov_mode(), json!({})).await;
+
+        assert_eq!(identity.email_verified, None);
+        assert!(
+            !identity.raw_claims.contains_key("xms_edov"),
+            "the fixture must genuinely omit the override claim"
+        );
+    }
+
+    // Case 4 — Claim("xms_edov"): a JSON number is neither a boolean nor
+    // "true"/"false", so coerce_bool refuses to guess and the result is None.
+    #[tokio::test]
+    async fn claim_mode_non_coercible_override_stays_none() {
+        let identity = validate_with_mode(xms_edov_mode(), json!({ "xms_edov": 42 })).await;
+
+        assert_eq!(identity.email_verified, None);
+        assert_eq!(
+            identity.raw_claims.get("xms_edov"),
+            Some(&json!(42)),
+            "the non-coercible value was present in the token, and was refused"
+        );
+    }
+
+    // Case 5 — the precedence proof: an explicit `email_verified: false`
+    // beside `xms_edov: true` stays Some(false). Overrides fill absence; they
+    // never overturn the provider's own signal.
+    #[tokio::test]
+    async fn claim_mode_explicit_false_beats_true_override() {
+        let identity = validate_with_mode(
+            xms_edov_mode(),
+            json!({ "email_verified": false, "xms_edov": true }),
+        )
+        .await;
+
+        assert_eq!(
+            identity.email_verified,
+            Some(false),
+            "an explicit provider signal must never be overturned by configuration"
+        );
+        assert_eq!(
+            identity.raw_claims.get("xms_edov"),
+            Some(&json!(true)),
+            "the losing override claim really was in the token"
+        );
+    }
+
+    // Case 6 — TrustEmail: a non-empty email string counts as verified when
+    // the standard claim is absent.
+    #[tokio::test]
+    async fn trust_email_mode_present_email_derives_true() {
+        let identity = validate_with_mode(
+            EmailVerification::TrustEmail,
+            json!({ "email": "user@example.com" }),
+        )
+        .await;
+
+        assert_eq!(identity.email_verified, Some(true));
+        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+    }
+
+    // Case 7 — TrustEmail: no email claim at all derives nothing.
+    #[tokio::test]
+    async fn trust_email_mode_absent_email_stays_none() {
+        let identity = validate_with_mode(EmailVerification::TrustEmail, json!({})).await;
+
+        assert_eq!(identity.email_verified, None);
+        assert_eq!(identity.email, None);
+    }
+
+    // Case 8 — TrustEmail: an empty-string email is not an email; nothing is
+    // derived from it.
+    #[tokio::test]
+    async fn trust_email_mode_empty_email_stays_none() {
+        let identity =
+            validate_with_mode(EmailVerification::TrustEmail, json!({ "email": "" })).await;
+
+        assert_eq!(identity.email_verified, None);
+        assert_eq!(
+            identity.email.as_deref(),
+            Some(""),
+            "the empty email claim was present in the token, and was refused"
+        );
+    }
+
+    // Case 9 — TrustEmail: an explicit `email_verified: false` passes through
+    // even though a non-empty email would otherwise have derived true.
+    #[tokio::test]
+    async fn trust_email_mode_explicit_false_is_never_overturned() {
+        let identity = validate_with_mode(
+            EmailVerification::TrustEmail,
+            json!({ "email": "user@example.com", "email_verified": false }),
+        )
+        .await;
+
+        assert_eq!(
+            identity.email_verified,
+            Some(false),
+            "TrustEmail fills absence only; an explicit false stays false"
+        );
+        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
+    }
+
+    // Case 10 — Standard: the named pin of the 0.4.0 behaviour. An absent
+    // claim stays None even when an email (and an unconfigured override
+    // claim) are present.
+    #[tokio::test]
+    async fn standard_mode_absent_claim_stays_none() {
+        let identity = validate_with_mode(
+            EmailVerification::Standard,
+            json!({ "email": "user@example.com", "xms_edov": true }),
+        )
+        .await;
+
+        assert_eq!(
+            identity.email_verified, None,
+            "Standard mode never fabricates a value the token did not carry"
+        );
+        assert_eq!(identity.email.as_deref(), Some("user@example.com"));
     }
 }
