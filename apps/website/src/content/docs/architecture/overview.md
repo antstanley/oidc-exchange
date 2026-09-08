@@ -3,11 +3,11 @@ title: "Architecture"
 description: "Hexagonal architecture and crate structure."
 ---
 
-oidc-exchange is built with hexagonal architecture (ports and adapters). All infrastructure (databases, key management, audit systems, identity providers) sits behind trait interfaces defined in the core crate. The core business logic has zero infrastructure dependencies. Adapters are selected at runtime from configuration.
+oidc-exchange separates business logic from infrastructure through interfaces called ports. Adapters implement these interfaces for databases, signing keys, audit systems, and identity providers. This pattern is called hexagonal architecture. The core crate defines the ports and has no infrastructure dependencies. Configuration selects the adapters at startup.
 
 ## Crate structure
 
-The project is a Cargo workspace with six crates:
+The project is a Cargo workspace with six crates, which are Rust packages:
 
 ```
 crates/
@@ -30,7 +30,7 @@ crates/
 
 ## Hexagonal architecture
 
-The hexagonal architecture pattern separates business logic from infrastructure by defining abstract interfaces (ports) that the core depends on. Concrete implementations (adapters) are injected at startup.
+The core depends on port interfaces. The server provides their adapter implementations at startup.
 
 ```
                     ┌─────────────────────────────────┐
@@ -55,28 +55,28 @@ The hexagonal architecture pattern separates business logic from infrastructure 
                                                providers)
 ```
 
-This means:
+These boundaries support the following changes:
 
-- Business logic in `core` is testable in complete isolation using mocks
-- Swapping DynamoDB for PostgreSQL means changing a config value, not rewriting the service
-- Adding a new storage backend means implementing a trait, not modifying core logic
-- All infrastructure concerns (network, serialization, retries) are contained in adapter crates
+- Test business logic in `core` with mock adapters.
+- Select DynamoDB or PostgreSQL through configuration.
+- Add storage backends by implementing a trait.
+- Keep network calls, data conversion, and retries in adapter crates.
 
 ## Port traits
 
-Ports are async trait interfaces defined in `crates/core/src/ports/`. They define the contracts that the core depends on.
+Ports are asynchronous Rust traits defined in `crates/core/src/ports/`. They specify the operations available to the core.
 
 | Port | Trait | Purpose | Adapters |
 |---|---|---|---|
-| User storage | `UserRepository` | CRUD for user records | DynamoDB, PostgreSQL, SQLite |
+| User storage | `UserRepository` | Create, read, update, and delete user records | DynamoDB, PostgreSQL, SQLite |
 | Session-only storage | `SessionRepository` | Optional override for session operations only | Valkey, LMDB |
-| Key management | `KeyManager` | JWT signing and public key export | Local (Ed25519), AWS KMS (RSA, ECDSA), Noop |
+| Key management | `KeyManager` | Sign JSON Web Tokens (JWTs) and export public keys | Local (Ed25519), AWS KMS (RSA, ECDSA), Noop |
 | Audit logging | `AuditLog` | Compliance and security event recording | Noop, Stdout/Stderr, SQS |
 | Identity provider | `IdentityProvider` | Code exchange, ID token validation, revocation | Standard OIDC, Apple, atproto (planned) |
 | User sync | `UserSync` | Notify external systems of user lifecycle events | Webhook, Noop |
 | Rate limiting | `RateLimiter` | Request and failed-authentication budgets | In-process fixed window, Noop |
 
-All ports return `Result<T>` using a domain-specific error type. Adapters map their internal errors (AWS SDK errors, database errors, HTTP errors) into domain errors at the boundary. No adapter-specific types leak into the core.
+All ports return `Result<T>` with a core error type. Adapters convert their internal errors to this type before returning them. The core does not depend on adapter-specific error types.
 
 ## Dependency rules
 
@@ -84,10 +84,10 @@ The dependency graph enforces strict layering:
 
 - **`core`** depends on nothing infrastructure-specific: no AWS SDKs, no HTTP clients, no database drivers. Its dependencies are pure-Rust utility crates (serde, thiserror, async-trait, chrono, tracing, and similar), never infrastructure clients.
 - **`adapters`** and **`providers`** depend on `core` for trait definitions. They implement the port traits using real infrastructure clients.
-- **`server`** depends on `core`, `adapters`, and `providers`. It wires everything together at startup.
+- **`server`** depends on `core`, `adapters`, and `providers`. It creates and connects the adapters at startup.
 - **`test-utils`** depends only on `core`. It provides in-memory mock implementations used as dev-dependencies by all other crates.
 
-These boundaries are enforced by the Cargo workspace. If `core` compiles, the domain logic is free of infrastructure coupling.
+The crate dependencies preserve the separation between core logic and infrastructure.
 
 ```
 server ──────► core ◄────── adapters
@@ -101,7 +101,7 @@ server ──────► core ◄────── adapters
 
 ## AppService
 
-The `AppService` struct in the core crate is the central orchestrator. It holds references to all ports and implements the business logic for token exchange, refresh, revocation, and user management:
+The core crate's `AppService` struct holds the ports and implements token exchange, refresh, revocation, and user management:
 
 ```rust
 pub struct AppService {
@@ -116,20 +116,20 @@ pub struct AppService {
 }
 ```
 
-All ports use dynamic dispatch (`Box<dyn Trait>`). Since every port operation is I/O-bound (network calls, disk reads), the nanosecond overhead of dynamic dispatch is irrelevant compared to the millisecond cost of the actual operations. This enables runtime adapter selection from configuration without monomorphization complexity.
+All ports use dynamic dispatch (`Box<dyn Trait>`), which selects the implementation at runtime. This lets configuration choose adapters without requiring a separate build.
 
-The server crate constructs `AppService` at startup by reading the configuration, instantiating the appropriate adapters, and injecting them. The axum router holds an `Arc<AppService>` in application state and passes it to request handlers.
+At startup, the server reads the configuration and creates the adapters and `AppService`. The axum router shares an `Arc<AppService>` with request handlers.
 
 ## Runtime bootstrap
 
 The server crate's `main.rs` is the entrypoint: it loads configuration, initializes telemetry, and selects the transport, then delegates adapter wiring and router construction to `bootstrap.rs` (`build_service` and `build_router`). The full startup sequence is:
 
-1. Load configuration (TOML file + environment variable overrides)
-2. Initialize the telemetry subscriber based on `[telemetry]` config
-3. Detect runtime mode: if `AWS_LAMBDA_RUNTIME_API` is set, Lambda mode; otherwise, server mode
-4. Instantiate adapters based on config in `bootstrap::build_service` (user repository, session repository, key manager, audit, rate limiter, providers, user sync)
-5. Construct `AppService` with injected ports, also in `bootstrap::build_service`
-6. Build the axum `Router` with routes and middleware in `bootstrap::build_router`
+1. Load configuration (TOML file + environment variable overrides).
+2. Initialize the telemetry subscriber based on `[telemetry]` config.
+3. Detect runtime mode: if `AWS_LAMBDA_RUNTIME_API` is set, Lambda mode; otherwise, server mode.
+4. Instantiate adapters based on config in `bootstrap::build_service` (user repository, session repository, key manager, audit, rate limiter, providers, user sync).
+5. Construct `AppService` with injected ports, also in `bootstrap::build_service`.
+6. Build the axum `Router` with routes and middleware in `bootstrap::build_router`.
 7. Lambda mode: wrap the router with `lambda_http` and run `lambda_runtime`. Server mode: bind to the configured address and run with hyper.
 
-The same binary, the same router, and the same code paths run in both modes. Only the outermost transport layer differs.
+Both modes use the same binary, router, and request handlers. They differ only in how requests reach the router.

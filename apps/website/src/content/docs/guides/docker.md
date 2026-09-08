@@ -1,17 +1,17 @@
 ---
 title: Docker
-description: Run oidc-exchange in Docker with GHCR or Docker Hub images.
+description: Run oidc-exchange with images from GitHub Container Registry or Docker Hub.
 ---
 
 ## Pull the image
 
-From GitHub Container Registry:
+Pull the image from GitHub Container Registry (GHCR):
 
 ```bash
 docker pull ghcr.io/antstanley/oidc-exchange:latest
 ```
 
-From Docker Hub:
+To use Docker Hub, run:
 
 ```bash
 docker pull antstanley80/oidc-exchange:latest
@@ -27,7 +27,7 @@ docker run -p 8080:8080 \
   ghcr.io/antstanley/oidc-exchange:latest
 ```
 
-Environment variables can be passed with `-e`:
+Pass environment variables with `-e`:
 
 ```bash
 docker run -p 8080:8080 \
@@ -84,8 +84,8 @@ url = "postgresql://oidc:changeme@postgres:5432/oidc_exchange"
 
 Images are published for both architectures:
 
-- `linux/amd64`
-- `linux/arm64`
+- `linux/amd64`.
+- `linux/arm64`.
 
 Docker automatically pulls the correct image for your platform. To explicitly specify an architecture:
 
@@ -127,4 +127,4 @@ docker build -t my-oidc-exchange .
 docker run -p 8080:8080 my-oidc-exchange
 ```
 
-This is useful for CI/CD pipelines where you want the config baked into the image rather than mounted at runtime.
+Use this approach when your automated build and deployment pipeline needs configuration included in the image.

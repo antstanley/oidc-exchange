@@ -3,16 +3,16 @@ title: "Linux + PostgreSQL"
 description: Deploy oidc-exchange with PostgreSQL for users and optional Valkey for sessions.
 ---
 
-Run oidc-exchange on a Linux host using PostgreSQL for persistent storage. This guide covers PostgreSQL for both users and sessions, with an optional Valkey/Redis upgrade for session storage when you need lower-latency token operations.
+Run oidc-exchange on Linux with PostgreSQL for persistent user and session storage. To reduce session lookup time, you can store sessions separately in Valkey or Redis.
 
 A runnable example is in [`examples/linux-postgres/`](https://github.com/example/oidc-exchange/tree/main/examples/linux-postgres).
 
 ## When to use this
 
-- You already run PostgreSQL and prefer a single relational database for all state
-- You want ACID guarantees on user records
-- You need to query user data directly via SQL tooling
-- Optionally: you want sub-millisecond session lookups by adding Valkey/Redis
+- You already run PostgreSQL and want one relational database for persistent data.
+- You need atomic, consistent, isolated, and durable (ACID) transactions for user records.
+- You need to query user data directly with SQL tools.
+- You want the option to use Valkey or Redis for session lookups.
 
 ## Architecture
 
@@ -37,9 +37,9 @@ Without Valkey, PostgreSQL handles both users and sessions.
 
 ## Prerequisites
 
-- A Linux server with oidc-exchange binary (see [build instructions](/deployment/overview/#building))
-- PostgreSQL 14+ accessible from the server
-- (Optional) Valkey or Redis 7+ for session storage
+- A Linux server with oidc-exchange binary (see [build instructions](/deployment/overview/#building)).
+- PostgreSQL 14+ accessible from the server.
+- (Optional) Valkey or Redis 7+ for session storage.
 
 ## Step-by-step
 
@@ -113,7 +113,7 @@ With this configuration, both users and sessions are stored in PostgreSQL.
 
 ### 4. Configure (PostgreSQL + Valkey for sessions)
 
-To offload session storage to Valkey/Redis, add a `[session_repository]` section. Users stay in PostgreSQL; sessions move to Valkey with automatic TTL expiration:
+To store sessions in Valkey or Redis, add a `[session_repository]` section. Users remain in PostgreSQL. Sessions expire automatically when their configured lifetime ends:
 
 ```toml
 [server]
@@ -225,13 +225,13 @@ See the [generic Linux server guide](/deployment/linux-server/#reverse-proxy-ngi
 
 ## Connection pool tuning
 
-The `max_connections` setting in `[repository.postgres]` controls the sqlx connection pool size. Defaults to 5 if not specified. Guidelines:
+The `[repository.postgres]` setting `max_connections` limits the database connections shared across requests. It defaults to 5. Use these starting points:
 
-- **Single instance**: 10-20 connections is typical
-- **Multiple instances**: divide your PostgreSQL `max_connections` (minus overhead) across instances
-- **Valkey sessions**: when using Valkey for sessions, PostgreSQL handles only user CRUD, so fewer connections are needed (5-10)
+- **Single instance**: 10-20 connections is typical.
+- **Multiple instances**: divide your PostgreSQL `max_connections` (minus overhead) across instances.
+- **Valkey sessions**: when using Valkey for sessions, PostgreSQL handles only user CRUD, so fewer connections are needed (5-10).
 
 ## Backup considerations
 
-- **PostgreSQL**: standard `pg_dump` / WAL archiving covers all user data and (if not using Valkey) session data
-- **Valkey sessions**: sessions are ephemeral by design (30-day default TTL). Valkey persistence (RDB/AOF) is optional; losing session data forces users to re-authenticate but does not lose accounts
+- **PostgreSQL**: standard `pg_dump` / WAL archiving covers all user data and (if not using Valkey) session data.
+- **Valkey sessions**: sessions are ephemeral by design (30-day default TTL). Valkey persistence (RDB/AOF) is optional; losing session data forces users to re-authenticate but does not lose accounts.

@@ -1,6 +1,6 @@
 ---
 title: Python
-description: Use oidc-exchange as an embedded OIDC provider in Python applications.
+description: Embed oidc-exchange in Python applications.
 ---
 
 ## Installation
@@ -15,7 +15,7 @@ Or with pip:
 pip install oidc-exchange
 ```
 
-Requires **Python 3.10+**. Prebuilt wheels are included for Linux (x64, ARM64), macOS (ARM64), and Windows (x64).
+Use **Python 3.10 or later**. Prebuilt wheels are included for Linux (x64, ARM64), macOS (ARM64), and Windows (x64).
 
 ## Basic usage
 
@@ -35,7 +35,9 @@ response = oidc.handle_request_sync({
 print(response["status"])  # 200
 ```
 
-The `handle_request_sync` method takes a dict with `method`, `raw_path` (bytes, the still-percent-encoded path when `path_is_raw` is `True`), `query` (bytes without the leading `?`), `headers` (a list of `(name, value)` tuples), `body` (bytes), and `path_is_raw` (bool). It returns a dict with `status` (int), `headers` (a list of `(name, value)` pairs), and `body` (bytes).
+The `handle_request_sync` method accepts a dictionary with `method`, `raw_path`, `query`, `headers`, `body`, and `path_is_raw` fields. Pass `raw_path`, `query`, and `body` as bytes. When `path_is_raw` is `True`, keep the path percent-encoded. Omit the leading `?` from `query`. Pass headers as a list of `(name, value)` tuples.
+
+The method returns a dictionary with `status` (`int`), `headers` (a list of name-value pairs), and `body` (`bytes`).
 
 ## Framework integration
 
@@ -50,7 +52,7 @@ oidc = OidcExchange(config="../config.toml")
 app.mount("/auth", oidc.asgi_app())
 ```
 
-The `asgi_app()` method returns a standard ASGI application that can be mounted directly into any ASGI framework.
+The `asgi_app()` method returns an application that implements the Asynchronous Server Gateway Interface (ASGI). Mount it in an ASGI framework such as FastAPI.
 
 ### Flask
 
@@ -110,7 +112,7 @@ urlpatterns = [
 
 ## Async support
 
-The `handle_request` method is async and runs the handler in a thread pool executor:
+The asynchronous `handle_request` method runs the handler in a pool of worker threads:
 
 ```python
 response = await oidc.handle_request({
@@ -123,7 +125,7 @@ response = await oidc.handle_request({
 })
 ```
 
-Use `handle_request_sync` for synchronous contexts (Flask, Django). The ASGI adapter uses `handle_request` (async) internally, so FastAPI gets non-blocking behavior automatically.
+Use `handle_request_sync` in synchronous applications such as Flask or Django. The ASGI adapter uses `handle_request` to avoid blocking FastAPI's event loop.
 
 ## Configuration
 

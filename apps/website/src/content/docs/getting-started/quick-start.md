@@ -1,11 +1,11 @@
 ---
 title: Quick Start
-description: Build and run oidc-exchange in 5 minutes.
+description: Install, configure, and run oidc-exchange.
 ---
 
 ## Prerequisites
 
-- An OIDC provider (e.g., a [Google OAuth client](https://console.cloud.google.com/apis/credentials))
+Configure an OpenID Connect (OIDC) provider, such as a [Google OAuth client](https://console.cloud.google.com/apis/credentials). OIDC is an identity protocol built on OAuth 2.0.
 
 ## Install
 
@@ -57,7 +57,7 @@ pip install oidc-exchange
 
 ### Option 5: Build from source
 
-Requires a recent stable Rust toolchain (CI builds and tests on rustc 1.98) and optionally [cargo-nextest](https://nexte.st) for testing.
+Install a recent stable Rust toolchain. Continuous integration (CI) builds and tests use rustc 1.98. To run tests, also install [cargo-nextest](https://nexte.st).
 
 ```bash
 cargo build --release
@@ -65,7 +65,7 @@ cargo build --release
 
 ## Configure
 
-Create a `config/default.toml`:
+Create `config/default.toml`:
 
 ```toml
 [server]
@@ -156,6 +156,6 @@ curl http://localhost:8080/keys
 
 ## Next steps
 
-- [Configuration reference](/guides/configuration/): all config options
-- [API reference](/guides/api-reference/): endpoints and request formats
-- [Deployment guides](/deployment/overview/): production deployment options
+- [Configuration reference](/guides/configuration/): all config options.
+- [API reference](/guides/api-reference/): endpoints and request formats.
+- [Deployment guides](/deployment/overview/): production deployment options.

@@ -3,11 +3,13 @@ title: "Identity Providers"
 description: "Configure Google, Apple, and custom OIDC providers."
 ---
 
-oidc-exchange supports three tiers of identity providers. Standard OIDC providers like Google are config-only (no code required). Providers with non-standard behavior like Apple have dedicated modules. Each provider is registered as a `[providers.<name>]` block in the configuration file, and the name is what clients pass in the `provider` field of `POST /token` requests.
+oidc-exchange supports providers that use OpenID Connect (OIDC), an identity protocol built on OAuth 2.0. Standard providers such as Google need only configuration. Providers with specific requirements, such as Apple, use dedicated modules. Support for the non-OIDC provider atproto is planned.
+
+Register each provider in a `[providers.<name>]` configuration block. Clients pass `<name>` in the `provider` field of `POST /token` requests.
 
 ## Standard OIDC providers (config-only)
 
-Any provider that follows the OpenID Connect specification can be added with just a configuration block. The generic `OidcProvider` adapter handles discovery, JWKS caching, code exchange, and ID token validation automatically.
+Add a provider that follows OpenID Connect with a configuration block. The `OidcProvider` adapter discovers endpoints, caches public keys from a JSON Web Key Set (JWKS), exchanges authorization codes, and validates identity (ID) tokens.
 
 ### Google example
 
@@ -21,7 +23,7 @@ scopes = ["openid", "email", "profile"]
 endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com"]
 ```
 
-At startup, the adapter fetches `https://accounts.google.com/.well-known/openid-configuration` to discover the token endpoint, JWKS URI, and revocation endpoint. JWKS keys are cached with TTL-based automatic refresh.
+At startup, the adapter reads `https://accounts.google.com/.well-known/openid-configuration`. This document provides the token endpoint, public key URL, and revocation endpoint. The adapter caches keys and refreshes them when their cache lifetime ends.
 
 #### Why `endpoint_origins` is there
 
@@ -47,7 +49,7 @@ To add a new provider, create a `[providers.<name>]` block with the following fi
 
 For most Tier 1 providers, `issuer`, `client_id`, and `client_secret` are the fields you set. Endpoint fields are populated from the issuer's `.well-known/openid-configuration` at startup. If provided in config, they override the discovered values. If you override an endpoint onto another host, its origin joins the pinned set automatically; use `endpoint_origins` for extra origins only the *discovered* document names.
 
-The two email-verification overrides only fill absence: an explicit `email_verified` claim from the provider always takes precedence over either key, in both directions — an override never overturns a value the provider sent, whether `true` or `false`. Setting both keys on one provider block is a configuration error (the provider registry fails to build at startup). A provider running either non-default mode logs one structured warning at startup, so the relaxed trust posture is visible in the logs.
+The email-verification overrides apply only when the provider omits `email_verified`. An explicit `true` or `false` always takes precedence. Setting both overrides for one provider causes a startup configuration error. Each provider using an override logs a structured warning at startup to make the changed trust policy visible.
 
 ### Examples
 
@@ -63,9 +65,9 @@ scopes = ["openid", "email", "profile"]
 email_verified_claim = "xms_edov"
 ```
 
-The `email_verified_claim` line is what makes this block admit anyone. Entra v2.0 ID tokens carry an `email` claim but no `email_verified` claim, so under the default behaviour the service never sees an Entra email as verified and denies every sign-in. Mapping Entra's optional `xms_edov` ("email domain owner verified") claim fills that gap: when the token has no `email_verified` claim of its own, the adapter reads `xms_edov` instead (bool-or-string coerced). Note that `xms_edov` is off by default — a tenant administrator must enable the optional claim on the app registration before Entra will emit it.
+Entra v2.0 ID tokens include `email` but omit `email_verified`. Without an override, the service treats the email as unverified and denies sign-in. Set `email_verified_claim` to Entra's optional `xms_edov` claim, which means "email domain owner verified". The adapter reads it as a boolean or converts a string value when `email_verified` is absent. A tenant administrator must enable `xms_edov` on the app registration before Entra includes it.
 
-If your tenant cannot enable `xms_edov`, set `trust_email_verified = true` instead (and drop the `email_verified_claim` line — the two keys are mutually exclusive). That counts any token carrying a non-empty `email` claim as verified. The caveat: Entra's `email` claim can be user-mutable in some tenant configurations, so prefer the `xms_edov` claim mapping wherever the tenant permits it.
+If your tenant cannot enable `xms_edov`, remove `email_verified_claim` and set `trust_email_verified = true`. This treats a non-empty `email` claim as verified when `email_verified` is absent. Some Entra tenant configurations let users change their email claim. Prefer the `xms_edov` mapping when your tenant supports it.
 
 **GitHub (via OIDC-compatible endpoint):**
 
@@ -80,9 +82,9 @@ scopes = ["openid", "email"]
 
 ## Apple Sign-In
 
-Apple follows OIDC for most of the flow but has a significant quirk: instead of sending a static `client_secret` to the token endpoint, Apple requires you to generate a short-lived ES256 (P-256) JWT signed with your private key and send that as the client secret on every request.
+Apple requires a signed JSON Web Token (JWT) as the `client_secret` for token requests. Sign this short-lived token with your private key using the ES256 algorithm and a P-256 key.
 
-The `AppleProvider` module handles this automatically. You provide your Apple credentials and the service generates the signed client JWT internally.
+Provide your Apple credentials in the configuration. The `AppleProvider` module generates and signs the client JWT.
 
 ### Configuration
 
@@ -108,21 +110,21 @@ Apple's endpoint overrides follow the same origin pinning as standard providers.
 
 ### How the ES256 client JWT works
 
-For each token endpoint call, the Apple provider:
+For each token endpoint call, the Apple provider follows these steps:
 
-1. Loads the P-256 private key from `private_key_path`
-2. Constructs a JWT with claims: `iss` (team_id), `sub` (client_id), `aud` ("https://appleid.apple.com"), `iat`, `exp` (short-lived)
-3. Signs the JWT with ES256 using the private key
-4. Sends this JWT as the `client_secret` parameter to Apple's token endpoint
+1. It loads the P-256 private key from `private_key_path`.
+2. It creates a JWT with fields called claims. These include `iss` (team ID), `sub` (client ID), `aud` (`https://appleid.apple.com`), `iat` (issue time), and `exp` (expiry).
+3. It signs the JWT with ES256 using the private key.
+4. It sends the JWT as `client_secret` to Apple's token endpoint.
 
 The rest of the flow (JWKS fetching, ID token validation, discovery) reuses the shared OIDC utilities from the adapters crate.
 
 ### Getting your Apple credentials
 
-1. Go to the [Apple Developer Portal](https://developer.apple.com/account)
-2. Create a Services ID under **Certificates, Identifiers & Profiles** (this is your `client_id`)
-3. Create a Sign In with Apple key (this gives you a `.p8` file, a Key ID, and your Team ID)
-4. The `.p8` file is a P-256 private key in PKCS#8 format
+1. Go to the [Apple Developer Portal](https://developer.apple.com/account).
+2. Create a Services ID under **Certificates, Identifiers & Profiles** (this is your `client_id`).
+3. Create a Sign In with Apple key (this gives you a `.p8` file, a Key ID, and your Team ID).
+4. The `.p8` file is a P-256 private key in PKCS#8 format.
 
 ## Provider config format reference
 
@@ -136,4 +138,4 @@ adapter = "<adapter_type>"    # "oidc" or "apple"  (atproto is planned)
 
 The `<name>` is the identifier clients use in `POST /token` requests. When a request arrives with `provider=google`, the service looks up the `"google"` key in its provider registry. An unknown provider returns `400 Bad Request`.
 
-Providers are constructed at startup from configuration. The server builds a `HashMap<String, Box<dyn IdentityProvider>>` and resolves providers by name at request time.
+The server creates providers from configuration at startup. It selects the provider by name for each request.

@@ -3,18 +3,18 @@ title: "Linux + SQLite"
 description: Deploy oidc-exchange with SQLite for embedded storage and optional LMDB for sessions.
 ---
 
-Run oidc-exchange on a single Linux host using SQLite for all persistent storage. No external database services needed. This is the simplest production deployment: one binary, one config file, one database file.
+Run oidc-exchange on one Linux host with SQLite for persistent storage. This deployment uses one binary, a configuration file, and a database file. It needs no external database service.
 
-Optionally, use LMDB for session storage when you want faster session lookups without adding a network service.
+Optionally, store refresh token sessions in Lightning Memory-Mapped Database (LMDB). This adds a local session store without a network service.
 
 A runnable example is in [`examples/linux-sqlite/`](https://github.com/example/oidc-exchange/tree/main/examples/linux-sqlite).
 
 ## When to use this
 
-- Single-server deployment with no external database dependencies
-- Low to moderate traffic (hundreds of requests per second)
-- You want the simplest possible ops story: back up one directory, restore anywhere
-- Optionally: use LMDB for faster session reads on the same server
+- You want a single server with no external database dependencies.
+- You expect low to moderate traffic, such as hundreds of requests per second.
+- You want to keep persistent data in one directory for backups.
+- You want the option to store sessions in LMDB on the same server.
 
 ## Architecture
 
@@ -39,9 +39,9 @@ Without LMDB, SQLite handles both users and sessions.
 
 ## Prerequisites
 
-- A Linux server with oidc-exchange binary (see [build instructions](/deployment/overview/#building))
-- A writable directory for the SQLite database file
-- (Optional) A writable directory for the LMDB environment
+- A Linux server with oidc-exchange binary (see [build instructions](/deployment/overview/#building)).
+- A writable directory for the SQLite database file.
+- (Optional) A writable directory for the LMDB environment.
 
 ## Step-by-step
 
@@ -111,11 +111,11 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 
 `endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered (see [Identity Providers](/guides/providers/)).
 
-SQLite runs with WAL journal mode and foreign keys enabled automatically. The database file and tables are created on first startup.
+SQLite enables write-ahead logging (WAL) and foreign key checks automatically. The database file and tables are created on first startup.
 
 ### 4. Configure (SQLite + LMDB for sessions)
 
-LMDB is an embedded key-value store optimized for read-heavy workloads. Session lookups (every token refresh) are the hottest path in oidc-exchange, and LMDB serves these from memory-mapped files with zero-copy reads.
+LMDB is a local key-value database designed for frequent reads. oidc-exchange looks up a session on each token refresh. LMDB reads session data through files mapped into memory.
 
 ```toml
 [server]
@@ -162,7 +162,7 @@ client_secret = "${GOOGLE_CLIENT_SECRET}"
 scopes = ["openid", "email", "profile"]
 ```
 
-The `max_size_mb` setting controls the LMDB memory map size. 256 MB is generous for session data: each session is roughly 500 bytes, so 256 MB supports ~500,000 concurrent sessions. The space is reserved but not allocated until used.
+The `max_size_mb` setting limits the LMDB memory map size. At roughly 500 bytes per session, 256 MB holds about 500,000 sessions. LMDB reserves this space and allocates it as needed.
 
 ### 5. Create the environment file
 
@@ -208,7 +208,7 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-Note `ReadWritePaths=/var/lib/oidc-exchange`: the service needs write access to the SQLite and LMDB data directories.
+Set `ReadWritePaths=/var/lib/oidc-exchange` to give the service write access to the SQLite and LMDB data directories.
 
 ### 7. Install and start
 
@@ -225,19 +225,19 @@ See the [generic Linux server guide](/deployment/linux-server/#reverse-proxy-ngi
 
 ## Backup
 
-All state lives in `/var/lib/oidc-exchange/`. To back up:
+The service stores its database files in `/var/lib/oidc-exchange/`. Back up SQLite with:
 
 ```bash
 # SQLite: use the .backup command for a consistent snapshot
 sqlite3 /var/lib/oidc-exchange/data/oidc-exchange.db ".backup /tmp/oidc-exchange-backup.db"
 ```
 
-For LMDB, copy the directory while the service is running; LMDB's copy-on-write design means readers never block writers and file copies are crash-consistent. Alternatively, stop the service and copy `/var/lib/oidc-exchange/lmdb/`.
+To back up LMDB, stop the service and copy `/var/lib/oidc-exchange/lmdb/`.
 
-LMDB session data is ephemeral (sessions expire). Losing it only forces users to re-authenticate.
+LMDB sessions expire. Losing session data requires users to sign in again.
 
 ## Limitations
 
 - **Single-server only**: SQLite and LMDB do not support concurrent access from multiple processes on different hosts. For multi-server deployments, use [PostgreSQL](/deployment/linux-postgres/) or [DynamoDB](/deployment/aws-lambda/).
 - **Write throughput**: SQLite with WAL handles hundreds of writes per second. If you need thousands, consider PostgreSQL.
-- **No horizontal scaling**: you cannot add more oidc-exchange instances behind a load balancer with SQLite/LMDB. Each instance would have its own database.
+- **Scaling across hosts:** Each host would have its own SQLite or LMDB database. Use a shared database to run instances across hosts.
