@@ -3,16 +3,16 @@ title: ECS Fargate
 description: Deploy oidc-exchange on ECS Fargate with ALB, DynamoDB, and ElastiCache Valkey using Terraform.
 ---
 
-Run oidc-exchange as an auto-scaling containerized service on AWS ECS Fargate, with an Application Load Balancer for traffic distribution, DynamoDB for user storage, and ElastiCache Valkey for low-latency session lookups.
+Run oidc-exchange on Amazon Elastic Container Service (ECS) with Fargate for automatic scaling. An Application Load Balancer (ALB) distributes requests. DynamoDB stores users, and ElastiCache Valkey stores refresh token sessions.
 
 Infrastructure is managed with Terraform. A runnable example is in [`examples/ecs-fargate/`](https://github.com/example/oidc-exchange/tree/main/examples/ecs-fargate).
 
 ## When to use this
 
-- You need high availability with automatic scaling
-- You want managed infrastructure without managing EC2 instances or Kubernetes
-- You want the performance of Valkey for session operations (sub-millisecond) with the durability of DynamoDB for user records
-- You are already invested in the AWS ecosystem
+- You need high availability with automatic scaling.
+- You want to run containers without managing servers or Kubernetes.
+- You want Valkey for session lookups and DynamoDB for persistent user records.
+- You already use AWS.
 
 ## Architecture
 
@@ -46,23 +46,23 @@ All Fargate tasks share the same DynamoDB table and ElastiCache cluster.
 
 | Resource | Purpose | Managed by |
 |----------|---------|-----------|
-| VPC | Network isolation (2 AZs, public + private subnets) | Terraform |
-| ALB | TLS termination, health checks, traffic distribution | Terraform |
+| Virtual private cloud (VPC) | Network isolation across two availability zones, with public and private subnets | Terraform |
+| ALB | Handle Transport Layer Security (TLS), check service health, and distribute traffic | Terraform |
 | ECS Cluster + Service | Fargate task orchestration, auto-scaling (2-20 tasks) | Terraform |
 | DynamoDB | User storage (on-demand billing, single-table design) | Terraform |
 | ElastiCache Valkey | Session storage (single-node, in-VPC) | Terraform |
-| KMS | JWT signing (ECC_NIST_P256) | Terraform |
-| SQS | Audit event queue | Terraform |
-| ECR | Container registry | Terraform |
-| Secrets Manager | OIDC client secrets | Terraform |
+| AWS Key Management Service (KMS) | Sign JSON Web Tokens (JWTs) with ECC_NIST_P256 | Terraform |
+| Amazon Simple Queue Service (SQS) | Queue audit events | Terraform |
+| Amazon Elastic Container Registry (ECR) | Store container images | Terraform |
+| Secrets Manager | Store OpenID Connect (OIDC) client secrets | Terraform |
 
 ## Prerequisites
 
-- [Terraform](https://www.terraform.io/) 1.5+
-- AWS CLI configured with credentials
-- Docker (to build and push the container image)
-- A Google OAuth client ID and secret (or another OIDC provider)
-- (Optional) An ACM certificate ARN for HTTPS
+- [Terraform](https://www.terraform.io/) 1.5+.
+- The AWS command-line interface (CLI), configured with credentials.
+- Docker (to build and push the container image).
+- A Google OAuth client ID and secret (or another OIDC provider).
+- An optional AWS Certificate Manager (ACM) certificate and its Amazon Resource Name (ARN) for HTTPS.
 
 ## Deployment
 
@@ -108,7 +108,7 @@ terraform plan
 terraform apply
 ```
 
-Terraform creates all infrastructure: VPC, subnets, NAT gateway, ALB, ECS cluster and service, DynamoDB table, ElastiCache Valkey cluster, KMS key, SQS queue, IAM roles, security groups, and auto-scaling policies.
+Terraform creates the resources listed in the infrastructure table. It also creates network subnets, a network address translation (NAT) gateway, access roles, security groups, and scaling policies.
 
 Because the ALB is the client-facing hop, configure `server.trusted_proxies` with the task-visible ALB/VPC CIDRs and set `trusted_proxy_hops = 1`. When rate limiting is enabled without trusted proxies, startup warns that all clients behind the ALB would otherwise share one proxy-address budget.
 
@@ -122,7 +122,7 @@ curl $ALB_URL/.well-known/openid-configuration
 
 ## Configuration
 
-The TOML config at `examples/ecs-fargate/config/fargate.toml` uses environment variable placeholders. Keep `/token` and `/revoke` protected by the configured public budgets; `/health`, discovery, and JWKS remain available for health checks and key discovery and are not charged to authentication-failure budgets. Terraform injects the actual values via the ECS task definition:
+The TOML configuration at `examples/ecs-fargate/config/fargate.toml` uses environment variable placeholders. Keep `/token` and `/revoke` protected by the configured public budgets; `/health`, discovery, and JWKS remain available for health checks and key discovery and are not charged to authentication-failure budgets. Terraform injects the actual values via the ECS task definition:
 
 ```toml
 [repository]
@@ -143,13 +143,13 @@ When `[session_repository]` is present, sessions use Valkey while users stay in 
 
 ## Auto-scaling
 
-The Terraform configuration sets up CPU-based target tracking:
+Terraform adjusts the number of tasks to keep average processor (CPU) usage near a target:
 
-- **Target**: 60% average CPU utilization
-- **Min tasks**: 2 (configurable via `desired_count`)
-- **Max tasks**: 20 (configurable via `max_count`)
-- **Scale-out cooldown**: 60 seconds
-- **Scale-in cooldown**: 300 seconds
+- **Target**: 60% average CPU utilization.
+- **Min tasks**: 2 (configurable via `desired_count`).
+- **Max tasks**: 20 (configurable via `max_count`).
+- **Scale-out cooldown**: 60 seconds.
+- **Scale-in cooldown**: 300 seconds.
 
 Modify `variables.tf` defaults or override in `terraform.tfvars` to tune scaling behavior.
 
@@ -166,26 +166,26 @@ DynamoDB, KMS, SQS, and Secrets Manager are accessed via AWS service endpoints (
 
 ## IAM roles
 
-Terraform creates two IAM roles:
+Terraform creates two Identity and Access Management (IAM) roles:
 
 **Task execution role**, used by ECS to pull images, read secrets, and write logs:
-- `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`
-- `secretsmanager:GetSecretValue` (scoped to `oidc-exchange/*`)
-- `logs:CreateLogStream`, `logs:PutLogEvents`
+- `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`.
+- `secretsmanager:GetSecretValue` (scoped to `oidc-exchange/*`).
+- `logs:CreateLogStream`, `logs:PutLogEvents`.
 
 **Task role**, used by the running container to access AWS services:
-- DynamoDB: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchWriteItem`
-- KMS: `Sign`, `GetPublicKey`
-- SQS: `SendMessage`
+- DynamoDB: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchWriteItem`.
+- KMS: `Sign`, `GetPublicKey`.
+- SQS: `SendMessage`.
 
 ElastiCache Valkey access is controlled via security groups (VPC networking), not IAM.
 
 ## Cost optimization
 
-- **Fargate Spot**: add `capacity_provider_strategy` with `FARGATE_SPOT` in the ECS service for up to 70% savings
-- **ElastiCache**: the example uses a single `cache.t4g.micro` node; upgrade to a replication group for HA, or use ElastiCache Serverless for auto-scaling
-- **DynamoDB on-demand**: no capacity planning needed; switch to provisioned capacity for steady-state traffic
-- **ARM64**: build for `linux/arm64` and set `runtime_platform` in the task definition for ~20% lower Fargate cost
+- **Fargate Spot:** Add `capacity_provider_strategy` with `FARGATE_SPOT` in the ECS service for up to 70% savings.
+- **ElastiCache:** The example uses a single `cache.t4g.micro` node. Use a replication group for high availability or ElastiCache Serverless for automatic scaling.
+- **DynamoDB on-demand:** You do not need to plan capacity. For steady traffic, consider provisioned capacity.
+- **ARM64:** Build for `linux/arm64` and set `runtime_platform` in the task definition for ~20% lower Fargate cost.
 
 ## Cleanup
 

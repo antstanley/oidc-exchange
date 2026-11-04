@@ -3,7 +3,7 @@ title: "Client Integration"
 description: "How to integrate your application with oidc-exchange."
 ---
 
-Regardless of how oidc-exchange is deployed, clients interact with it the same way. Your application handles the OAuth flow with the identity provider (Google, Apple, etc.) and sends the resulting authorization code to oidc-exchange. The service validates the code, issues your own tokens, and returns them to the client.
+Your application handles sign-in with an OpenID Connect (OIDC) provider such as Google or Apple. OIDC is an identity protocol built on OAuth 2.0. Send the resulting authorization code to oidc-exchange. The service validates the provider's response and returns its own access and refresh tokens.
 
 ## Token exchange
 
@@ -29,13 +29,13 @@ curl -X POST https://auth.example.com/token \
 }
 ```
 
-- `access_token` is a short-lived JWT (default 15 minutes) signed by oidc-exchange. Use this for API authorization.
-- `refresh_token` is a long-lived opaque token (default 30 days). Store it securely and use it to obtain new access tokens.
+- `access_token` is a signed JSON Web Token (JWT) that expires after 15 minutes by default. Use it to authorize API requests.
+- `refresh_token` is a random value that expires after 30 days by default. Store it securely and use it to obtain new access tokens.
 - `expires_in` is the access token lifetime in seconds.
 
 ## Token refresh
 
-When the access token expires, use the refresh token to obtain a new one without requiring the user to re-authenticate:
+When the access token expires, use the refresh token to obtain a new one without asking the user to sign in again:
 
 ```bash
 curl -X POST https://auth.example.com/token \
@@ -72,7 +72,7 @@ The endpoint returns `200 OK` per RFC 7009 for any token state, even if the toke
 
 ## JWKS verification
 
-Downstream services (your API servers) verify access tokens by fetching the public key from the JWKS endpoint:
+Your API verifies access tokens with public keys from the JSON Web Key Set (JWKS) endpoint:
 
 ```bash
 curl https://auth.example.com/keys
@@ -95,24 +95,24 @@ curl https://auth.example.com/keys
 }
 ```
 
-Most JWT libraries support JWKS URLs natively. Point your verification middleware at `https://auth.example.com/keys` and it will cache and rotate keys automatically.
+Configure a JWT library with JWKS support to use `https://auth.example.com/keys`. Configure key caching and refresh according to the library's documentation.
 
 ### Verification flow
 
-1. Your API receives a request with `Authorization: Bearer <access_token>`
-2. Your JWT library decodes the token header to find the `kid` (Key ID)
-3. It fetches (and caches) the public key from the JWKS endpoint
-4. It verifies the token signature, `iss` (issuer), `aud` (audience), and `exp` (expiration)
-5. If valid, your API trusts the claims in the token (`sub` for user ID, plus any custom claims)
+1. Your API receives a request with `Authorization: Bearer <access_token>`.
+2. Your JWT library reads the token header to find the key ID (`kid`).
+3. It fetches and caches the matching public key from the JWKS endpoint.
+4. It verifies the signature and checks the issuer (`iss`), audience (`aud`), and expiry (`exp`).
+5. If validation succeeds, your API uses the token's claims, including the user ID (`sub`) and custom fields.
 
 ### Library examples
 
 Most languages have JWT libraries with built-in JWKS support:
 
-- **Node.js**: `jose` or `jsonwebtoken` with `jwks-rsa`
-- **Python**: `PyJWT` with `PyJWKClient`
-- **Go**: `go-jose` or `golang-jwt` with JWKS fetcher
-- **Rust**: `jsonwebtoken` with manual JWKS fetch, or `openidconnect`
+- **Node.js**: `jose` or `jsonwebtoken` with `jwks-rsa`.
+- **Python**: `PyJWT` with `PyJWKClient`.
+- **Go**: `go-jose` or `golang-jwt` with JWKS fetcher.
+- **Rust**: `jsonwebtoken` with manual JWKS fetch, or `openidconnect`.
 
 ## OpenID Connect discovery
 
@@ -137,4 +137,4 @@ curl https://auth.example.com/.well-known/openid-configuration
 }
 ```
 
-OIDC-compatible client libraries can auto-configure themselves from this endpoint. Point your library at the issuer URL and it will discover all endpoints automatically.
+For client libraries that support OIDC discovery, configure the issuer URL. The library can then read the endpoint details from this document.

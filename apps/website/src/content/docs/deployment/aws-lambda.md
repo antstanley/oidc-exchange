@@ -3,19 +3,19 @@ title: AWS Lambda
 description: Deploy oidc-exchange as a serverless Lambda function with DynamoDB and KMS.
 ---
 
-This is the recommended deployment for AWS-native workloads. oidc-exchange detects the `AWS_LAMBDA_RUNTIME_API` environment variable at startup and automatically switches to Lambda mode, with no code or config changes needed.
+Use this deployment to run oidc-exchange on AWS Lambda. At startup, the service selects Lambda mode if `AWS_LAMBDA_RUNTIME_API` is set.
 
 A runnable example is in [`examples/aws-web/`](https://github.com/example/oidc-exchange/tree/main/examples/aws-web).
 
 ## Infrastructure
 
-A complete CDK example is in `examples/aws-web/infra/`. The key resources are:
+An AWS Cloud Development Kit (CDK) example is in `examples/aws-web/infra/`. The key resources are:
 
 | Resource | Purpose |
 |----------|---------|
 | DynamoDB table | User and session storage (single-table design, on-demand billing) |
 | KMS key (ECC_NIST_P256) | JWT signing (keys never leave KMS) |
-| SQS queue | Audit trail (optional) |
+| Amazon Simple Queue Service (SQS) queue | Store audit events (optional) |
 | Lambda function (`provided.al2023`) | The oidc-exchange binary |
 | API Gateway HTTP API | Routes traffic to Lambda |
 
@@ -59,7 +59,7 @@ aws kms create-key \
   --description "oidc-exchange JWT signing key"
 ```
 
-Note the key ARN for the configuration.
+Save the key's Amazon Resource Name (ARN) for the configuration.
 
 **4. Configure**
 
@@ -159,7 +159,7 @@ aws apigatewayv2 create-api \
 
 ## IAM permissions
 
-The Lambda execution role needs:
+The Lambda execution role needs these Identity and Access Management (IAM) permissions:
 
 ```json
 {
@@ -179,12 +179,12 @@ The Lambda execution role needs:
 }
 ```
 
-Plus `kms:Sign`, `kms:GetPublicKey` on the signing key, and optionally `sqs:SendMessage` on the audit queue.
+Also allow `kms:Sign` and `kms:GetPublicKey` on the signing key. If you use an audit queue, allow `sqs:SendMessage` on that queue.
 
 ## Cold start considerations
 
-The `provided.al2023` runtime with a Rust binary typically cold-starts in 50-150ms. KMS signing adds ~20ms per request. To minimize cold starts:
+A cold start occurs when Lambda initializes a new function instance. The `provided.al2023` runtime with a Rust binary typically starts in 50 to 150 milliseconds. KMS signing adds about 20 milliseconds per request. To reduce startup delays:
 
-- Use ARM64 (`arm64` architecture) for lower cost and comparable performance
-- Set memory to 256 MB or higher; Lambda allocates CPU proportionally to memory
-- Use provisioned concurrency if sub-100ms p99 latency is required
+- Use ARM64 (`arm64` architecture) for lower cost and comparable performance.
+- Set memory to 256 MB or higher; Lambda allocates CPU proportionally to memory.
+- Use provisioned concurrency if sub-100ms p99 latency is required.

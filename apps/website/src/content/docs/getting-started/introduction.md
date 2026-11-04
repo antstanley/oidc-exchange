@@ -3,9 +3,12 @@ title: Introduction
 description: What oidc-exchange does and how it works.
 ---
 
-Let your users sign in with Google, Apple, or any OIDC provider, and give your API tokens you actually control. oidc-exchange turns a provider sign-in into your own access and refresh tokens: your token lifetimes, your custom claims, your signing keys, revocable on demand. Your API validates one token format no matter which provider a user chose, with no per-user fees and no call to a third party on every request. It runs as a single self-hosted binary.
+oidc-exchange is a Rust service that validates identity (ID) tokens from OpenID Connect (OIDC) providers such as Google and Apple. OIDC is an identity protocol built on OAuth 2.0. The service exchanges provider credentials for its own access and refresh tokens.
 
-Your client application handles the OAuth flow with the identity provider and sends the resulting authorization code to oidc-exchange. The service validates the upstream identity, creates or looks up the user, and returns a short-lived JWT access token and a long-lived refresh token. (A direct ID-token grant is also available but is disabled by default; see the flow below.)
+Your client application handles sign-in with the identity provider. It sends the resulting authorization code to oidc-exchange. The service validates the identity, finds or creates the user, and returns two tokens:
+
+- An access token is a signed JSON Web Token (JWT) that your API uses to authorize requests.
+- A refresh token lets the client obtain new access tokens without asking the user to sign in again.
 
 ## Token exchange flow
 
@@ -27,35 +30,31 @@ sequenceDiagram
     OE-->>App: { access_token, refresh_token, token_type, expires_in }
 ```
 
-The diagram above shows the three participants in the exchange: your **User Application**, the **Identity Provider** (Google, Apple, etc.), and **oidc-exchange**.
+The diagram shows your application, the identity provider, and oidc-exchange.
 
-1. **Initiate sign-in**: the user taps "Sign In" and your app redirects to the identity provider's `/authorize` endpoint.
-2. **Authenticate with the provider**: the provider presents its login form. The user enters their credentials and submits them back to the provider via `POST /authorize`.
-3. **Redirect with authorization code**: after successful authentication the provider issues a 302 redirect back to your app's callback URL, including an authorization code.
-4. **Exchange the code**: your app sends a `POST /token` request to oidc-exchange with the authorization code. The service then:
-   - Redeems the code with the provider and validates the returned ID token (signature, issuer, audience, expiry)
-   - Applies registration policy checks (domain allowlist, open/existing-users mode)
-   - Looks up or creates the user
-   - Generates a refresh token (256-bit random, stored hashed)
-   - Signs a short-lived JWT access token
-5. **Receive credentials**: oidc-exchange responds with `{ access_token, refresh_token, token_type, expires_in }` and your app signs the user in.
+1. The user selects "Sign In". Your application redirects them to the identity provider's authorization endpoint.
+2. The user signs in with the provider.
+3. The provider redirects the user back to your application's callback URL with an authorization code.
+4. Your application sends the authorization code to `POST /token`. oidc-exchange redeems the code with the provider and validates the returned ID token's signature, issuer, audience, and expiry. It checks the registration policy and finds or creates the user.
+5. oidc-exchange signs an access token and generates a random 256-bit refresh token. It stores only a hash of the refresh token.
+6. The service returns `{ access_token, refresh_token, token_type, expires_in }`. Your application uses these credentials to complete sign-in.
 
-The authorization-code exchange shown here is served by default. oidc-exchange also offers a direct ID-token grant (your app posts a provider ID token straight to `POST /token`), but it is disabled by default: enable it with `[grants] id_token = true`, and each exchange must first claim a nonce from `POST /nonce`.
+The authorization-code grant is enabled by default. To accept provider ID tokens directly, set `[grants] id_token = true`. Each direct exchange must first obtain a nonce, a value used once to bind the exchange, from `POST /nonce`.
 
 ## Features
 
-- **Token Exchange**: accepts authorization codes from OIDC providers, validates ID tokens, issues short-lived JWTs (default 15min) and long-lived refresh tokens (default 30 days)
-- **Pluggable Providers**: standard OIDC (Google, config-only), OIDC-with-quirks (Apple, ES256 client JWT), and non-OIDC (atproto, planned)
-- **Hexagonal Architecture**: all infrastructure behind trait interfaces: database, key management, audit, user sync
-- **Registration Policy**: open or existing-users-only mode with optional email domain/subdomain allowlists
-- **Per-User Claims**: configurable custom JWT claims from TOML templates and per-user overrides via internal API
-- **Audit Trail**: syslog severity levels, configurable blocking threshold, stdout/stderr or SQS integration
-- **OpenTelemetry**: pluggable exporters (OTLP, X-Ray, stdout) via the `tracing` ecosystem
-- **Written in Rust**: a single native binary with a small memory footprint, low request latency, and near-instant startup, well suited to serverless cold starts and dense container deployments
-- **Dual Runtime**: same binary runs as an axum server or AWS Lambda function
-- **Docker Images**: prebuilt images at `ghcr.io/antstanley/oidc-exchange` for instant container deployments
-- **Node.js and Python Bindings**: install via `npm install @oidc-exchange/node` or `pip install oidc-exchange` to embed the service in your existing stack
-- **Internal Admin API**: user CRUD and claims management, authenticated by operator token or mTLS (a legacy shared-secret mechanism is also available but discouraged)
+- **Token exchange:** Issue access tokens that expire after 15 minutes and refresh tokens that expire after 30 days by default.
+- **Identity providers:** Configure standard OIDC providers such as Google. Use the Apple module for its specific requirements. Support for the non-OIDC provider atproto is planned.
+- **Replaceable infrastructure:** Select database, key management, audit, and user synchronization adapters through configuration.
+- **Registration policy:** Allow new users or restrict access to existing users. Optionally allow only specific email domains or subdomains.
+- **Custom claims:** Add fields to access tokens through TOML configuration templates. Set per-user overrides through the internal API.
+- **Audit logging:** Record security events with syslog severity levels. Send events to process output or Amazon Simple Queue Service (SQS). Configure which audit failures also fail the request.
+- **OpenTelemetry:** Export traces through the OpenTelemetry Protocol (OTLP), AWS X-Ray, or standard output.
+- **Written in Rust:** Run a native binary with low memory use and fast startup.
+- **Server and Lambda support:** Run the same binary as an axum web server or an AWS Lambda function.
+- **Docker images:** Deploy prebuilt images from `ghcr.io/antstanley/oidc-exchange`.
+- **Node.js and Python bindings:** Embed the service in an existing application with `npm install @oidc-exchange/node` or `pip install oidc-exchange`.
+- **Internal admin API:** Create, read, update, and delete users and manage their claims. Authenticate with an operator token or mutual Transport Layer Security (mTLS). Legacy shared-secret authentication is available but discouraged.
 
 ## Performance
 
@@ -74,6 +73,6 @@ The small footprint and sub-second startup suit serverless cold starts (AWS Lamb
 
 ## Next steps
 
-- [Quick Start](/getting-started/quick-start/): build and run in 5 minutes
-- [Why oidc-exchange?](/getting-started/why-oidc-exchange/): comparison with alternatives
-- [Deployment guides](/deployment/overview/): choose your infrastructure
+- Follow the [Quick Start](/getting-started/quick-start/) to build and run the service.
+- Read [Why oidc-exchange?](/getting-started/why-oidc-exchange/) to compare authentication approaches.
+- Use the [deployment guides](/deployment/overview/) to choose your infrastructure.

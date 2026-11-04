@@ -1,11 +1,11 @@
 ---
 title: "Why oidc-exchange?"
-description: "How oidc-exchange compares to Auth0, Keycloak, and rolling your own."
+description: "Compare oidc-exchange with provider tokens and hosted authentication services."
 ---
 
-If your application needs to authenticate users via Google, Apple, or other OIDC providers, you have several architectural choices for how your API verifies identity and authorizes requests. Each approach involves different trust boundaries, operational trade-offs, and failure modes.
+Applications that use Google, Apple, or another OpenID Connect (OIDC) provider need a way to authorize API requests after sign-in. OIDC is an identity protocol built on OAuth 2.0. Your choice of token service affects who controls tokens, what you operate, and which services must be available.
 
-This page walks through the most common patterns, explains the pros and cons of each, and shows where oidc-exchange fits.
+An identity (ID) token tells the client who signed in. An access token authorizes access to an API. A refresh token lets the client obtain new tokens.
 
 ## Common authentication architectures
 
@@ -27,19 +27,20 @@ sequenceDiagram
     API-->>C: Response
 ```
 
-The simplest possible approach. Your client authenticates with Google, Apple, or another OIDC provider and receives an ID token. The client sends that ID token directly to your API in the Authorization header. Your API validates the token by fetching the provider's public keys (JWKS) and checking the signature, expiry, and audience.
+The client signs in with the provider and sends the resulting ID token to your API in the `Authorization` header. Your API checks its signature, expiry, and audience. It obtains the provider's public keys from a JSON Web Key Set (JWKS).
 
 **Pros:**
-- Minimal moving parts - no token exchange service, no extra infrastructure
-- Fast to implement for a single provider
-- No secrets to manage on the backend beyond the JWKS endpoint
+
+- You do not need a separate token exchange service.
+- You can implement validation for a single provider with little infrastructure.
 
 **Cons:**
-- **No control over token lifetime** - you are bound by the provider's ID token expiry (typically 1 hour for Google), with no ability to revoke access earlier
-- **No custom claims** - your API cannot embed application-specific roles, permissions, or user metadata in the token; this information must be fetched separately on every request
-- **Multi-provider complexity** - each provider uses different token formats, signing algorithms, and claim structures; your API must handle all of them
-- **No refresh flow** - ID tokens are not refreshable; when they expire, the user must re-authenticate with the provider
-- **Tight coupling** - your API's authorization logic is coupled to the identity provider's token format; switching providers requires rewriting validation logic
+
+- ID tokens describe identity for the client application. They are not intended as API access tokens.
+- The provider controls token lifetime and claims, which are the fields in a token.
+- Your API must obtain application roles and permissions separately.
+- Your API must handle each provider's token format and validation rules.
+- Your client depends on the provider's flow to obtain new tokens.
 
 ### 2. Using identity provider access tokens directly
 
@@ -60,18 +61,20 @@ sequenceDiagram
     API-->>C: Response
 ```
 
-A variation where the client uses the provider's access token instead of the ID token. Your API validates the access token by calling the provider's introspection or userinfo endpoint, or by checking it against the provider's JWKS if the access token is a JWT.
+The client sends the provider's access token to your API. Validation depends on the provider. It may require a call to an endpoint that checks token status or returns user information. If the access token is a JSON Web Token (JWT), validation may use the provider's public keys.
 
 **Pros:**
-- Access tokens can be refreshed via the provider's refresh token flow, so users stay authenticated longer
-- The provider's userinfo endpoint gives you a standardized way to fetch identity claims
+
+- Provider refresh tokens can let users stay signed in longer.
+- The provider's user information endpoint offers a standard way to retrieve identity claims.
 
 **Cons:**
-- **Runtime dependency on the provider** - every API request may require a call to the provider's introspection/userinfo endpoint, adding latency and a point of failure
-- **Opaque tokens** - many providers issue opaque (non-JWT) access tokens that cannot be validated locally, forcing a network round-trip on every request
-- **Still no custom claims** - the tokens carry the provider's claims, not your application's
-- **Provider rate limits** - high-traffic APIs can hit the provider's rate limits on introspection/userinfo calls
-- **Same multi-provider problem** - each provider's access token format and validation mechanism differs
+
+- Validation may require a provider request, which adds delay and a dependency on provider availability.
+- Opaque tokens cannot be inspected and verified locally.
+- Tokens contain the provider's claims rather than your application's roles and permissions.
+- Provider requests are subject to rate limits.
+- Each provider may require different validation logic.
 
 ### 3. SaaS auth service issuing its own tokens
 
@@ -96,21 +99,21 @@ sequenceDiagram
     API-->>C: Response
 ```
 
-The client authenticates through a hosted auth service (Auth0, Cognito, Clerk, Firebase Auth). The SaaS service handles the upstream identity provider flow, then issues its own access token and refresh token. Your API validates tokens using the SaaS service's JWKS endpoint.
+A hosted authentication service, also called software as a service (SaaS), handles sign-in with the identity provider. Examples include Auth0, Cognito, Clerk, and Firebase Auth. The service issues its own access and refresh tokens. Your API validates signed tokens using the service's JWKS endpoint.
 
 **Pros:**
-- Managed infrastructure - the auth service handles provider integrations, token issuance, and key rotation
-- Custom claims and roles can be embedded in the token via the service's rules/actions/hooks
-- Built-in refresh token flow with configurable lifetimes
-- Admin dashboards, user management, and compliance features included
-- Fast to get started for common use cases
+
+- The service manages provider integrations, token issuance, and signing keys.
+- You can configure custom claims, roles, and token lifetimes where supported.
+- User management and admin interfaces can reduce development work.
 
 **Cons:**
-- **Per-MAU pricing** - costs scale with your user base, which can become significant at scale
-- **Vendor lock-in** - your token format, claims structure, and user data model are tied to the service; migration is painful
-- **Opaque behavior** - token issuance rules, rate limits, and security policies are configured through a web console, not version-controlled code
-- **Latency** - token validation may require calls to the SaaS service, and the initial auth flow adds network hops through the service's infrastructure
-- **Availability dependency** - if the SaaS service goes down, your users cannot authenticate
+
+- Pricing may depend on monthly active users (MAU).
+- Token configuration and user data become tied to the service, which adds migration work.
+- Configuration and policy controls depend on the service's available tools.
+- Sign-in depends on the service's availability and adds network requests.
+- Some validation flows also require calls to the hosted service.
 
 ### 4. SaaS auth service using ID tokens for API authorization
 
@@ -134,20 +137,22 @@ sequenceDiagram
     API-->>C: Response
 ```
 
-The SaaS auth service handles the upstream identity provider flow and issues its own ID token back to the client. The client then sends that ID token to your API in the Authorization header, and your API validates it against the SaaS service's JWKS endpoint.
+The hosted service handles provider sign-in and issues an ID token. The client sends that token to your API, which validates it using the service's public keys.
 
-This is a misuse of ID tokens. ID tokens are intended for the client application to learn the user's identity. They are not designed to be sent as bearer credentials to APIs. Access tokens are the correct token type for API authorization, as defined by OAuth 2.0.
+ID tokens tell the client who signed in. Use access tokens to authorize API requests.
 
 **Pros:**
-- The SaaS service unifies multiple identity providers behind a single token format
-- Token validation is a local JWT signature check against the SaaS service's JWKS
+
+- The service provides one token format across identity providers.
+- Your API can check JWT signatures locally with cached public keys.
 
 **Cons:**
-- **Wrong token type** - ID tokens are meant for the client, not for APIs; they lack the scoping and audience restrictions that access tokens provide, and using them this way violates the OAuth 2.0 / OIDC specification
-- **No revocation** - ID tokens are typically short-lived and non-revocable; if a user's access needs to be cut immediately, there is no mechanism to invalidate an already-issued ID token
-- **No refresh flow** - ID tokens cannot be refreshed; when they expire, the user must re-authenticate through the SaaS service
-- **Limited claims control** - ID tokens carry identity claims (who the user is), not authorization claims (what they can do); embedding roles or permissions requires non-standard extensions
-- **Per-MAU pricing** - you still pay the SaaS service per user, despite using the token in a way the service was not designed for
+
+- The token is intended for the client application rather than API authorization.
+- An issued ID token generally remains valid until expiry.
+- Your client depends on the hosted service to obtain new tokens.
+- Identity claims do not replace application permissions.
+- Hosted service costs still apply.
 
 ### 5. Issuing your own tokens with oidc-exchange
 
@@ -173,45 +178,39 @@ sequenceDiagram
     API-->>C: Response
 ```
 
-The client authenticates with the identity provider and sends the resulting authorization code or ID token to oidc-exchange. The service validates the upstream identity, creates or looks up the user, and issues its own access token (JWT) and refresh token. Your API validates tokens using oidc-exchange's JWKS endpoint - no network calls to external services at request time.
+The client signs in with the identity provider and sends the authorization code to oidc-exchange. Direct ID-token exchange is optional and requires a nonce from `POST /nonce`. The service validates the identity, finds or creates the user, and issues its own access and refresh tokens. Your API checks access tokens locally using public keys cached from oidc-exchange's JWKS endpoint.
 
 **Pros:**
-- **Full control over token lifetime** - configure access token and refresh token expiry to match your security requirements, and revoke tokens at any time
-- **Custom claims** - embed application-specific roles, permissions, and metadata directly in the JWT; your API has everything it needs without extra lookups
-- **Provider-agnostic API** - your API validates one token format regardless of whether the user authenticated with Google, Apple, or any other provider; switching or adding providers requires zero API changes
-- **No runtime external dependencies** - token validation is a local signature check against cached keys; no calls to identity providers or SaaS services on the hot path
-- **No per-user pricing** - runs on your infrastructure; costs scale with compute, not user count
-- **Auditable and version-controlled** - every configuration decision is in a TOML file in your repo; no web console toggles to discover in production
-- **Self-hosted** - your user data stays in your database, tokens are signed with your keys, and there is no third-party availability dependency
+
+- You configure access and refresh token lifetimes and can revoke refresh token sessions.
+- You can include application roles, permissions, and metadata in access tokens.
+- Your API validates one token format across identity providers.
+- Local token validation does not require a request to an identity provider or hosted authentication service.
+- You operate the service on your infrastructure without a per-user service fee.
+- You can version configuration files with your code.
+- You control the database and signing keys.
 
 **Cons:**
-- **Infrastructure to operate** - you run and monitor the service yourself (though it is a single binary with minimal dependencies)
-- **Not a full authorization server** - does not support OAuth 2.0 client credentials, scopes, consent screens, or multi-tenant organization management
-- **No managed login UI** - your client must implement the identity provider's OAuth redirect flow (oidc-exchange handles everything after the redirect)
+
+- You must deploy, monitor, and maintain the service.
+- The service does not provide OAuth 2.0 client credentials, scopes, consent screens, or organization management.
+- Your client must implement the identity provider's sign-in redirect flow.
 
 ## Summary
 
-| Approach | Custom claims | Token control | Provider-agnostic |
-|-|-|-|-|
-| Provider ID tokens | No | No | No |
-| Provider access tokens | No | No | No |
-| SaaS auth service | Yes | Partial | Yes |
-| SaaS ID tokens | No | No | Yes |
-| **oidc-exchange** | **Yes** | **Yes** | **Yes** |
-
-| Approach | No external runtime deps | No per-user cost |
-|-|-|-|
-| Provider ID tokens | Yes | Yes |
-| Provider access tokens | No | Yes |
-| SaaS auth service | No | No |
-| SaaS ID tokens | Yes | No |
-| **oidc-exchange** | **Yes** | **Yes** |
+| Approach | Application claims | Token lifetime control | One format across providers | Local signature validation |
+|---|---|---|---|---|
+| Provider ID tokens | Provider-controlled | Provider-controlled | No | Yes |
+| Provider access tokens | Provider-controlled | Provider-controlled | No | Depends on token format |
+| SaaS auth service | Depends on service | Depends on service | Yes | Depends on token format |
+| SaaS ID tokens | Identity claims | Depends on service | Yes | Yes |
+| **oidc-exchange** | **Yes** | **Yes** | **Yes** | **Yes** |
 
 ## When to use something else
 
 oidc-exchange is not a general-purpose authorization server. Choose a different tool if you need:
 
-- **Password-based authentication** - oidc-exchange delegates authentication entirely to upstream providers.
-- **OAuth 2.0 authorization server** - if you need to issue tokens to third-party clients with scopes and consent, use a full OIDC server.
-- **Multi-tenant SaaS auth** - if you need organization management, RBAC, or SCIM provisioning, a hosted service like Auth0 or WorkOS is better suited.
-- **Federation between internal services** - if you need service-to-service authentication (mTLS, SPIFFE), oidc-exchange is the wrong layer.
+- **Password authentication:** oidc-exchange delegates sign-in to identity providers.
+- **A full OAuth 2.0 authorization server:** Issuing tokens to third-party clients with scopes and consent requires a full authorization server.
+- **Organization management:** Applications that serve multiple organizations may need role-based access control (RBAC) or System for Cross-domain Identity Management (SCIM) for user provisioning.
+- **Authentication between services:** Mutual Transport Layer Security (mTLS) or a workload identity system addresses this need.
