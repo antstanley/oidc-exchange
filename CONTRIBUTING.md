@@ -131,7 +131,7 @@ All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace 
 | Package manager | `pnpm` | `pnpm install` |
 | Formatting | `oxfmt` | `pnpm format` / `pnpm format:check` |
 | Linting | `oxlint` | `pnpm lint` |
-| Type-checking | `tsc` / `astro check` / `svelte-check` | `pnpm typecheck` |
+| Type-checking | `tsc` (incl. Astro via content mapper) / `svelte-check` | `pnpm typecheck` |
 | Testing | `vitest` | `pnpm test` |
 
 **All JavaScript/Node.js code must be TypeScript.** No plain `.js` source files (except generated output). Use `.ts` for all source code.

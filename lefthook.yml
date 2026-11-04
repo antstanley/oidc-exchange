@@ -41,7 +41,7 @@ pre-push:
       glob: "{python/**,tests/**,pyproject.toml}"
       run: uv run ruff format --check . && uv run ruff check . && uv run pyright && uv run pytest
 
-    # Docs website (Astro). oxlint/oxfmt cover the loose .ts/.js; `astro check`
+    # Docs website (Astro). oxlint/oxfmt cover the loose .ts/.js; `tsc` (Astro content mapper)
     # type-checks the project (.astro, content collections, TS).
     website:
       root: "apps/website/"
