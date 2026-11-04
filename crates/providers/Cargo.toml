@@ -12,7 +12,7 @@ async-trait.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 reqwest = { version = "0.13", features = ["json", "form"] }
-jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 p256 = { version = "0.14.0", features = ["ecdsa", "pem"] }
 base64.workspace = true
 chrono.workspace = true

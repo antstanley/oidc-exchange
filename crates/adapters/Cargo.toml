@@ -14,19 +14,19 @@ tokio.workspace = true
 # by consuming response.bytes_stream() instead of an unbounded text().
 reqwest = { version = "0.13", features = ["json", "form", "stream"] }
 ed25519-dalek = { version = "3.0.0", features = ["rand_core", "pkcs8", "pem"] }
-jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 base64.workspace = true
-aws-sdk-dynamodb = "1"
-aws-sdk-kms = "1"
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 rsa = "0.10.0-rc.20"
 p256 = { version = "0.14.0", features = ["ecdsa"] }
 p384 = "0.14.0"
 p521 = { version = "0.14.0", features = ["ecdsa"] }
-aws-sdk-sqs = "1"
+aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 hmac = "0.13"
 sha2 = "0.11"
-heed = "0.22"
+heed = "0.23"
 hex.workspace = true
 ulid.workspace = true
 chrono.workspace = true

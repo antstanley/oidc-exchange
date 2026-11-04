@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use heed::types::{Bytes, Str};
-use heed::{Database, Env, EnvOpenOptions, RwTxn};
+use heed::{CommitOrAbort, Database, Env, EnvOpenOptions, RwTxn};
 use oidc_exchange_core::domain::{
     is_valid_family_id, RefreshResolution, RetiredRefreshToken, Session,
 };
@@ -47,10 +47,10 @@ enum Expired {
 /// `spawn_blocking` closure (`heed::Database` is a cheap copyable handle).
 #[derive(Clone, Copy)]
 struct Dbs {
-    sessions: Database<Str, Bytes>,
-    user_sessions: Database<Str, Str>,
-    retired_tokens: Database<Str, Bytes>,
-    family_index: Database<Str, Str>,
+    sessions: Database<'static, Str, Bytes>,
+    user_sessions: Database<'static, Str, Str>,
+    retired_tokens: Database<'static, Str, Bytes>,
+    family_index: Database<'static, Str, Str>,
 }
 
 impl Dbs {
@@ -190,10 +190,10 @@ fn retirement_record(
 /// complete (SR5).
 pub struct LmdbSessionRepository {
     env: Env,
-    sessions: Database<Str, Bytes>,
-    user_sessions: Database<Str, Str>,
-    retired_tokens: Database<Str, Bytes>,
-    family_index: Database<Str, Str>,
+    sessions: Database<'static, Str, Bytes>,
+    user_sessions: Database<'static, Str, Str>,
+    retired_tokens: Database<'static, Str, Bytes>,
+    family_index: Database<'static, Str, Str>,
     /// How long a retirement record stays readable after its rotation:
     /// `retired_at + reuse_retention_secs`, capped per record at the family's
     /// absolute `expires_at` by [`RetiredRefreshToken::retention_deadline`].
@@ -203,7 +203,7 @@ pub struct LmdbSessionRepository {
     /// Single-use records (nonces, assertion-replay markers), keyed by
     /// namespaced digest. A separate named database keeps their key space
     /// disjoint from session token hashes.
-    single_use: Database<Str, Str>,
+    single_use: Database<'static, Str, Str>,
 }
 
 /// Build the composite key used in the `user_sessions` index.
@@ -237,16 +237,18 @@ impl LmdbSessionRepository {
                 .open(path)?
         };
 
-        let mut wtxn = env.write_txn()?;
-        let sessions: Database<Str, Bytes> = env.create_database(&mut wtxn, Some("sessions"))?;
-        let user_sessions: Database<Str, Str> =
-            env.create_database(&mut wtxn, Some("user_sessions"))?;
-        let retired_tokens: Database<Str, Bytes> =
-            env.create_database(&mut wtxn, Some("retired_tokens"))?;
-        let family_index: Database<Str, Str> =
-            env.create_database(&mut wtxn, Some("family_index"))?;
-        let single_use: Database<Str, Str> = env.create_database(&mut wtxn, Some("single_use"))?;
-        wtxn.commit()?;
+        let wtxn = env.write_txn()?;
+        let (sessions, user_sessions, retired_tokens, family_index, single_use) = env
+            .create_databases_and_commit(wtxn, |opener, wtxn| -> Result<_, heed::Error> {
+                Ok(CommitOrAbort::<_, ()>::Commit((
+                    opener.create_database::<Str, Bytes>(wtxn, Some("sessions"))?,
+                    opener.create_database::<Str, Str>(wtxn, Some("user_sessions"))?,
+                    opener.create_database::<Str, Bytes>(wtxn, Some("retired_tokens"))?,
+                    opener.create_database::<Str, Str>(wtxn, Some("family_index"))?,
+                    opener.create_database::<Str, Str>(wtxn, Some("single_use"))?,
+                )))
+            })?
+            .unwrap_commit();
 
         Ok(Self {
             env,
@@ -1344,7 +1346,7 @@ mod single_use_tests {
     /// last allocated page number times the page size over the map size.
     fn map_occupancy(repo: &LmdbSessionRepository) -> f64 {
         let info = repo.env.info();
-        let stat = repo.env.stat();
+        let stat = repo.env.unnamed_database_stat();
         let used_bytes = (info.last_page_number as u64 + 1) * u64::from(stat.page_size);
         used_bytes as f64 / info.map_size as f64
     }

@@ -1,5 +1,6 @@
-import { redirect, type Handle } from "@sveltejs/kit";
-import { hasAdminClaim, verifyAccessToken } from "$lib/auth";
+import { redirect } from "@sveltejs/kit";
+import type { Handle } from "@sveltejs/kit/hooks";
+import { hasAdminClaim, verifyAccessToken } from "#lib/auth";
 
 const SESSION_COOKIE = "__Host-admin_session";
 const COOKIE_OPTIONS = {

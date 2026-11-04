@@ -131,7 +131,8 @@ All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace 
 | Package manager | `pnpm` | `pnpm install` |
 | Formatting | `oxfmt` | `pnpm format` / `pnpm format:check` |
 | Linting | `oxlint` | `pnpm lint` |
-| Type-checking | `tsc` / `astro check` / `svelte-check` | `pnpm typecheck` |
+| Type-checking | `tsc` (incl. Astro via content mapper) / `svelte-check` | `pnpm typecheck` |
+| Unused code and dependencies | `knip` (config in `knip.json`) | `pnpm knip` |
 | Testing | `vitest` | `pnpm test` |
 
 **All JavaScript/Node.js code must be TypeScript.** No plain `.js` source files (except generated output). Use `.ts` for all source code.
@@ -155,6 +156,7 @@ All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace 
 | Linting | `ruff check` | `uv run ruff check .` |
 | Type validation | `pydantic` | Use for data models requiring validation |
 | Type-checking | `pyright` | `uv run pyright` (strict) |
+| Unused code and dependencies | `knip` (config in `knip.json`) | `pnpm knip` |
 | Testing | `pytest` | `uv run pytest` |
 
 **Always use `uv`** for Python package management — never `pip`, `pip install`, or manual virtualenvs. `uv` manages the virtualenv automatically.

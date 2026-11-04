@@ -34,7 +34,7 @@
     "oxfmt": "0.76.0",
     "oxlint": "1.90.0",
     "publint": "0.3.25",
-    "typescript": "6.0.3",
+    "typescript": "7.1.0-beta",
     "vitest": "5.1.0"
   },
   "optionalDependencies": {
