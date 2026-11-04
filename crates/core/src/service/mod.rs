@@ -46,11 +46,10 @@ pub(crate) fn record_mandatory_audit_success() {
 
 pub(crate) fn record_mandatory_audit_failure() {
     AUDIT_SINK_FAILURES_TOTAL.fetch_add(1, Ordering::Relaxed);
-    let _ = AUDIT_SINK_CONSECUTIVE_FAILURES.fetch_update(
-        Ordering::AcqRel,
-        Ordering::Acquire,
-        |value| Some(value.saturating_add(1)),
-    );
+    let _ =
+        AUDIT_SINK_CONSECUTIVE_FAILURES.try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            Some(value.saturating_add(1))
+        });
 }
 use crate::error::{Error, Result};
 use crate::ports::{
