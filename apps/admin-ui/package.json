@@ -26,8 +26,7 @@
     "d3-array": "^3.2.5",
     "d3-scale": "^4.0.3",
     "d3-shape": "^3.2.1",
-    "jose": "^6.2.15",
-    "layerchart": "^2.9.2"
+    "jose": "^6.2.15"
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "^8.0.0",
