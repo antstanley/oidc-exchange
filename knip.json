@@ -14,8 +14,7 @@
     },
     "apps/website": {
       "entry": ["integrations/*"],
-      "ignoreDependencies": ["@emnapi/core", "@emnapi/runtime"],
-      "ignore": ["src/components/TokenFlow.svelte"]
+      "ignoreDependencies": ["@emnapi/core", "@emnapi/runtime"]
     },
     "bindings/nodejs": {
       "ignoreDependencies": ["@arethetypeswrong/cli", "publint"]

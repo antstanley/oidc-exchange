@@ -16,12 +16,10 @@
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.8",
-    "@astrojs/svelte": "^9.1.2",
     "astro": "^7.4.5",
     "astro-mermaid": "^2.2.0",
     "mermaid": "^12.2.0",
-    "sharp": "^0.35.5",
-    "svelte": "^5.57.3"
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@astrojs/ts-content-mapper": "^0.2.0",
