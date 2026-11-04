@@ -48,6 +48,11 @@ pre-push:
       glob: "{src/**,integrations/**,astro.config.mjs,package.json,tsconfig.json}"
       run: pnpm lint && pnpm format:check && pnpm typecheck
 
+    # Unused files, exports and dependencies across the JS workspaces (knip.json).
+    knip:
+      glob: "{**/*.{ts,js,mjs,svelte,astro},**/package.json,knip.json}"
+      run: pnpm knip
+
     # Admin UI (SvelteKit). oxlint/oxfmt cover the .ts; `svelte-check` type-checks
     # the .svelte components.
     admin-ui:

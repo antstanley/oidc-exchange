@@ -6,7 +6,7 @@ import type { RequestOptions } from "node:https";
  * server-side environment. Kept here — not in generated code — because it
  * describes Node's TLS plumbing, not the service contract.
  */
-export interface ClientCertificateCredential {
+interface ClientCertificateCredential {
   kind: "client_certificate";
   certificate: string;
   privateKey: string;

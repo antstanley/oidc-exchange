@@ -430,10 +430,6 @@ export function hasAdminClaim(payload: VerifiedAccessTokenClaims): boolean {
   return typeof value === "string" && value === REQUIRED_VALUE;
 }
 
-export function getOidcExchangeUrl(): string {
-  return OIDC_EXCHANGE_URL;
-}
-
 export function resetAuthCacheForTesting(): void {
   if (import.meta.env.MODE !== "test") throw new Error("Auth cache reset is test-only");
   cachedMaterial = undefined;

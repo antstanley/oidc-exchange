@@ -225,5 +225,7 @@ jobs:
       - name: Admin UI — test
         working-directory: apps/admin-ui
         run: pnpm test
+      - name: Unused code and dependencies (knip)
+        run: pnpm knip
     permissions:
       contents: read
