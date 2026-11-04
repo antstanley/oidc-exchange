@@ -46,3 +46,9 @@ minimumReleaseAgeExclude:
   # freshly published, so the minimum-release-age policy must not gate them (it
   # would keep them out of the lockfile and break the frozen-lockfile CI check).
   - '@oidc-exchange/*'
+peerDependencyRules:
+  allowedVersions:
+    # These list TypeScript <=6 but are only used for Svelte/Astro build-time
+    # transforms; the website typechecks with tsc 7.1 + @astrojs/ts-content-mapper.
+    '@astrojs/svelte>typescript': '7'
+    svelte2tsx>typescript: '7'
