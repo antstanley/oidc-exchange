@@ -29,13 +29,13 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@napi-rs/cli": "3.7.2",
-    "@types/node": "26.0.1",
-    "oxfmt": "0.56.0",
-    "oxlint": "1.71.0",
-    "publint": "0.3.18",
+    "@napi-rs/cli": "3.10.12",
+    "@types/node": "26.6.6",
+    "oxfmt": "0.76.0",
+    "oxlint": "1.90.0",
+    "publint": "0.3.25",
     "typescript": "6.0.3",
-    "vitest": "4.1.9"
+    "vitest": "5.1.0"
   },
   "optionalDependencies": {
     "@oidc-exchange/darwin-arm64": "0.4.1",

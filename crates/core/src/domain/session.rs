@@ -43,7 +43,7 @@ pub fn new_family_id() -> String {
     format!(
         "{}{}",
         FAMILY_ID_PREFIX,
-        ulid::Ulid::new().to_string().to_lowercase()
+        ulid::Ulid::generate().to_string().to_lowercase()
     )
 }
 

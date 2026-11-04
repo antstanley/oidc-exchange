@@ -375,7 +375,7 @@ pub fn create_audit_event(
     user_agent: Option<String>,
 ) -> AuditEvent {
     AuditEvent {
-        id: ulid::Ulid::new().to_string(),
+        id: ulid::Ulid::generate().to_string(),
         timestamp: Utc::now(),
         severity,
         event_type,

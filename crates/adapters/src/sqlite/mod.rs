@@ -152,9 +152,9 @@ async fn ensure_version_column(pool: &SqlitePool) -> std::result::Result<(), Err
             .is_some();
 
     if !has_version {
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE users ADD COLUMN version INTEGER NOT NULL DEFAULT {INITIAL_USER_VERSION}"
-        ))
+        )))
         .execute(pool)
         .await
         .map_err(|e| Error::StoreError {
@@ -446,13 +446,11 @@ where
     let rotated_at_str = session.rotated_at.map(|ts| ts.to_rfc3339());
 
     let conflict_clause = if replace { "OR REPLACE" } else { "" };
-    sqlx::query(
-        &format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT {conflict_clause} INTO sessions \
              (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-        ),
-    )
+        )))
     .bind(session.refresh_token_hash.expose())
     .bind(&session.user_id)
     .bind(&session.family_id)
@@ -519,7 +517,7 @@ impl UserRepository for SqliteRepository {
     #[instrument(skip(self, user), fields(external_id = %user.external_id, provider = %user.provider))]
     async fn create_user(&self, user: &NewUser) -> Result<User> {
         let now = Utc::now();
-        let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
+        let id = format!("usr_{}", ulid::Ulid::generate().to_string().to_lowercase());
         let now_str = now.to_rfc3339();
         let metadata_str = "{}";
         let claims_str = "{}";
