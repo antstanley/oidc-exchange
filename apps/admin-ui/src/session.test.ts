@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const verifyAccessToken = vi.fn();
 const hasAdminClaim = vi.fn((claims: Record<string, unknown>) => claims.role === "admin");
-vi.mock("$lib/auth", () => ({ verifyAccessToken, hasAdminClaim }));
+vi.mock("#lib/auth", () => ({ verifyAccessToken, hasAdminClaim }));
 
 interface CookieCall {
   name: string;

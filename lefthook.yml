@@ -52,5 +52,5 @@ pre-push:
     # the .svelte components.
     admin-ui:
       root: "apps/admin-ui/"
-      glob: "{src/**,svelte.config.js,vite.config.ts,package.json,tsconfig.json}"
+      glob: "{src/**,vite.config.ts,package.json,tsconfig.json}"
       run: pnpm lint && pnpm format:check && pnpm typecheck

@@ -1,4 +1,4 @@
-import { listUsersPage } from "$lib/api";
+import { listUsersPage } from "#lib/api";
 import type { PageServerLoad } from "./$types";
 
 /**

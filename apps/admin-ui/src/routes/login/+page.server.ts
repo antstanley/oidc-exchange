@@ -1,5 +1,5 @@
 import { fail, redirect } from "@sveltejs/kit";
-import { hasAdminClaim, verifyAccessToken } from "$lib/auth";
+import { hasAdminClaim, verifyAccessToken } from "#lib/auth";
 import type { Actions, PageServerLoad } from "./$types";
 
 const SESSION_COOKIE = "__Host-admin_session";

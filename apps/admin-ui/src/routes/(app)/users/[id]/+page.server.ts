@@ -1,4 +1,4 @@
-import { getUser, getUserClaims, updateUser, setClaims, deleteUser } from "$lib/api";
+import { getUser, getUserClaims, updateUser, setClaims, deleteUser } from "#lib/api";
 import { error, redirect, fail } from "@sveltejs/kit";
 import type { PageServerLoad, Actions } from "./$types";
 

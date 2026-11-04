@@ -14,7 +14,7 @@ const env = {
   REQUIRED_VALUE: "admin",
 };
 
-vi.mock("$env/dynamic/private", () => ({ env }));
+vi.mock("#lib/server/env", () => ({ env }));
 
 let privateKey: CryptoKey;
 let alternateKey: CryptoKey;
