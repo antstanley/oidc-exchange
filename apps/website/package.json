@@ -12,7 +12,7 @@
     "lint": "oxlint --deny-warnings",
     "format": "oxfmt --ignore-path=.oxfmtignore",
     "format:check": "oxfmt --check --ignore-path=.oxfmtignore",
-    "typecheck": "astro check"
+    "typecheck": "astro sync && tsc --noEmit --runExternalCode"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.8",
@@ -24,12 +24,12 @@
     "svelte": "^5.57.3"
   },
   "devDependencies": {
-    "@astrojs/check": "^0.9.12",
+    "@astrojs/ts-content-mapper": "^0.2.0",
     "@emnapi/core": "1.11.3",
     "@emnapi/runtime": "1.11.3",
     "oxfmt": "^0.76.0",
     "oxlint": "^1.90.0",
-    "typescript": "^6.0.3"
+    "typescript": "7.1.0-beta"
   },
   "engines": {
     "node": ">= 24.18.0"
