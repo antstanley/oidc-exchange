@@ -984,7 +984,7 @@ impl UserRepository for DynamoRepository {
     #[instrument(skip(self, user), fields(external_id = %user.external_id, provider = %user.provider))]
     async fn create_user(&self, user: &NewUser) -> Result<User> {
         let now = Utc::now();
-        let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
+        let id = format!("usr_{}", ulid::Ulid::generate().to_string().to_lowercase());
 
         let full_user = User {
             id,

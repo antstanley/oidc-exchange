@@ -471,10 +471,10 @@ where
         ""
     };
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) {conflict_clause}"
-    ))
+    )))
     .bind(session.refresh_token_hash.expose())
     .bind(&session.user_id)
     .bind(&session.family_id)
@@ -535,7 +535,7 @@ impl UserRepository for PostgresRepository {
     #[instrument(skip(self, user), fields(external_id = %user.external_id, provider = %user.provider))]
     async fn create_user(&self, user: &NewUser) -> Result<User> {
         let now = Utc::now();
-        let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
+        let id = format!("usr_{}", ulid::Ulid::generate().to_string().to_lowercase());
         let metadata =
             serde_json::to_value(HashMap::<String, Value>::new()).map_err(Self::store_err)?;
         let claims =
@@ -1175,11 +1175,13 @@ mod tests {
         let bootstrap_pool = create_pool(&test_database_url(), 1, false)
             .await
             .expect("failed to connect to test Postgres instance for schema bootstrap");
-        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
-            .execute(&bootstrap_pool)
-            .await
-            .expect("drop isolated test schema");
-        sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS {schema_name} CASCADE"
+        )))
+        .execute(&bootstrap_pool)
+        .await
+        .expect("drop isolated test schema");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema_name}")))
             .execute(&bootstrap_pool)
             .await
             .expect("create isolated test schema");
@@ -1964,11 +1966,13 @@ mod tests {
         let pool = create_pool(base_url, 1, false)
             .await
             .expect("failed to connect to DATABASE_URL for schema bootstrap");
-        sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
-            .execute(&pool)
-            .await
-            .expect("drop test schema");
-        sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS {schema_name} CASCADE"
+        )))
+        .execute(&pool)
+        .await
+        .expect("drop test schema");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema_name}")))
             .execute(&pool)
             .await
             .expect("create test schema");

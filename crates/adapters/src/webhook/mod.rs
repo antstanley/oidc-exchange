@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use oidc_exchange_core::config::HttpsUrl;
 use oidc_exchange_core::domain::User;
 use oidc_exchange_core::error::{Error, Result};
@@ -66,7 +66,7 @@ impl WebhookUserSync {
     /// unambiguously a retry of the same occasion, never a new one.
     async fn send_webhook(&self, event_name: &str, data: serde_json::Value) -> Result<()> {
         let sent_at = chrono::Utc::now().to_rfc3339();
-        let delivery_id = ulid::Ulid::new().to_string();
+        let delivery_id = ulid::Ulid::generate().to_string();
 
         assert!(
             !sent_at.is_empty() && !delivery_id.is_empty(),

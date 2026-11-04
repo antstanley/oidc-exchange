@@ -269,7 +269,7 @@ impl SecurityEvent {
         user_agent: Option<String>,
     ) -> AuditEvent {
         AuditEvent {
-            id: ulid::Ulid::new().to_string(),
+            id: ulid::Ulid::generate().to_string(),
             timestamp: Utc::now(),
             severity: self.severity(),
             event_type: self.event_type(),

@@ -223,7 +223,7 @@ impl UserRepository for MockRepository {
         }
 
         let now = Utc::now();
-        let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
+        let id = format!("usr_{}", ulid::Ulid::generate().to_string().to_lowercase());
         let user = User {
             id: id.clone(),
             external_id: new_user.external_id.clone(),
@@ -1083,7 +1083,7 @@ impl MockIdentityProvider {
 
         let mut raw = std::collections::HashMap::new();
         raw.insert("sub".to_string(), json!("test-subject"));
-        raw.insert("jti".to_string(), json!(ulid::Ulid::new().to_string()));
+        raw.insert("jti".to_string(), json!(ulid::Ulid::generate().to_string()));
         raw.insert(
             "exp".to_string(),
             json!(chrono::Utc::now().timestamp() + MOCK_DEFAULT_ASSERTION_TTL_SECS as i64),
@@ -1227,7 +1227,7 @@ pub mod single_use_conformance {
     fn scenario_key(label: &str) -> String {
         format!(
             "nonce:{label}:{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         )
     }
 
@@ -1397,7 +1397,7 @@ pub mod single_use_conformance {
 
         // One expired and one live session alongside them.
         let make_session = |hash: &str, expires_at: chrono::DateTime<Utc>| Session {
-            user_id: format!("usr_su_cleanup_{}", ulid::Ulid::new()),
+            user_id: format!("usr_su_cleanup_{}", ulid::Ulid::generate()),
             family_id: oidc_exchange_core::domain::new_family_id(),
             generation: 0,
             rotated_at: None,
