@@ -309,7 +309,14 @@ mod tests {
         // Extract public key components for JWKS
         let public_key = rsa_key.to_public_key();
         let n_bytes = public_key.n().to_be_bytes();
-        let e_bytes = public_key.e().to_be_bytes();
+        // JWK integers use minimal big-endian encoding: strip the u64 padding zeros.
+        let e_bytes: Vec<u8> = public_key
+            .e()
+            .to_be_bytes()
+            .iter()
+            .copied()
+            .skip_while(|b| *b == 0)
+            .collect();
         let n = URL_SAFE_NO_PAD.encode(&n_bytes);
         let e = URL_SAFE_NO_PAD.encode(&e_bytes);
 

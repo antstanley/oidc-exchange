@@ -26,9 +26,9 @@ toml = "1.2"
 config = "0.15"
 uuid = { version = "1", features = ["v4"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-dynamodb = "1"
-aws-sdk-kms = "1"
-aws-sdk-sqs = "1"
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 futures = "0.3"
 lambda_http = "1"
 percent-encoding = { version = "2", optional = true }
