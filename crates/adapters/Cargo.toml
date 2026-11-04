@@ -26,7 +26,7 @@ aws-sdk-sqs = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 hmac = "0.13"
 sha2 = "0.11"
-heed = "0.22"
+heed = "0.23"
 hex.workspace = true
 ulid.workspace = true
 chrono.workspace = true
