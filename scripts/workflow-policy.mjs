@@ -22,6 +22,9 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
   // Changesets "Version Packages" bot: pushes the version commit and opens its PR via
   // the GitHub API. Checkout still sets persist-credentials: false.
   ["version-packages.yml:version", new Set(["contents", "pull-requests"])],
+  // Generates .changeset/auto-pr-<n>.md on same-repo PR branches through the contents API
+  // (pull_request_target; the base branch script runs, PR code is never checked out).
+  ["auto-changeset.yml:changeset", new Set(["contents"])],
   ["production.yml:deploy", new Set(["id-token"])],
   ["preview.yml:deploy", new Set(["id-token", "pull-requests"])],
   ["preview.yml:destroy", new Set(["id-token", "pull-requests"])],
