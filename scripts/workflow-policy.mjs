@@ -114,6 +114,25 @@ export function validateWorkflow(text, workflowName) {
         if (!version || !/^\d+\.\d+\.\d+$/.test(version))
           errors.push(`${key}: cargo install cross requires literal exact stable --version`);
       }
+      // cargo-binstall must install literal exact stable crate versions from
+      // crate-published (author-controlled) binaries only: no source-compile
+      // fallback and no third-party QuickInstall mirror.
+      const joined = step.run.replace(/\\\r?\n\s*/g, " ");
+      const VALUE_FLAGS = new Set(["--strategies", "--disable-strategies", "--targets", "--pkg-url", "--bin-dir", "--pkg-fmt", "--version", "--root", "--manifest-path", "--index", "--git"]);
+      for (const command of joined.matchAll(/\bcargo\s+binstall\b[^\n]*/g)) {
+        const tokens = command[0].match(/'[^']*'|"[^"]*"|\S+/g).slice(2);
+        const crates = [];
+        const flags = new Map();
+        for (let i = 0; i < tokens.length; i += 1) {
+          if (tokens[i].startsWith("--")) {
+            if (VALUE_FLAGS.has(tokens[i])) { flags.set(tokens[i], tokens[i + 1]); i += 1; } else flags.set(tokens[i], true);
+          } else crates.push(tokens[i]);
+        }
+        if (crates.length === 0 || !crates.every((crate) => /^[\w-]+@\d+\.\d+\.\d+$/.test(crate)))
+          errors.push(`${key}: cargo binstall requires literal exact stable crate@version`);
+        if (flags.get("--strategies") !== "crate-meta-data" || flags.has("--disable-strategies"))
+          errors.push(`${key}: cargo binstall must use --strategies crate-meta-data (no compile or QuickInstall fallback)`);
+      }
     }
   }
   const publishNpm = workflow.jobs["publish-npm"];

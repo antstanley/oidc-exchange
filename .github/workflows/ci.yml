@@ -32,9 +32,18 @@ jobs:
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 12.16.1
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-binstall@1.26.2
       - name: Provision pinned scanners
         run: |
-          cargo install cargo-deny --version 0.20.2 --locked
+          # cargo-deny publishes no binstall metadata, so point binstall at the
+          # author's own GitHub release (static musl build). No compile fallback.
+          cargo binstall --no-confirm --strategies crate-meta-data --targets x86_64-unknown-linux-musl \
+            --pkg-url '{ repo }/releases/download/{ version }/{ name }-{ version }-{ target }.tar.gz' \
+            --bin-dir '{ name }-{ version }-{ target }/{ bin }{ binary-ext }' --pkg-fmt tgz \
+            cargo-deny@0.20.2
           python -m pip install --require-hashes --only-binary=:all: -r config/pip-audit-requirements.txt
           pnpm --version
       - name: Evaluate frozen Cargo, pnpm, and Python graphs
