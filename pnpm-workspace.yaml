@@ -2,6 +2,7 @@ packages:
   - "bindings/nodejs"
   - "bindings/lambda"
   - "apps/*"
+  - "infra/*"
   - "bindings/nodejs/npm/*"
 linkWorkspacePackages: true
 minimumReleaseAge: 1440

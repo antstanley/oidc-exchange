@@ -1,0 +1,7 @@
+{
+  "app": "node bin/app.ts",
+  "context": {
+    "hostedZoneId": "",
+    "zoneName": "iamstan.dev"
+  }
+}

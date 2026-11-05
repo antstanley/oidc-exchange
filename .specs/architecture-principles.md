@@ -1,6 +1,6 @@
 # Architecture Principles
 
-**Status:** Implemented · **Date:** 2026-08-16 · **Owner:** Ant Stanley · **Scope:** Repo-wide
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** Repo-wide
 
 Repo-wide architecture for `oidc-exchange`: a Rust service that validates ID tokens from
 third-party OIDC providers and exchanges them for self-issued access and refresh tokens.
@@ -114,13 +114,16 @@ oidc-exchange/
 ├── apps/
 │   ├── admin-ui/              # SvelteKit admin console
 │   └── website/              # Astro/Starlight docs site
+├── infra/
+│   └── downloads/             # CDK app: S3 + CloudFront download host (ships nothing)
 ├── examples/                  # reference deployments and framework integrations
 └── docs/                      # canonical prose docs (website symlinks this)
 ```
 
 The Cargo workspace members are `crates/{core,adapters,providers,server,ffi,test-utils}`
 plus `bindings/{nodejs,python}` (both are `cdylib` crates). The pnpm workspace covers
-`bindings/nodejs`, `bindings/lambda`, and `apps/*`.
+`bindings/nodejs`, `bindings/lambda`, `apps/*`, and `infra/*`. `infra/downloads` depends on no
+other workspace package.
 
 ## Dependency graph (Rust)
 

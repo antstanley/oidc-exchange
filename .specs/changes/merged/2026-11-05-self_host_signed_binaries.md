@@ -1,6 +1,6 @@
 # Change: Self-host signed release binaries at dl.oidc-exchange.iamstan.dev
 
-**Status:** Proposed · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Target:** bindings (distribution), `.github/workflows`, `install.sh`, `infra/downloads` (new)
+**Status:** Merged · **Merged:** 2026-11-05 · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Target:** bindings (distribution), `.github/workflows`, `install.sh`, `infra/downloads` (new)
 
 Publish every release's CLI binaries to a download host the project owns,
 `https://dl.oidc-exchange.iamstan.dev`, in addition to GitHub Releases. Each release job signs the
@@ -31,10 +31,10 @@ signing key to store or rotate; the verification identity is the release workflo
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/bindings/specs/05-distribution.md`](../bindings/specs/05-distribution.md) | Artifacts table gains the download host and signature column; Install script, Release pipeline and Supply-chain gates describe the new job, signing and verification |
+| [`.specs/bindings/specs/05-distribution.md`](../../bindings/specs/05-distribution.md) | Artifacts table gains the download host and signature column; Install script, Release pipeline and Supply-chain gates describe the new job, signing and verification |
 | `.specs/bindings/specs/06-download-host.md` (new) | The CDK-defined host: resources, layout, cache policy, upload role, operator runbook |
-| [`.specs/architecture-principles.md`](../architecture-principles.md) | Monorepo layout lists `infra/downloads` |
-| [`.specs/README.md`](../README.md) | Index the new page and this change spec |
+| [`.specs/architecture-principles.md`](../../architecture-principles.md) | Monorepo layout lists `infra/downloads` |
+| [`.specs/README.md`](../../README.md) | Index the new page and this change spec |
 
 ---
 

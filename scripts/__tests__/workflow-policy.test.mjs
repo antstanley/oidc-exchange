@@ -37,6 +37,7 @@ test("positive fixtures permit read-only locked validation and exact cross provi
   assert.deepEqual(validateWorkflow(fixture("cross-valid.yml"), "fixture.yml"), []);
   assert.deepEqual(validateWorkflow(fixture("binstall-valid.yml"), "fixture.yml"), []);
   assert.deepEqual(validateWorkflow(fixture("maturin-valid.yml"), "fixture.yml"), []);
+  assert.deepEqual(validateWorkflow(fixture("cosign-valid.yml"), "fixture.yml"), []);
 });
 
 test("negative fixtures reject each authority and tool-resolution violation", () => {
@@ -62,8 +63,12 @@ test("negative fixtures reject each authority and tool-resolution violation", ()
     ["maturin-prerelease-version.yml", "literal exact stable maturin-version"],
     ["maturin-expression-version.yml", "literal exact stable maturin-version"],
     ["maturin-mismatch-version.yml", "does not match audited maturin 1.16.0"],
+    ["cosign-missing-version.yml", "literal exact stable cosign-release"],
+    ["cosign-range-version.yml", "literal exact stable cosign-release"],
+    ["cosign-latest-version.yml", "literal exact stable cosign-release"],
+    ["cosign-prerelease-version.yml", "literal exact stable cosign-release"],
   ]);
-  assert.equal(expected.size, 21);
+  assert.equal(expected.size, 25);
   for (const [name, message] of expected) {
     const errors = validateWorkflow(fixture(name), "fixture.yml");
     assert.ok(errors.length > 0, `${name} must fail`);
@@ -76,7 +81,7 @@ test("negative fixtures reject each authority and tool-resolution violation", ()
 
 test("workflow fixtures are valid YAML objects", () => {
   const names = readdirSync(FIXTURE_DIRECTORY).filter((name) => name.endsWith(".yml"));
-  assert.equal(names.length, 25);
+  assert.equal(names.length, 30);
   for (const name of names) assert.equal(typeof YAML.parse(fixture(name)).jobs, "object");
 });
 

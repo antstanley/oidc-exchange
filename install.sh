@@ -4,6 +4,8 @@ set -euo pipefail
 readonly REPO="antstanley/oidc-exchange"
 readonly SIGNER_WORKFLOW="antstanley/oidc-exchange/.github/workflows/release.yml"
 readonly BINARY_NAME="oidc-exchange"
+readonly DOWNLOAD_HOST="https://dl.oidc-exchange.iamstan.dev"
+readonly SIGNER_ISSUER="https://token.actions.githubusercontent.com"
 readonly GH_VERIFY_TIMEOUT="30s"
 VERSION=""
 
@@ -81,33 +83,48 @@ else
     exit 1
 fi
 
-# Resolve version
+# Resolve version: prefer the project download host, fall back to the GitHub API.
 if [[ -z "$VERSION" ]]; then
     echo "Fetching latest version..."
-    VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+    VERSION="$(curl -fsSL "${DOWNLOAD_HOST}/latest.json" 2>/dev/null | grep '"version"' | sed -E 's/.*"version": *"([^"]+)".*/v\1/' || true)"
     if [[ -z "$VERSION" ]]; then
-        echo "Error: Could not determine latest version from GitHub API"
+        VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+    fi
+    if [[ -z "$VERSION" ]]; then
+        echo "Error: Could not determine latest version from ${DOWNLOAD_HOST} or the GitHub API"
         exit 1
     fi
     validate_version "$VERSION"
 fi
+# Release tags and download-host prefixes are always v-prefixed.
+[[ "$VERSION" == v* ]] || VERSION="v${VERSION}"
 
 echo "Installing ${BINARY_NAME} ${VERSION} (${OS_LABEL}/${ARCH_LABEL})..."
 
-DOWNLOAD_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
-BINARY_URL="${DOWNLOAD_BASE}/${BINARY_FILENAME}"
-CHECKSUM_URL="${DOWNLOAD_BASE}/${BINARY_FILENAME}.sha256"
+DOWNLOAD_BASE="${DOWNLOAD_HOST}/releases/${VERSION}"
+GITHUB_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+SOURCE="download-host"
 
 # Create temp directory
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Download binary and checksum
-echo "Downloading binary..."
-curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "$BINARY_URL"
+fetch_artifact() {
+    local base="$1"
+    curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "${base}/${BINARY_FILENAME}" &&
+        curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "${base}/${BINARY_FILENAME}.sha256"
+}
 
-echo "Downloading checksum..."
-curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "$CHECKSUM_URL"
+# Download binary and checksum. An unreachable or non-2xx download host falls back to
+# GitHub Releases for the same version; every check below applies to either source.
+echo "Downloading binary and checksum..."
+BASE="$DOWNLOAD_BASE"
+if ! fetch_artifact "$DOWNLOAD_BASE"; then
+    echo "Download host unavailable for ${VERSION}; falling back to GitHub Releases..." >&2
+    SOURCE="github"
+    BASE="$GITHUB_BASE"
+    fetch_artifact "$GITHUB_BASE"
+fi
 
 # Verify checksum. A missing checksum tool already failed the install closed above.
 checksum_verified=false
@@ -121,18 +138,40 @@ else
     checksum_verified=true
 fi
 
-# Verify provenance when GitHub CLI is available. The repository and signer
-# workflow are constants, never values derived from installer input.
-if command -v gh &>/dev/null; then
-    echo "Verifying GitHub build provenance..."
+run_with_timeout() {
     if command -v timeout &>/dev/null; then
-        timeout "$GH_VERIFY_TIMEOUT" gh attestation verify             "${TMPDIR}/${BINARY_FILENAME}"             --repo "$REPO"             --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+        timeout "$GH_VERIFY_TIMEOUT" "$@"
     else
-        gh attestation verify             "${TMPDIR}/${BINARY_FILENAME}"             --repo "$REPO"             --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+        "$@"
     fi
-else
+}
+
+# Authenticate the artifact. The repository, signer workflow and OIDC issuer are
+# constants, never values derived from installer input. Order: Sigstore signature
+# (cosign, download host only: the bundle is published there), then the GitHub
+# attestation (gh), then a loud checksum-only warning.
+authenticated=false
+if command -v cosign &>/dev/null && [[ "$SOURCE" == "download-host" ]]; then
+    echo "Downloading signature bundle..."
+    curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sigstore.bundle" "${BASE}/${BINARY_FILENAME}.sigstore.bundle"
+    echo "Verifying Sigstore signature..."
+    run_with_timeout cosign verify-blob \
+        --bundle "${TMPDIR}/${BINARY_FILENAME}.sigstore.bundle" \
+        --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${VERSION}" \
+        --certificate-oidc-issuer "$SIGNER_ISSUER" \
+        "${TMPDIR}/${BINARY_FILENAME}" >/dev/null
+    authenticated=true
+elif command -v gh &>/dev/null; then
+    echo "Verifying GitHub build provenance..."
+    run_with_timeout gh attestation verify "${TMPDIR}/${BINARY_FILENAME}" \
+        --repo "$REPO" \
+        --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
+    authenticated=true
+fi
+
+if [[ "$authenticated" != true ]]; then
     if [[ "$checksum_verified" = true ]]; then
-        echo "Warning: GitHub CLI not found; checksum verified corruption only, artifact provenance was not authenticated." >&2
+        echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
     else
         echo "Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation." >&2
     fi
