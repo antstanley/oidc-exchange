@@ -118,7 +118,7 @@ export function validateWorkflow(text, workflowName) {
 
   if (workflowName === "release.yml") {
     const attestAction =
-      "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a";
+      "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8";
     const binaryJob = workflow.jobs["build-binaries"];
     const dockerJob = workflow.jobs["build-docker"];
     const manifestJob = workflow.jobs["docker-manifest"];

@@ -9,7 +9,7 @@ import test from "node:test";
 const ROOT = resolve(import.meta.dirname, "../..");
 const WRAPPER = resolve(ROOT, "scripts/run-advisory-scans.mjs");
 const SCANNER_REQUIREMENTS = resolve(ROOT, "config/pip-audit-requirements.txt");
-const GOOD_EXPORT = "maturin==1.9.4\ntomli==2.4.1 ; python_full_version < '3.11'\n";
+const GOOD_EXPORT = "maturin==1.16.0\ntomli==2.5.0 ; python_full_version < '3.11'\n";
 
 function executable(path, content) {
   writeFileSync(path, `#!/bin/sh\nset -eu\n${content}`);
@@ -78,8 +78,8 @@ test("python advisory stage audits the exact nonempty frozen build export", asyn
 });
 
 for (const [name, exported, message] of [
-  ["missing maturin", "tomli==2.4.1 ; python_full_version < '3.11'\n", /missing maturin/],
-  ["mismatched maturin", "maturin==1.9.3\ntomli==2.4.1 ; python_full_version < '3.11'\n", /maturin 1\.9\.3, expected 1\.9\.4/],
+  ["missing maturin", "tomli==2.5.0 ; python_full_version < '3.11'\n", /missing maturin/],
+  ["mismatched maturin", "maturin==1.9.3\ntomli==2.5.0 ; python_full_version < '3.11'\n", /maturin 1\.9\.3, expected 1\.16\.0/],
   ["empty export", "", /export is empty/],
 ]) {
   test(`python advisory stage fails closed for ${name}`, async () => {
@@ -99,7 +99,7 @@ test("python advisory stage fails closed when pip-audit fails", async () => {
   try {
     assert.equal(run.result.status, 2);
     assert.match(run.result.stderr, /pip-audit tool or vulnerability DB failure/);
-    assert.match(readFileSync(run.auditLog, "utf8"), /maturin==1\.9\.4/);
+    assert.match(readFileSync(run.auditLog, "utf8"), /maturin==1\.16\.0/);
   } finally {
     await cleanup(run);
   }

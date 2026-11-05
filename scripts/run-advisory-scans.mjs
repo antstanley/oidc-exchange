@@ -8,7 +8,7 @@ const OUTPUT = resolve(process.env.ADVISORY_OUTPUT_DIR ?? resolve(ROOT, ".adviso
 const PNPM_VERSION = "12.16.1";
 const PIP_AUDIT_VERSION = "2.10.1";
 const CARGO_DENY_VERSION = "0.20.2";
-const MATURIN_VERSION = "1.9.4";
+const MATURIN_VERSION = "1.16.0";
 const TODAY = process.env.ADVISORY_POLICY_DATE ?? new Date().toISOString().slice(0, 10);
 mkdirSync(OUTPUT, { recursive: true });
 
@@ -88,7 +88,7 @@ function pythonFindings() {
   const maturin = packages.find((pkg) => pkg.name === "maturin");
   if (!maturin) throw new Error("uv frozen build export is missing maturin");
   if (maturin.version !== MATURIN_VERSION) throw new Error(`uv frozen build export has maturin ${maturin.version}, expected ${MATURIN_VERSION}`);
-  if (!/^tomli==2\.4\.1\s*;\s*python_full_version\s*<\s*['"]3\.11['"](?:\s*\\)?\s*$/m.test(exported))
+  if (!/^tomli==2\.5\.0\s*;\s*python_full_version\s*<\s*['"]3\.11['"](?:\s*\\)?\s*$/m.test(exported))
     throw new Error("uv frozen build export is missing audited conditional tomli");
   const audit = run("pip-audit", ["--requirement", requirements, "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"]);
   if (audit.error || ![0, 1].includes(audit.status)) throw new Error("pip-audit tool or vulnerability DB failure");
