@@ -33,7 +33,7 @@ done
 printf '%b' ${JSON.stringify(exported)} > "$output"
 `);
   executable(join(bin, "pip-audit"), `
-if [ "$1" = "--version" ]; then printf '%s\\n' 'pip-audit 2.9.0'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '%s\\n' 'pip-audit 2.10.1'; exit 0; fi
 requirement=""
 previous=""
 for argument in "$@"; do

@@ -18,5 +18,5 @@
     "lefthook": "2.2.2",
     "yaml": "2.9.1"
   },
-  "packageManager": "pnpm@11.9.0"
+  "packageManager": "pnpm@12.16.1"
 }

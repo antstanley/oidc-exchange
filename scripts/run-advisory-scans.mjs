@@ -5,9 +5,9 @@ import { resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const OUTPUT = resolve(process.env.ADVISORY_OUTPUT_DIR ?? resolve(ROOT, ".advisory-results"));
-const PNPM_VERSION = "11.9.0";
-const PIP_AUDIT_VERSION = "2.9.0";
-const CARGO_DENY_VERSION = "0.19.0";
+const PNPM_VERSION = "12.16.1";
+const PIP_AUDIT_VERSION = "2.10.1";
+const CARGO_DENY_VERSION = "0.20.2";
 const MATURIN_VERSION = "1.9.4";
 const TODAY = process.env.ADVISORY_POLICY_DATE ?? new Date().toISOString().slice(0, 10);
 mkdirSync(OUTPUT, { recursive: true });
