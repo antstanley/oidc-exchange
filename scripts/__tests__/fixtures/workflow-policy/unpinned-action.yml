@@ -9,4 +9,4 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - run: corepack pnpm@11.9.0 install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile

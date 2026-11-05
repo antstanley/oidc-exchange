@@ -1,6 +1,6 @@
 # Configuration
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/config.rs, crates/server/src/bootstrap.rs, config/
 
 One TOML file drives the whole service. `RawConfig` mirrors the merged TOML input; `AppConfig`
 is the resolved configuration held by the service. Every entry point that constructs a running
@@ -119,6 +119,13 @@ trusted_proxy_hops = 1
 [registration]
 mode = "open"
 
+[session.location]
+city_header = ""
+region_header = ""
+country_header = ""
+ip_header = ""
+trust_headers_from_any_peer = false
+
 [token]
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
@@ -179,6 +186,18 @@ default empty list, forwarding headers are not trusted.
 `mode` (`open` | `existing_users_only`, default `open`) is a closed domain: an unrecognised
 value is a config-load error, never a silent selection of `open`. Optional `domain_allowlist`
 contains exact or `*.domain` wildcard entries; entries are ASCII only.
+
+### `[session.location]`
+
+Opt-in recording of a caller-reported session location. `city_header`, `region_header`,
+`country_header`, `ip_header` (all `""` by default; an empty name disables that field), and
+`trust_headers_from_any_peer` (`false`). Header names must be valid HTTP header names,
+case-insensitive, and distinct from one another. Setting `trust_headers_from_any_peer = true`
+with no header named is rejected at load. The key states a deployment fact the service cannot
+verify: the origin is unreachable except through the proxy that sets these headers. Headers are
+honoured only from `server.trusted_proxies` peers unless that key is set; see
+[04-http-api.md](04-http-api.md) → Middleware stack for how values are read and how `ip_header`
+yields a `Reported` or `Asserted` address.
 
 ### `[token]`
 
@@ -279,7 +298,20 @@ It defaults to empty, which pins a provider to its issuer's origin. While the
 endpoint-origin check runs in its shipped warning mode, an undeclared origin logs a
 structured warning naming the endpoint and the permitted set and the deployment is served
 unchanged; rejecting undeclared origins is a separate future release-owner decision after
-one release of that telemetry. See [05-provider-system.md](05-provider-system.md).
+one release of that telemetry.
+
+Two optional oidc-adapter keys govern how the adapter derives
+`IdentityClaims.email_verified` for providers that do not emit the standard
+`email_verified` claim (Microsoft Entra ID v2.0 is the motivating case):
+`email_verified_claim` (non-empty string, at most 64 characters — read the named claim,
+bool-or-string coerced, when the standard claim is absent) and `trust_email_verified`
+(TOML boolean, default `false` — treat a non-empty `email` claim as verified when the
+standard claim is absent). An explicit `email_verified` claim from the provider always
+takes precedence, setting both keys on one provider block is a config error, and both
+are validated in the same `provider_config_to_oidc` lift as the other adapter-specific
+fields — a set-but-mistyped value fails registry build rather than being coerced or
+ignored. See
+[05-provider-system.md](05-provider-system.md#email-verification-overrides).
 
 ## Validation at load
 
@@ -312,11 +344,14 @@ The closed domains:
 | `providers.<name>.{issuer,jwks_uri,token_endpoint,revocation_endpoint}` | `HttpsUrl` | `https` only |
 | `providers.<name>.adapter` | `ProviderAdapter` | `oidc` \| `apple` |
 
-Two cross-field checks run in the same pass:
+Three cross-field checks run in the same pass:
 
 - **Internal-API secret.** When the internal API will be served (`server.role` is `admin` or
   `all` and `internal_api.enabled = true`), `internal_api.shared_secret` must be present and
   non-empty.
+- **Session location headers.** Each `session.location.*_header` that is non-empty must be a valid
+  HTTP header name, and the named headers must be distinct. `trust_headers_from_any_peer = true`
+  with no header named is rejected.
 - **Algorithm truthfulness.** The key manager reports the algorithm derived from the key
   material it loaded; resolution compares the operator's declared `algorithm` against it and
   fails when they disagree. The configured value is an assertion to verify, never metadata to
@@ -334,6 +369,7 @@ string through the FFI bindings (`bootstrap::parse_config`).
 | `server.issuer`, `token.audience` | `https://auth.example.com` / `https://api.example.com` *(replace for deployment)* |
 | `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
 | `registration.mode` | `open` |
+| `session.location.*_header` / `trust_headers_from_any_peer` | `""` / `false` |
 | `token.access_token_ttl` / `refresh_token_ttl` | `15m` / `30d` |
 | `grants.id_token` | `false` |
 | `grants.nonce_ttl` / `max_assertion_lifetime` | `10m` / `1h` |

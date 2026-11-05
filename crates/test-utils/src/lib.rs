@@ -26,6 +26,8 @@ pub mod telemetry;
 
 pub mod session_contract;
 
+pub mod session_list_contract;
+
 // ---------------------------------------------------------------------------
 // MockRepository
 // ---------------------------------------------------------------------------
@@ -223,7 +225,7 @@ impl UserRepository for MockRepository {
         }
 
         let now = Utc::now();
-        let id = format!("usr_{}", ulid::Ulid::new().to_string().to_lowercase());
+        let id = format!("usr_{}", ulid::Ulid::generate().to_string().to_lowercase());
         let user = User {
             id: id.clone(),
             external_id: new_user.external_id.clone(),
@@ -557,6 +559,24 @@ impl SessionRepository for MockRepository {
         let retired_removed = (retired_before - state.retired.len()) as u64;
 
         Ok(sessions_removed + retired_removed)
+    }
+
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<Session>> {
+        let state = self.state.lock().await;
+        let mut live: Vec<Session> = state
+            .sessions
+            .values()
+            .filter(|s| s.user_id == user_id && s.expires_at > now)
+            .cloned()
+            .collect();
+        live.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        live.truncate(limit);
+        Ok(live)
     }
 
     async fn count_active_sessions(&self) -> Result<u64> {
@@ -1083,7 +1103,7 @@ impl MockIdentityProvider {
 
         let mut raw = std::collections::HashMap::new();
         raw.insert("sub".to_string(), json!("test-subject"));
-        raw.insert("jti".to_string(), json!(ulid::Ulid::new().to_string()));
+        raw.insert("jti".to_string(), json!(ulid::Ulid::generate().to_string()));
         raw.insert(
             "exp".to_string(),
             json!(chrono::Utc::now().timestamp() + MOCK_DEFAULT_ASSERTION_TTL_SECS as i64),
@@ -1227,7 +1247,7 @@ pub mod single_use_conformance {
     fn scenario_key(label: &str) -> String {
         format!(
             "nonce:{label}:{}",
-            ulid::Ulid::new().to_string().to_lowercase()
+            ulid::Ulid::generate().to_string().to_lowercase()
         )
     }
 
@@ -1397,7 +1417,7 @@ pub mod single_use_conformance {
 
         // One expired and one live session alongside them.
         let make_session = |hash: &str, expires_at: chrono::DateTime<Utc>| Session {
-            user_id: format!("usr_su_cleanup_{}", ulid::Ulid::new()),
+            user_id: format!("usr_su_cleanup_{}", ulid::Ulid::generate()),
             family_id: oidc_exchange_core::domain::new_family_id(),
             generation: 0,
             rotated_at: None,
@@ -1407,6 +1427,7 @@ pub mod single_use_conformance {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         };
 
@@ -1499,6 +1520,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         }
     }

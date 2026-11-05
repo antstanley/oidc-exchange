@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/users/{id}",
             get(get_user).patch(update_user).delete(delete_user),
         )
+        .route("/users/{id}/sessions", get(list_user_sessions))
         .route(
             "/users/{id}/claims",
             get(get_claims)
@@ -122,6 +123,31 @@ pub async fn list_users(
         .admin_list_users(query.cursor.as_deref(), query.limit)
         .await?;
     Ok(Json(page))
+}
+
+// ---------------------------------------------------------------------------
+// Session listing
+// ---------------------------------------------------------------------------
+
+/// `GET /internal/users/{id}/sessions`: the user's live sessions, newest first,
+/// at most 50. `404` for an unknown or soft-deleted user. The body carries only
+/// the `SessionSummary` read model — never a token, hash, device id, or family
+/// id.
+pub async fn list_user_sessions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    match state.service.admin_list_user_sessions(&id).await? {
+        Some(sessions) => Ok(Json(serde_json::json!({ "sessions": sessions })).into_response()),
+        None => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not_found",
+                "error_description": format!("user not found: {}", id),
+            })),
+        )
+            .into_response()),
+    }
 }
 
 // ---------------------------------------------------------------------------

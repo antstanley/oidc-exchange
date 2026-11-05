@@ -5,11 +5,11 @@ description: "Development setup, testing, and code standards."
 
 ## Prerequisites
 
-- **Rust**: stable toolchain. CI builds and tests on stable rustc 1.98; no MSRV is pinned in the workspace. Install via [rustup](https://rustup.rs/).
-- **cargo-nextest**: test runner. Install with `cargo install cargo-nextest`.
-- **cargo-lambda**: required only for building Lambda binaries. Install with `cargo install cargo-lambda`.
-- **Docker**: required for DynamoDB Local integration tests.
-- **jj (Jujutsu)**: version control. Install from [martinvonz/jj](https://github.com/martinvonz/jj). This project uses jj exclusively; do not use git CLI commands.
+- **Rust:** Install a stable toolchain with [rustup](https://rustup.rs/). Continuous integration (CI) uses rustc 1.98. The workspace does not specify a minimum supported Rust version (MSRV).
+- **cargo-nextest:** Use this to run tests. Install with `cargo install cargo-nextest`.
+- **cargo-lambda:** Install this if you need to build Lambda binaries. Install with `cargo install cargo-lambda`.
+- **Docker:** Install this to run DynamoDB Local integration tests.
+- **jj (Jujutsu):** Use this for version control. Install from [martinvonz/jj](https://github.com/martinvonz/jj). This project uses jj exclusively; do not use git CLI commands.
 
 ## Clone and build
 
@@ -23,7 +23,7 @@ Any editor with rust-analyzer support works. The workspace root `Cargo.toml` def
 
 ## Version control with jj
 
-This project uses **Jujutsu (jj)** for version control. jj is a Git-compatible VCS with a simpler mental model: there is no staging area, and every working-copy state is automatically committed.
+This project uses **Jujutsu (jj)**, a Git-compatible version control system. It records working-copy changes automatically and has no staging area.
 
 ### Common workflows
 
@@ -61,10 +61,10 @@ jj git push --bookmark my-feature
 
 ### Key differences from git
 
-- **No staging area**: all file changes are part of the current change automatically.
+- **No staging area:** All file edits become part of the current change automatically.
 - **Immutable commits**: `jj describe`, `jj squash`, and `jj rebase` create new commit IDs. This is safe; jj tracks the rewrite.
 - **Conflict markers in files**: jj allows conflicted states to exist in the working copy. Resolve conflicts, then `jj status` confirms resolution.
-- **`jj new` instead of `git commit`**: when your current change is ready, run `jj new` to start a fresh change on top of it.
+- **`jj new` instead of `git commit`:** When your current change is ready, run `jj new` to start a fresh change on top of it.
 
 ## Testing
 
@@ -102,12 +102,12 @@ cargo nextest run -p oidc-exchange-adapters -- --ignored
 
 ### Test architecture
 
-The codebase uses hexagonal architecture to make testing straightforward:
+The codebase separates business logic from infrastructure through interfaces called ports. This lets tests replace infrastructure with mock implementations:
 
 - **`crates/test-utils/`**: provides mock implementations of all port traits (`MockRepository`, `MockKeyManager`, `MockAuditLog`, `MockRateLimiter`, `MockIdentityProvider`, `MockUserSync`). These are in-memory implementations used by core service tests and server E2E tests.
-- **Core tests** (`crates/core/tests/`): test business logic in isolation using mocks. No network, no filesystem.
-- **Adapter tests** (`crates/adapters/tests/`): test infrastructure integrations. HTTP-based adapters use [wiremock](https://crates.io/crates/wiremock) for deterministic HTTP mocking. DynamoDB tests require DynamoDB Local.
-- **Server E2E tests** (`crates/server/tests/`): spin up a full axum router with mock adapters and issue real HTTP requests.
+- **Core tests** (`crates/core/tests/`) test business logic with mocks. They do not use the network or filesystem.
+- **Adapter tests** (`crates/adapters/tests/`) test infrastructure integrations. HTTP-based adapters use [wiremock](https://crates.io/crates/wiremock) for deterministic HTTP mocking. DynamoDB tests require DynamoDB Local.
+- **Server E2E tests** (`crates/server/tests/`) start an axum router with mock adapters and send HTTP requests.
 
 ### Writing tests
 
@@ -137,7 +137,7 @@ The codebase uses hexagonal architecture to make testing straightforward:
 - `ffi` depends on `server` (router construction) and `core`; the Node.js and Python bindings depend on `ffi`.
 - `test-utils` depends only on `core`.
 
-These boundaries are enforced by the Cargo workspace. If `core` compiles, the domain logic is free of infrastructure coupling.
+The crate dependencies keep core logic separate from infrastructure.
 
 ### Adding a new adapter
 
@@ -145,15 +145,24 @@ These boundaries are enforced by the Cargo workspace. If `core` compiles, the do
 2. Implement the relevant port trait from `crates/core/src/ports/`.
 3. Add a builder function (e.g., `from_config()`) that constructs the adapter from the TOML config.
 4. Wire it into the adapter selection in `crates/server/src/bootstrap.rs`.
-5. Add tests: use wiremock for HTTP-based adapters, Docker services for database adapters.
+5. Add tests. Use wiremock for HTTP adapters and Docker services for database adapters.
 
 ### Adding a new identity provider
 
 1. If the provider follows standard OIDC, it only needs a config entry, with no code required.
-2. If the provider has quirks (like Apple), add a module in `crates/providers/src/` implementing `IdentityProvider`.
-3. Add an adapter name and wire it into provider construction in `crates/server/src/bootstrap.rs`.
+2. If the provider has specific requirements, such as Apple, add a module in `crates/providers/src/` implementing `IdentityProvider`.
+3. Add an adapter name and register it in provider construction in `crates/server/src/bootstrap.rs`.
 
 ## Code standards
+
+### Writing guidelines
+
+These guidelines apply to documentation, code comments, commit and pull request messages, and replies to users.
+
+- Write clear, complete sentences. Keep the detail proportional to the task.
+- Remove filler, repetition, and unrelated details.
+- Follow the plain language principles of ISO 24495-1:2023. Use short sentences with one idea each. Define terms on first use.
+- Do not use em dashes or teasers such as "Here's the thing" or "But there's a catch".
 
 ### Formatting and linting
 
@@ -186,8 +195,8 @@ Write concise commit messages that describe what changed and why. Use `jj descri
 ```
 fix: reject expired refresh tokens before database lookup
 
-The previous flow hit the database before checking expiry,
-adding unnecessary load during token storms.
+The previous flow queried the database before checking expiry.
+Repeated requests with expired tokens added unnecessary load.
 ```
 
 Prefix with a type when it helps clarity: `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`.

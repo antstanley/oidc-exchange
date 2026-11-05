@@ -3,7 +3,7 @@ title: Generic Linux Server
 description: Deploy oidc-exchange on a Linux host with systemd and nginx.
 ---
 
-Run oidc-exchange directly on a Linux host behind a reverse proxy. This is the simplest deployment model for on-prem or single-server setups.
+Run oidc-exchange directly on a Linux host behind a reverse proxy. This suits single-server deployments on your own infrastructure.
 
 A runnable example is in [`examples/linux-server/`](https://github.com/example/oidc-exchange/tree/main/examples/linux-server).
 
@@ -30,7 +30,7 @@ chmod 600 /etc/oidc-exchange/signing-key.pem
 
 ## Configuration
 
-Place config files in `/etc/oidc-exchange/config/`:
+Place configuration files in `/etc/oidc-exchange/config/`:
 
 ```toml
 # /etc/oidc-exchange/config/default.toml
@@ -89,7 +89,7 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 
 `endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered (see [Identity Providers](/guides/providers/)).
 
-Bind to `127.0.0.1` and put a reverse proxy (nginx, Caddy) in front for TLS termination.
+Bind to `127.0.0.1`. Use a reverse proxy such as nginx or Caddy to handle Transport Layer Security (TLS) for HTTPS connections.
 
 ## systemd service
 
@@ -188,11 +188,11 @@ Systemd captures it in the journal; `telemetry.exporter = "stdout"` also writes 
 journalctl -u oidc-exchange -f
 ```
 
-Forward to your log aggregator via journald export, or switch to `exporter = "otlp"` to send traces directly to an OpenTelemetry collector.
+Export journal entries to your central logging service. To send traces to an OpenTelemetry collector, set `exporter = "otlp"` to use the OpenTelemetry Protocol (OTLP).
 
 ## Specialized guides
 
 For deployment-specific storage configurations, see:
 
-- [Linux + PostgreSQL](/deployment/linux-postgres/): relational storage with optional Valkey for sessions
-- [Linux + SQLite](/deployment/linux-sqlite/): embedded storage for single-server deployments
+- Use [Linux + PostgreSQL](/deployment/linux-postgres/) for relational storage with optional Valkey sessions.
+- Use [Linux + SQLite](/deployment/linux-sqlite/) for local storage on one server.

@@ -323,7 +323,7 @@ impl JwksCache {
 /// The JWS `alg` name (e.g. `"RS256"`, `"EdDSA"`) for a resolved
 /// [`jsonwebtoken::Algorithm`].
 ///
-/// `jsonwebtoken` 10 exposes no `Display` for `Algorithm`, and the validators must
+/// `jsonwebtoken` exposes no `Display` for `Algorithm`, and the validators must
 /// report the algorithm they verified with as data (`IdentityClaims.signing_alg`), so
 /// the mapping lives here once instead of being re-derived from the untrusted header
 /// or re-matched ad hoc at each call site.
@@ -343,6 +343,9 @@ pub fn jws_alg_name(alg: jsonwebtoken::Algorithm) -> &'static str {
         A::PS384 => "PS384",
         A::PS512 => "PS512",
         A::EdDSA => "EdDSA",
+        // `Algorithm` is `#[non_exhaustive]` since jsonwebtoken 11; the validators only
+        // ever admit the algorithms above, so this arm is unreachable in practice.
+        _ => "UNSUPPORTED",
     }
 }
 

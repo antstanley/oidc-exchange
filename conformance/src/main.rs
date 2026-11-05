@@ -56,6 +56,7 @@ fn run_ffi(exchange: &OidcExchange, input: Input) -> Value {
             hints: TransportHints {
                 path_is_raw: input.path_is_raw,
             },
+            location: None,
         })
         .expect("production FFI request failed");
     output(input.id, response.status, &response.body)

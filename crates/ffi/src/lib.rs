@@ -48,6 +48,16 @@ pub struct TransportHints {
     pub path_is_raw: bool,
 }
 
+/// Optional session location an embedder establishes itself and hands to the
+/// service alongside the request. Sanitised by `SessionLocation::new` before
+/// use; core records it without further trust decisions.
+#[derive(Debug, Clone, Default)]
+pub struct WireLocation {
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub country: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WireRequest {
     pub method: String,
@@ -56,6 +66,10 @@ pub struct WireRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub hints: TransportHints,
+    /// Embedder-supplied session location for token exchanges. `None` records
+    /// no location: the FFI audit-context layer has no transport peer, so the
+    /// `[session.location]` header mapping is never applied here.
+    pub location: Option<WireLocation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +138,22 @@ impl OidcExchange {
             // `Config::resolve` would: absolute, non-root, no trailing slash.
             config.server.base_path = Some(base_path.to_string());
         }
+        // Install the process-wide telemetry subscriber at the one FFI
+        // construction seam, so every embedded deployment (Node, Lambda,
+        // Python) inherits operator-visible diagnostics with no binding-code
+        // changes. Placement matters twice over: after config resolution, so
+        // parse failures above still reach the host as `CONFIG_ERROR` values;
+        // before the runtime is created and `build_service` runs, so
+        // bootstrap-time warnings (e.g. the single-plane `role = "all"`
+        // warning) are captured too. `init_telemetry` is idempotent and
+        // host-respecting — an already-set global dispatcher (a second
+        // instance, or a host-owned subscriber) is retained and maps to
+        // `Ok(())` — so a returned error is practically unreachable and
+        // shares the `SERVICE_ERROR` class of a `build_service` failure.
+        oidc_exchange::telemetry::init_telemetry(&config.telemetry).map_err(|e| FfiError {
+            code: "SERVICE_ERROR".to_string(),
+            message: e.to_string(),
+        })?;
         let limits = NormalisationLimits {
             max_body_bytes: config.server.max_request_body_bytes as u64,
         };
@@ -274,11 +304,19 @@ impl OidcExchange {
             return Err(StatusCode::BAD_REQUEST);
         }
         let actual_body_len = request.body.len() as u64;
+        let supplied_location = request.location.and_then(|l| {
+            oidc_exchange_core::domain::SessionLocation::new(l.city, l.region, l.country)
+        });
         let mut built = http::Request::builder()
             .method(method)
             .uri(uri)
             .body(axum::body::Body::from(request.body))
             .map_err(|_| StatusCode::BAD_REQUEST)?;
+        if let Some(location) = supplied_location {
+            built.extensions_mut().insert(
+                oidc_exchange::middleware::audit_context::SuppliedLocation(location),
+            );
+        }
         #[cfg(feature = "conformance")]
         built
             .extensions_mut()
@@ -366,6 +404,7 @@ impl OidcExchange {
             headers,
             body,
             hints: TransportHints { path_is_raw: false },
+            location: None,
         }))
     }
 }
@@ -538,7 +577,34 @@ mod tests {
             ],
             body: SUBJECT.as_bytes().to_vec(),
             hints: TransportHints { path_is_raw: true },
+            location: None,
         }
+    }
+
+    #[test]
+    fn embedder_supplied_location_is_sanitised_and_attached_as_an_extension() {
+        let runtime = runtime(PanicPoint::ServiceFuture);
+        let mut wire = request("req-location");
+        wire.location = Some(WireLocation {
+            city: Some("  Oslo\u{0} ".into()),
+            region: None,
+            country: Some("NO".into()),
+        });
+        let built = runtime.normalise_request(wire).expect("normalises");
+        let supplied = built
+            .extensions()
+            .get::<oidc_exchange::middleware::audit_context::SuppliedLocation>()
+            .expect("location extension attached");
+        assert_eq!(supplied.0.city.as_deref(), Some("Oslo"));
+        assert_eq!(supplied.0.country.as_deref(), Some("NO"));
+
+        let mut empty = request("req-empty");
+        empty.location = Some(WireLocation::default());
+        let built = runtime.normalise_request(empty).expect("normalises");
+        assert!(built
+            .extensions()
+            .get::<oidc_exchange::middleware::audit_context::SuppliedLocation>()
+            .is_none());
     }
 
     fn assert_safe_500(response: &FfiResponse, expected_request_id: Option<&str>, logs: &str) {

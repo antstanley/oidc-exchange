@@ -349,6 +349,7 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let response = svc
@@ -453,6 +454,7 @@ async fn exchange_existing_user_does_not_create_new() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp1 = svc
         .exchange(request1)
@@ -470,6 +472,7 @@ async fn exchange_existing_user_does_not_create_new() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp2 = svc
         .exchange(request2)
@@ -556,6 +559,7 @@ async fn exchange_suspended_user_is_rejected() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request)
         .await
@@ -588,6 +592,7 @@ async fn exchange_suspended_user_is_rejected() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request2)
@@ -618,6 +623,7 @@ async fn exchange_unknown_provider_is_rejected() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -674,6 +680,7 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -726,6 +733,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         svc.exchange(request)
             .await
@@ -758,6 +766,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         svc.exchange(request)
             .await
@@ -790,6 +799,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         let err = svc
             .exchange(request)
@@ -827,6 +837,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         let err = svc
             .exchange(request)
@@ -864,6 +875,7 @@ async fn exchange_existing_users_only_rejects_new_user() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -916,6 +928,7 @@ async fn exchange_existing_user_is_denied_after_allowlist_tightening() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -953,6 +966,7 @@ async fn exchange_open_registration_requires_verified_email_without_allowlist() 
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         })
         .await
         .expect_err("open registration must reject an unverified email");
@@ -999,6 +1013,7 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -1055,6 +1070,7 @@ async fn exchange_with_direct_id_token_skips_code_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let result = svc
@@ -1095,6 +1111,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp_a = svc_a
         .exchange(request_a)
@@ -1132,6 +1149,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp_b = svc_b
         .exchange(request_b)
@@ -1179,6 +1197,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc_a
         .exchange(request_a)
@@ -1219,6 +1238,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc_b
         .exchange(request_b)
@@ -1265,6 +1285,7 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1278,16 +1299,21 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
 
     // Infrastructure failures are not client-attributable outcomes: they are
     // not recorded as authentication failures (the failing store may be the
-    // audit dependency itself), so no terminal event is emitted at all.
+    // audit dependency itself), so no terminal `SecurityEvent` is emitted.
+    // The fault is still an operational fact: exactly one best-effort
+    // `store_error` event records the store's diagnostic.
     let events = audit_clone.events().await;
-    assert!(
-        events.is_empty(),
-        "an infrastructure failure must not be recorded as an authentication outcome: {:?}",
+    assert_eq!(
+        events.len(),
+        1,
+        "an infrastructure failure must record exactly one operational store_error event \
+         and no terminal authentication outcome: {:?}",
         events
             .iter()
             .map(|e| e.event_type.clone())
             .collect::<Vec<_>>()
     );
+    assert_eq!(events[0].event_type, AuditEventType::StoreError);
 
     // No user or session was created, and the flow did not swallow the
     // infra error to attempt a silent re-lookup.
@@ -1301,6 +1327,243 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         1,
         "a non-Conflict create_user error must not trigger a re-lookup"
     );
+}
+
+/// A failing store surfaces `StoreError` to the caller *and* leaves exactly
+/// one operational `store_error` audit event behind — severity `error`,
+/// outcome `failure`/`store_error`, the provider named, no `actor` (identity
+/// may not have been established), `ip_address`/`user_agent` from the
+/// request, and `detail.store_detail` carrying the store's diagnostic (the
+/// string whose absence motivated issue #47). No terminal `SecurityEvent`
+/// accompanies it: infrastructure ≠ client fault.
+#[tokio::test]
+async fn exchange_store_fault_emits_one_operational_store_error_event() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let (failing_repo, _lookup_calls) = FailingCreateUserRepository::new(repo.clone());
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+    let svc = make_service_with_user_repo_and_audit(
+        Box::new(failing_repo),
+        repo.clone(),
+        provider,
+        make_config(),
+        audit,
+    );
+
+    let request = ExchangeRequest {
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
+        provider: "mock".to_string(),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Peer(
+            "203.0.113.7".parse().expect("valid test IP"),
+        ),
+        user_agent: Some("test-agent/1.0".to_string()),
+        device_id: None,
+        location: None,
+    };
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("a store fault must propagate");
+    assert!(
+        matches!(err, Error::StoreError { .. }),
+        "expected StoreError, got: {:?}",
+        err
+    );
+
+    let events = audit_clone.events().await;
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one operational event and no terminal SecurityEvent: {:?}",
+        events
+            .iter()
+            .map(|e| e.event_type.clone())
+            .collect::<Vec<_>>()
+    );
+    let event = &events[0];
+    assert_eq!(event.event_type, AuditEventType::StoreError);
+    assert_eq!(event.severity, AuditSeverity::Error);
+    assert_eq!(
+        event.outcome,
+        AuditOutcome::Failure(AuditFailure::StoreError)
+    );
+    assert!(
+        event.actor.is_none(),
+        "the arm sees only the typed error; no actor may be attributed"
+    );
+    assert_eq!(event.provider.as_deref(), Some("mock"));
+    assert_eq!(event.ip_address.as_deref(), Some("203.0.113.7"));
+    assert_eq!(event.user_agent.as_deref(), Some("test-agent/1.0"));
+    let store_detail = event
+        .detail
+        .get("store_detail")
+        .and_then(|value| value.as_str())
+        .expect("detail.store_detail must be present as a string");
+    assert!(
+        !store_detail.is_empty(),
+        "detail.store_detail must carry the store's diagnostic"
+    );
+
+    // Pin the wire shape: the standard `AuditEvent` JSON, with the
+    // diagnostic namespaced under `store_detail` (never `detail.detail`).
+    let json = serde_json::to_value(event).expect("audit events serialize");
+    assert_eq!(json["event_type"], "store_error");
+    assert_eq!(json["severity"], "error");
+    assert_eq!(json["outcome"]["status"], "failure");
+    assert_eq!(json["outcome"]["reason"], "store_error");
+    assert_eq!(json["detail"]["store_detail"], store_detail);
+    assert!(json["detail"].get("detail").is_none());
+}
+
+/// The `store_error` event rides the best-effort channel, so its `Error`
+/// severity is subject to `emit_threshold`: raised past `error` (e.g. to
+/// `critical`), the event is simply not emitted — and the response is
+/// unchanged.
+#[tokio::test]
+async fn exchange_store_fault_event_respects_raised_emit_threshold() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let (failing_repo, _lookup_calls) = FailingCreateUserRepository::new(repo.clone());
+    let audit = MockAuditLog::new();
+    let audit_clone = audit.clone();
+
+    let mut raw = base_raw_config();
+    raw.audit.emit_threshold = "critical".to_string();
+    let config = Config::resolve(raw).expect("test config should resolve");
+    let svc = make_service_with_user_repo_and_audit(
+        Box::new(failing_repo),
+        repo.clone(),
+        provider,
+        config,
+        audit,
+    );
+
+    let request = ExchangeRequest {
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
+        provider: "mock".to_string(),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
+        user_agent: None,
+        device_id: None,
+        location: None,
+    };
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("a store fault must propagate");
+    assert!(
+        matches!(err, Error::StoreError { .. }),
+        "the response must be unchanged by the emit threshold, got: {:?}",
+        err
+    );
+
+    let events = audit_clone.events().await;
+    assert!(
+        events.is_empty(),
+        "with emit_threshold above error the best-effort event must be dropped: {:?}",
+        events
+            .iter()
+            .map(|e| e.event_type.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Failing store *and* failing audit sink: the emission result is discarded,
+/// so the caller still receives the original `StoreError` — never an
+/// `AuditError` (the fallback log already captured the serialized event).
+#[tokio::test]
+async fn exchange_store_fault_with_failing_audit_sink_still_returns_store_error() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let (failing_repo, _lookup_calls) = FailingCreateUserRepository::new(repo.clone());
+    let audit = MockAuditLog::new();
+    audit.set_fail_mode(true).await;
+    let audit_clone = audit.clone();
+    let svc = make_service_with_user_repo_and_audit(
+        Box::new(failing_repo),
+        repo.clone(),
+        provider,
+        make_config(),
+        audit,
+    );
+
+    let request = ExchangeRequest {
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
+        provider: "mock".to_string(),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
+        user_agent: None,
+        device_id: None,
+        location: None,
+    };
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("a store fault must propagate");
+    assert!(
+        matches!(err, Error::StoreError { .. }),
+        "the caller must receive the StoreError, never an AuditError: {:?}",
+        err
+    );
+    assert!(audit_clone.events().await.is_empty());
+}
+
+/// `audit.durability = "enforce"` plus a failing sink: the durability
+/// contract governs the mandatory channel only, and this event never rides
+/// it — the caller still receives the original `StoreError`.
+#[tokio::test]
+async fn exchange_store_fault_under_enforce_durability_still_returns_store_error() {
+    let repo = MockRepository::new();
+    let provider = MockIdentityProvider::new("mock");
+    let (failing_repo, _lookup_calls) = FailingCreateUserRepository::new(repo.clone());
+    let audit = MockAuditLog::new();
+    audit.set_fail_mode(true).await;
+    let audit_clone = audit.clone();
+
+    let mut raw = base_raw_config();
+    raw.audit.durability = "enforce".to_string();
+    let config = Config::resolve(raw).expect("test config should resolve");
+    let svc = make_service_with_user_repo_and_audit(
+        Box::new(failing_repo),
+        repo.clone(),
+        provider,
+        config,
+        audit,
+    );
+
+    let request = ExchangeRequest {
+        provider_access_token: None,
+        credential: ExchangeCredential::AuthorizationCode {
+            code: "code".to_string(),
+            redirect_uri: "https://app.test.com/callback".to_string(),
+        },
+        provider: "mock".to_string(),
+        client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
+        user_agent: None,
+        device_id: None,
+        location: None,
+    };
+    let err = svc
+        .exchange(request)
+        .await
+        .expect_err("a store fault must propagate");
+    assert!(
+        matches!(err, Error::StoreError { .. }),
+        "durability must not govern the best-effort store_error event, got: {:?}",
+        err
+    );
+    assert!(audit_clone.events().await.is_empty());
 }
 
 #[tokio::test]
@@ -1322,6 +1585,7 @@ async fn exchange_provider_timeout_emits_exactly_one_typed_terminal_event() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1357,6 +1621,7 @@ async fn exchange_with_client_context_stores_exact_session_values() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.7".parse().unwrap()),
         user_agent: Some("integration-test-agent/1.0".to_string()),
         device_id: Some("device-abc-123".to_string()),
+        location: None,
     };
 
     svc.exchange(request)
@@ -1392,6 +1657,7 @@ async fn exchange_without_client_context_stores_none_session_values() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     svc.exchange(request)
@@ -1430,6 +1696,7 @@ async fn exchange_new_user_emits_user_created_then_token_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.9".parse().unwrap()),
         user_agent: Some("test-agent/2.0".to_string()),
         device_id: None,
+        location: None,
     };
 
     svc.exchange(request)
@@ -1486,6 +1753,7 @@ async fn exchange_existing_user_emits_only_token_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request1)
         .await
@@ -1508,6 +1776,7 @@ async fn exchange_existing_user_emits_only_token_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.10".parse().unwrap()),
         user_agent: Some("test-agent/3.0".to_string()),
         device_id: None,
+        location: None,
     };
     svc2.exchange(request2)
         .await
@@ -1545,6 +1814,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request)
         .await
@@ -1580,6 +1850,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.11".parse().unwrap()),
         user_agent: Some("test-agent/4.0".to_string()),
         device_id: None,
+        location: None,
     };
     svc2.exchange(request2)
         .await
@@ -1652,6 +1923,7 @@ async fn exchange_existing_user_allowlist_rejection_names_user_in_audit() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         })
         .await
         .expect_err("existing user outside current allowlist must be denied");
@@ -1692,6 +1964,7 @@ async fn exchange_existing_users_only_rejection_emits_registration_denied() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         })
         .await
         .expect_err("new users must be denied in existing_users_only mode");
@@ -1745,6 +2018,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.12".parse().unwrap()),
         user_agent: Some("test-agent/5.0".to_string()),
         device_id: None,
+        location: None,
     };
 
     svc.exchange(request)
@@ -1819,6 +2093,7 @@ async fn exchange_enforce_audit_failure_revokes_new_session() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -1863,6 +2138,7 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request)
         .await
@@ -1899,6 +2175,7 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request2)
         .await
@@ -1942,6 +2219,7 @@ async fn exchange_jit_registration_still_returns_token_when_sync_fails_every_att
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let response = svc
         .exchange(request)

@@ -5,12 +5,13 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{AsciiDomainPattern, RegistrationMode};
 use crate::domain::{
-    is_valid_family_id, new_family_id, AuditFailure, AuditOutcome, AuthenticationKind, ClientAddr,
-    NewUser, RateLimitDecision, RateLimitKey, SecurityEvent, Session, TokenResponse, UserStatus,
+    is_valid_family_id, new_family_id, AuditEventType, AuditFailure, AuditOutcome, AuditSeverity,
+    AuthenticationKind, ClientAddr, NewUser, RateLimitDecision, RateLimitKey, SecurityEvent,
+    Session, TokenResponse, UserStatus,
 };
 use crate::error::{Error, Result};
 use crate::service::assertion::{AssertionBindError, AssertionContext};
-use crate::service::AppService;
+use crate::service::{create_audit_event, AppService};
 
 /// The typed form of the declared `grant_type`: one variant per exchange
 /// grant, each owning that grant's required parameters as non-optional
@@ -54,6 +55,9 @@ pub struct ExchangeRequest {
     /// Client-supplied device identifier (`X-Device-Id`), extracted by the
     /// server's audit-context middleware. Stored on the resulting session.
     pub device_id: Option<String>,
+    /// Caller-supplied session location, stored on the resulting session.
+    /// Core records it as given and makes no trust decision.
+    pub location: Option<crate::domain::SessionLocation>,
 }
 
 /// Check whether an email's domain matches any entry in the allowlist.
@@ -158,8 +162,33 @@ impl AppService {
             // Infrastructure failures are not client-attributable outcomes:
             // they surface as 5xx and are not recorded as authentication
             // failures (the failing store may be the audit dependency
-            // itself). Infrastructure ≠ client fault.
-            Err(ExchangeFlowError::Other(error @ Error::StoreError { .. })) => return Err(error),
+            // itself). Infrastructure ≠ client fault. The fault is still an
+            // operational fact, so one best-effort `store_error` event
+            // records the store's diagnostic before the error propagates.
+            Err(ExchangeFlowError::Other(Error::StoreError { detail })) => {
+                let mut event = create_audit_event(
+                    AuditEventType::StoreError,
+                    AuditSeverity::Error,
+                    AuditOutcome::Failure(AuditFailure::StoreError),
+                    // The arm sees only the typed error; identity may not
+                    // have been established when the store failed.
+                    None,
+                    Some(request.provider.clone()),
+                    client_addr,
+                    request.user_agent.clone(),
+                );
+                event.detail.insert(
+                    "store_detail".to_string(),
+                    serde_json::Value::String(detail.clone()),
+                );
+                // Best-effort emission; the result is deliberately discarded.
+                // On a sink failure `emit_audit` has already logged the
+                // serialized event through `log_audit_fallback`, and the
+                // original `StoreError` — never an `AuditError` — is what
+                // the caller must receive.
+                let _ = self.emit_audit(event).await;
+                return Err(Error::StoreError { detail });
+            }
             Err(ExchangeFlowError::Attributed { error, actor }) => {
                 let (event, outcome, _) = exchange_terminal_event(&error);
                 let emitted = self
@@ -490,6 +519,12 @@ impl AppService {
             device_id: request.device_id.clone(),
             user_agent: request.user_agent.clone(),
             ip_address: request.client_addr.audit_address(),
+            // Re-run the sanitising constructor: the fields are public, so a
+            // caller that built the value by hand still gets bounded text.
+            location: request
+                .location
+                .clone()
+                .and_then(|l| crate::domain::SessionLocation::new(l.city, l.region, l.country)),
             created_at: Utc::now(),
         };
         self.session_repo.store_refresh_token(&session).await?;

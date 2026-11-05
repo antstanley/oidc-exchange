@@ -1,4 +1,4 @@
-import { getStats, listUsersPage } from "$lib/api";
+import { getStats, listUsersPage } from "#lib/api";
 import type { PageServerLoad } from "./$types";
 
 /** How many recently-created users the dashboard preview shows. */

@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-08-22 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, the configured retained `rate_limiter`, a `providers` map, and `config`. The
@@ -17,10 +17,14 @@ already parsed the form into a `TokenGrant`, so `AppService::exchange` receives 
 ([04-http-api.md](04-http-api.md)). Emission is terminal and single: the flow maps its result
 to exactly one `SecurityEvent`, with fixed classification strings rather than upstream error
 text (an assertion-binding rejection's detail-enriched `ValidationFailed` record is that
-terminal event, and infrastructure store failures are 5xx conditions, not recorded
-authentication outcomes). Success is emitted after storing the session and signing the access
-token; under `audit.durability = "enforce"`, a failed terminal emit revokes that just-stored
-session before returning the error. Principal creation is a separate state-change event, so a
+terminal event). Infrastructure store failures remain 5xx conditions and are never recorded
+as authentication outcomes; instead of returning silently, the flow records one operational
+`StoreError` audit event for them — `Error` severity, outcome `failure`/`store_error`,
+`detail.store_detail` carrying the store's diagnostic — through best-effort `emit_audit`,
+whose own failure is discarded so the original `StoreError` always reaches the caller.
+Success is emitted after storing the session and signing the access token; under
+`audit.durability = "enforce"`, a failed terminal emit revokes that just-stored session
+before returning the error. Principal creation is a separate state-change event, so a
 losing JIT-registration racer emits none.
 
 1. **Resolve provider** — look up `request.provider` in the `providers` map; missing →
@@ -67,20 +71,27 @@ losing JIT-registration racer emits none.
 
    Store failures during the two atomic operations propagate as typed infrastructure
    errors (`StoreError` → 5xx), never disguised as client-fault rejections; no rejection
-   audit is emitted for them.
+   audit is emitted for them — the exchange wrapper records them as the flow's single
+   operational `StoreError` event instead.
 4. **User lookup / registration policy** — `get_user_by_external_id(subject, provider)`:
    - **Found, suspended** → `UserSuspended` (audited `Unauthorized`/`UserSuspended`).
-   - **Found, active** → when `registration.domain_allowlist` is set, re-apply it against the
-     assertion's current claims: `email_verified == Some(true)` and a matching domain, using
-     the same predicate as the Not-found arm. A failure → `AccessDenied` (audited
-     `RegistrationDenied`, naming the user id). The live ID-token claims are used rather than
-     the stored `user.email`, which is frozen at first login. `registration.mode` is not
-     re-evaluated here: it is an admission gate and is trivially satisfied by an existing user.
+   - **Found, active** → re-apply the registration policy against the assertion's current
+     claims, through the same predicate as the Not-found arm: a verified email
+     (`email_verified == Some(true)`) is always required, and when
+     `registration.domain_allowlist` is set the email's domain must also match it. A
+     failure → `AccessDenied` (audited `RegistrationDenied`, naming the user id). The live
+     ID-token claims are used rather than the stored `user.email`, which is frozen at
+     first login. `registration.mode` is not re-evaluated here: it is an admission gate
+     and is trivially satisfied by an existing user.
    - **Not found** → apply policy. The policy value is a `RegistrationMode`, matched
      exhaustively; there is no unrecognised case because config load rejected it.
      - The ID token must carry a **verified** email (`email_verified == Some(true)`) — a
-       requirement of accepting the claim at all, not merely of the allowlist branch. A missing
-       or unverified email → `AccessDenied` (audited `RegistrationDenied`).
+       requirement of accepting the claim at all, not merely of the allowlist branch. A
+       missing or unverified email → `AccessDenied` (audited `RegistrationDenied`).
+       `email_verified` is the signal the provider adapter derived — for the generic OIDC
+       adapter, per that provider's configured email-verification mode
+       ([05-provider-system.md](05-provider-system.md#email-verification-overrides)); the
+       policy itself never reads raw claims.
      - If `registration.domain_allowlist` is set, the email's domain must match it — exact
        (`example.com`) or wildcard (`*.example.com`, at least one subdomain, ASCII
        case-insensitive). A non-matching domain → `AccessDenied` (audited
@@ -102,7 +113,7 @@ losing JIT-registration racer emits none.
 
 `ExchangeRequest` carries the client context (`ip_address`, `user_agent`, `device_id`)
 extracted by the server's audit-context middleware; the stored session records all three,
-and every audit event in the flow records the `ip_address` and `user_agent` (the
+along with the caller-supplied `request.location` (stored on the generation-0 session), and every audit event in the flow records the `ip_address` and `user_agent` (the
 `AuditEvent` shape carries no `device_id`). A suspended user audits `UserSuspended` (warning,
 failure); the registration-policy denials audit `RegistrationDenied` (warning, failure); a
 created user audits `UserCreated` (notice, success); a successful exchange audits
@@ -146,7 +157,7 @@ sign-in shares a `family_id`, and a family has exactly one live generation at an
    Both are decided before anything is written.
 6. Mint the replacement — 32 random bytes, base64url-no-pad for the opaque token, SHA-256
    hex of the bytes for the new hash. The replacement `Session` inherits `family_id`,
-   `user_id`, `provider`, `created_at`, `expires_at` and the device fields unchanged, sets
+   `user_id`, `provider`, `created_at`, `expires_at`, `location` (copied from `live.location`) and the device fields unchanged, sets
    `generation = live.generation + 1` and `rotated_at = now`.
 7. `rotate_refresh_token(live_hash, replacement)` — one atomic compare-and-swap conditioned
    on `live_hash` still being the family's live generation. It deletes the live session,
@@ -313,11 +324,14 @@ emit_audit(AuditEvent)                      — best-effort
 ```
 
 Severity follows RFC 5424 (emergency 0 … debug 7); lower is more severe. Every shipped flow
-uses the mandatory channel. The HTTP public per-IP throttle also emits `ThrottleExceeded`
-through this same API before returning its terminal `429`; the middleware
-logs an enforce-mode emission error but preserves the `429`, so audit-sink behavior cannot make
-the denial unsafe. `emit_audit` remains available for operational events supplied by embedders,
-and only that best-effort channel is governed by `emit_threshold` and `blocking_threshold`.
+emits its security outcomes on the mandatory channel. The HTTP public per-IP throttle also
+emits `ThrottleExceeded` through this same API before returning its terminal `429`; the
+middleware logs an enforce-mode emission error but preserves the `429`, so audit-sink
+behavior cannot make the denial unsafe. `emit_audit` carries operational events — the
+exchange flow's infrastructure `StoreError` record, and events supplied by embedders — and
+only that best-effort channel is governed by `emit_threshold` and `blocking_threshold`; the
+exchange wrapper discards a store-fault emission failure (already logged by the fallback) so
+an audit-sink error can never displace the `StoreError` the caller must receive.
 
 ## Admin operations (`user_admin.rs`)
 
@@ -338,11 +352,12 @@ so an audit write failure follows `audit.durability`; their events have
 | `admin_clear_claims` | set claims to empty |
 | `admin_stats` | `count_by_status` + `count_active_sessions` → `AdminStats` |
 | `admin_list_users` | `list_users(offset, limit)` |
+| `admin_list_user_sessions` | `get_user_by_id`; `None` when the user is absent or soft-deleted, otherwise `list_live_sessions(user_id, now, 50)` mapped to `SessionSummary` values (one per family, newest first); a pre-rotation row with no `family_id` has no stable id and is omitted |
 
 Admin mutations are audited: `admin_create_user` → `UserCreated`, `admin_update_user` →
 `UserUpdated` (and `UserSuspended` when the patch sets `status = Suspended`),
 `admin_delete_user` → `UserDeleted`, and the claims mutations → `UserUpdated` with the
-operation in `detail`. Read-only operations (get, list, stats, get-claims) are not audited.
+operation in `detail`. Read-only operations (get, list, list-sessions, stats, get-claims) are not audited.
 Audit failures follow `emit_audit`'s blocking rules, unlike best-effort user sync. Admin
 operations carry no client `ip_address`/`user_agent` context.
 
@@ -410,9 +425,14 @@ operations carry no client `ip_address`/`user_agent` context.
   hash and access-token revocation would silently become a no-op. A rotation-independent
   identifier keeps the `sid` resolvable for the token's full TTL.
 - *Registration demands a verified email.* **Every just-in-time user creation requires
-  `email_verified == true`, whether or not an allowlist is configured.** The requirement is a
-  property of accepting the email claim, not of the allowlist; nesting it inside an optional
-  feature's branch meant turning the allowlist off turned identity verification off with it.
+  `email_verified == true`, whether or not an allowlist is configured.** The
+  requirement is a property of accepting the email claim, not of the allowlist; nesting
+  it inside an optional feature's branch meant turning the allowlist off turned
+  identity verification off with it. The per-provider email-verification overrides
+  ([05-provider-system.md](05-provider-system.md#email-verification-overrides)) do not
+  weaken this predicate: they govern how the generic OIDC adapter derives
+  `email_verified` from a provider's claims, and the core still refuses anything short
+  of `Some(true)`.
 - *The allowlist is an authorization predicate; the mode is an admission gate.* **The domain
   allowlist is re-evaluated on every exchange, for existing users as well as new ones;
   `registration.mode` applies only at creation.** An operator who tightens the allowlist is

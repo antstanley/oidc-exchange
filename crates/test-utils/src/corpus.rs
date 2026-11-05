@@ -57,7 +57,7 @@ FVcapekT6K7Pw8/im5jUsL16uUTW9JJXIpQ/HWLGwo7uR3C3KB0wvcsZa+LM7Boj
 const RSA_N: &str = "yeHs3xSHnxGN17yWbvw8FBnpsqOlWHCul1PZ4h1B2cOKFr7A7QN6mVzVst5V1wSphcwBFy4nGbEonSXK6M1UZ76fAI88GeYxlCluetqX4XCQzTPGHHP30mXijUfYRFIp76ZSGMsSNABWGgSKOW4mM_qfEfz4zQKbKVgiZr0B6-Tz6gw02vQCvcD8yk_SP9m3HU5TWjjAmZ1K9TIQHCVAtkKBC8aMGoOVSG0Kbcg9vdU87CoMSnUqQ58xY1QrLyk5C3sZL7V6Ncvh2j-ilP_c4n6qZpvWqYEGqqBK20MEiaQ_iRbXR6XoouZz1OLZkBmUO3J-jCyfE9Oer_dvx7ktIQ";
 
 /// Public exponent of the corpus RSA key pair (65537), base64url without padding.
-const RSA_E: &str = "AAAAAAABAAE";
+const RSA_E: &str = "AQAB";
 
 /// Private half of the corpus P-256 key pair (PKCS#8), generated from the seed
 /// `[42u8; 32]`. Test-only material.

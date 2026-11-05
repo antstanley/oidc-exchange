@@ -41,16 +41,21 @@ pre-push:
       glob: "{python/**,tests/**,pyproject.toml}"
       run: uv run ruff format --check . && uv run ruff check . && uv run pyright && uv run pytest
 
-    # Docs website (Astro). oxlint/oxfmt cover the loose .ts/.js; `astro check`
+    # Docs website (Astro). oxlint/oxfmt cover the loose .ts/.js; `tsc` (Astro content mapper)
     # type-checks the project (.astro, content collections, TS).
     website:
       root: "apps/website/"
       glob: "{src/**,integrations/**,astro.config.mjs,package.json,tsconfig.json}"
       run: pnpm lint && pnpm format:check && pnpm typecheck
 
+    # Unused files, exports and dependencies across the JS workspaces (knip.json).
+    knip:
+      glob: "{**/*.{ts,js,mjs,svelte,astro},**/package.json,knip.json}"
+      run: pnpm knip
+
     # Admin UI (SvelteKit). oxlint/oxfmt cover the .ts; `svelte-check` type-checks
     # the .svelte components.
     admin-ui:
       root: "apps/admin-ui/"
-      glob: "{src/**,svelte.config.js,vite.config.ts,package.json,tsconfig.json}"
+      glob: "{src/**,vite.config.ts,package.json,tsconfig.json}"
       run: pnpm lint && pnpm format:check && pnpm typecheck

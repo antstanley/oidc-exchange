@@ -15,7 +15,7 @@ pnpm build
 
 ## Deploy
 
-Use your preferred deployment tool (SAM, CDK, Serverless Framework, Terraform) to deploy `handler.handler` as a Lambda function with Node.js 22 runtime.
+Use your preferred deployment tool (SAM, CDK, Serverless Framework, Terraform) to deploy `handler.handler` as a Lambda function with Node.js 24 runtime.
 
 ### SAM template example
 
@@ -25,7 +25,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: handler.handler
-      Runtime: nodejs22.x
+      Runtime: nodejs24.x
       CodeUri: .
       Events:
         Auth:

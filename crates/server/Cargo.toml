@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-conformance = ["dep:percent-encoding"]
+conformance = []
 
 [dependencies]
 oidc-exchange-core.workspace = true
@@ -21,17 +21,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.8"
 subtle = "2"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "request-id", "catch-panic", "timeout"] }
-toml = "1.1"
+tower-http = { version = "0.7", features = ["trace", "request-id", "catch-panic", "timeout"] }
+toml = "1.2"
 config = "0.15"
 uuid = { version = "1", features = ["v4"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-dynamodb = "1"
-aws-sdk-kms = "1"
-aws-sdk-sqs = "1"
+aws-sdk-dynamodb = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-kms = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 futures = "0.3"
 lambda_http = "1"
-percent-encoding = { version = "2", optional = true }
+percent-encoding = "2"
 ipnet.workspace = true
 
 [dev-dependencies]

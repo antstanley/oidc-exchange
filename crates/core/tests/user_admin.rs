@@ -680,6 +680,7 @@ async fn admin_delete_user_revokes_sessions() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let response = svc
         .exchange(request)
@@ -753,6 +754,7 @@ async fn service_with_active_session() -> (AppService, String, MockRepository, M
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let response = svc
         .exchange(request)
@@ -880,6 +882,7 @@ async fn suspended_to_suspended_is_a_noop_and_does_not_re_revoke() {
         device_id: None,
         user_agent: None,
         ip_address: None,
+        location: None,
         created_at: chrono::Utc::now(),
     };
     repo_clone
@@ -1640,4 +1643,145 @@ async fn admin_list_users_rejects_a_tampered_cursor_as_invalid_request() {
             other => panic!("expected InvalidRequest for {bad_cursor:?}, got {other:?}"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session listing and caller-supplied location
+// ---------------------------------------------------------------------------
+
+fn cape_town() -> oidc_exchange_core::domain::SessionLocation {
+    oidc_exchange_core::domain::SessionLocation::new(
+        Some("Cape Town".into()),
+        Some("Western Cape".into()),
+        Some("ZA".into()),
+    )
+    .expect("non-empty location")
+}
+
+/// Exchange once with `location`, returning the service, the user id, the mock
+/// store, and the refresh token issued.
+async fn exchange_with_location(
+    location: Option<oidc_exchange_core::domain::SessionLocation>,
+) -> (AppService, String, MockRepository, String) {
+    let repo = MockRepository::new();
+    let repo_clone = repo.clone();
+    let svc =
+        make_service_with_provider(repo, MockUserSync::new(), MockIdentityProvider::new("mock"));
+    let response = svc
+        .exchange(ExchangeRequest {
+            provider_access_token: None,
+            credential: ExchangeCredential::AuthorizationCode {
+                code: "auth-code".to_string(),
+                redirect_uri: "https://app.test.com/callback".to_string(),
+            },
+            provider: "mock".to_string(),
+            client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
+            user_agent: Some("agent/1".to_string()),
+            device_id: Some("device-secret".to_string()),
+            location,
+        })
+        .await
+        .expect("exchange should succeed");
+    let refresh_token = response
+        .refresh_token
+        .expect("refresh token issued")
+        .expose()
+        .clone();
+    let user_id = repo_clone.get_all_sessions().await[0].user_id.clone();
+    (svc, user_id, repo_clone, refresh_token)
+}
+
+#[tokio::test]
+async fn exchange_stores_caller_supplied_location_and_listing_reports_it() {
+    let (svc, user_id, repo, refresh_token) = exchange_with_location(Some(cape_town())).await;
+
+    assert_eq!(
+        repo.get_all_sessions().await[0].location,
+        Some(cape_town()),
+        "exchange stores the caller's location verbatim"
+    );
+
+    let listed = svc
+        .admin_list_user_sessions(&user_id)
+        .await
+        .expect("list")
+        .expect("user exists");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].location, Some(cape_town()));
+    assert_eq!(listed[0].user_agent.as_deref(), Some("agent/1"));
+    assert!(listed[0].id.starts_with("ses_"));
+
+    // No credential-bearing value leaks into the serialized read model.
+    let json = serde_json::to_string(&listed).expect("serialize");
+    let stored = &repo.get_all_sessions().await[0];
+    assert!(!json.contains(stored.refresh_token_hash.expose()));
+    assert!(!json.contains(&refresh_token));
+    assert!(!json.contains("device-secret"));
+    assert!(!json.contains(&stored.family_id));
+}
+
+#[tokio::test]
+async fn listing_id_and_location_are_stable_across_rotation() {
+    let (svc, user_id, repo, refresh_token) = exchange_with_location(Some(cape_town())).await;
+    let before = svc
+        .admin_list_user_sessions(&user_id)
+        .await
+        .expect("list")
+        .expect("user");
+
+    svc.refresh(oidc_exchange_core::service::refresh::RefreshRequest {
+        refresh_token,
+        ..Default::default()
+    })
+    .await
+    .expect("refresh");
+
+    assert_eq!(repo.get_all_sessions().await[0].generation, 1);
+    let after = svc
+        .admin_list_user_sessions(&user_id)
+        .await
+        .expect("list")
+        .expect("user");
+    assert_eq!(after.len(), 1, "a rotated family lists once");
+    assert_eq!(
+        after[0].id, before[0].id,
+        "the id is stable across rotation"
+    );
+    assert_eq!(
+        after[0].location,
+        Some(cape_town()),
+        "location is carried forward"
+    );
+}
+
+#[tokio::test]
+async fn listing_without_location_reports_none_and_omits_the_key() {
+    let (svc, user_id, _repo, _token) = exchange_with_location(None).await;
+    let listed = svc
+        .admin_list_user_sessions(&user_id)
+        .await
+        .expect("list")
+        .expect("user");
+    assert_eq!(listed[0].location, None);
+    let json = serde_json::to_value(&listed[0]).expect("serialize");
+    assert!(json.get("location").is_none());
+}
+
+#[tokio::test]
+async fn listing_is_none_for_unknown_and_soft_deleted_users() {
+    let (svc, user_id, _repo, _token) = exchange_with_location(None).await;
+    assert!(svc
+        .admin_list_user_sessions("usr_missing")
+        .await
+        .expect("list")
+        .is_none());
+
+    svc.admin_update_user(&operator(), &user_id, &status_patch(UserStatus::Deleted))
+        .await
+        .expect("delete");
+    assert!(svc
+        .admin_list_user_sessions(&user_id)
+        .await
+        .expect("list")
+        .is_none());
 }

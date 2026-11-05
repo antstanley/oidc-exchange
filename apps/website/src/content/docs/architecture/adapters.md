@@ -3,15 +3,15 @@ title: "Storage Adapters"
 description: "Available database, session, audit, and key management adapters."
 ---
 
-oidc-exchange ships with all adapters compiled into a single binary. Configuration selects which adapters are active at runtime. This page details every available adapter and its configuration.
+Adapters connect oidc-exchange to storage, signing keys, audit logs, and user event services. All adapters are compiled into one binary. Configuration selects which ones the service uses.
 
 ## User and session storage
 
-The `[repository]` section selects the primary storage backend for both user records and session (refresh token) data. Three backends are available.
+The `[repository]` section selects storage for user records and sessions. Sessions contain refresh token data. Three storage backends are available.
 
 ### DynamoDB
 
-Single-table design optimized for the access patterns oidc-exchange uses: user lookup by ID, user lookup by external ID (provider subject), and session lookup by refresh token hash.
+DynamoDB stores users and sessions in one table. It supports user lookups by internal ID or provider ID, and session lookups by refresh token hash.
 
 ```toml
 [repository]
@@ -22,11 +22,11 @@ table_name = "oidc-exchange"
 region = "us-east-1"       # optional, uses SDK default if omitted
 ```
 
-DynamoDB is the recommended backend for AWS deployments, especially Lambda-based architectures where a connection pool is impractical. The table schema is defined in `schemas/dynamodb/table-design.json`.
+DynamoDB suits AWS deployments, including Lambda functions that do not maintain database connections. The table schema is defined in `schemas/dynamodb/table-design.json`.
 
 ### PostgreSQL
 
-Relational storage using [sqlx](https://github.com/launchbadge/sqlx) with connection pooling. Suitable for teams that prefer SQL or need to query user data with ad-hoc SQL.
+PostgreSQL uses [sqlx](https://github.com/launchbadge/sqlx) to share database connections across requests. Use it when you need a relational database or direct SQL queries on user data.
 
 ```toml
 [repository]
@@ -39,7 +39,7 @@ max_connections = 5
 
 ### SQLite
 
-File-based storage using [sqlx](https://github.com/launchbadge/sqlx). Zero external dependencies, ideal for single-server deployments or development.
+SQLite stores data in a local file using [sqlx](https://github.com/launchbadge/sqlx). It needs no external database service and suits development or single-server deployments.
 
 ```toml
 [repository]
@@ -51,17 +51,18 @@ path = "./data/oidc-exchange.db"
 
 ## Session-only storage
 
-The optional `[session_repository]` section overrides the backend used for session and refresh token operations without affecting user storage. This allows you to pair a relational user store with a fast session store.
+The optional `[session_repository]` section selects separate storage for sessions. User records remain in the `[repository]` backend.
 
 When `[session_repository]` is configured:
-- User operations (create, get, update, delete) use the `[repository]` backend
-- Session operations (store refresh token, lookup by hash, revoke) use the `[session_repository]` backend
+
+- User operations (create, get, update, delete) use the `[repository]` backend.
+- Session operations (store refresh token, lookup by hash, revoke) use the `[session_repository]` backend.
 
 When `[session_repository]` is not configured, all operations use the `[repository]` backend.
 
 ### Valkey / Redis
 
-In-memory key-value store using the [fred](https://github.com/aembke/fred.rs) client. Provides sub-millisecond session lookups. Compatible with Redis, Valkey, and ElastiCache.
+This adapter stores sessions in memory through the [fred](https://github.com/aembke/fred.rs) client. It works with Redis, Valkey, and ElastiCache.
 
 ```toml
 [session_repository]
@@ -74,7 +75,7 @@ key_prefix = "oidc:"
 
 ### LMDB
 
-Embedded key-value store using [heed](https://github.com/meilisearch/heed) (Rust bindings for LMDB). Fast local storage without a network dependency. Suitable for single-server deployments that need session performance beyond what SQLite offers.
+Lightning Memory-Mapped Database (LMDB) stores sessions locally as key-value pairs. The adapter uses the [heed](https://github.com/meilisearch/heed) Rust library. It suits single-server deployments that need a separate session store without a network service.
 
 ```toml
 [session_repository]
@@ -98,11 +99,11 @@ max_size_mb = 64
 
 ## Key management
 
-The `[key_manager]` section controls how access token JWTs are signed.
+The `[key_manager]` section controls how access tokens are signed. Access tokens use the JSON Web Token (JWT) format.
 
 ### Local key signing
 
-Load a private key from disk and sign tokens in-process. Supports Ed25519 (EdDSA) keys only; the local key manager rejects any other algorithm at startup.
+The local adapter loads a private key from disk and signs tokens within the service. It supports only Ed25519 (EdDSA) keys. Other algorithms cause a startup error.
 
 ```toml
 [key_manager]
@@ -121,11 +122,11 @@ Generate a key:
 openssl genpkey -algorithm ed25519 -out keys/ed25519.pem
 ```
 
-Local key management is suitable for development and single-server deployments. For production, consider KMS for automatic key protection and access control.
+Local key management is suitable for development and single-server deployments. AWS Key Management Service (KMS) provides managed key protection and access control.
 
 ### AWS KMS
 
-Sign tokens using an AWS KMS asymmetric key. Both RSA (RS256/RS384/RS512 and PS256/PS384/PS512) and ECDSA (ES256/ES384/ES512) signing algorithms are supported. The private key never leaves KMS, signing is a remote API call.
+Sign tokens using an AWS KMS asymmetric key. Both RSA (RS256/RS384/RS512 and PS256/PS384/PS512) and ECDSA (ES256/ES384/ES512) signing algorithms are supported. Each signing operation calls KMS. The private key stays in KMS.
 
 ```toml
 [key_manager]
@@ -137,11 +138,11 @@ algorithm = "ES256"
 kid = "prod-key-1"
 ```
 
-KMS handles key rotation transparently. The service uses standard AWS SDK credential resolution (environment variables, instance profile, ECS task role, etc.).
+KMS handles key rotation transparently. The AWS software development kit (SDK) obtains credentials from sources such as environment variables, instance profiles, or ECS task roles.
 
 ### Noop
 
-Every signing operation errors. Selected for admin-only deployments (the `admin` role) that never issue access tokens and so need no signing key.
+The noop adapter returns an error for every signing operation. Use it for deployments with the `admin` role that do not issue access tokens.
 
 ```toml
 [key_manager]
@@ -164,7 +165,7 @@ blocking_threshold = "warning"
 
 ### Stdout/Stderr
 
-Audit events are emitted as structured JSON to the process output: info-and-below to stdout, error-and-above to stderr.
+This adapter writes audit events as structured JSON. Events at info severity or below go to stdout. Events at error severity or above go to stderr.
 
 ```toml
 [audit]
@@ -174,7 +175,7 @@ blocking_threshold = "warning"
 
 ### SQS
 
-Send audit events to an SQS queue. Useful for building a pipeline to S3, Iceberg, or other analytics backends via Firehose or Lambda.
+This adapter sends audit events to Amazon Simple Queue Service (SQS). Firehose or Lambda can then forward them to storage or analytics services such as S3 or Iceberg.
 
 ```toml
 [audit]
@@ -192,8 +193,9 @@ The `blocking_threshold` setting controls what happens when the audit provider f
 If the audit provider fails to emit an event and the event's severity is at or above the configured threshold, the operation that triggered the event also fails. Events below the threshold are logged to stdout/stderr as a fallback and the operation proceeds.
 
 For example, with `blocking_threshold = "warning"`:
-- A failed `TokenExchange` audit (severity: notice) logs to stdout and the token exchange succeeds
-- A failed `RegistrationDenied` audit (severity: warning) causes the request to fail with a 500 error
+
+- A failed `TokenExchange` audit (severity: notice) logs to stdout and the token exchange succeeds.
+- A failed `RegistrationDenied` audit (severity: warning) causes the request to fail with a 500 error.
 
 ## Rate limiting
 
@@ -201,7 +203,7 @@ The `[rate_limit]` section bounds per-request and failed-authentication budgets.
 
 ### In-process fixed window
 
-A per-process fixed-window limiter over a bounded, expiry-evicted map of keys. Suitable for single-instance deployments; budgets are not shared across instances.
+This adapter counts requests within fixed time windows. It limits the number of stored keys and removes expired entries. Each process has its own limits, so instances do not share request budgets.
 
 ```toml
 [rate_limit]
@@ -231,7 +233,7 @@ The `[user_sync]` section enables outbound notifications when users are created,
 
 ### Webhook
 
-Sends HTTP POST requests with HMAC-SHA256 signed payloads to an external URL.
+The webhook adapter sends user events to an external URL with HTTP POST requests. It authenticates each request body with a hash-based message authentication code using SHA-256 (HMAC-SHA256).
 
 ```toml
 [user_sync]
@@ -245,7 +247,7 @@ timeout = "5s"
 retries = 2
 ```
 
-The webhook payload:
+The webhook sends this payload:
 
 ```json
 {
@@ -255,7 +257,7 @@ The webhook payload:
 }
 ```
 
-Event types: `user.created`, `user.updated`, `user.deleted`. User sync is non-blocking: sync failures are logged via `tracing::warn!` and never fail the originating request.
+The event types are `user.created`, `user.updated`, and `user.deleted`. If user synchronization fails, the service logs a warning with `tracing::warn!`. The failure does not fail the original request.
 
 ### Verifying a delivery (receiver contract)
 
@@ -373,4 +375,4 @@ signature itself is unchanged):
 
 ### Noop
 
-Disables user sync. This is the default when `user_sync.enabled` is `false` or the section is omitted.
+The noop adapter disables user synchronization. It is the default when `user_sync.enabled` is `false` or the section is omitted.

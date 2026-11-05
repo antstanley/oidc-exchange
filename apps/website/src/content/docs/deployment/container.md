@@ -3,7 +3,7 @@ title: Container Deployment
 description: Deploy oidc-exchange with Docker, Docker Compose, and Kubernetes.
 ---
 
-Run oidc-exchange as a long-lived container in ECS, EKS, Cloud Run, or any container orchestrator. The binary runs as an axum HTTP server when `AWS_LAMBDA_RUNTIME_API` is not set.
+Run oidc-exchange as a long-lived container on a service such as Amazon Elastic Container Service (ECS), Amazon Elastic Kubernetes Service (EKS), or Cloud Run. The binary runs as an axum HTTP server when `AWS_LAMBDA_RUNTIME_API` is not set.
 
 A runnable example is in [`examples/container/`](https://github.com/example/oidc-exchange/tree/main/examples/container).
 
@@ -79,7 +79,7 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 Containers give you flexibility in key management:
 
 - **Local keys**: mount a signing key via a volume or Kubernetes secret. Use `adapter = "local"`, which supports Ed25519 (EdDSA) only. ECDSA or RSA signing requires the KMS adapter.
-- **AWS KMS**: if running in AWS (ECS/EKS), use `adapter = "kms"` with IAM roles for service accounts or task roles.
+- **AWS Key Management Service (KMS):** On ECS or EKS, use `adapter = "kms"`. Grant access through Identity and Access Management (IAM) task roles or service account roles.
 
 ## Docker Compose
 
@@ -110,7 +110,7 @@ services:
 
 ## ECS Fargate
 
-Build and push the image to ECR:
+Build and push the image to Amazon Elastic Container Registry (ECR):
 
 ```bash
 docker build -t oidc-exchange .
@@ -121,10 +121,10 @@ docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/oidc-exchange:latest
 
 In your task definition, set the key configuration:
 
-- Use `adapter = "kms"` with a KMS key ARN and attach the appropriate IAM policy to the task role.
+- Use `adapter = "kms"` with the key's Amazon Resource Name (ARN) and attach the appropriate IAM policy to the task role.
 - Alternatively, inject a local signing key via AWS Secrets Manager into the container environment.
 
-For production-grade ECS Fargate with auto-scaling and ALB, see the dedicated [ECS Fargate guide](/deployment/ecs-fargate/).
+For ECS Fargate with automatic scaling and an Application Load Balancer (ALB), see the [ECS Fargate guide](/deployment/ecs-fargate/).
 
 ## Kubernetes
 

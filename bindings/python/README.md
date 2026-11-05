@@ -14,7 +14,7 @@ The service is embedded in-process as a native extension (built with [PyO3](http
 pip install oidc-exchange
 ```
 
-Ships as an `abi3` wheel — one wheel per platform works on **Python 3.10+**: `manylinux_2_28` x86_64/aarch64, `win_amd64`, and `macosx_11_0_arm64`. An sdist is published alongside for other platforms (needs a Rust toolchain to build).
+Ships as an `abi3` wheel — one wheel per platform works on **Python 3.11+**: `manylinux_2_28` x86_64/aarch64, `win_amd64`, and `macosx_11_0_arm64`. An sdist is published alongside for other platforms (needs a Rust toolchain to build).
 
 ## Usage
 
@@ -34,11 +34,13 @@ app.mount("/auth", oidc.asgi_app())
 ```python
 from oidc_exchange import OidcExchange
 
-oidc = OidcExchange(config_string="""
+oidc = OidcExchange(
+    config_string="""
 [server]
 issuer = "https://auth.example.com"
 …
-""")
+"""
+)
 application = oidc.wsgi_app()
 ```
 
@@ -47,17 +49,21 @@ application = oidc.wsgi_app()
 ```python
 from urllib.parse import urlencode
 
-resp = oidc.handle_request_sync({
-    "method": "POST",
-    "path": "/token",
-    "headers": {"content-type": "application/x-www-form-urlencoded"},
-    "body": urlencode({
-        "grant_type": "authorization_code",
-        "code": "abc123",
-        "redirect_uri": "https://app.example.com/callback",
-        "provider": "google",
-    }).encode(),
-})
+resp = oidc.handle_request_sync(
+    {
+        "method": "POST",
+        "path": "/token",
+        "headers": {"content-type": "application/x-www-form-urlencoded"},
+        "body": urlencode(
+            {
+                "grant_type": "authorization_code",
+                "code": "abc123",
+                "redirect_uri": "https://app.example.com/callback",
+                "provider": "google",
+            }
+        ).encode(),
+    }
+)
 # resp -> {"status": 200, "headers": {...}, "body": b"…"}
 
 # or await the async variant (runs the blocking call in the default executor):
@@ -71,8 +77,8 @@ class OidcExchange:
     def __init__(self, *, config: str | None = None, config_string: str | None = None) -> None: ...
     def handle_request_sync(self, request: dict) -> dict: ...
     async def handle_request(self, request: dict) -> dict: ...
-    def asgi_app(self) -> Any: ...   # mountable ASGI application
-    def wsgi_app(self) -> Any: ...   # mountable WSGI application
+    def asgi_app(self) -> Any: ...  # mountable ASGI application
+    def wsgi_app(self) -> Any: ...  # mountable WSGI application
     def shutdown(self) -> None: ...
 ```
 

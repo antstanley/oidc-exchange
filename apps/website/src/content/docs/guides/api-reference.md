@@ -3,7 +3,7 @@ title: "API Reference"
 description: "HTTP endpoints for token exchange, refresh, revocation, and user management."
 ---
 
-oidc-exchange exposes public endpoints for token operations and internal endpoints for user management. All responses use JSON. The API follows OAuth 2.0 conventions (RFC 6749) for token endpoints and RFC 7009 for revocation.
+oidc-exchange provides public endpoints for token operations and internal endpoints for user management. Response bodies use JSON where present. The token endpoints follow OAuth 2.0 conventions in RFC 6749. Revocation follows RFC 7009.
 
 ## Public endpoints
 
@@ -50,11 +50,11 @@ grant_type=authorization_code
 }
 ```
 
-The `access_token` is a signed JWT with configurable lifetime (default 15 minutes). The `refresh_token` is an opaque token (256-bit random, base64url-encoded) with a longer lifetime (default 30 days). Only the SHA-256 hash of the refresh token is stored server-side.
+The `access_token` is a signed JSON Web Token (JWT). Its lifetime defaults to 15 minutes. The `refresh_token` is a random 256-bit value encoded with base64url. Its lifetime defaults to 30 days. The service stores only its SHA-256 hash. You can configure both lifetimes.
 
 ### POST /token (refresh)
 
-Use a refresh token to obtain a new access token without re-authenticating.
+Use a refresh token to obtain a new access token without signing in again.
 
 **Request:**
 
@@ -124,7 +124,7 @@ Mints a single-use nonce for the direct ID-token grant. Mounted only when `[gran
 
 ### POST /revoke
 
-Revoke a token per RFC 7009. Always returns `200 OK`, even if the token is unknown or already revoked.
+Revoke a token as defined by RFC 7009. The endpoint returns `200 OK` even if the token is unknown or already revoked.
 
 **Request:**
 
@@ -145,7 +145,7 @@ token=dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4...
 
 ### GET /keys
 
-Returns the JSON Web Key Set containing the public key(s) used to sign access tokens. Downstream services use this endpoint to verify token signatures.
+The endpoint returns the JSON Web Key Set (JWKS) containing public keys for verifying access token signatures. Your API uses these keys to validate tokens.
 
 **Response (200 OK):**
 
@@ -183,11 +183,11 @@ Returns the standard OpenID Connect discovery document.
 }
 ```
 
-The `id_token_signing_alg_values_supported` field is dynamically populated from the configured key manager's algorithm.
+The `id_token_signing_alg_values_supported` field contains the configured key manager's algorithm.
 
 ### GET /health
 
-Returns `200 OK` if the service is operational. No authentication required.
+The endpoint returns `200 OK` if the service is running. It does not require authentication.
 
 ## Internal endpoints
 
@@ -223,14 +223,23 @@ shared_secret = "${INTERNAL_API_SECRET}"
 | GET | `/internal/users/{id}` | Get a user by ID |
 | PATCH | `/internal/users/{id}` | Update a user |
 | DELETE | `/internal/users/{id}` | Soft-delete a user (revokes all sessions) |
+| GET | `/internal/users/{id}/sessions` | List the user's live sessions, newest first, at most 50 (404 for an unknown or soft-deleted user) |
 | GET | `/internal/users/{id}/claims` | Get a user's private claims |
 | PUT | `/internal/users/{id}/claims` | Replace all of a user's private claims |
 | PATCH | `/internal/users/{id}/claims` | Merge into a user's private claims |
 | DELETE | `/internal/users/{id}/claims` | Clear all of a user's private claims |
 
+### GET /internal/users/{id}/sessions
+
+Returns `{ "sessions": [...] }`, one entry per live refresh-token family. Each entry has an
+opaque `id` (`ses_…`, stable across rotation), `provider`, `user_agent`, `ip_address`,
+`created_at`, `expires_at`, and a `location` (`city`, `region`, `country`) that is omitted
+when none was recorded. Refresh-token hashes, device ids, and family ids are never returned.
+See [Session location](/guides/configuration/#session-location) for how locations are recorded.
+
 ### POST /internal/users
 
-Create a new user. The user ID is generated server-side (`usr_` prefix + ULID).
+Create a user. The service generates the user ID with a `usr_` prefix and a Universally Unique Lexicographically Sortable Identifier (ULID).
 
 **Request:**
 
@@ -269,11 +278,11 @@ Soft-deletes the user (sets status to `Deleted`) and revokes all active sessions
 
 ### Claims endpoints
 
-Per-user claims are merged on top of config-level `[token.custom_claims]` when issuing access tokens. Per-user claims take precedence over config claims with the same key.
+When issuing an access token, the service combines `[token.custom_claims]` with the user's claims. User claims override configuration claims with the same key.
 
-- **PUT** `/internal/users/{id}/claims` replaces the entire claims map
-- **PATCH** `/internal/users/{id}/claims` merges new claims into existing ones
-- **DELETE** `/internal/users/{id}/claims` clears all per-user claims
+- **PUT** `/internal/users/{id}/claims` replaces the entire claims map.
+- **PATCH** `/internal/users/{id}/claims` merges new claims into existing ones.
+- **DELETE** `/internal/users/{id}/claims` clears all per-user claims.
 
 **Example (PUT):**
 
@@ -308,4 +317,4 @@ All error responses follow the OAuth 2.0 error format (RFC 6749 Section 5.2):
 | `slow_down` | 429 | Rate limit exceeded; retry after the delay in the `Retry-After` header |
 | `server_error` | 500/502/504 | Internal failure, provider error, or provider timeout |
 
-Internal details are never leaked to the client. `server_error` responses log the detail internally and return a generic message.
+For `server_error` responses, the service logs details internally and returns a generic message to the client.

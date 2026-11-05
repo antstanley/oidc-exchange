@@ -284,6 +284,7 @@ impl AppService {
             device_id: live.device_id.clone(),
             user_agent: live.user_agent.clone(),
             ip_address: live.ip_address.clone(),
+            location: live.location.clone(),
             created_at: live.created_at,
         };
 

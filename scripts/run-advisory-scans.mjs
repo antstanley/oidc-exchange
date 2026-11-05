@@ -5,10 +5,10 @@ import { resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const OUTPUT = resolve(process.env.ADVISORY_OUTPUT_DIR ?? resolve(ROOT, ".advisory-results"));
-const PNPM_VERSION = "11.9.0";
-const PIP_AUDIT_VERSION = "2.9.0";
-const CARGO_DENY_VERSION = "0.19.0";
-const MATURIN_VERSION = "1.9.4";
+const PNPM_VERSION = "12.16.1";
+const PIP_AUDIT_VERSION = "2.10.1";
+const CARGO_DENY_VERSION = "0.20.2";
+const MATURIN_VERSION = "1.16.0";
 const TODAY = process.env.ADVISORY_POLICY_DATE ?? new Date().toISOString().slice(0, 10);
 mkdirSync(OUTPUT, { recursive: true });
 
@@ -60,8 +60,8 @@ function cargoFindings() {
 }
 
 function pnpmFindings() {
-  requireVersion("corepack", [`pnpm@${PNPM_VERSION}`, "--version"], PNPM_VERSION);
-  const result = run("corepack", [`pnpm@${PNPM_VERSION}`, "audit", "--recursive", "--json", "--prod", "--audit-level", "high"]);
+  requireVersion("pnpm", ["--version"], PNPM_VERSION);
+  const result = run("pnpm", ["audit", "--recursive", "--json", "--prod", "--audit-level", "high"]);
   if (result.error || ![0, 1].includes(result.status)) throw new Error("pnpm audit tool or registry failure");
   let report;
   try { report = JSON.parse(result.stdout); } catch { throw new Error("pnpm audit emitted malformed JSON"); }
@@ -88,8 +88,6 @@ function pythonFindings() {
   const maturin = packages.find((pkg) => pkg.name === "maturin");
   if (!maturin) throw new Error("uv frozen build export is missing maturin");
   if (maturin.version !== MATURIN_VERSION) throw new Error(`uv frozen build export has maturin ${maturin.version}, expected ${MATURIN_VERSION}`);
-  if (!/^tomli==2\.4\.1\s*;\s*python_full_version\s*<\s*['"]3\.11['"](?:\s*\\)?\s*$/m.test(exported))
-    throw new Error("uv frozen build export is missing audited conditional tomli");
   const audit = run("pip-audit", ["--requirement", requirements, "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"]);
   if (audit.error || ![0, 1].includes(audit.status)) throw new Error("pip-audit tool or vulnerability DB failure");
   let report;

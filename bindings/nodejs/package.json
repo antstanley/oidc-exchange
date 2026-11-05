@@ -1,6 +1,6 @@
 {
   "name": "@oidc-exchange/node",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Node.js bindings for oidc-exchange - OIDC token exchange service",
   "license": "MIT",
   "repository": {
@@ -29,19 +29,19 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@napi-rs/cli": "3.7.2",
-    "@types/node": "26.0.1",
-    "oxfmt": "0.56.0",
-    "oxlint": "1.71.0",
-    "publint": "0.3.18",
-    "typescript": "6.0.3",
-    "vitest": "4.1.9"
+    "@napi-rs/cli": "3.10.12",
+    "@types/node": "26.6.6",
+    "oxfmt": "0.76.0",
+    "oxlint": "1.91.0",
+    "publint": "0.3.25",
+    "typescript": "7.1.0-beta",
+    "vitest": "5.1.0"
   },
   "optionalDependencies": {
-    "@oidc-exchange/darwin-arm64": "0.4.0",
-    "@oidc-exchange/linux-arm64-gnu": "0.4.0",
-    "@oidc-exchange/linux-x64-gnu": "0.4.0",
-    "@oidc-exchange/win32-x64-msvc": "0.4.0"
+    "@oidc-exchange/darwin-arm64": "0.4.1",
+    "@oidc-exchange/linux-arm64-gnu": "0.4.1",
+    "@oidc-exchange/linux-x64-gnu": "0.4.1",
+    "@oidc-exchange/win32-x64-msvc": "0.4.1"
   },
   "napi": {
     "binaryName": "oidc-exchange",
@@ -55,5 +55,5 @@
   "engines": {
     "node": ">= 22"
   },
-  "packageManager": "pnpm@11.9.0"
+  "packageManager": "pnpm@12.16.1"
 }

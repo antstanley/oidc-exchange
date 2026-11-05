@@ -124,6 +124,7 @@ fn direct_request() -> ExchangeRequest {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     }
 }
 
@@ -139,6 +140,7 @@ fn code_request() -> ExchangeRequest {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     }
 }
 
@@ -872,6 +874,14 @@ impl SessionRepository for SingleUseFailRepo {
         self.inner.revoke_all_user_sessions(user_id).await
     }
 
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> oidc_exchange_core::error::Result<Vec<oidc_exchange_core::domain::Session>> {
+        self.inner.list_live_sessions(user_id, now, limit).await
+    }
     async fn count_active_sessions(&self) -> Result<u64> {
         self.inner.count_active_sessions().await
     }

@@ -1093,3 +1093,141 @@ async fn cleanup_endpoint_sweeps_expired_rows_and_reports_the_combined_count() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body_to_json(response.into_body()).await["deleted"], 0);
 }
+
+// ---------------------------------------------------------------------------
+// GET /internal/users/{id}/sessions
+// ---------------------------------------------------------------------------
+
+/// The admin plane over one shared mock store (users and sessions together),
+/// returned alongside the store so tests can seed it.
+fn build_admin_plane_with_store() -> (Router, MockRepository) {
+    let config = test_config(TEST_SECRET);
+    let repo = MockRepository::new();
+    let service = AppService::new(
+        Box::new(repo.clone()),
+        Box::new(repo.clone()),
+        Box::new(MockKeyManager::new()),
+        Box::new(MockAuditLog::new()),
+        Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
+        HashMap::new(),
+        config.clone(),
+    );
+    let routers = build_routers(&config, service).expect("the admin test config builds routers");
+    (routers.admin.expect("admin router"), repo)
+}
+
+async fn seed_user_with_session(
+    repo: &MockRepository,
+) -> (String, oidc_exchange_core::domain::Session) {
+    use oidc_exchange_core::domain::{NewUser, Session, SessionLocation};
+    use oidc_exchange_core::ports::{SessionRepository, UserRepository};
+    use oidc_exchange_core::secret::Secret;
+
+    let user = repo
+        .create_user(&NewUser {
+            external_id: "ext-sessions".into(),
+            provider: "google".into(),
+            email: None,
+            display_name: None,
+        })
+        .await
+        .expect("create user");
+    let session = Session {
+        user_id: user.id.clone(),
+        refresh_token_hash: Secret::new("a".repeat(64)),
+        family_id: oidc_exchange_core::domain::new_family_id(),
+        generation: 0,
+        provider: "google".into(),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        rotated_at: None,
+        device_id: Some("device-secret-123".into()),
+        user_agent: Some("agent/1".into()),
+        ip_address: Some("203.0.113.9".into()),
+        location: SessionLocation::new(Some("Cape Town".into()), None, Some("ZA".into())),
+        created_at: chrono::Utc::now(),
+    };
+    repo.store_refresh_token(&session).await.expect("store");
+    (user.id, session)
+}
+
+fn sessions_request(user_id: &str, auth: bool) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(format!("/internal/users/{user_id}/sessions"));
+    if auth {
+        builder = builder.header("authorization", format!("Bearer {TEST_SECRET}"));
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn list_sessions_requires_internal_auth() {
+    let (app, repo) = build_admin_plane_with_store();
+    let (user_id, _) = seed_user_with_session(&repo).await;
+    let response = app
+        .oneshot(sessions_request(&user_id, false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn list_sessions_unknown_user_is_404() {
+    let (app, _repo) = build_admin_plane_with_store();
+    let response = app
+        .oneshot(sessions_request("usr_missing", true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body_to_json(response.into_body()).await["error"],
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn list_sessions_returns_summaries_without_credentials() {
+    let (app, repo) = build_admin_plane_with_store();
+    let (user_id, session) = seed_user_with_session(&repo).await;
+
+    let response = app.oneshot(sessions_request(&user_id, true)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = body_to_json(response.into_body()).await;
+
+    let sessions = body["sessions"].as_array().expect("sessions array");
+    assert_eq!(sessions.len(), 1);
+    let entry = &sessions[0];
+    assert!(entry["id"].as_str().unwrap().starts_with("ses_"));
+    assert_eq!(entry["provider"], "google");
+    assert_eq!(entry["user_agent"], "agent/1");
+    assert_eq!(entry["ip_address"], "203.0.113.9");
+    assert_eq!(
+        entry["location"],
+        json!({"city": "Cape Town", "country": "ZA"})
+    );
+    assert!(entry["created_at"].is_string() && entry["expires_at"].is_string());
+    oidc_exchange_test_utils::session_list_contract::assert_listing_contract(&body);
+    let keys: Vec<&String> = entry.as_object().unwrap().keys().collect();
+    assert_eq!(keys.len(), 7, "only the SessionSummary fields: {keys:?}");
+
+    // No JSON value in the listing equals (or contains) any stored credential.
+    let serialized = body.to_string();
+    for secret in [
+        session.refresh_token_hash.expose().as_str(),
+        session.family_id.as_str(),
+        "device-secret-123",
+    ] {
+        assert!(!serialized.contains(secret), "listing leaked {secret}");
+    }
+}
+
+#[tokio::test]
+async fn list_sessions_for_soft_deleted_user_is_404() {
+    use oidc_exchange_core::ports::UserRepository;
+    let (app, repo) = build_admin_plane_with_store();
+    let (user_id, _) = seed_user_with_session(&repo).await;
+    repo.delete_user(&user_id).await.expect("soft delete");
+    let response = app.oneshot(sessions_request(&user_id, true)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

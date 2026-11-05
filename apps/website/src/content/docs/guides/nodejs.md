@@ -1,6 +1,6 @@
 ---
 title: Node.js
-description: Use oidc-exchange as an embedded OIDC provider in Node.js applications.
+description: Embed oidc-exchange in Node.js applications.
 ---
 
 ## Installation
@@ -9,7 +9,7 @@ description: Use oidc-exchange as an embedded OIDC provider in Node.js applicati
 pnpm add @oidc-exchange/node
 ```
 
-Requires **Node.js 22+**. Prebuilt native binaries are included for Linux (x64, ARM64), macOS (ARM64), and Windows (x64).
+Use **Node.js 22 or later**. Prebuilt native binaries are included for Linux (x64, ARM64), macOS (ARM64), and Windows (x64).
 
 For AWS Lambda deployments, install the Lambda adapter instead:
 
@@ -232,7 +232,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 
 ### AWS Lambda
 
-Use the `@oidc-exchange/lambda` package for serverless deployments. It automatically detects the event source: API Gateway v1 (REST API), API Gateway v2 (HTTP API), Lambda Function URL, or ALB.
+Use `@oidc-exchange/lambda` for AWS Lambda deployments. It detects events from API Gateway v1 (REST API), API Gateway v2 (HTTP API), Lambda Function URLs, and Application Load Balancers (ALB).
 
 ```typescript
 import { createHandler } from "@oidc-exchange/lambda";
@@ -243,27 +243,26 @@ export const handler = createHandler({
 });
 ```
 
-That's it. The handler translates Lambda events into HTTP requests, routes them through oidc-exchange, and returns the appropriate Lambda response format.
+The handler converts Lambda events to HTTP requests and routes them through oidc-exchange. It converts each response to the format expected by Lambda.
 
-Works with SAM, CDK, Serverless Framework, Terraform, or any other deployment tool.
+You can deploy with AWS Serverless Application Model (SAM), AWS Cloud Development Kit (CDK), Serverless Framework, or Terraform.
 
 #### Deployment modes: managed runtime and container image
 
-`@oidc-exchange/lambda` runs on either Lambda packaging model, and it's common to use both (a **container image** for local, reproducible end-client testing, and either model in production):
+`@oidc-exchange/lambda` supports two deployment formats:
 
-- **Managed (zip) runtime**: deploy your bundle (including `@oidc-exchange/node`'s native addon) to a `nodejs22.x`-style runtime. These run on **Amazon Linux 2023 (glibc 2.34)**.
-- **Container image**: package the function as a container image with the AWS Lambda Runtime Interface Client (RIC). Convenient for reproducing the runtime locally (e.g. `public.ecr.aws/lambda/nodejs:22`, which mirrors AL2023) and for pinning your own base image.
+- **Managed runtime:** Deploy a zip bundle that includes the native addon from `@oidc-exchange/node`. The `nodejs24.x` runtime uses Amazon Linux 2023 with GNU C Library (glibc) 2.34.
+- **Container image:** Package the function with the AWS Lambda Runtime Interface Client (RIC). Use an image such as `public.ecr.aws/lambda/nodejs:22` to reproduce the runtime locally or choose a specific base image.
 
-The published `@oidc-exchange/linux-{x64,arm64}-gnu` native addons are built against an **old glibc floor (~2.17)**, so they load on the AL2023 managed runtime and on common container base images alike. Two things to know:
+The published `@oidc-exchange/linux-{x64,arm64}-gnu` addons require glibc 2.17 or later. Amazon Linux 2023 meets this requirement. The operating system provides glibc, so changing the Node.js version does not change the available glibc version.
 
-- The floor is what matters for compatibility: the addon loads on any glibc **≥ 2.17** host (effectively every mainstream distro and the managed runtime). The Node.js version does **not** affect this: Lambda's glibc comes from the OS (AL2023), not the Node runtime, so bumping Node won't change it.
-- The addons are **glibc**, not musl. Alpine/musl base images would need a `-musl` build (not currently published), so use a glibc base (`debian`, `ubuntu`, `public.ecr.aws/lambda/nodejs:*`, `gcr.io/distroless/nodejs*`) instead.
+Use a glibc base image such as `debian`, `ubuntu`, `public.ecr.aws/lambda/nodejs:*`, or `gcr.io/distroless/nodejs*`. Alpine uses a different C library, musl, and requires a `-musl` addon build. That build is not currently published.
 
-> For local testing, prefer an AWS-provided base image (`public.ecr.aws/lambda/nodejs:*`): it mirrors the managed runtime (AL2023), so a function that loads there will load in production too.
+For local testing, use an AWS base image that matches your production runtime.
 
 ## Configuration
 
-Pass config as a file path or inline TOML string:
+Pass configuration as a file path or a string in TOML format:
 
 ```typescript
 // File path

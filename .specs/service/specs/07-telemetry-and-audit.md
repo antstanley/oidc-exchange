@@ -1,6 +1,6 @@
 # Telemetry and Audit
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
+**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
 
 Two independent observability systems with different purposes.
 
@@ -14,8 +14,14 @@ Two independent observability systems with different purposes.
 ## Telemetry (`telemetry::init_telemetry`)
 
 Instrumentation uses the `tracing` ecosystem: `crates/core` and the adapters emit spans and
-events with no OTEL awareness; `crates/server` installs the subscriber at startup, before any
-other work, so all subsequent spans are captured.
+events with no OTEL awareness; only entry points install the subscriber. The server binary
+installs it at startup, before any other work; the FFI core installs the same subscriber
+during `OidcExchange` construction, after config resolution and before any adapter is built,
+so both runtimes capture all subsequent spans. `init_telemetry` is idempotent and
+host-respecting: it installs through `try_init`, so an already-set global dispatcher — a
+second embedded instance, or a host application that installed its own subscriber — is
+retained rather than fought over, and the call reports success without installing (skipping
+the exporter fallback warning, which describes only a subscriber the call itself installed).
 
 Current behaviour by `[telemetry].exporter`:
 
@@ -24,7 +30,10 @@ Current behaviour by `[telemetry].exporter`:
   formatter**; the OTLP/X-Ray exporters and the tower OTEL HTTP-span layer are not yet wired.
 
 The env filter honours `RUST_LOG`, defaulting to `info`. In Lambda these JSON lines are
-captured by CloudWatch Logs; in containers by the log driver.
+captured by CloudWatch Logs; in containers by the log driver; in embedded deployments (the
+Node, Python, and Lambda bindings over `crates/ffi`) they appear on the host process's
+stdout — which is what makes the 500 error mapping's internal diagnostic and the FFI
+panic-boundary record operator-visible there.
 
 ## Telemetry hygiene
 
@@ -59,7 +68,11 @@ Audit has two channels. The **mandatory** channel carries `SecurityEvent`s
 configured threshold filters it: sink failures are governed by `audit.durability` —
 `enforce` fails the operation and `observe` records degradation while allowing it. The
 **best-effort** channel is `emit_audit`, retaining `emit_threshold` and
-`blocking_threshold` for operational events. Shipped flows use the mandatory channel.
+`blocking_threshold` for operational events. Shipped flows emit their security outcomes on
+the mandatory channel. The best-effort channel is not embedder-only: the exchange flow
+records its infrastructure store fault there as an operational `StoreError` event at
+`Error` severity — an operational record of a 5xx condition, deliberately not a
+`SecurityEvent` ([03-service-flows.md](03-service-flows.md)).
 
 Severity remains on both channels because sinks and SIEMs route and alert on it; on the
 mandatory channel it never determines whether a security event exists.

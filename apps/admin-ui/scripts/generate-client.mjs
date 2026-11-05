@@ -412,10 +412,10 @@ export function generateApi(schema) {
     "// GENERATED FILE — do not edit.",
     "// Source: schemas/internal-api.schema.json (run `pnpm generate`).",
     "//",
-    "// Server-side only: this module imports SvelteKit's `$env/dynamic/private`,",
+    "// Server-side only: this module imports the server-only `#lib/server/env`,",
     "// so reaching it from browser code fails the build. Operator credentials",
     "// live only in the server runtime and never reach the browser bundle.",
-    'import { env } from "$env/dynamic/private";',
+    'import { env } from "#lib/server/env";',
     "",
     'import { requestViaTls } from "./tls-transport";',
     // The contract's own names, resolved from types.ts: a rename that is not

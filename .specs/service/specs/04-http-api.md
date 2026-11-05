@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -37,6 +37,11 @@ role. When mounted they sit behind Bearer auth (see Middleware stack).
 | PUT | `/internal/users/{id}/claims` | replace claims (404 if absent) |
 | PATCH | `/internal/users/{id}/claims` | merge claims (404 if absent) |
 | DELETE | `/internal/users/{id}/claims` | clear claims (404 if absent) |
+| GET | `/internal/users/{id}/sessions` | list the user's live sessions, newest first, at most 50; 404 for an unknown or soft-deleted user |
+
+`GET /internal/users/{id}/sessions` responds `200` with `{ "sessions": [SessionSummary…] }`, with
+`location` omitted when none was recorded. Auth and error behaviour are those of every other internal
+route.
 
 ### POST /nonce
 
@@ -142,11 +147,21 @@ Applied to the router, outermost first:
    `server.trusted_proxies`, the `X-Forwarded-For` entry `server.trusted_proxy_hops` from the
    right is parsed as `Forwarded`. Otherwise the peer remains authoritative. User-Agent and
    device-id values are truncated to 256 characters.
+
+   When `session.location` names headers, the middleware reads them only if the request's peer is in
+   `server.trusted_proxies`, or `session.location.trust_headers_from_any_peer = true`. Header values are
+   percent-decoded (invalid UTF-8 replaced), then passed through `SessionLocation::new`. When
+   `ip_header` is named and its value, after stripping a trailing `:port` (and brackets for IPv6),
+   parses as an `IpAddr`, the resolved address is `Reported` when the peer is in
+   `server.trusted_proxies` and `Asserted` when the header was accepted only through
+   `trust_headers_from_any_peer`; otherwise the existing `Peer`/`Forwarded` resolution stands. Absent,
+   empty, or unparseable headers yield no location and leave address resolution unchanged. With no
+   header named (the default) the middleware does nothing new.
 4. **Catch panic** — renders a safe `500` response.
 
 Public routes additionally use, in route-layer execution order, the per-IP throttle, access
-log, and concurrency guard. The throttle runs before handler/provider work; only `Peer` and
-`Forwarded` values become rate-limit keys. A denial returns `429 slow_down` and
+log, and concurrency guard. The throttle runs before handler/provider work; only `Peer`,
+`Forwarded` and `Reported` values become rate-limit keys. A denial returns `429 slow_down` and
 `Retry-After`; every direct per-IP denial also emits the mandatory `ThrottleExceeded`
 `SecurityEvent` using the resolved `ClientAddr` and bounded User-Agent. Audit-sink failure is
 recorded through the mandatory-channel durability contract but cannot replace or otherwise alter
@@ -335,7 +350,7 @@ Applied to the router (`routes/mod.rs`), outermost first:
 6. **Audit context** (`middleware/audit_context.rs`) — extract `X-Forwarded-For`,
    `User-Agent`, `X-Device-Id` into an `AuditContext` request extension, which the `/token`
    and `/revoke` handlers pass into the core request structs so the stored session records
-   `ip_address`/`user_agent`/`device_id` and audit events record `ip_address`/`user_agent`.
+   `ip_address`/`user_agent`/`device_id` (and, when `[session.location]` is configured, `location`) and audit events record `ip_address`/`user_agent`.
 7. **Inner catch-panic** (`middleware/error_handler.rs`, tower `CatchPanicLayer`) — nearest
    the handler, so a caught handler panic still passes back out through the request-id layer
    and its response carries `x-request-id`.

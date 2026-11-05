@@ -17,6 +17,9 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
   // Docs publishing to oidc-exchange.iamstan.dev via blogwright: keyless AWS
   // deploys assume the GitHub OIDC role (id-token), and PR previews comment their
   // URL back on the pull request (pull-requests). No other write scope is granted.
+  // Changesets "Version Packages" bot: pushes the version commit and opens its PR via
+  // the GitHub API. Checkout still sets persist-credentials: false.
+  ["version-packages.yml:version", new Set(["contents", "pull-requests"])],
   ["production.yml:deploy", new Set(["id-token"])],
   ["preview.yml:deploy", new Set(["id-token", "pull-requests"])],
   ["preview.yml:destroy", new Set(["id-token", "pull-requests"])],
@@ -94,18 +97,44 @@ export function validateWorkflow(text, workflowName) {
         !step.run.includes("--frozen-lockfile")
       )
         errors.push(`${key}: non-frozen pnpm install`);
-      // pnpm 11 has no `--offline` flag for `exec`; the enforceable invariant
-      // is that exec runs the pinned corepack pnpm (so the tool comes from the
-      // frozen install's node_modules) and never a dynamic runner — dlx/npx
-      // are rejected above as dynamic commands.
-      if (step.run.includes("pnpm exec") && !/corepack pnpm@[\w.-]+ (?:--\S+ )*exec\b/.test(step.run))
-        errors.push(`${key}: pnpm exec must use the pinned corepack invocation`);
+      // Node 25+ no longer bundles corepack; pnpm comes from a pinned
+      // pnpm/action-setup step with a literal exact version.
+      if (/\bcorepack\b/.test(step.run))
+        errors.push(`${key}: corepack is not available on Node 26; use pnpm/action-setup`);
+      // pnpm has no `--offline` flag for `exec`; the enforceable invariant is
+      // that exec runs the exact pnpm provisioned by pnpm/action-setup (so the
+      // tool comes from the frozen install's node_modules) and never a dynamic
+      // runner — dlx/npx are rejected above as dynamic commands.
+      if (/\bpnpm\b/.test(step.run)) {
+        const setup = job.steps.find((s) => String(s.uses ?? "").startsWith("pnpm/action-setup@"));
+        if (!setup || typeof setup.with?.version !== "string" || !EXACT_STABLE_VERSION.test(setup.with.version))
+          errors.push(`${key}: pnpm requires a pnpm/action-setup step with a literal exact version`);
+      }
       if (/\bpnpm(?:@[\w.-]+)?\s+exec\s+--offline\b/.test(step.run))
         errors.push(`${key}: pnpm 11 exec treats everything after exec as the command; --offline is not a flag there`);
       for (const command of step.run.matchAll(/\bcargo\s+install\s+cross\b[^\n]*/g)) {
         const version = /(?:^|\s)--version\s+(\S+)/.exec(command[0])?.[1];
         if (!version || !/^\d+\.\d+\.\d+$/.test(version))
           errors.push(`${key}: cargo install cross requires literal exact stable --version`);
+      }
+      // cargo-binstall must install literal exact stable crate versions from
+      // crate-published (author-controlled) binaries only: no source-compile
+      // fallback and no third-party QuickInstall mirror.
+      const joined = step.run.replace(/\\\r?\n\s*/g, " ");
+      const VALUE_FLAGS = new Set(["--strategies", "--disable-strategies", "--targets", "--pkg-url", "--bin-dir", "--pkg-fmt", "--version", "--root", "--manifest-path", "--index", "--git"]);
+      for (const command of joined.matchAll(/\bcargo\s+binstall\b[^\n]*/g)) {
+        const tokens = command[0].match(/'[^']*'|"[^"]*"|\S+/g).slice(2);
+        const crates = [];
+        const flags = new Map();
+        for (let i = 0; i < tokens.length; i += 1) {
+          if (tokens[i].startsWith("--")) {
+            if (VALUE_FLAGS.has(tokens[i])) { flags.set(tokens[i], tokens[i + 1]); i += 1; } else flags.set(tokens[i], true);
+          } else crates.push(tokens[i]);
+        }
+        if (crates.length === 0 || !crates.every((crate) => /^[\w-]+@\d+\.\d+\.\d+$/.test(crate)))
+          errors.push(`${key}: cargo binstall requires literal exact stable crate@version`);
+        if (flags.get("--strategies") !== "crate-meta-data" || flags.has("--disable-strategies"))
+          errors.push(`${key}: cargo binstall must use --strategies crate-meta-data (no compile or QuickInstall fallback)`);
       }
     }
   }
@@ -118,7 +147,7 @@ export function validateWorkflow(text, workflowName) {
 
   if (workflowName === "release.yml") {
     const attestAction =
-      "actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a";
+      "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8";
     const binaryJob = workflow.jobs["build-binaries"];
     const dockerJob = workflow.jobs["build-docker"];
     const manifestJob = workflow.jobs["docker-manifest"];

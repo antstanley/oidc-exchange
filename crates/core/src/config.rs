@@ -12,6 +12,7 @@ use crate::secret::Secret;
 pub struct RawConfig {
     pub server: RawServerConfig,
     pub registration: RawRegistrationConfig,
+    pub session: RawSessionConfig,
     pub token: RawTokenConfig,
     pub grants: RawGrantsConfig,
     pub audit: RawAuditConfig,
@@ -31,6 +32,7 @@ pub struct RawConfig {
 pub struct Config {
     pub server: ServerConfig,
     pub registration: RegistrationConfig,
+    pub session: SessionConfig,
     pub token: TokenConfig,
     pub grants: GrantsConfig,
     pub audit: AuditConfig,
@@ -56,6 +58,7 @@ impl Config {
     pub fn resolve(raw: RawConfig) -> Result<Self, Error> {
         let server = ServerConfig::resolve(raw.server)?;
         let registration = RegistrationConfig::resolve(raw.registration)?;
+        let session = SessionConfig::resolve(raw.session)?;
         let token = TokenConfig::resolve(raw.token)?;
         let grants = GrantsConfig::resolve(raw.grants)?;
         let audit = AuditConfig::resolve(raw.audit)?;
@@ -78,6 +81,7 @@ impl Config {
         let config = Self {
             server,
             registration,
+            session,
             token,
             grants,
             audit,
@@ -440,6 +444,119 @@ impl ServerConfig {
                 raw.trusted_proxy_hops
             },
         })
+    }
+}
+
+/// `[session]`: settings for how sessions are described.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RawSessionConfig {
+    pub location: RawSessionLocationConfig,
+}
+
+/// `[session.location]`: operator-named request headers that carry a session's
+/// location and client address. Every field is off by default.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RawSessionLocationConfig {
+    pub city_header: String,
+    pub region_header: String,
+    pub country_header: String,
+    pub ip_header: String,
+    /// Honour the named headers from any peer, not just `server.trusted_proxies`.
+    /// States a deployment fact the service cannot verify: the origin is
+    /// unreachable except through the proxy that sets these headers.
+    pub trust_headers_from_any_peer: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionConfig {
+    pub location: SessionLocationConfig,
+}
+
+impl SessionConfig {
+    fn resolve(raw: RawSessionConfig) -> Result<Self, Error> {
+        Ok(Self {
+            location: SessionLocationConfig::resolve(raw.location)?,
+        })
+    }
+}
+
+/// Resolved `[session.location]`. Header names are validated and lowercased at
+/// load; `None` means that field is disabled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionLocationConfig {
+    pub city_header: Option<String>,
+    pub region_header: Option<String>,
+    pub country_header: Option<String>,
+    pub ip_header: Option<String>,
+    pub trust_headers_from_any_peer: bool,
+}
+
+impl SessionLocationConfig {
+    /// Whether any header is named, i.e. whether the middleware has anything
+    /// to read.
+    pub fn is_enabled(&self) -> bool {
+        self.city_header.is_some()
+            || self.region_header.is_some()
+            || self.country_header.is_some()
+            || self.ip_header.is_some()
+    }
+
+    fn resolve(raw: RawSessionLocationConfig) -> Result<Self, Error> {
+        fn header(field: &str, value: String) -> Result<Option<String>, Error> {
+            if value.is_empty() {
+                return Ok(None);
+            }
+            // RFC 9110 token characters.
+            let is_token = value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+            if !is_token {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "session.location.{field} {value:?} is not a valid HTTP header name"
+                    ),
+                });
+            }
+            Ok(Some(value.to_ascii_lowercase()))
+        }
+
+        let resolved = Self {
+            city_header: header("city_header", raw.city_header)?,
+            region_header: header("region_header", raw.region_header)?,
+            country_header: header("country_header", raw.country_header)?,
+            ip_header: header("ip_header", raw.ip_header)?,
+            trust_headers_from_any_peer: raw.trust_headers_from_any_peer,
+        };
+
+        let named: Vec<&String> = [
+            &resolved.city_header,
+            &resolved.region_header,
+            &resolved.country_header,
+            &resolved.ip_header,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for (i, name) in named.iter().enumerate() {
+            if named[..i].contains(name) {
+                return Err(Error::ConfigError {
+                    detail: format!(
+                        "session.location header {name:?} is named more than once; \
+                         header names must be distinct"
+                    ),
+                });
+            }
+        }
+        if resolved.trust_headers_from_any_peer && !resolved.is_enabled() {
+            return Err(Error::ConfigError {
+                detail: "session.location.trust_headers_from_any_peer = true requires at least \
+                         one session.location header to be named"
+                    .to_string(),
+            });
+        }
+        Ok(resolved)
     }
 }
 
@@ -2253,6 +2370,43 @@ mod tests {
         let err = HttpsUrl::parse("http://provider.example/token")
             .expect_err("production URL constructor must reject HTTP");
         assert!(matches!(err, Error::ConfigError { .. }));
+    }
+
+    #[test]
+    fn session_location_defaults_to_disabled() {
+        let config = Config::resolve(default_raw_config()).expect("resolve");
+        assert_eq!(config.session.location, SessionLocationConfig::default());
+        assert!(!config.session.location.is_enabled());
+    }
+
+    #[test]
+    fn session_location_headers_are_validated_and_lowercased() {
+        let mut raw = default_raw_config();
+        raw.session.location.city_header = "X-Viewer-City".into();
+        raw.session.location.ip_header = "X-Viewer-Ip".into();
+        let config = Config::resolve(raw).expect("resolve");
+        assert_eq!(
+            config.session.location.city_header.as_deref(),
+            Some("x-viewer-city")
+        );
+        assert_eq!(config.session.location.region_header, None);
+        assert!(config.session.location.is_enabled());
+    }
+
+    #[test]
+    fn session_location_rejects_invalid_duplicate_and_orphan_trust() {
+        let mut raw = default_raw_config();
+        raw.session.location.city_header = "not a header".into();
+        assert_config_error(Config::resolve(raw), "session.location.city_header");
+
+        let mut raw = default_raw_config();
+        raw.session.location.city_header = "X-Place".into();
+        raw.session.location.region_header = "x-place".into();
+        assert_config_error(Config::resolve(raw), "distinct");
+
+        let mut raw = default_raw_config();
+        raw.session.location.trust_headers_from_any_peer = true;
+        assert_config_error(Config::resolve(raw), "trust_headers_from_any_peer");
     }
 
     #[test]

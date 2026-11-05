@@ -1,6 +1,6 @@
 # Provider System
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
+**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/adapters/oidc, crates/providers
 
 Identity providers implement the [`IdentityProvider`](02-ports-and-adapters.md) port. The
 service keeps them in a `HashMap<String, Box<dyn IdentityProvider>>` keyed by the config
@@ -40,7 +40,9 @@ rather than derived. The check ships in warning mode for one release — an unde
 logs a structured warning and the deployment is served unchanged — and rejecting undeclared
 origins (`Warn` → `Enforce`) is a separate future release-owner decision made after that
 warning window, not part of this change. Adding a Tier 1 provider is a config block — no
-code.
+code. Two optional keys govern how the adapter derives `IdentityClaims.email_verified` for
+providers that do not emit the standard claim; see
+[Email-verification overrides](#email-verification-overrides).
 
 **Tier 2 — OIDC with quirks (custom module).** `providers/apple::AppleProvider`:
 
@@ -98,7 +100,10 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   `IdentityClaims` carries `signing_alg` — the algorithm the resolved key actually verified
   with, not the header's — so the core's `at_hash` check can select the matching digest
   without re-deciding the algorithm. Both validators report it; neither performs any replay
-  or binding check itself.
+  or binding check itself. The `email_verified` the returned claims carry is derived per
+  the provider's configured email-verification mode (see
+  [Email-verification overrides](#email-verification-overrides)); an explicit
+  `email_verified` claim always passes through, bool-or-string coerced.
 - Eligibility and algorithm are decided together, in the key set's constructor. An entry
   whose `use` is present and is not `"sig"`, or whose `key_ops` is present and omits
   `"verify"`, is not a candidate. An entry declaring an `alg` outside the provider's
@@ -114,6 +119,55 @@ codebase. Treat any atproto reference as aspirational until a change spec lands 
   shared transport. A non-2xx response is read under the shared ceiling and rendered through
   `shared::upstream::error_detail`, so an intermediary that echoes the submitted form cannot
   put the token being revoked into the error log.
+
+## Email-verification overrides
+
+The registration policy ([03-service-flows.md](03-service-flows.md)) accepts an email
+claim only when `IdentityClaims.email_verified == Some(true)`. The generic adapter
+derives that field per provider, in `validate_id_token`, from one of three configured
+modes:
+
+| Mode | Config | Derivation when the token's own `email_verified` is absent |
+|---|---|---|
+| Standard (default) | *(neither key set)* | stays `None` — a provider that does not attest verification cannot pass registration policy |
+| Mapped claim | `email_verified_claim = "<name>"` | read the named claim instead, bool-or-string coerced (`coerce_bool`); any other value is `None` |
+| Trusted email | `trust_email_verified = true` | `Some(true)` iff the token carries a non-empty `email` string claim |
+
+An explicit `email_verified` claim from the provider always passes through first — the
+overrides fill absence, they never overturn the provider's own signal, so a token
+carrying `email_verified: false` is unverified in every mode. Both keys are
+oidc-adapter `extra` keys, lifted and validated in the server's
+`provider_config_to_oidc` alongside `client_id` and `endpoint_origins`:
+`email_verified_claim` must be a non-empty string of at most 64 characters,
+`trust_email_verified` must be a TOML boolean (a set-but-non-boolean value is a config
+error, never coerced), and setting both on one provider block is a config error. The
+keys are meaningful only under `adapter = "oidc"`; the Apple adapter reads its own
+config and always receives `email_verified` from Apple. A provider configured with a
+non-default mode logs one structured startup warning at registry build naming the
+provider and the mode — the toggle weakens an identity control and must be visible in
+boot logs.
+
+**Microsoft Entra ID (Azure AD) v2.0** is the motivating deployment: its id_tokens
+carry `email` but no `email_verified` claim (scopes `openid email profile`), so under
+the default mode every Entra sign-in fails registration policy. The supported recipe
+maps Entra's optional `xms_edov` ("email domain owner verified") claim, which a tenant
+administrator enables per app registration:
+
+```toml
+[providers.entra]
+adapter = "oidc"
+issuer = "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0"
+client_id = "${ENTRA_CLIENT_ID}"
+client_secret = "${ENTRA_CLIENT_SECRET}"
+scopes = ["openid", "email", "profile"]
+email_verified_claim = "xms_edov"
+```
+
+`xms_edov` is off by default in Entra; tenants that cannot enable it may instead set
+`trust_email_verified = true`, accepting that Entra's `email` claim is then trusted
+without domain-ownership proof — Entra documents the claim as user-mutable in some
+tenant configurations, which is exactly the input class `xms_edov` exists to attest.
+Prefer the claim mapping wherever the tenant permits it.
 
 ## Provider registry
 
@@ -185,6 +239,24 @@ unrecognised `provider` value yields `UnknownProvider` → HTTP 400 `invalid_req
   assertion; enforcement follows a one-release warning window by explicit release-owner
   decision, so deployments relying on an undeclared cross-origin endpoint learn about it
   from a log line before it becomes an outage.
+- *Verification is derived at the adapter boundary; the policy predicate is untouched.*
+  **`registration_policy_reason` still requires `email_verified == Some(true)` on every
+  path; the per-provider modes change only how the generic adapter derives that
+  field.** The core cannot know which claim attests verification for which provider —
+  that is provider dialect, and provider dialect lives in adapters (the Apple
+  bool-or-string coercion set the precedent). Keeping the predicate closed also keeps
+  the security-review surface one function.
+- *Overrides fill absence, never overturn.* **An explicit `email_verified` claim wins
+  over any configured override, in both directions.** A provider that says `false` has
+  made a statement; a configuration that discarded it would turn a per-provider
+  gap-filler into a general verification bypass.
+- *Explicit, per-provider, default-strict.* **Both keys default off, are scoped to one
+  provider block, and are mutually exclusive.** Trusting an unverified email is a
+  security-sensitive weakening — a domain-allowlist entry could be satisfied by an
+  attacker-authored address, and downstream consumers of `user.email` (user-sync
+  webhooks, admin surfaces) inherit the trust — so it must be a deliberate, auditable,
+  per-provider choice, never a global flag and never a side effect of a provider's
+  claim shape.
 
 ### Open questions
 

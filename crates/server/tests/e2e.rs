@@ -165,6 +165,7 @@ fn token_request(body: &str) -> Request<Body> {
             client_addr: oidc_exchange_core::domain::ClientAddr::Peer("192.0.2.1".parse().unwrap()),
             user_agent: None,
             device_id: None,
+            location: None,
         });
     request
 }
@@ -880,6 +881,7 @@ async fn nonce_shares_the_public_per_ip_throttle_budget() {
                 client_addr,
                 user_agent: None,
                 device_id: None,
+                location: None,
             });
         request
     }

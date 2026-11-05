@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install oidc-exchange via one-line script, prebuilt binary, Docker, npm, pip, or from source.
+description: Install oidc-exchange with a script, prebuilt binary, Docker, npm, pip, or a source build.
 ---
 
 ## Quick install (Linux / macOS)
@@ -29,7 +29,7 @@ Or from Docker Hub:
 docker pull antstanley80/oidc-exchange:latest
 ```
 
-Run with a config file:
+Run with a configuration file:
 
 ```bash
 docker run -p 8080:8080 -v ./config:/app/config ghcr.io/antstanley/oidc-exchange:latest
@@ -53,7 +53,7 @@ See the [Python guide](/guides/python) for framework-specific setup.
 
 ## Prebuilt binaries
 
-Download from [GitHub Releases](https://github.com/antstanley/oidc-exchange/releases):
+Download a binary from [GitHub Releases](https://github.com/antstanley/oidc-exchange/releases):
 
 | Platform | Binary |
 |----------|--------|
@@ -64,7 +64,7 @@ Download from [GitHub Releases](https://github.com/antstanley/oidc-exchange/rele
 
 ## From source
 
-Requires a recent stable [Rust](https://rustup.rs/) toolchain (CI builds and tests on rustc 1.98):
+Install a recent stable [Rust](https://rustup.rs/) toolchain. Continuous integration (CI) builds and tests use rustc 1.98. Build the binary with:
 
 ```bash
 git clone https://github.com/antstanley/oidc-exchange.git

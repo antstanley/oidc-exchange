@@ -12,8 +12,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 oidc-exchange-ffi = { path = "../../crates/ffi" }
-napi = { version = "2", features = ["async", "napi9"] }
-napi-derive = "2"
+napi = { version = "3", features = ["async", "napi9"] }
+napi-derive = "3"
 
 [build-dependencies]
 napi-build = "2"

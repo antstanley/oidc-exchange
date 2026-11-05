@@ -3,7 +3,7 @@ title: Deployment Overview
 description: Choose a deployment model for oidc-exchange.
 ---
 
-Deployment guides for oidc-exchange across different infrastructure targets. All guides use the same binary; runtime detection and configuration determine the deployment target.
+Choose a deployment guide for your infrastructure. All deployment targets use the same binary. Environment variables and configuration determine how it runs.
 
 ## Choosing a deployment model
 
@@ -13,16 +13,16 @@ Deployment guides for oidc-exchange across different infrastructure targets. All
 | [ECS Fargate](/deployment/ecs-fargate/) | Containerized, auto-scaling, high availability | DynamoDB + ElastiCache Valkey |
 | [Linux + PostgreSQL](/deployment/linux-postgres/) | Traditional server, relational storage | PostgreSQL (+ optional Valkey) |
 | [Linux + SQLite](/deployment/linux-sqlite/) | Single-server, minimal dependencies | SQLite (+ optional LMDB) |
-| [Generic Container](/deployment/container/) | K8s, Cloud Run, any orchestrator | Any supported backend |
-| [Generic Linux](/deployment/linux-server/) | On-prem, simple single-server | Any supported backend |
+| [Generic Container](/deployment/container/) | Kubernetes, Cloud Run, or another container platform | Any supported backend |
+| [Generic Linux](/deployment/linux-server/) | A single server on your own infrastructure | Any supported backend |
 
 ## Prerequisites
 
 All environments require:
 
-- A built `oidc-exchange` binary (see [Building](#building))
-- A TOML configuration file (see [Configuration](#configuration))
-- At least one OIDC provider configured (Google, Apple, etc.)
+- A built `oidc-exchange` binary (see [Building](#building)).
+- A configuration file in TOML format (see [Configuration](#configuration)).
+- At least one configured OpenID Connect (OIDC) identity provider, such as Google or Apple.
 
 ### Building
 
@@ -40,16 +40,16 @@ cargo lambda build --release
 
 oidc-exchange loads configuration in order:
 
-1. `config/default.toml` (baseline defaults)
-2. `config/{OIDC_EXCHANGE_ENV}.toml` (environment-specific overrides)
-3. Environment variables, `OIDC_EXCHANGE__{section}__{key}` (double underscore delimiters)
-4. `${VAR_NAME}` placeholders, resolved from environment at load time
+1. `config/default.toml` (baseline defaults).
+2. `config/{OIDC_EXCHANGE_ENV}.toml` (environment-specific overrides).
+3. Environment variables, `OIDC_EXCHANGE__{section}__{key}` (double underscore delimiters).
+4. `${VAR_NAME}` placeholders, resolved from environment at load time.
 
-Secrets (client secrets, API keys) should always use `${VAR_NAME}` placeholders and be injected via environment variables, never hardcoded in TOML files.
+Use `${VAR_NAME}` placeholders for secrets such as client secrets and API keys. Supply their values through environment variables. Do not store secret values in TOML files.
 
 ## Client integration
 
-Regardless of deployment method, clients interact with oidc-exchange the same way.
+Clients use the same endpoints for every deployment method.
 
 ### Token exchange
 
@@ -94,13 +94,13 @@ curl -X POST https://auth.example.com/revoke \
 
 ### JWKS verification
 
-Downstream services verify access tokens by fetching the public key from the JWKS endpoint:
+Your API verifies access tokens with public keys from the JSON Web Key Set (JWKS) endpoint:
 
 ```bash
 curl https://auth.example.com/keys
 ```
 
-Most JWT libraries support JWKS URLs natively. Point your verification middleware at `https://auth.example.com/keys` and it will cache and rotate keys automatically.
+Use a JSON Web Token (JWT) library with JWKS support. Configure it to read `https://auth.example.com/keys` and cache and refresh keys according to the library's documentation.
 
 ### OpenID Connect discovery
 

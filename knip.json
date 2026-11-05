@@ -1,0 +1,21 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": ["examples/**"],
+  "ignoreBinaries": ["openssl"],
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.{js,mjs}", "scripts/__tests__/*.test.mjs", "conformance/*.mjs"],
+      "project": ["scripts/**/*.{js,mjs}", "conformance/**/*.mjs"]
+    },
+    "apps/admin-ui": {
+      "entry": ["scripts/*.mjs"],
+      "ignore": ["src/lib/api.ts", "src/lib/types.ts"]
+    },
+    "apps/website": {
+      "entry": ["integrations/*"],
+      "ignoreDependencies": ["@emnapi/core", "@emnapi/runtime"]
+    },
+    "bindings/nodejs": {},
+    "bindings/lambda": {}
+  }
+}

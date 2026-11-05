@@ -240,8 +240,10 @@ fn session_entity_never_derives_debug() {
     let lines: Vec<&str> = session_rs.lines().collect();
     for (line_no, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();
-        if !(trimmed.starts_with("pub struct Session")
-            || trimmed.starts_with("pub struct RetiredRefreshToken"))
+        // Exact names (`Session {`), not a prefix: `SessionLocation` and
+        // `SessionSummary` are credential-free read models and may derive Debug.
+        if !(trimmed.starts_with("pub struct Session {")
+            || trimmed.starts_with("pub struct RetiredRefreshToken {"))
         {
             continue;
         }

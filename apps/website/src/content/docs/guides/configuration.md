@@ -3,19 +3,19 @@ title: "Configuration"
 description: "Complete configuration reference for oidc-exchange."
 ---
 
-oidc-exchange is configured entirely via TOML files and environment variables. A single configuration file controls every aspect of the service: server settings, token lifetimes, storage backends, identity providers, audit logging, and telemetry.
+Configure oidc-exchange with TOML files and environment variables. TOML is a text format for configuration settings. These settings control the server, token lifetimes, storage, identity providers, audit logging, and telemetry, which records service activity.
 
 ## Config loading order
 
 Configuration is loaded and merged in the following order, with later sources overriding earlier ones:
 
-1. **`config/default.toml`**: baseline defaults shipped with the binary
-2. **`config/{OIDC_EXCHANGE_ENV}.toml`**: environment-specific overrides. The `OIDC_EXCHANGE_ENV` environment variable selects the file (e.g., `production`, `staging`, `local`). If unset, only `default.toml` is loaded.
-3. **Environment variable overrides**: structural overrides using double-underscore delimiters, `OIDC_EXCHANGE__{section}__{key}` (e.g., `OIDC_EXCHANGE__SERVER__PORT=9090`)
-4. **`${VAR_NAME}` placeholder resolution**: any value in the TOML containing `${VAR_NAME}` is resolved from the environment at load time; an unset value is a configuration error
-5. **Closed-domain resolution**: the merged configuration is narrowed into typed values; invalid security-relevant values (including non-HTTPS issuer, provider, and webhook URLs) fail before startup
+1. Load baseline defaults from `config/default.toml`.
+2. Load overrides from `config/{OIDC_EXCHANGE_ENV}.toml`. Set `OIDC_EXCHANGE_ENV` to select an environment such as `production`, `staging`, or `local`. If unset, the service loads only `default.toml`.
+3. Apply environment variables named `OIDC_EXCHANGE__{section}__{key}`. Separate each part with two underscores. For example, `OIDC_EXCHANGE__SERVER__PORT=9090` sets the port.
+4. Replace `${VAR_NAME}` placeholders with values from the environment. An unset variable causes a configuration error.
+5. Validate the merged settings against the accepted types and values. Invalid security settings, including non-HTTPS issuer, provider, or webhook URLs, cause a startup error.
 
-Secrets (client secrets, API keys, KMS ARNs) should always use `${VAR_NAME}` placeholders and be injected via environment variables. Never hardcode secrets in TOML files.
+Use `${VAR_NAME}` placeholders for secrets such as client secrets and API keys. Supply their values through environment variables. Do not store secrets in TOML files.
 
 ## Full annotated config example
 
@@ -34,6 +34,15 @@ max_request_body_bytes = 2097152       # max request body (2 MiB) buffered befor
 # Trust X-Forwarded-For only from these peer CIDRs. Empty means never trust it.
 trusted_proxies = ["10.0.0.0/8"]
 trusted_proxy_hops = 1                 # select this many entries from X-Forwarded-For's right side
+
+# ─── Session location (opt-in) ────────────────────────────────────
+# Name the request headers a trusted proxy sets; an empty name disables that field.
+[session.location]
+city_header = ""
+region_header = ""
+country_header = ""
+ip_header = ""                         # client address, e.g. recorded as `reported`
+trust_headers_from_any_peer = false    # see "Session location" below
 
 # ─── Registration policy ──────────────────────────────────────────
 [registration]
@@ -233,7 +242,7 @@ private_key_path = "/secrets/apple.p8"
 
 ## Environment variable overrides
 
-Any config value can be overridden at runtime using environment variables with double-underscore delimiters:
+Override a configuration value with an environment variable. Separate the prefix, section, and key with two underscores:
 
 ```
 OIDC_EXCHANGE__{section}__{key}=value
@@ -250,7 +259,7 @@ Examples:
 
 ## Secret placeholder syntax
 
-Values containing `${VAR_NAME}` are resolved from the environment at config load time. This allows secrets to be injected without appearing in TOML files:
+At startup, the service replaces `${VAR_NAME}` with the corresponding environment variable. This keeps secret values out of configuration files:
 
 ```toml
 [providers.google]
@@ -287,6 +296,7 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 | `rate_limit.enabled` / `store` / `window` | `true` / `in_process` / `1m` |
 | `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
 | `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
+| `session.location.*_header` / `trust_headers_from_any_peer` | `""` / `false` |
 | `audit.blocking_threshold` | `warning` |
 | `providers.<name>.endpoint_origins` | none; the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
@@ -332,6 +342,28 @@ The server uses the connection peer as the client address by default. It reads
 `trusted_proxy_hops` entries from the **right** of the comma-separated chain. This makes the
 address `forwarded`; direct peers are `peer`. A forwarding header from any other peer is
 client-asserted and is never used as a rate-limit key or authorization input.
+
+## Session location
+
+`GET /internal/users/{id}/sessions` lists a user's live sessions (one per refresh-token family,
+newest first, at most 50) with an opaque stable `id` and an optional `location`
+(`city`, `region`, `country`). The service records whatever location its caller supplies; the
+HTTP server fills it from the request headers named under `[session.location]`. Nothing is
+read by default, and no provider name appears in the code: header names are configuration.
+Values are percent-decoded, stripped of control characters, trimmed, and capped at 80
+characters per part.
+
+Headers are honoured only when the request's peer is in `server.trusted_proxies`. When
+`ip_header` is also named and holds a valid address (a trailing `:port` and IPv6 brackets are
+stripped), that address is recorded as `reported` and, because the peer is trusted, may key
+the per-IP throttle; it wins over `X-Forwarded-For`.
+
+Platforms whose peer address is not a stable, listable CIDR (Lambda behind an API gateway)
+can set `trust_headers_from_any_peer = true`. This states a fact the service cannot verify:
+the origin is unreachable except through the proxy that sets these headers, which must strip
+or overwrite any client-supplied copies. An address accepted this way is recorded as
+`asserted` and is never a rate-limit key. The setting is rejected at load when no header is
+named.
 
 The shipped in-process limiter is per process. Use an API gateway, WAF, or other edge control
 for a global limit across replicas or Lambda execution environments.

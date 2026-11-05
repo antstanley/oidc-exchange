@@ -487,6 +487,14 @@ mod tests {
                 detail: "failing fixture store".into(),
             })
         }
+        async fn list_live_sessions(
+            &self,
+            _: &str,
+            _: chrono::DateTime<chrono::Utc>,
+            _: usize,
+        ) -> oidc_exchange_core::error::Result<Vec<oidc_exchange_core::domain::Session>> {
+            unreachable!("list_live_sessions is not exercised by this fixture")
+        }
         async fn count_active_sessions(&self) -> Result<u64> {
             Err(Error::StoreError {
                 detail: "failing fixture store".into(),

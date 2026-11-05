@@ -76,7 +76,7 @@ if (oldVersion !== newVersion) {
 
 // Refresh the root pnpm lockfile (npm package versions changed) and mirror it into
 // the two binding copies the supply-chain invariant keeps byte-identical.
-run('pnpm-lock.yaml', 'corepack', ['pnpm@11.9.0', 'install', '--no-frozen-lockfile'], repoRoot)
+run('pnpm-lock.yaml', 'pnpm', ['install', '--no-frozen-lockfile'], repoRoot)
 for (const copy of ['bindings/nodejs/pnpm-lock.yaml', 'bindings/lambda/pnpm-lock.yaml']) {
   copyFileSync(R('pnpm-lock.yaml'), R(copy))
   console.log(`  ✓ ${copy} (mirrored)`)

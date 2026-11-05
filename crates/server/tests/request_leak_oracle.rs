@@ -609,6 +609,7 @@ async fn hostile_upstream_echo_yields_generic_body_and_redacted_log() {
         ),
         revocation_endpoint: None,
         endpoint_origins: Vec::new(),
+        email_verification: oidc_exchange_core::domain::EmailVerification::default(),
         scopes: Vec::new(),
         additional_params: HashMap::new(),
     };

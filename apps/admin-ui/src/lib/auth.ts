@@ -1,4 +1,4 @@
-import { env } from "$env/dynamic/private";
+import { env } from "#lib/server/env";
 import {
   createLocalJWKSet,
   decodeProtectedHeader,
@@ -428,10 +428,6 @@ export async function verifyAccessToken(token: string): Promise<VerifiedAccessTo
 export function hasAdminClaim(payload: VerifiedAccessTokenClaims): boolean {
   const value = payload[REQUIRED_CLAIM];
   return typeof value === "string" && value === REQUIRED_VALUE;
-}
-
-export function getOidcExchangeUrl(): string {
-  return OIDC_EXCHANGE_URL;
 }
 
 export function resetAuthCacheForTesting(): void {

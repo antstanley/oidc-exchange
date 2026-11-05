@@ -153,6 +153,41 @@
       }
     },
     {
+      "id": "location-headers-pass-through-encoded",
+      "request": {
+        "method": "GET",
+        "rawPath": "/auth/health",
+        "headers": [
+          {
+            "name": "x-viewer-city",
+            "value": "S%C3%A3o%20Paulo"
+          },
+          {
+            "name": "x-viewer-country",
+            "value": "BR"
+          }
+        ]
+      },
+      "expected": {
+        "method": "GET",
+        "decodedPath": "/health",
+        "query": null,
+        "orderedHeaders": [
+          {
+            "name": "x-viewer-city",
+            "value": "S%C3%A3o%20Paulo"
+          },
+          {
+            "name": "x-viewer-country",
+            "value": "BR"
+          }
+        ],
+        "status": 200,
+        "bodyLength": 0,
+        "downstreamMarker": "observed-after-routing"
+      }
+    },
+    {
       "id": "base-path-sibling",
       "request": {
         "method": "GET",

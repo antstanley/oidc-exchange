@@ -11,7 +11,7 @@
 - **jj (Jujutsu)** — version control. Install from [martinvonz/jj](https://github.com/martinvonz/jj). This project uses jj exclusively; do not use git CLI commands.
 - **Node.js 22+** — required for Node.js bindings development.
 - **pnpm** — Node.js package manager. Install with `npm install -g pnpm`.
-- **Python 3.10+** — required for Python bindings development.
+- **Python 3.11+** — required for Python bindings development.
 - **uv** — Python package manager. Install from [astral.sh/uv](https://docs.astral.sh/uv/).
 
 ### Clone and build
@@ -131,7 +131,8 @@ All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace 
 | Package manager | `pnpm` | `pnpm install` |
 | Formatting | `oxfmt` | `pnpm format` / `pnpm format:check` |
 | Linting | `oxlint` | `pnpm lint` |
-| Type-checking | `tsc` / `astro check` / `svelte-check` | `pnpm typecheck` |
+| Type-checking | `tsc` (incl. Astro via content mapper) / `svelte-check` | `pnpm typecheck` |
+| Unused code and dependencies | `knip` (config in `knip.json`) | `pnpm knip` |
 | Testing | `vitest` | `pnpm test` |
 
 **All JavaScript/Node.js code must be TypeScript.** No plain `.js` source files (except generated output). Use `.ts` for all source code.
@@ -155,6 +156,7 @@ All Rust code must pass `cargo fmt --check --all` and `cargo clippy --workspace 
 | Linting | `ruff check` | `uv run ruff check .` |
 | Type validation | `pydantic` | Use for data models requiring validation |
 | Type-checking | `pyright` | `uv run pyright` (strict) |
+| Unused code and dependencies | `knip` (config in `knip.json`) | `pnpm knip` |
 | Testing | `pytest` | `uv run pytest` |
 
 **Always use `uv`** for Python package management — never `pip`, `pip install`, or manual virtualenvs. `uv` manages the virtualenv automatically.
@@ -367,7 +369,15 @@ with your change.
 
 ### Step 1 — apply the pending changesets
 
-When you are ready to release, consume the pending changesets to bump every manifest and
+The `Version Packages` workflow (`.github/workflows/version-packages.yml`) does this for you:
+on every push to `main` with pending changesets it opens or updates a
+`chore(release): version packages` PR containing exactly what `pnpm changeset:version` produces.
+Merging that PR replaces steps 1–2 below; continue at step 3 (tag). Note that PRs opened with
+the default `GITHUB_TOKEN` do not trigger CI, so close and reopen the PR (or push an empty
+commit) to run the checks before merging. The bot pushes through the GitHub API and the
+checkout keeps `persist-credentials: false`.
+
+To do it by hand instead, consume the pending changesets to bump every manifest and
 write the changelogs:
 
 ```bash

@@ -57,11 +57,13 @@
 //! | [`assert_family_revocation_removes_everything_and_returns_count`] | SR5 |
 //! | [`assert_resolution_unknown_immediately_after_revoke`] | SR1 (negative space) |
 //! | [`assert_rotation_preserves_absolute_expiry`] | SR2 (expiry inheritance) |
+//! | [`assert_listing_returns_live_generations_newest_first`] | listing |
+//! | [`assert_location_round_trips_and_survives_rotation`] | location |
 
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use oidc_exchange_core::domain::{is_valid_family_id, RefreshResolution, Session};
+use oidc_exchange_core::domain::{is_valid_family_id, RefreshResolution, Session, SessionLocation};
 use oidc_exchange_core::ports::SessionRepository;
 use oidc_exchange_core::secret::Secret;
 use sha2::{Digest, Sha256};
@@ -149,6 +151,7 @@ pub fn generation_session(
         device_id: None,
         user_agent: None,
         ip_address: None,
+        location: None,
         created_at,
     }
 }
@@ -843,6 +846,202 @@ pub async fn assert_rotation_preserves_absolute_expiry<S: SessionRepository + ?S
 }
 
 // ---------------------------------------------------------------------------
+// Listing and location
+// ---------------------------------------------------------------------------
+
+/// Owner of the listing fixtures. Adapters with a user foreign key must seed
+/// this id and [`LISTING_OTHER_USER`] before running the suite.
+pub const LISTING_USER: &str = "usr_listing";
+
+/// A second owner whose families must never appear in [`LISTING_USER`]'s listing.
+pub const LISTING_OTHER_USER: &str = "usr_listing_other";
+
+/// A one-family fixture owned by `user_id`, created `age_secs` before `base`
+/// and expiring `ttl_secs` after it. Stores that refuse a session whose expiry
+/// is already past (Valkey) cannot hold a negative value, so "expired" fixtures
+/// use a short positive TTL and the listing is evaluated at a later `now`.
+fn listing_family(
+    tag: &str,
+    label: &str,
+    user_id: &str,
+    base: DateTime<Utc>,
+    age_secs: i64,
+    ttl_secs: i64,
+) -> Session {
+    generation_session(
+        user_id,
+        &fixture_family_id(&format!("{tag}:list:{label}")),
+        0,
+        fixture_hash(&format!("{tag}:list:{label}:gen0")),
+        base + chrono::Duration::seconds(ttl_secs),
+        base - chrono::Duration::seconds(age_secs),
+        None,
+    )
+}
+
+/// **Listing.** `list_live_sessions` returns the live generation of each of the
+/// user's families — a rotated family exactly once, as its live generation —
+/// omits expired families and other users' families, orders newest first, and
+/// honours the limit.
+pub async fn assert_listing_returns_live_generations_newest_first<S: SessionRepository + ?Sized>(
+    repo: &S,
+    tag: &str,
+) {
+    let base = capture_base_instant();
+    let user = LISTING_USER.to_string();
+    let other_user = LISTING_OTHER_USER.to_string();
+    // Fixed owners (SQL stores enforce a user foreign key): start clean so a
+    // re-run against a persistent backend sees only this run's families.
+    repo.revoke_all_user_sessions(&user).await.expect("reset");
+    repo.revoke_all_user_sessions(&other_user)
+        .await
+        .expect("reset");
+
+    let oldest = listing_family(tag, "oldest", &user, base, 3_000, 86_400);
+    let middle = listing_family(tag, "middle", &user, base, 2_000, 86_400);
+    let newest = listing_family(tag, "newest", &user, base, 1_000, 86_400);
+    let expired = listing_family(tag, "expired", &user, base, 4_000, 30);
+    let foreign = listing_family(tag, "foreign", &other_user, base, 500, 86_400);
+    for session in [&oldest, &middle, &newest, &expired, &foreign] {
+        repo.store_refresh_token(session).await.expect("store");
+    }
+
+    // Evaluate the listing after the short-lived family's expiry.
+    let at = base + chrono::Duration::seconds(60);
+
+    // Rotate the middle family: the listing must show only generation 1.
+    let rotated = generation_session(
+        &user,
+        &middle.family_id,
+        1,
+        fixture_hash(&format!("{tag}:list:middle:gen1")),
+        middle.expires_at,
+        middle.created_at,
+        Some(base),
+    );
+    assert!(
+        repo.rotate_refresh_token(middle.refresh_token_hash.expose(), &rotated)
+            .await
+            .expect("rotate"),
+        "rotation must win"
+    );
+
+    let listed = repo.list_live_sessions(&user, at, 50).await.expect("list");
+    let families: Vec<&str> = listed.iter().map(|s| s.family_id.as_str()).collect();
+    assert_eq!(
+        families,
+        vec![
+            newest.family_id.as_str(),
+            middle.family_id.as_str(),
+            oldest.family_id.as_str()
+        ],
+        "live families must list newest first, once each, without expired or foreign families"
+    );
+    let middle_listed = &listed[1];
+    assert_eq!(
+        middle_listed.refresh_token_hash.expose(),
+        rotated.refresh_token_hash.expose(),
+        "a rotated family must list its live generation, not a retired one"
+    );
+    assert_eq!(middle_listed.generation, 1);
+
+    let limited = repo.list_live_sessions(&user, at, 2).await.expect("list");
+    let limited_families: Vec<&str> = limited.iter().map(|s| s.family_id.as_str()).collect();
+    assert_eq!(
+        limited_families,
+        vec![newest.family_id.as_str(), middle.family_id.as_str()],
+        "the limit must keep the newest entries"
+    );
+
+    assert!(
+        repo.list_live_sessions("usr_listing_nobody", at, 50)
+            .await
+            .expect("list")
+            .is_empty(),
+        "a user with no sessions lists empty"
+    );
+
+    // Revocation removes a family from the listing.
+    repo.revoke_family(&newest.family_id).await.expect("revoke");
+    let after = repo.list_live_sessions(&user, at, 50).await.expect("list");
+    assert_eq!(after.len(), 2, "a revoked family must leave the listing");
+}
+
+/// **Location.** `location` round-trips through the store, survives rotation
+/// when the replacement copies it, and a session written without one reads back
+/// `None`.
+pub async fn assert_location_round_trips_and_survives_rotation<S: SessionRepository + ?Sized>(
+    repo: &S,
+    tag: &str,
+) {
+    let base = capture_base_instant();
+    let user = LISTING_USER.to_string();
+    repo.revoke_all_user_sessions(&user).await.expect("reset");
+    let location = SessionLocation::new(
+        Some("Cape Town".into()),
+        Some("Western Cape".into()),
+        Some("ZA".into()),
+    )
+    .expect("non-empty location");
+
+    let mut with_location = listing_family(tag, "with", &user, base, 2_000, 86_400);
+    with_location.location = Some(location.clone());
+    let without = listing_family(tag, "without", &user, base, 1_000, 86_400);
+    repo.store_refresh_token(&with_location)
+        .await
+        .expect("store");
+    repo.store_refresh_token(&without).await.expect("store");
+
+    let fetched = repo
+        .get_session_by_refresh_token(&with_location.refresh_token_hash)
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(
+        fetched.location,
+        Some(location.clone()),
+        "location round-trips"
+    );
+
+    let mut replacement = generation_session(
+        &user,
+        &with_location.family_id,
+        1,
+        fixture_hash(&format!("{tag}:list:with:gen1")),
+        with_location.expires_at,
+        with_location.created_at,
+        Some(base),
+    );
+    replacement.location = with_location.location.clone();
+    assert!(repo
+        .rotate_refresh_token(with_location.refresh_token_hash.expose(), &replacement)
+        .await
+        .expect("rotate"));
+
+    let listed = repo
+        .list_live_sessions(&user, base, 50)
+        .await
+        .expect("list");
+    assert_eq!(listed.len(), 2);
+    let by_family = |family: &str| {
+        listed
+            .iter()
+            .find(|s| s.family_id == family)
+            .expect("listed")
+    };
+    assert_eq!(
+        by_family(&with_location.family_id).location,
+        Some(location),
+        "location must survive rotation"
+    );
+    assert_eq!(
+        by_family(&without.family_id).location,
+        None,
+        "a session stored without a location lists None"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
 
@@ -868,4 +1067,6 @@ pub async fn assert_full_conformance<S: SessionRepository + Send + Sync + ?Sized
         .await;
     assert_resolution_unknown_immediately_after_revoke(repo, &format!("{tag}:unknown")).await;
     assert_rotation_preserves_absolute_expiry(repo, &format!("{tag}:expiry")).await;
+    assert_listing_returns_live_generations_newest_first(repo, &format!("{tag}:listing")).await;
+    assert_location_round_trips_and_survives_rotation(repo, &format!("{tag}:location")).await;
 }

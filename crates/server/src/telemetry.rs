@@ -19,26 +19,60 @@ use oidc_exchange_core::config::{TelemetryConfig, TelemetryExporter};
 ///
 /// When `config.enabled` is `false` the exporter field is ignored and a plain
 /// JSON subscriber is installed.
+///
+/// # Idempotent and host-respecting
+///
+/// A global dispatcher can be installed only once per process, so the install
+/// goes through `try_init` rather than the panicking `init`. The first call in
+/// a process installs the JSON subscriber exactly as described above. Any
+/// later call — or a call made after a host application installed its own
+/// global dispatcher (an embedding binding, a test harness) — finds a
+/// dispatcher already set: it returns `Ok(())`, notes at debug level (through
+/// the *existing* dispatcher) that the installed subscriber is retained, and
+/// skips the exporter fallback warning — that warning describes the subscriber
+/// *this call* installed, and on the retained path nothing was installed. The
+/// double-init panic is unrepresentable.
+///
+/// The standalone server is unaffected: `main` calls this before any
+/// subscriber can exist, so its call still installs and still warns for
+/// `otlp`/`xray`/`prometheus`.
 pub fn init_telemetry(config: &TelemetryConfig) -> Result<(), Box<dyn std::error::Error>> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
     // The JSON stdout formatter is what every exporter installs today; the only
     // variation is the fallback warning, computed by the exhaustive classifier
-    // below. Installing the subscriber (`init`) can happen only once per
-    // process, so keeping the *decision* in a pure function lets it be unit
-    // tested without a global subscriber.
+    // below. Installing the subscriber can happen only once per process, so
+    // keeping the *decision* in a pure function lets it be unit tested without
+    // a global subscriber.
     let warning = if config.enabled {
         exporter_fallback_warning(&config.exporter)
     } else {
         None
     };
 
-    tracing_subscriber::fmt()
+    if tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
-        .init();
+        .try_init()
+        .is_err()
+    {
+        // A global dispatcher is already installed — by an earlier call of
+        // this function or by a host application that owns its own subscriber.
+        // Respect it: telemetry keeps flowing through whatever is installed,
+        // and this debug note (dispatched through that existing subscriber) is
+        // the only trace this call leaves. The fallback warning is
+        // deliberately skipped here: it claims *this call* fell back to stdout
+        // JSON, which is false when nothing was installed.
+        tracing::debug!(
+            "a global tracing dispatcher is already installed; retaining the existing \
+             subscriber and skipping telemetry subscriber installation"
+        );
+        return Ok(());
+    }
 
+    // Installed path only: the warning describes the JSON stdout subscriber
+    // this call just installed.
     if let Some(message) = warning {
         tracing::warn!("{message}");
     }

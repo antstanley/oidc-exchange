@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -66,6 +66,7 @@ struct Session {
     device_id: Option<String>,
     user_agent: Option<String>,
     ip_address: Option<String>,
+    location: Option<SessionLocation>, // #[serde(default)]; None for older rows or when none supplied
     created_at: DateTime<Utc>,        // when the family was created
 }
 ```
@@ -80,6 +81,43 @@ stored session. `refresh_token_hash` is the *generation's* lookup key — every
 `SessionRepository` lookup takes it — while `family_id` is the *stable* identity minted
 access tokens carry as their `sid` claim, so a presented access token names the one token
 family it belongs to across every rotation.
+
+`location` is `Option<SessionLocation>` (`#[serde(default)]`; `None` for rows written before
+this field existed and whenever the caller supplied none). It is set at exchange from
+`ExchangeRequest.location` and copied unchanged into every replacement generation at rotation,
+exactly as `device_id`, `user_agent`, and `ip_address` are.
+
+### SessionLocation and SessionSummary (`domain/session.rs`)
+
+```rust
+struct SessionLocation {
+    city: Option<String>,
+    region: Option<String>,
+    country: Option<String>,
+}
+
+struct SessionSummary {
+    id: String,                         // "ses_…", opaque and stable per family
+    provider: String,
+    user_agent: Option<String>,
+    ip_address: Option<String>,
+    location: Option<SessionLocation>,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+```
+
+`SessionLocation` is plain data with no knowledge of headers or providers. Its only constructor,
+`SessionLocation::new(city, region, country) -> Option<Self>`, strips control characters, trims
+whitespace, truncates each part to 80 characters, drops parts that are empty afterwards, and returns
+`None` when no part remains. Core records the value as given and makes no trust decision: the caller
+must pass only data it has established.
+
+`SessionSummary` is a read model derived from the live `Session` of one family. It has no refresh-token
+hash, `device_id`, or `family_id`. Its `id` is `"ses_"` followed by the unpadded base64url encoding of
+the first 16 bytes of `SHA-256("oidc-exchange/session-id/v1:" ‖ family_id)`. The id is a pure function
+of the family, so it is stable across reads and rotations; it is one-way and shares no input with the
+refresh token or its hash.
 
 ### RetiredRefreshToken (`domain/session.rs`)
 
@@ -131,9 +169,13 @@ captures them at the HTTP edge and the exchange flow threads them into the store
 - **`ProviderTokens`** — what a provider returns from code exchange: `id_token`, optional
   `refresh_token`, optional `access_token`.
 - **`IdentityClaims`** — verified claims from a provider ID token: `subject`, optional
-  `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag; `None`
-  for other providers), `signing_alg` (the algorithm the resolved JWK verified with, e.g.
-  `"ES256"`), and `raw_claims`.
+  `email`, `email_verified`, `name`, `is_private_email` (Apple private-relay flag;
+  `None` for other providers), `signing_alg` (the algorithm the resolved JWK verified
+  with, e.g. `"ES256"`), and `raw_claims`. `email_verified` is the adapter-derived
+  verification signal the registration policy reads: an explicit `email_verified`
+  claim passes through (bool-or-string coerced), and for the generic OIDC adapter an
+  absent claim may be filled by that provider's configured email-verification override
+  ([05-provider-system.md](05-provider-system.md#email-verification-overrides)).
 
 ### Exchange request types (`service/exchange.rs`)
 
@@ -149,14 +191,17 @@ struct ExchangeRequest {
     ip_address: Option<String>,
     user_agent: Option<String>,
     device_id: Option<String>,
+    location: Option<SessionLocation>,
 }
 ```
 
 `ExchangeCredential` is the typed form of the declared `grant_type`: one variant per exchange
 grant, each owning that grant's required parameters as non-optional fields. The refresh grant
 has its own input type, `RefreshRequest`. `ExchangeRequest` derives no `Default` — a request
-with no credential is not constructible. The three trailing fields are client context captured
-by the audit-context middleware, not grant parameters.
+with no credential is not constructible. The trailing client-context fields are captured
+by the audit-context middleware (or supplied by a non-HTTP embedder), not grant parameters.
+`location` is supplied by the caller and stored on the resulting session. `RefreshRequest` has no
+`location`: rotation inherits the live generation's location.
 
 ### AuditEvent (`domain/audit.rs`)
 
@@ -169,7 +214,7 @@ struct AuditEvent {
     actor: Option<String>,            // user id if known
     provider: Option<String>,
     ip_address: Option<String>,
-    ip_address_source: ClientAddrSource, // peer | forwarded | asserted | unknown
+    ip_address_source: ClientAddrSource, // peer | forwarded | reported | asserted | unknown
     user_agent: Option<String>,
     detail: HashMap<String, Value>,
     outcome: AuditOutcome,            // Success | Failure { reason }
@@ -179,8 +224,9 @@ struct AuditEvent {
 `AuditEventType` variants: `TokenExchange`, `TokenRefresh`, `TokenRevocation`,
 `SessionRevoked`, `AllSessionsRevoked`, `UserCreated`, `UserUpdated`, `UserSuspended`,
 `UserDeleted`, `ValidationFailed`, `RegistrationDenied`, `ProviderError`, `Unauthorized`,
-`ThrottleExceeded`, `RefreshTokenReuse`. `ip_address_source` records whether the optional address was server-observed
-(`peer`), established by a trusted proxy (`forwarded`), client-asserted (`asserted`), or unavailable
+`ThrottleExceeded`, `RefreshTokenReuse`, `MissingCredential`, `InvalidCredential`,
+`NotConfigured`, `StoreError`. `ip_address_source` records whether the optional address was server-observed
+(`peer`), established by a trusted proxy (`forwarded`), read from a configured header behind a trusted proxy (`reported`), client-asserted (`asserted`), or unavailable
 (`unknown`). `AuditOutcome` serializes to `{ "status": "success" }` or
 `{ "status": "failure", "reason": … }`.
 
@@ -191,9 +237,15 @@ struct AuditEvent {
 `Info`; authentication failure, registration denial, principal suspension, provider rejection,
 and `ThrottleExceeded` are `Warning`; principal creation, all-session revocation, and admin
 mutations are `Notice`. `ClientAddr` retains address provenance: `Peer(IpAddr)` and
-`Forwarded(IpAddr)` may become rate-limit keys; `Asserted(value)` and `Unknown` may not.
-`ClientAddrSource` serializes as `peer`, `forwarded`, `asserted`, or `unknown`, and
-`ThrottleExceeded` serializes in `AuditEventType` as `throttle_exceeded`. Audit serialization
+`Forwarded(IpAddr)` and `Reported(IpAddr)` may become rate-limit keys; `Asserted(value)` and
+`Unknown` may not. `Reported(IpAddr)` is an address read from a configured header
+(`session.location.ip_header`) on a request whose observed peer is in `server.trusted_proxies`.
+Because the peer is trusted, it is eligible as a rate-limit key, like `Peer` and `Forwarded`. A header
+value accepted only through `session.location.trust_headers_from_any_peer` is recorded as `Asserted`
+instead (never a rate-limit key). In both cases `audit_address()` returns the address, so it is stored
+as the session's `ip_address`. When both a `Reported` and a `Forwarded` address are available,
+`Reported` wins. `ClientAddrSource` serializes as `peer`, `forwarded`, `reported`, `asserted`, or
+`unknown`, and `ThrottleExceeded` serializes in `AuditEventType` as `throttle_exceeded`. Audit serialization
 retains the address value, when available, and its source.
 
 ### OidcProviderConfig (`domain/provider.rs`)
@@ -202,7 +254,9 @@ The normalized config the standard OIDC adapter consumes: `provider_id`, `issuer
 `client_id`, optional `client_secret` (a `Secret<String>` — unprintable by type), optional
 `jwks_uri` / `token_endpoint` / `revocation_endpoint` (discovered from the issuer if
 absent), optional `endpoint_origins` (extra origins a discovery document may name; see
-[05-provider-system.md](05-provider-system.md)), `scopes`, and `additional_params`.
+[05-provider-system.md](05-provider-system.md)), `scopes`, `additional_params`, and
+`email_verification` — the per-provider email-verification derivation mode, default
+`Standard` ([05-provider-system.md](05-provider-system.md#email-verification-overrides)).
 
 ### AdminStats (`service/user_admin.rs`)
 
@@ -277,7 +331,8 @@ patch at all (see above): `Deleted → Deleted` is rejected, not a no-op.
 A family is created on token exchange with `expires_at = now + refresh_token_ttl` and
 generation 0. Each refresh advances the live generation and retires its predecessor; the
 absolute `expires_at` never moves, so the family dies at the deadline set at sign-in however
-often it rotates. A family ends at that deadline, on explicit revocation (`/revoke`,
+often it rotates. A rotated generation inherits the family's `location` unchanged, so
+the place a sign-in was created from is stable for the life of the family. A family ends at that deadline, on explicit revocation (`/revoke`,
 delete-user, revoke-all-user-sessions, or a status change to `Suspended` or `Deleted`), or
 on reuse detection.
 

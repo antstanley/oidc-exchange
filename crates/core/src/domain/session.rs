@@ -43,8 +43,109 @@ pub fn new_family_id() -> String {
     format!(
         "{}{}",
         FAMILY_ID_PREFIX,
-        ulid::Ulid::new().to_string().to_lowercase()
+        ulid::Ulid::generate().to_string().to_lowercase()
     )
+}
+
+/// Maximum characters kept in each [`SessionLocation`] part.
+pub const MAX_LOCATION_PART_LEN: usize = 80;
+
+/// Prefix of an opaque [`SessionSummary`] id.
+pub const SESSION_ID_PREFIX: &str = "ses_";
+
+/// Domain-separation prefix hashed ahead of the family id.
+const SESSION_ID_DOMAIN: &str = "oidc-exchange/session-id/v1:";
+
+/// Provider-neutral, caller-supplied place a session was created from.
+///
+/// Plain data: no knowledge of headers or providers. Core records the value as
+/// given and makes no trust decision — the caller must pass only data it has
+/// established.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SessionLocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
+impl SessionLocation {
+    /// Sanitising constructor: strips control characters, trims whitespace,
+    /// truncates each part to [`MAX_LOCATION_PART_LEN`] characters, drops parts
+    /// that are empty afterwards, and returns `None` when no part remains.
+    pub fn new(
+        city: Option<String>,
+        region: Option<String>,
+        country: Option<String>,
+    ) -> Option<Self> {
+        fn clean(part: Option<String>) -> Option<String> {
+            let raw = part?;
+            let stripped: String = raw.chars().filter(|c| !c.is_control()).collect();
+            let trimmed: String = stripped
+                .trim()
+                .chars()
+                .take(MAX_LOCATION_PART_LEN)
+                .collect();
+            // Truncation may expose trailing whitespace; trim again.
+            let trimmed = trimmed.trim().to_owned();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }
+        let location = Self {
+            city: clean(city),
+            region: clean(region),
+            country: clean(country),
+        };
+        (location.city.is_some() || location.region.is_some() || location.country.is_some())
+            .then_some(location)
+    }
+}
+
+/// Read model of one live session family, as listed to operators. Carries no
+/// refresh-token hash, `device_id`, or `family_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// `ses_…`: opaque and stable per family; see [`session_id_for_family`].
+    pub id: String,
+    pub provider: String,
+    pub user_agent: Option<String>,
+    pub ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<SessionLocation>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Derive the opaque session id for a family: `ses_` + unpadded base64url of
+/// the first 16 bytes of `SHA-256("oidc-exchange/session-id/v1:" ‖ family_id)`.
+/// A pure, one-way function of the family id.
+pub fn session_id_for_family(family_id: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(SESSION_ID_DOMAIN.as_bytes());
+    hasher.update(family_id.as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "{}{}",
+        SESSION_ID_PREFIX,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..16])
+    )
+}
+
+impl From<&Session> for SessionSummary {
+    fn from(s: &Session) -> Self {
+        Self {
+            id: session_id_for_family(&s.family_id),
+            provider: s.provider.clone(),
+            user_agent: s.user_agent.clone(),
+            ip_address: s.ip_address.clone(),
+            location: s.location.clone(),
+            created_at: s.created_at,
+            expires_at: s.expires_at,
+        }
+    }
 }
 
 /// One generation of a refresh-token family.
@@ -86,6 +187,11 @@ pub struct Session {
     pub device_id: Option<String>,
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
+    /// Caller-supplied place the sign-in came from; set at exchange and copied
+    /// unchanged into every replacement generation. `None` for rows written
+    /// before this field existed and whenever the caller supplied none.
+    #[serde(default)]
+    pub location: Option<SessionLocation>,
     /// When the family was created (not when this generation was issued).
     pub created_at: DateTime<Utc>,
 }
@@ -174,6 +280,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn location_new_cleans_and_bounds_every_part() {
+        let long = "x".repeat(200);
+        let location = SessionLocation::new(
+            Some("  Cape\u{0}\u{7} Town\n ".into()),
+            Some("   ".into()),
+            Some(long),
+        )
+        .expect("some part survives");
+        assert_eq!(location.city.as_deref(), Some("Cape Town"));
+        assert_eq!(location.region, None, "whitespace-only parts are dropped");
+        assert_eq!(
+            location.country.as_deref().map(|c| c.chars().count()),
+            Some(MAX_LOCATION_PART_LEN)
+        );
+    }
+
+    #[test]
+    fn location_new_is_none_when_nothing_remains() {
+        assert_eq!(SessionLocation::new(None, None, None), None);
+        assert_eq!(
+            SessionLocation::new(Some("\u{1}".into()), Some(" ".into()), None),
+            None
+        );
+    }
+
+    #[test]
+    fn location_truncation_counts_characters_not_bytes() {
+        let wide = "é".repeat(100);
+        let location = SessionLocation::new(Some(wide), None, None).expect("kept");
+        assert_eq!(
+            location.city.expect("city").chars().count(),
+            MAX_LOCATION_PART_LEN
+        );
+    }
+
+    #[test]
+    fn session_id_is_stable_opaque_and_well_formed() {
+        let family = "fam_01j2m3n4p5q6r7s8t9v0wxyzab";
+        let id = session_id_for_family(family);
+        assert_eq!(id, session_id_for_family(family), "pure function");
+        assert_ne!(id, session_id_for_family("fam_01j2m3n4p5q6r7s8t9v0wxyzac"));
+        let body = id.strip_prefix(SESSION_ID_PREFIX).expect("prefix");
+        assert_eq!(body.len(), 22, "16 bytes of unpadded base64url");
+        assert!(body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(!id.contains(family));
+    }
+
+    #[test]
     fn accepts_well_formed_lowercase_ulid_family_ids() {
         // 26 lowercase Crockford-base32 digits after the prefix.
         assert!(is_valid_family_id("fam_01j2m3n4p5q6r7s8t9v0wxyzab"));
@@ -244,6 +400,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: Utc::now(),
         }
     }
@@ -380,6 +537,7 @@ mod debug_redaction_tests {
             device_id: Some("device-1".to_string()),
             user_agent: Some("ua/1".to_string()),
             ip_address: Some("192.0.2.9".to_string()),
+            location: None,
             created_at: now,
         }
     }

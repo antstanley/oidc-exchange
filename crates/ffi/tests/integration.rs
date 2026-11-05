@@ -15,6 +15,7 @@ fn wire(method: &str, raw_path: &[u8]) -> WireRequest {
         headers: vec![],
         body: vec![],
         hints: TransportHints { path_is_raw: true },
+        location: None,
     }
 }
 

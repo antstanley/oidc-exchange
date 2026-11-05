@@ -2,7 +2,7 @@ service: oidc-exchange-serverless
 
 provider:
   name: aws
-  runtime: nodejs22.x
+  runtime: nodejs24.x
   region: us-east-1
 
 functions:

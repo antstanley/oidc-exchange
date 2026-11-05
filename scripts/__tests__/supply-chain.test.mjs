@@ -9,7 +9,7 @@ import test from "node:test";
 import YAML from "yaml";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const PNPM_VERSION = "11.9.0";
+const PNPM_VERSION = "12.16.1";
 const PACKAGE_MANAGER = `pnpm@${PNPM_VERSION}`;
 const WORKFLOWS = ["ci.yml", "release.yml", "nodejs-addon-glibc.yml"];
 
@@ -30,9 +30,8 @@ function manifest(relativePath) {
 
 function frozenInstall(packageDirectory) {
   const result = spawnSync(
-    "corepack",
+    "pnpm",
     [
-      `pnpm@${PNPM_VERSION}`,
       "--filter",
       `./${packageDirectory}`,
       "install",
@@ -84,7 +83,7 @@ test("owned workflow installs use the exact frozen package manager", () => {
         )
           continue;
         installCount += 1;
-        assert.match(step.run, new RegExp(`corepack pnpm@${PNPM_VERSION.replaceAll(".", "\\.")}`));
+        assert.doesNotMatch(step.run, /corepack/);
         assert.match(step.run, /--frozen-lockfile/);
         assert.doesNotMatch(step.run, /--no-frozen-lockfile/);
       }
@@ -115,8 +114,8 @@ test("frozen install rejects manifest drift without rewriting the lock", () => {
     );
     const before = readFileSync(join(temporaryDirectory, "pnpm-lock.yaml"), "utf8");
     const result = spawnSync(
-      "corepack",
-      [`pnpm@${PNPM_VERSION}`, "install", "--frozen-lockfile", "--ignore-scripts"],
+      "pnpm",
+      ["install", "--frozen-lockfile", "--ignore-scripts"],
       {
         cwd: temporaryDirectory,
         encoding: "utf8",

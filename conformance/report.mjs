@@ -50,7 +50,12 @@ async function execute(shape, fixtures, variant = "faithful", runnerOverride) {
     command = join(root, "bindings/python/.venv/bin/python");
     args = [runnerOverride ?? join(root, "conformance/python_runner.py"), shape, config, pyArtifact, variant];
   }
-  const child = spawn(command, args, { cwd: root, stdio: ["pipe", "pipe", "inherit"] });
+  // Every runner constructs the service, which now installs a JSON tracing
+  // subscriber (the FFI/embedded telemetry install). That subscriber writes to
+  // the process's stdout — the exact channel this harness uses to read one JSON
+  // conformance record per line. Force the subscriber to emit nothing so the
+  // data channel stays clean; the config already sets `[telemetry] enabled=false`.
+  const child = spawn(command, args, { cwd: root, stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, RUST_LOG: "off" } });
   const output = [];
   createInterface({ input: child.stdout }).on("line", (line) => output.push(JSON.parse(line)));
   for (const fixture of fixtures) child.stdin.write(`${JSON.stringify(input(fixture, shape, variant))}\n`);
@@ -94,14 +99,14 @@ function compare(key, fixtures, outputs) {
 try {
   runSync("openssl", ["genpkey", "-algorithm", "Ed25519", "-out", key]);
   await writeFile(config, `[server]\nissuer="https://conformance.invalid"\nrole="exchange"\nbase_path="/auth"\nmax_request_body_bytes=2097152\n[registration]\nmode="open"\n[repository]\nadapter="sqlite"\n[repository.sqlite]\npath="${database}"\n[key_manager]\nadapter="local"\n[key_manager.local]\nprivate_key_path="${key}"\nalgorithm="EdDSA"\nkid="conformance"\n[audit]\nadapter="noop"\n[telemetry]\nenabled=false\n`);
-  runSync("corepack", ["pnpm@11.9.0", "install", "--frozen-lockfile", "--ignore-scripts"]);
+  runSync("pnpm", ["install", "--frozen-lockfile", "--ignore-scripts"]);
   if (shapes.some((shape) => ["native", "ffi"].includes(shape))) {
     runSync("cargo", ["build", "-p", "oidc-exchange-conformance"]);
   }
   if (shapes.some((shape) => ["node", "lambda"].includes(shape))) {
     const buildStarted = Date.now();
-    runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/nodejs", "exec", "napi", "build", "--features", "conformance", "--dts", "index.generated.d.ts"]);
-    runSync("corepack", ["pnpm@11.9.0", "--dir", "bindings/lambda", "build"]);
+    runSync("pnpm", ["--dir", "bindings/nodejs", "exec", "napi", "build", "--features", "conformance", "--dts", "index.generated.d.ts"]);
+    runSync("pnpm", ["--dir", "bindings/lambda", "build"]);
     const artifact = join(root, "bindings/nodejs/oidc-exchange.node");
     const artifactStat = await stat(artifact).catch(() => null);
     if (!artifactStat || artifactStat.mtimeMs + 1000 < buildStarted) throw new Error(`missing or stale artifact ${artifact}`);
