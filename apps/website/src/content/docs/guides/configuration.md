@@ -35,6 +35,15 @@ max_request_body_bytes = 2097152       # max request body (2 MiB) buffered befor
 trusted_proxies = ["10.0.0.0/8"]
 trusted_proxy_hops = 1                 # select this many entries from X-Forwarded-For's right side
 
+# ─── Session location (opt-in) ────────────────────────────────────
+# Name the request headers a trusted proxy sets; an empty name disables that field.
+[session.location]
+city_header = ""
+region_header = ""
+country_header = ""
+ip_header = ""                         # client address, e.g. recorded as `reported`
+trust_headers_from_any_peer = false    # see "Session location" below
+
 # ─── Registration policy ──────────────────────────────────────────
 [registration]
 # "open": any authenticated user gets a record created
@@ -287,6 +296,7 @@ Use `oidc-exchange config check path/to/config.toml` to run the same side-effect
 | `rate_limit.enabled` / `store` / `window` | `true` / `in_process` / `1m` |
 | `rate_limit.per_ip` / `per_ip_failures` / `per_subject` / `per_provider` | `60` / `10` / `10` / `600` |
 | `server.trusted_proxies` / `trusted_proxy_hops` | `[]` / `1` |
+| `session.location.*_header` / `trust_headers_from_any_peer` | `""` / `false` |
 | `audit.blocking_threshold` | `warning` |
 | `providers.<name>.endpoint_origins` | none; the provider is pinned to its issuer's origin (plus the origins of explicitly configured endpoints) |
 | `user_sync.enabled` | `false` |
@@ -332,6 +342,28 @@ The server uses the connection peer as the client address by default. It reads
 `trusted_proxy_hops` entries from the **right** of the comma-separated chain. This makes the
 address `forwarded`; direct peers are `peer`. A forwarding header from any other peer is
 client-asserted and is never used as a rate-limit key or authorization input.
+
+## Session location
+
+`GET /internal/users/{id}/sessions` lists a user's live sessions (one per refresh-token family,
+newest first, at most 50) with an opaque stable `id` and an optional `location`
+(`city`, `region`, `country`). The service records whatever location its caller supplies; the
+HTTP server fills it from the request headers named under `[session.location]`. Nothing is
+read by default, and no provider name appears in the code: header names are configuration.
+Values are percent-decoded, stripped of control characters, trimmed, and capped at 80
+characters per part.
+
+Headers are honoured only when the request's peer is in `server.trusted_proxies`. When
+`ip_header` is also named and holds a valid address (a trailing `:port` and IPv6 brackets are
+stripped), that address is recorded as `reported` and, because the peer is trusted, may key
+the per-IP throttle; it wins over `X-Forwarded-For`.
+
+Platforms whose peer address is not a stable, listable CIDR (Lambda behind an API gateway)
+can set `trust_headers_from_any_peer = true`. This states a fact the service cannot verify:
+the origin is unreachable except through the proxy that sets these headers, which must strip
+or overwrite any client-supplied copies. An address accepted this way is recorded as
+`asserted` and is never a rate-limit key. The setting is rejected at load when no header is
+named.
 
 The shipped in-process limiter is per process. Use an API gateway, WAF, or other edge control
 for a global limit across replicas or Lambda execution environments.

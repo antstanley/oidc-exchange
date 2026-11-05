@@ -69,6 +69,7 @@ fn sentinel_session(s: &Sentinels, user_id: &str) -> Session {
         device_id: Some(s.device.to_string()),
         user_agent: Some(s.user_agent.to_string()),
         ip_address: Some(s.ip.to_string()),
+        location: None,
         created_at: now,
     }
 }

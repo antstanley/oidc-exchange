@@ -223,10 +223,19 @@ shared_secret = "${INTERNAL_API_SECRET}"
 | GET | `/internal/users/{id}` | Get a user by ID |
 | PATCH | `/internal/users/{id}` | Update a user |
 | DELETE | `/internal/users/{id}` | Soft-delete a user (revokes all sessions) |
+| GET | `/internal/users/{id}/sessions` | List the user's live sessions, newest first, at most 50 (404 for an unknown or soft-deleted user) |
 | GET | `/internal/users/{id}/claims` | Get a user's private claims |
 | PUT | `/internal/users/{id}/claims` | Replace all of a user's private claims |
 | PATCH | `/internal/users/{id}/claims` | Merge into a user's private claims |
 | DELETE | `/internal/users/{id}/claims` | Clear all of a user's private claims |
+
+### GET /internal/users/{id}/sessions
+
+Returns `{ "sessions": [...] }`, one entry per live refresh-token family. Each entry has an
+opaque `id` (`ses_…`, stable across rotation), `provider`, `user_agent`, `ip_address`,
+`created_at`, `expires_at`, and a `location` (`city`, `region`, `country`) that is omitted
+when none was recorded. Refresh-token hashes, device ids, and family ids are never returned.
+See [Session location](/guides/configuration/#session-location) for how locations are recorded.
 
 ### POST /internal/users
 

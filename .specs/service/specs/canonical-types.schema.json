@@ -161,7 +161,41 @@
         "device_id": { "type": ["string", "null"] },
         "user_agent": { "type": ["string", "null"] },
         "ip_address": { "type": ["string", "null"] },
+        "location": {
+          "oneOf": [{ "$ref": "#/$defs/SessionLocation" }, { "type": "null" }],
+          "description": "Caller-supplied location; null for rows written before the field existed. Copied unchanged into every replacement generation."
+        },
         "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp", "description": "When the family was created." }
+      }
+    },
+    "SessionLocation": {
+      "type": "object",
+      "description": "Provider-neutral, sanitised place a session was created from. Built only through SessionLocation::new (control characters stripped, trimmed, each part at most 80 characters, empty parts dropped).",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "city": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "region": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "country": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "SessionSummary": {
+      "type": "object",
+      "description": "Read model of one live session family, returned by GET /internal/users/{id}/sessions. Carries no refresh-token hash, device_id, or family_id.",
+      "additionalProperties": false,
+      "required": ["id", "provider", "created_at", "expires_at"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^ses_[A-Za-z0-9_-]{22}$",
+          "description": "ses_ + unpadded base64url of the first 16 bytes of SHA-256('oidc-exchange/session-id/v1:' || family_id); opaque and stable per family."
+        },
+        "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
+        "user_agent": { "type": ["string", "null"] },
+        "ip_address": { "type": ["string", "null"] },
+        "location": { "$ref": "#/$defs/SessionLocation" },
+        "created_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" },
+        "expires_at": { "$ref": "../../canonical-types.schema.json#/$defs/Timestamp" }
       }
     },
     "RetiredRefreshToken": {
@@ -356,7 +390,8 @@
         "provider": { "$ref": "../../canonical-types.schema.json#/$defs/NonEmptyString" },
         "ip_address": { "type": ["string", "null"] },
         "user_agent": { "type": ["string", "null"] },
-        "device_id": { "type": ["string", "null"] }
+        "device_id": { "type": ["string", "null"] },
+        "location": { "oneOf": [{ "$ref": "#/$defs/SessionLocation" }, { "type": "null" }] }
       }
     },
     "AuditSeverity": {
@@ -655,10 +690,11 @@
       "enum": [
         "peer",
         "forwarded",
+        "reported",
         "asserted",
         "unknown"
       ],
-      "description": "Provenance of AuditEvent.ip_address. peer is observed by the server or runtime platform; forwarded is selected from X-Forwarded-For only behind server.trusted_proxies; asserted is client-controlled and never a rate-limit key; unknown has no usable address."
+      "description": "Provenance of AuditEvent.ip_address. peer is observed by the server or runtime platform; forwarded is selected from X-Forwarded-For only behind server.trusted_proxies; reported is read from session.location.ip_header behind server.trusted_proxies and is rate-limit eligible; asserted is client-controlled and never a rate-limit key; unknown has no usable address."
     }
   }
 }

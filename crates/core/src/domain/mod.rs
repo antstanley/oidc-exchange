@@ -17,8 +17,9 @@ pub use operator::{
 };
 pub use provider::{EmailVerification, OidcProviderConfig};
 pub use session::{
-    is_valid_family_id, new_family_id, RefreshResolution, RetiredRefreshToken, Session,
-    FAMILY_ID_PREFIX, ULID_CHAR_LEN,
+    is_valid_family_id, new_family_id, session_id_for_family, RefreshResolution,
+    RetiredRefreshToken, Session, SessionLocation, SessionSummary, FAMILY_ID_PREFIX,
+    MAX_LOCATION_PART_LEN, SESSION_ID_PREFIX, ULID_CHAR_LEN,
 };
 pub use single_use::SingleUseRecord;
 pub use token::{AccessTokenClaims, IdentityClaims, ProviderTokens, TokenResponse};

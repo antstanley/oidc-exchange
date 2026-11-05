@@ -8,8 +8,8 @@ use ipnet::IpNet;
 use lambda_http::request::RequestContext;
 
 use crate::state::AppState;
-use oidc_exchange_core::config::MAX_TRUSTED_PROXY_HOPS;
-use oidc_exchange_core::domain::ClientAddr;
+use oidc_exchange_core::config::{SessionLocationConfig, MAX_TRUSTED_PROXY_HOPS};
+use oidc_exchange_core::domain::{ClientAddr, SessionLocation};
 
 /// Maximum byte length copied from a client-authored forwarding header.
 pub const MAX_FORWARDED_HEADER_LEN: usize = 1_024;
@@ -17,8 +17,18 @@ pub const MAX_FORWARDED_HEADER_LEN: usize = 1_024;
 pub const MAX_USER_AGENT_LEN: usize = 256;
 /// Maximum byte length copied from a client-authored device identifier.
 pub const MAX_DEVICE_ID_LEN: usize = 256;
+/// Maximum byte length read from an operator-named location or address header
+/// before percent-decoding. `SessionLocation::new` bounds each decoded part.
+pub const MAX_LOCATION_HEADER_LEN: usize = 1_024;
 /// Maximum forwarding-chain entries inspected for a trusted proxy request.
 pub const MAX_FORWARDED_CHAIN_ENTRIES: usize = MAX_TRUSTED_PROXY_HOPS;
+
+/// A session location supplied directly by an in-process embedder (the FFI and
+/// language bindings), carried as a request extension. HTTP clients cannot set
+/// request extensions, so this is trusted exactly as far as the embedder is; it
+/// takes precedence over any header-derived location.
+#[derive(Clone, Debug)]
+pub struct SuppliedLocation(pub SessionLocation);
 
 /// Request-scoped audit metadata with server-established address provenance.
 #[derive(Clone, Debug)]
@@ -26,6 +36,9 @@ pub struct AuditContext {
     pub client_addr: ClientAddr,
     pub user_agent: Option<String>,
     pub device_id: Option<String>,
+    /// Session location read from the operator-named `[session.location]`
+    /// headers; `None` unless configured and the request's peer is trusted.
+    pub location: Option<SessionLocation>,
 }
 
 impl AuditContext {
@@ -42,19 +55,92 @@ pub fn audit_context_from_request<B>(
     trusted: &[IpNet],
     hops: usize,
 ) -> AuditContext {
-    let forwarded = bounded_header(request, "x-forwarded-for", MAX_FORWARDED_HEADER_LEN);
-    let peer = lambda_platform_source_ip(request).or(peer);
-    let client_addr = resolve_client_addr(
-        peer.map(|peer| peer.ip()),
-        forwarded.as_deref(),
+    audit_context_with_location(
+        request,
+        peer,
         trusted,
         hops,
-    );
+        &SessionLocationConfig::default(),
+    )
+}
+
+/// As [`audit_context_from_request`], additionally honouring the
+/// `[session.location]` header mapping. With no header named (the default)
+/// this is identical to the plain form.
+pub fn audit_context_with_location<B>(
+    request: &Request<B>,
+    peer: Option<SocketAddr>,
+    trusted: &[IpNet],
+    hops: usize,
+    location_config: &SessionLocationConfig,
+) -> AuditContext {
+    let forwarded = bounded_header(request, "x-forwarded-for", MAX_FORWARDED_HEADER_LEN);
+    let peer = lambda_platform_source_ip(request).or(peer);
+    let peer_ip = peer.map(|peer| peer.ip());
+    let mut client_addr = resolve_client_addr(peer_ip, forwarded.as_deref(), trusted, hops);
+    let mut location = None;
+
+    if location_config.is_enabled() {
+        let peer_trusted = peer_ip.is_some_and(|ip| trusted.iter().any(|net| net.contains(&ip)));
+        if peer_trusted || location_config.trust_headers_from_any_peer {
+            location = SessionLocation::new(
+                decoded_header(request, location_config.city_header.as_deref()),
+                decoded_header(request, location_config.region_header.as_deref()),
+                decoded_header(request, location_config.country_header.as_deref()),
+            );
+            if let Some(reported) = decoded_header(request, location_config.ip_header.as_deref())
+                .as_deref()
+                .and_then(parse_header_ip)
+            {
+                // A trusted-CIDR peer is a verifiable fact, so its report may
+                // key a rate limit; a header accepted only through the escape
+                // hatch is an operator assertion and may not.
+                client_addr = if peer_trusted {
+                    ClientAddr::Reported(reported)
+                } else {
+                    ClientAddr::asserted(reported.to_string()).unwrap_or(client_addr)
+                };
+            }
+        }
+    }
+
+    if let Some(SuppliedLocation(supplied)) = request.extensions().get::<SuppliedLocation>() {
+        location = Some(supplied.clone());
+    }
+
     AuditContext {
         client_addr,
         user_agent: bounded_header(request, "user-agent", MAX_USER_AGENT_LEN),
         device_id: bounded_header(request, "x-device-id", MAX_DEVICE_ID_LEN),
+        location,
     }
+}
+
+/// Reads a named header, bounds it, and percent-decodes it (invalid UTF-8 is
+/// replaced). `None` when the header is unnamed, absent, or empty.
+fn decoded_header<B>(request: &Request<B>, name: Option<&str>) -> Option<String> {
+    let raw = request.headers().get(name?)?.as_bytes();
+    let raw = &raw[..raw.len().min(MAX_LOCATION_HEADER_LEN)];
+    let decoded = percent_encoding::percent_decode(raw)
+        .decode_utf8_lossy()
+        .into_owned();
+    (!decoded.trim().is_empty()).then_some(decoded)
+}
+
+/// Parses a reported client address, stripping a trailing `:port` and the
+/// brackets around an IPv6 literal.
+fn parse_header_ip(value: &str) -> Option<IpAddr> {
+    let value = value.trim();
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    if let Ok(socket) = value.parse::<SocketAddr>() {
+        return Some(socket.ip());
+    }
+    value
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .and_then(|inner| inner.parse::<IpAddr>().ok())
 }
 
 /// Resolves only server-observed peers or forwarding chains sent by configured trusted CIDRs.
@@ -113,11 +199,12 @@ pub async fn audit_context_layer(
     // Parsed CIDRs are a load-time product of the typed config; borrow them.
     let trusted = state.config.server.trusted_proxies.clone();
     if request.extensions().get::<AuditContext>().is_none() {
-        let context = audit_context_from_request(
+        let context = audit_context_with_location(
             &request,
             peer,
             &trusted,
             state.config.server.trusted_proxy_hops,
+            &state.config.session.location,
         );
         request.extensions_mut().insert(context);
     }
@@ -235,6 +322,203 @@ mod tests {
                 .len(),
             MAX_USER_AGENT_LEN
         );
+    }
+
+    fn location_config(trust_any: bool) -> SessionLocationConfig {
+        SessionLocationConfig {
+            city_header: Some("x-city".into()),
+            region_header: Some("x-region".into()),
+            country_header: Some("x-country".into()),
+            ip_header: Some("x-viewer-ip".into()),
+            trust_headers_from_any_peer: trust_any,
+        }
+    }
+
+    fn located_request(headers: &[(&str, &str)]) -> Request<Body> {
+        let mut builder = Request::get("/");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    fn peer(value: &str) -> Option<SocketAddr> {
+        Some(SocketAddr::new(ip(value), 443))
+    }
+
+    fn trusted() -> Vec<IpNet> {
+        vec!["10.0.0.0/8".parse().unwrap()]
+    }
+
+    #[test]
+    fn embedder_supplied_location_applies_without_any_header_config() {
+        let mut request = located_request(&[("x-city", "Ignored")]);
+        let supplied = SessionLocation::new(Some("Oslo".into()), None, Some("NO".into())).unwrap();
+        request
+            .extensions_mut()
+            .insert(SuppliedLocation(supplied.clone()));
+        let context =
+            audit_context_with_location(&request, None, &[], 1, &SessionLocationConfig::default());
+        assert_eq!(context.location, Some(supplied));
+    }
+
+    #[test]
+    fn no_header_named_changes_nothing() {
+        let request = located_request(&[("x-city", "Paris"), ("x-viewer-ip", "192.0.2.1")]);
+        let context = audit_context_with_location(
+            &request,
+            peer("10.0.0.9"),
+            &trusted(),
+            1,
+            &SessionLocationConfig::default(),
+        );
+        assert_eq!(context.location, None);
+        assert_eq!(context.client_addr, ClientAddr::Peer(ip("10.0.0.9")));
+    }
+
+    #[test]
+    fn trusted_peer_location_is_percent_decoded_and_sanitised() {
+        let long = "z".repeat(300);
+        let request = located_request(&[
+            ("x-city", "S%C3%A3o%20Paulo"),
+            ("x-region", "  %00%07SP%0A "),
+            ("x-country", &long),
+        ]);
+        let context = audit_context_with_location(
+            &request,
+            peer("10.0.0.9"),
+            &trusted(),
+            1,
+            &location_config(false),
+        );
+        let location = context.location.expect("location");
+        assert_eq!(location.city.as_deref(), Some("São Paulo"));
+        assert_eq!(location.region.as_deref(), Some("SP"));
+        assert_eq!(location.country.map(|c| c.chars().count()), Some(80));
+    }
+
+    #[test]
+    fn invalid_utf8_is_replaced_not_rejected() {
+        let request = located_request(&[("x-city", "Bad%FFCity")]);
+        let context = audit_context_with_location(
+            &request,
+            peer("10.0.0.9"),
+            &trusted(),
+            1,
+            &location_config(false),
+        );
+        assert_eq!(
+            context.location.expect("location").city.as_deref(),
+            Some("Bad\u{FFFD}City")
+        );
+    }
+
+    #[test]
+    fn untrusted_peer_headers_are_ignored() {
+        let request = located_request(&[("x-city", "Paris"), ("x-viewer-ip", "192.0.2.1")]);
+        let context = audit_context_with_location(
+            &request,
+            peer("198.51.100.9"),
+            &trusted(),
+            1,
+            &location_config(false),
+        );
+        assert_eq!(context.location, None);
+        assert_eq!(context.client_addr, ClientAddr::Peer(ip("198.51.100.9")));
+    }
+
+    #[test]
+    fn trusted_peer_ip_header_is_reported_and_wins_over_forwarded() {
+        let request = located_request(&[
+            ("x-viewer-ip", "192.0.2.1"),
+            ("x-forwarded-for", "198.51.100.7"),
+        ]);
+        let context = audit_context_with_location(
+            &request,
+            peer("10.0.0.9"),
+            &trusted(),
+            1,
+            &location_config(false),
+        );
+        assert_eq!(context.client_addr, ClientAddr::Reported(ip("192.0.2.1")));
+        assert_eq!(context.ip_address().as_deref(), Some("192.0.2.1"));
+        assert_eq!(context.client_addr.rate_limit_key(), Some(ip("192.0.2.1")));
+    }
+
+    #[test]
+    fn escape_hatch_honours_headers_but_records_the_address_as_asserted() {
+        let request = located_request(&[("x-city", "Paris"), ("x-viewer-ip", "192.0.2.1")]);
+        let context = audit_context_with_location(
+            &request,
+            peer("198.51.100.9"),
+            &trusted(),
+            1,
+            &location_config(true),
+        );
+        assert_eq!(
+            context.location.as_ref().expect("location").city.as_deref(),
+            Some("Paris")
+        );
+        assert!(matches!(context.client_addr, ClientAddr::Asserted(_)));
+        assert_eq!(context.ip_address().as_deref(), Some("192.0.2.1"));
+        assert_eq!(context.client_addr.rate_limit_key(), None);
+    }
+
+    #[test]
+    fn escape_hatch_with_a_trusted_peer_still_reports() {
+        let request = located_request(&[("x-viewer-ip", "192.0.2.1")]);
+        let context = audit_context_with_location(
+            &request,
+            peer("10.0.0.9"),
+            &trusted(),
+            1,
+            &location_config(true),
+        );
+        assert_eq!(context.client_addr, ClientAddr::Reported(ip("192.0.2.1")));
+    }
+
+    #[test]
+    fn ip_header_strips_port_and_brackets() {
+        for (value, expected) in [
+            ("192.0.2.1:8443", "192.0.2.1"),
+            ("[2001:db8::1]:443", "2001:db8::1"),
+            ("[2001:db8::1]", "2001:db8::1"),
+            ("2001:db8::1", "2001:db8::1"),
+        ] {
+            let request = located_request(&[("x-viewer-ip", value)]);
+            let context = audit_context_with_location(
+                &request,
+                peer("10.0.0.9"),
+                &trusted(),
+                1,
+                &location_config(false),
+            );
+            assert_eq!(
+                context.client_addr,
+                ClientAddr::Reported(ip(expected)),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_empty_or_unparseable_headers_leave_resolution_unchanged() {
+        for headers in [
+            vec![],
+            vec![("x-city", ""), ("x-viewer-ip", "")],
+            vec![("x-city", "%20%20"), ("x-viewer-ip", "not-an-ip")],
+        ] {
+            let request = located_request(&headers);
+            let context = audit_context_with_location(
+                &request,
+                peer("10.0.0.9"),
+                &trusted(),
+                1,
+                &location_config(false),
+            );
+            assert_eq!(context.location, None, "{headers:?}");
+            assert_eq!(context.client_addr, ClientAddr::Peer(ip("10.0.0.9")));
+        }
     }
 
     #[test]

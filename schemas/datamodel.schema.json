@@ -42,7 +42,21 @@
         "device_id": { "type": ["string", "null"] },
         "user_agent": { "type": ["string", "null"] },
         "ip_address": { "type": ["string", "null"] },
+        "location": {
+          "oneOf": [{ "$ref": "#/definitions/SessionLocation" }, { "type": "null" }],
+          "description": "Caller-supplied place the sign-in came from; copied unchanged into every replacement generation. Null/absent on rows written before this field existed."
+        },
         "created_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "SessionLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "city": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "region": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "country": { "type": "string", "minLength": 1, "maxLength": 80 }
       }
     },
     "RetiredRefreshToken": {
@@ -74,7 +88,7 @@
           "anyOf": [{ "$ref": "#/definitions/OperatorPrincipal" }, { "type": "null" }]
         },
         "ip_address": { "type": ["string", "null"] },
-        "ip_address_source": { "enum": ["peer", "forwarded", "asserted", "unknown"] },
+        "ip_address_source": { "enum": ["peer", "forwarded", "reported", "asserted", "unknown"] },
         "user_agent": { "type": ["string", "null"] },
         "detail": { "type": "object", "additionalProperties": true },
         "outcome": {

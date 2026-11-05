@@ -93,6 +93,7 @@ impl OidcExchange {
                         PyValueError::new_err("request field 'path_is_raw' must be a bool")
                     })?,
             },
+            location: None,
         };
         let response = py
             .detach(|| self.inner.handle_blocking(wire))

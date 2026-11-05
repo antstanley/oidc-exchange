@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     device_id           TEXT,
     user_agent          TEXT,
     ip_address          TEXT,
+    location            JSONB,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -68,6 +69,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS family_id TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS location JSONB;
 
 CREATE TABLE IF NOT EXISTS retired_refresh_tokens (
     refresh_token_hash  TEXT PRIMARY KEY,
@@ -381,6 +383,12 @@ fn row_to_session(row: &sqlx::postgres::PgRow) -> Result<Session> {
         ip_address: row
             .try_get("ip_address")
             .map_err(PostgresRepository::store_err)?,
+        location: row
+            .try_get::<Option<Value>, _>("location")
+            .map_err(PostgresRepository::store_err)?
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(PostgresRepository::store_err)?,
         created_at: row
             .try_get("created_at")
             .map_err(PostgresRepository::store_err)?,
@@ -460,20 +468,28 @@ async fn insert_session_tx<'e, E>(executor: E, session: &Session, replace: bool)
 where
     E: sqlx::PgExecutor<'e>,
 {
+    let location_json = session
+        .location
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(PostgresRepository::store_err)?;
+
     let conflict_clause = if replace {
         "ON CONFLICT (refresh_token_hash) DO UPDATE SET \
          user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, \
          generation = EXCLUDED.generation, provider = EXCLUDED.provider, \
          expires_at = EXCLUDED.expires_at, rotated_at = EXCLUDED.rotated_at, \
          device_id = EXCLUDED.device_id, user_agent = EXCLUDED.user_agent, \
-         ip_address = EXCLUDED.ip_address, created_at = EXCLUDED.created_at"
+         ip_address = EXCLUDED.ip_address, created_at = EXCLUDED.created_at, \
+         location = EXCLUDED.location"
     } else {
         ""
     };
 
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) {conflict_clause}"
+        "INSERT INTO sessions (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at, location) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) {conflict_clause}"
     )))
     .bind(session.refresh_token_hash.expose())
     .bind(&session.user_id)
@@ -486,6 +502,7 @@ where
     .bind(&session.user_agent)
     .bind(&session.ip_address)
     .bind(session.created_at)
+    .bind(location_json)
     .execute(executor)
     .await
     .map_err(PostgresRepository::store_err)?;
@@ -966,6 +983,28 @@ impl SessionRepository for PostgresRepository {
 
         let count: i64 = row.try_get("count").map_err(Self::store_err)?;
         Ok(count as u64)
+    }
+
+    #[instrument(skip(self), fields(user_id))]
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<Session>> {
+        // Retired generations live in `retired_refresh_tokens`, so every
+        // `sessions` row is a live generation: one row per family.
+        let rows = sqlx::query(
+            "SELECT * FROM sessions WHERE user_id = $1 AND expires_at > $2 \
+             ORDER BY created_at DESC LIMIT $3",
+        )
+        .bind(user_id)
+        .bind(now)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Self::store_err)?;
+        rows.iter().map(row_to_session).collect()
     }
 
     #[instrument(skip(self), fields(user_id))]
@@ -2117,7 +2156,16 @@ mod tests {
     #[ignore] // Requires a live Postgres: see `test_database_url`.
     async fn postgres_session_store_meets_sr1_through_sr5() {
         let repo = create_isolated_schema_repo("oidc_pg_session_conformance").await;
-        seed_fixture_users(&repo, &["usr_conformance", "usr_shared"]).await;
+        seed_fixture_users(
+            &repo,
+            &[
+                "usr_conformance",
+                "usr_shared",
+                session_contract::LISTING_USER,
+                session_contract::LISTING_OTHER_USER,
+            ],
+        )
+        .await;
         session_contract::assert_full_conformance(&repo, "postgres-session-conformance").await;
     }
 

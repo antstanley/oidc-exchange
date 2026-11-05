@@ -119,6 +119,7 @@ async fn full_lifecycle_leaks_no_credentials_into_telemetry() {
                 .unwrap_or(oidc_exchange_core::domain::ClientAddr::Unknown),
             user_agent,
             device_id: device,
+            location: None,
         })
         .await
         .expect("exchange_code");
@@ -232,6 +233,7 @@ async fn audit_fallback_payloads_carry_no_credentials() {
                 .unwrap_or(oidc_exchange_core::domain::ClientAddr::Unknown),
             user_agent,
             device_id: device,
+            location: None,
         })
         .await
         .expect("audit failure must not block with the emergency threshold");
@@ -292,6 +294,7 @@ async fn configured_secrets_never_render_during_normal_operation() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         })
         .await
         .expect("exchange succeeds");

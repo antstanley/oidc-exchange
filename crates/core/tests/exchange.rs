@@ -349,6 +349,7 @@ async fn exchange_happy_path_creates_user_and_returns_tokens() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let response = svc
@@ -453,6 +454,7 @@ async fn exchange_existing_user_does_not_create_new() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp1 = svc
         .exchange(request1)
@@ -470,6 +472,7 @@ async fn exchange_existing_user_does_not_create_new() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp2 = svc
         .exchange(request2)
@@ -556,6 +559,7 @@ async fn exchange_suspended_user_is_rejected() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request)
         .await
@@ -588,6 +592,7 @@ async fn exchange_suspended_user_is_rejected() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request2)
@@ -618,6 +623,7 @@ async fn exchange_unknown_provider_is_rejected() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -674,6 +680,7 @@ async fn exchange_domain_allowlist_rejects_non_matching_domain() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -726,6 +733,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         svc.exchange(request)
             .await
@@ -758,6 +766,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         svc.exchange(request)
             .await
@@ -790,6 +799,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         let err = svc
             .exchange(request)
@@ -827,6 +837,7 @@ async fn exchange_wildcard_subdomain_matching() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         };
         let err = svc
             .exchange(request)
@@ -864,6 +875,7 @@ async fn exchange_existing_users_only_rejects_new_user() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -916,6 +928,7 @@ async fn exchange_existing_user_is_denied_after_allowlist_tightening() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -953,6 +966,7 @@ async fn exchange_open_registration_requires_verified_email_without_allowlist() 
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         })
         .await
         .expect_err("open registration must reject an unverified email");
@@ -999,6 +1013,7 @@ async fn exchange_no_email_rejected_when_allowlist_configured() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -1055,6 +1070,7 @@ async fn exchange_with_direct_id_token_skips_code_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let result = svc
@@ -1095,6 +1111,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp_a = svc_a
         .exchange(request_a)
@@ -1132,6 +1149,7 @@ async fn exchange_conflict_on_create_re_lookups_and_returns_token() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let resp_b = svc_b
         .exchange(request_b)
@@ -1179,6 +1197,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc_a
         .exchange(request_a)
@@ -1219,6 +1238,7 @@ async fn exchange_conflict_re_lookup_reapplies_suspended_check() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc_b
         .exchange(request_b)
@@ -1265,6 +1285,7 @@ async fn exchange_non_conflict_create_error_propagates_without_relookup() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1342,6 +1363,7 @@ async fn exchange_store_fault_emits_one_operational_store_error_event() {
         ),
         user_agent: Some("test-agent/1.0".to_string()),
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1431,6 +1453,7 @@ async fn exchange_store_fault_event_respects_raised_emit_threshold() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1482,6 +1505,7 @@ async fn exchange_store_fault_with_failing_audit_sink_still_returns_store_error(
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1528,6 +1552,7 @@ async fn exchange_store_fault_under_enforce_durability_still_returns_store_error
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1560,6 +1585,7 @@ async fn exchange_provider_timeout_emits_exactly_one_typed_terminal_event() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let err = svc
         .exchange(request)
@@ -1595,6 +1621,7 @@ async fn exchange_with_client_context_stores_exact_session_values() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.7".parse().unwrap()),
         user_agent: Some("integration-test-agent/1.0".to_string()),
         device_id: Some("device-abc-123".to_string()),
+        location: None,
     };
 
     svc.exchange(request)
@@ -1630,6 +1657,7 @@ async fn exchange_without_client_context_stores_none_session_values() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     svc.exchange(request)
@@ -1668,6 +1696,7 @@ async fn exchange_new_user_emits_user_created_then_token_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.9".parse().unwrap()),
         user_agent: Some("test-agent/2.0".to_string()),
         device_id: None,
+        location: None,
     };
 
     svc.exchange(request)
@@ -1724,6 +1753,7 @@ async fn exchange_existing_user_emits_only_token_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request1)
         .await
@@ -1746,6 +1776,7 @@ async fn exchange_existing_user_emits_only_token_exchange() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.10".parse().unwrap()),
         user_agent: Some("test-agent/3.0".to_string()),
         device_id: None,
+        location: None,
     };
     svc2.exchange(request2)
         .await
@@ -1783,6 +1814,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request)
         .await
@@ -1818,6 +1850,7 @@ async fn exchange_suspended_user_emits_only_user_suspended_event() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.11".parse().unwrap()),
         user_agent: Some("test-agent/4.0".to_string()),
         device_id: None,
+        location: None,
     };
     svc2.exchange(request2)
         .await
@@ -1890,6 +1923,7 @@ async fn exchange_existing_user_allowlist_rejection_names_user_in_audit() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         })
         .await
         .expect_err("existing user outside current allowlist must be denied");
@@ -1930,6 +1964,7 @@ async fn exchange_existing_users_only_rejection_emits_registration_denied() {
             client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
             user_agent: None,
             device_id: None,
+            location: None,
         })
         .await
         .expect_err("new users must be denied in existing_users_only mode");
@@ -1983,6 +2018,7 @@ async fn exchange_domain_allowlist_rejection_emits_registration_denied_and_no_to
         client_addr: oidc_exchange_core::domain::ClientAddr::Peer("203.0.113.12".parse().unwrap()),
         user_agent: Some("test-agent/5.0".to_string()),
         device_id: None,
+        location: None,
     };
 
     svc.exchange(request)
@@ -2057,6 +2093,7 @@ async fn exchange_enforce_audit_failure_revokes_new_session() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
 
     let err = svc
@@ -2101,6 +2138,7 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request)
         .await
@@ -2137,6 +2175,7 @@ async fn exchange_jit_registration_fires_exactly_one_user_created_notify() {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     svc.exchange(request2)
         .await
@@ -2180,6 +2219,7 @@ async fn exchange_jit_registration_still_returns_token_when_sync_fails_every_att
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let response = svc
         .exchange(request)

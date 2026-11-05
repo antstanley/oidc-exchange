@@ -32,6 +32,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 
 | Change spec | Status | Targets |
 |---|---|---|
+| [changes/merged/2026-11-05-list_user_sessions_with_location.md](changes/merged/2026-11-05-list_user_sessions_with_location.md) | Merged | service, bindings: `GET /internal/users/{id}/sessions`, caller-supplied `SessionLocation`, opt-in header mapping, `Reported`/`Asserted` address provenance (issue #53) |
 | [changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md) | Merged | service, bindings: tracing subscriber installed by the FFI entrypoint (idempotent `try_init`), operational `store_error` audit event for the exchange flow's infrastructure fault (issue #47) |
 | [changes/2026-08-25-close_r2_audit_code_divergences.md](changes/2026-08-25-close_r2_audit_code_divergences.md) | Proposed | service: reachable Apple adapter, explicit falsy config overrides, refresh flow on the mandatory audit channel, real client provenance, throttled `/nonce`, datamodel schema catch-up, prometheus init arm |
 | [changes/2026-06-24-add_atproto_provider.md](changes/2026-06-24-add_atproto_provider.md) | Proposed | service: Tier 3 atproto provider |

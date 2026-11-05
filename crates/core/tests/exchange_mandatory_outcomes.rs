@@ -57,6 +57,7 @@ fn request() -> ExchangeRequest {
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     }
 }
 

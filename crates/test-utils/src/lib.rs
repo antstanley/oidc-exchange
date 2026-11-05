@@ -26,6 +26,8 @@ pub mod telemetry;
 
 pub mod session_contract;
 
+pub mod session_list_contract;
+
 // ---------------------------------------------------------------------------
 // MockRepository
 // ---------------------------------------------------------------------------
@@ -557,6 +559,24 @@ impl SessionRepository for MockRepository {
         let retired_removed = (retired_before - state.retired.len()) as u64;
 
         Ok(sessions_removed + retired_removed)
+    }
+
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<Session>> {
+        let state = self.state.lock().await;
+        let mut live: Vec<Session> = state
+            .sessions
+            .values()
+            .filter(|s| s.user_id == user_id && s.expires_at > now)
+            .cloned()
+            .collect();
+        live.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        live.truncate(limit);
+        Ok(live)
     }
 
     async fn count_active_sessions(&self) -> Result<u64> {
@@ -1407,6 +1427,7 @@ pub mod single_use_conformance {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         };
 
@@ -1499,6 +1520,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         }
     }

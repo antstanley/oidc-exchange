@@ -55,6 +55,9 @@ pub struct ExchangeRequest {
     /// Client-supplied device identifier (`X-Device-Id`), extracted by the
     /// server's audit-context middleware. Stored on the resulting session.
     pub device_id: Option<String>,
+    /// Caller-supplied session location, stored on the resulting session.
+    /// Core records it as given and makes no trust decision.
+    pub location: Option<crate::domain::SessionLocation>,
 }
 
 /// Check whether an email's domain matches any entry in the allowlist.
@@ -516,6 +519,12 @@ impl AppService {
             device_id: request.device_id.clone(),
             user_agent: request.user_agent.clone(),
             ip_address: request.client_addr.audit_address(),
+            // Re-run the sanitising constructor: the fields are public, so a
+            // caller that built the value by hand still gets bounded text.
+            location: request
+                .location
+                .clone()
+                .and_then(|l| crate::domain::SessionLocation::new(l.city, l.region, l.country)),
             created_at: Utc::now(),
         };
         self.session_repo.store_refresh_token(&session).await?;

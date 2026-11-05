@@ -9,8 +9,8 @@ use tokio::sync::Mutex as TokioMutex;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
 use aws_sdk_dynamodb::types::{
-    AttributeValue, Delete, DeleteRequest, Put, ReturnConsumedCapacity, TransactWriteItem, Update,
-    WriteRequest,
+    AttributeValue, Delete, DeleteRequest, KeysAndAttributes, Put, ReturnConsumedCapacity,
+    TransactWriteItem, Update, WriteRequest,
 };
 use chrono::{DateTime, Utc};
 use oidc_exchange_core::domain::{
@@ -256,6 +256,10 @@ where
 /// allowed while draining a batch's `unprocessed_items` before the retry budget is exhausted
 /// and the call errors instead of silently leaving items undeleted.
 const BATCH_WRITE_MAX_ATTEMPTS: u32 = 8;
+
+/// Maximum number of keys in one `BatchGetItem` request — the service's hard
+/// limit.
+const BATCH_GET_MAX_KEYS: usize = 100;
 
 /// Maximum number of items in one `BatchWriteItem` request — the service's
 /// hard limit. Every delete fan-out chunks its key list by this constant.
@@ -1865,6 +1869,82 @@ impl SessionRepository for DynamoRepository {
         Ok(removed)
     }
 
+    #[instrument(skip(self), fields(user_id))]
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<Session>> {
+        // Enumerate through the strongly consistent roster, never GSI1 (an
+        // eventually consistent index can omit a session written moments
+        // earlier — see `get_user_roster`).
+        let roster = self.get_user_roster(user_id).await?;
+        let pending: Vec<HashMap<String, AttributeValue>> = roster
+            .families
+            .values()
+            .filter(|family| !family.live.is_empty())
+            .map(|family| {
+                HashMap::from([
+                    ("pk".to_string(), Self::session_pk(&family.live)),
+                    ("sk".to_string(), Self::session_sk()),
+                ])
+            })
+            .collect();
+
+        let mut sessions: Vec<Session> = Vec::new();
+        for chunk in pending.chunks(BATCH_GET_MAX_KEYS) {
+            let mut keys: Vec<HashMap<String, AttributeValue>> = chunk.to_vec();
+            for attempt in 1..=BATCH_WRITE_MAX_ATTEMPTS {
+                if attempt > 1 {
+                    let backoff_ms = BATCH_WRITE_BACKOFF_BASE_MS * (1u64 << (attempt - 2));
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+                let request = KeysAndAttributes::builder()
+                    .set_keys(Some(keys))
+                    .consistent_read(true)
+                    .build()
+                    .map_err(Self::store_err)?;
+                let output = self
+                    .client
+                    .batch_get_item()
+                    .request_items(self.table_name.clone(), request)
+                    .send()
+                    .await
+                    .map_err(Self::store_err)?;
+                if let Some(items) = output
+                    .responses
+                    .and_then(|mut responses| responses.remove(&self.table_name))
+                {
+                    for item in &items {
+                        sessions.push(item_to_session(item)?);
+                    }
+                }
+                keys = output
+                    .unprocessed_keys
+                    .and_then(|mut unprocessed| unprocessed.remove(&self.table_name))
+                    .map(|ka| ka.keys)
+                    .unwrap_or_default();
+                if keys.is_empty() {
+                    break;
+                }
+                if attempt == BATCH_WRITE_MAX_ATTEMPTS {
+                    return Err(Error::StoreError {
+                        detail: format!(
+                            "BatchGetItem retry budget exhausted with {} key(s) unprocessed",
+                            keys.len()
+                        ),
+                    });
+                }
+            }
+        }
+
+        sessions.retain(|s| s.expires_at > now);
+        sessions.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        sessions.truncate(limit);
+        Ok(sessions)
+    }
+
     /// Active-session count, cached per [`DynamoRepository::stats_cache_ttl`].
     ///
     /// The count still comes from a walk (a scan over `sk = SESSION` counting
@@ -2574,6 +2654,7 @@ mod tests {
             device_id: Some("device-1".to_string()),
             user_agent: Some("test-agent".to_string()),
             ip_address: Some("10.0.0.1".to_string()),
+            location: None,
             created_at: now,
         };
 
@@ -2614,6 +2695,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         };
         repo.store_refresh_token(&session2)
@@ -3812,6 +3894,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: Utc::now(),
         };
         repo.store_refresh_token(&session_for("cache_hash_a".to_string()))
@@ -3971,7 +4054,17 @@ mod tests {
         let table_name = "oidc-exchange-test-session-conformance";
         let client = create_test_client().await;
         create_test_table(&client, table_name).await;
-        seed_fixture_users(&client, table_name, &["usr_conformance", "usr_shared"]).await;
+        seed_fixture_users(
+            &client,
+            table_name,
+            &[
+                "usr_conformance",
+                "usr_shared",
+                session_contract::LISTING_USER,
+                session_contract::LISTING_OTHER_USER,
+            ],
+        )
+        .await;
 
         let repo = DynamoRepository::new(
             client.clone(),
@@ -4096,6 +4189,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: base,
             generation: 0,
         };

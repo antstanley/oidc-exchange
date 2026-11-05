@@ -1,6 +1,6 @@
 # Persistence
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
 
 How the domain entities ([01-domain-model.md](01-domain-model.md)) are stored by each
 repository adapter. The adapter-agnostic logical model is `schemas/datamodel.schema.json`; the
@@ -33,7 +33,13 @@ Access patterns:
 | `resolve_refresh_token` | strongly consistent `GetItem`s on both `SESSION#<hash>` and `RETIRED#<hash>` |
 | `rotate_refresh_token` | one `TransactWriteItems`: conditioned delete of the live session, put of the retirement item, conditioned put of the replacement |
 | `revoke_family` / `revoke_all_user_sessions` | strongly consistent `GetItem` of the user item's roster, then `BatchWrite` deletes (unprocessed items retried) |
+| `list_live_sessions` | strongly consistent `GetItem` of the user item's `families` roster, then `BatchGetItem` of the live generations; GSI1 is never queried |
 | `count_by_status` / `count_active_sessions` | table scans / counts |
+
+Session items carry an optional `location` map attribute (`city`, `region`, `country`; absent when
+none was recorded). `list_live_sessions` reads the roster with a strongly consistent read for the
+same reason the revocation paths do, drops families whose live generation is expired, and sorts by
+`created_at` descending up to `limit`.
 
 `resolve_refresh_token` issues strongly consistent `GetItem`s — `consistent_read(true)` on
 both the `SESSION#` and the `RETIRED#` lookup, matching what `get_user_by_external_id`
@@ -173,6 +179,10 @@ CREATE INDEX IF NOT EXISTS idx_retired_expires_at ON retired_refresh_tokens (exp
 ```
 
 (On SQLite, `retired_at` and `expires_at` are `TEXT`, matching its `sessions` table.)
+`sessions` also carries a nullable `location` column (JSON text on SQLite, `JSONB` on PostgreSQL),
+added by the same idempotent `ALTER TABLE … ADD COLUMN` step as `family_id`, `generation`, and
+`rotated_at`; existing rows keep `NULL`, which reads back as no location. `list_live_sessions` selects
+the user's unexpired rows, newest `created_at` first, bounded by `limit`.
 `rotate_refresh_token` runs its delete, retirement insert and replacement insert inside one
 `BEGIN … COMMIT`. The compare-and-swap condition is the delete's affected-row count: zero
 rows means the live generation moved, the transaction rolls back and the method returns
@@ -238,6 +248,10 @@ option.
   prunes `user_sessions` set members whose session key no longer exists, reconciles the
   counter by recomputing it from a SCAN of live `{prefix}session:*` keys, and returns the
   number of members pruned; session bodies themselves need no sweep.
+
+Both serialize `location` inside the stored session record (absent in older records). They list
+through the same per-user index `revoke_all_user_sessions` uses (`user_sessions`), skipping members
+whose session record is missing or expired, since those indexes can outlive the sessions they name.
 
 Both implement `SessionRepository` only and are selected via `[session_repository]`. Every
 session adapter stores retirement records alongside sessions and passes the session-store

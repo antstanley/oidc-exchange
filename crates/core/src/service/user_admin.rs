@@ -4,11 +4,14 @@ use serde_json::Value;
 
 use crate::domain::{
     clamp_admin_page_limit, AdminMutationKind, AuditEvent, AuditOutcome, ClientAddr, NewUser,
-    OperatorPrincipal, SecurityEvent, User, UserPage, UserPatch, UserStatus,
+    OperatorPrincipal, SecurityEvent, SessionSummary, User, UserPage, UserPatch, UserStatus,
     DEFAULT_ADMIN_PAGE_SIZE, MAX_ADMIN_PAGE_SIZE,
 };
 use crate::error::{Error, Result};
 use crate::service::{claims::find_reserved_claim_key, AppService};
+
+/// Most sessions `admin_list_user_sessions` returns.
+pub const MAX_LISTED_SESSIONS: usize = 50;
 
 /// Key under which the claims-mutation operation name (`set_claims` /
 /// `merge_claims` / `clear_claims`) is recorded in a `UserUpdated` audit
@@ -96,6 +99,33 @@ impl AppService {
     /// attribution surface for a principal to attach to.
     pub async fn admin_get_user(&self, user_id: &str) -> Result<Option<User>> {
         self.user_repo.get_user_by_id(user_id).await
+    }
+
+    /// List a user's live sessions, newest first, at most
+    /// [`MAX_LISTED_SESSIONS`]. Returns `None` when the user is absent or
+    /// soft-deleted. Pre-rotation rows (empty family id) have no stable id and
+    /// are omitted.
+    pub async fn admin_list_user_sessions(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<Vec<SessionSummary>>> {
+        let Some(user) = self.user_repo.get_user_by_id(user_id).await? else {
+            return Ok(None);
+        };
+        if user.status == UserStatus::Deleted {
+            return Ok(None);
+        }
+        let sessions = self
+            .session_repo
+            .list_live_sessions(user_id, chrono::Utc::now(), MAX_LISTED_SESSIONS)
+            .await?;
+        Ok(Some(
+            sessions
+                .iter()
+                .filter(|s| !s.family_id.is_empty())
+                .map(SessionSummary::from)
+                .collect(),
+        ))
     }
 
     /// Fetch the user (missing id -> `Error::NotFound`), validate any status

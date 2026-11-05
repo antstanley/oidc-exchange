@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, the configured retained `rate_limiter`, a `providers` map, and `config`. The
@@ -113,7 +113,7 @@ losing JIT-registration racer emits none.
 
 `ExchangeRequest` carries the client context (`ip_address`, `user_agent`, `device_id`)
 extracted by the server's audit-context middleware; the stored session records all three,
-and every audit event in the flow records the `ip_address` and `user_agent` (the
+along with the caller-supplied `request.location` (stored on the generation-0 session), and every audit event in the flow records the `ip_address` and `user_agent` (the
 `AuditEvent` shape carries no `device_id`). A suspended user audits `UserSuspended` (warning,
 failure); the registration-policy denials audit `RegistrationDenied` (warning, failure); a
 created user audits `UserCreated` (notice, success); a successful exchange audits
@@ -157,7 +157,7 @@ sign-in shares a `family_id`, and a family has exactly one live generation at an
    Both are decided before anything is written.
 6. Mint the replacement — 32 random bytes, base64url-no-pad for the opaque token, SHA-256
    hex of the bytes for the new hash. The replacement `Session` inherits `family_id`,
-   `user_id`, `provider`, `created_at`, `expires_at` and the device fields unchanged, sets
+   `user_id`, `provider`, `created_at`, `expires_at`, `location` (copied from `live.location`) and the device fields unchanged, sets
    `generation = live.generation + 1` and `rotated_at = now`.
 7. `rotate_refresh_token(live_hash, replacement)` — one atomic compare-and-swap conditioned
    on `live_hash` still being the family's live generation. It deletes the live session,
@@ -352,11 +352,12 @@ so an audit write failure follows `audit.durability`; their events have
 | `admin_clear_claims` | set claims to empty |
 | `admin_stats` | `count_by_status` + `count_active_sessions` → `AdminStats` |
 | `admin_list_users` | `list_users(offset, limit)` |
+| `admin_list_user_sessions` | `get_user_by_id`; `None` when the user is absent or soft-deleted, otherwise `list_live_sessions(user_id, now, 50)` mapped to `SessionSummary` values (one per family, newest first); a pre-rotation row with no `family_id` has no stable id and is omitted |
 
 Admin mutations are audited: `admin_create_user` → `UserCreated`, `admin_update_user` →
 `UserUpdated` (and `UserSuspended` when the patch sets `status = Suspended`),
 `admin_delete_user` → `UserDeleted`, and the claims mutations → `UserUpdated` with the
-operation in `detail`. Read-only operations (get, list, stats, get-claims) are not audited.
+operation in `detail`. Read-only operations (get, list, list-sessions, stats, get-claims) are not audited.
 Audit failures follow `emit_audit`'s blocking rules, unlike best-effort user sync. Admin
 operations carry no client `ip_address`/`user_agent` context.
 

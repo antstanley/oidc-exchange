@@ -145,6 +145,7 @@ fn request_to_wire(request: HttpRequest) -> WireRequest {
         hints: TransportHints {
             path_is_raw: request.path_is_raw,
         },
+        location: None,
     }
 }
 

@@ -103,6 +103,21 @@ bump_ttl(KEYS[4], tonumber(ARGV[8]))
 return 1
 "#;
 
+/// JSON form of a session's location as stored in the hash's `location` field;
+/// the empty string when none was recorded (hashes written before the field
+/// existed carry no field at all and read back the same way).
+fn encode_location(session: &Session) -> Result<String> {
+    session
+        .location
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|e| Error::StoreError {
+            detail: format!("failed to encode session location: {e}"),
+        })
+}
+
 pub struct ValkeySessionRepository {
     client: fred::clients::Client,
     key_prefix: String,
@@ -295,6 +310,7 @@ impl SessionRepository for ValkeySessionRepository {
             ("device_id", session.device_id.clone().unwrap_or_default()),
             ("user_agent", session.user_agent.clone().unwrap_or_default()),
             ("ip_address", session.ip_address.clone().unwrap_or_default()),
+            ("location", encode_location(session)?),
             ("created_at", session.created_at.to_rfc3339()),
         ];
 
@@ -478,6 +494,14 @@ impl SessionRepository for ValkeySessionRepository {
             device_id,
             user_agent,
             ip_address,
+            location: match values.get("location") {
+                Some(json) if !json.is_empty() => {
+                    Some(serde_json::from_str(json).map_err(|e| Error::StoreError {
+                        detail: format!("invalid location field: {e}"),
+                    })?)
+                }
+                _ => None,
+            },
             created_at: parse_dt(&created_at_str)?,
         }))
     }
@@ -576,7 +600,7 @@ impl SessionRepository for ValkeySessionRepository {
             /* ARGV[7] */ retired_expires_at.to_rfc3339(),
             /* ARGV[8] */ ttl_seconds.to_string(),
         ];
-        // ARGV[8..]: the replacement's field pairs, HSET'ed verbatim so the
+        // ARGV[9..]: the replacement's field pairs, HSET'ed verbatim so the
         // script's install writes exactly what `store_refresh_token` would.
         args.push("user_id".to_string());
         args.push(replacement.user_id.clone());
@@ -603,6 +627,8 @@ impl SessionRepository for ValkeySessionRepository {
         args.push(replacement.user_agent.clone().unwrap_or_default());
         args.push("ip_address".to_string());
         args.push(replacement.ip_address.clone().unwrap_or_default());
+        args.push("location".to_string());
+        args.push(encode_location(replacement)?);
         args.push("created_at".to_string());
         args.push(replacement.created_at.to_rfc3339());
 
@@ -631,6 +657,39 @@ impl SessionRepository for ValkeySessionRepository {
             }),
             other => unreachable!("ROTATION_SCRIPT returns only -1, 0, 1; got {other}"),
         }
+    }
+
+    #[instrument(skip(self), fields(user_id))]
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<Session>> {
+        let token_hashes: Vec<String> = self
+            .client
+            .smembers(self.user_sessions_key(user_id))
+            .await
+            .map_err(|e| Error::StoreError {
+                detail: e.to_string(),
+            })?;
+
+        // The user set can outlive the sessions it names (natural TTL expiry
+        // removes the hash, not the set member): skip missing or expired ones.
+        let mut live: Vec<Session> = Vec::new();
+        for token_hash in token_hashes {
+            if let Some(session) = self
+                .get_session_by_refresh_token(&Secret::new(token_hash))
+                .await?
+            {
+                if session.user_id == user_id && session.expires_at > now {
+                    live.push(session);
+                }
+            }
+        }
+        live.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        live.truncate(limit);
+        Ok(live)
     }
 
     #[instrument(skip(self, token_hash), fields(token_hash))]
@@ -1268,6 +1327,7 @@ mod tests {
             device_id: Some("device-1".to_string()),
             user_agent: Some("test-agent".to_string()),
             ip_address: Some("10.0.0.1".to_string()),
+            location: None,
             created_at: now,
         }
     }
@@ -1481,6 +1541,30 @@ mod tests {
             count_after_second_revoke, 0,
             "a repeated revoke of an already-deleted session must not decrement the counter again"
         );
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires a local Valkey: docker run -p 6379:6379 valkey/valkey:8-alpine
+    async fn listing_skips_user_set_members_whose_session_is_gone() {
+        let repo = create_test_repo().await;
+        let user_id = "usr_list_stale";
+        let kept = sample_session(user_id, "hash_list_kept", 3600);
+        let gone = sample_session(user_id, "hash_list_gone", 3600);
+        repo.store_refresh_token(&kept).await.expect("store kept");
+        repo.store_refresh_token(&gone).await.expect("store gone");
+
+        // Remove the hash but leave the user-set member, as natural TTL expiry does.
+        repo.client
+            .del::<(), _>(repo.session_key("hash_list_gone"))
+            .await
+            .expect("delete session hash");
+
+        let listed = repo
+            .list_live_sessions(user_id, Utc::now(), 50)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1, "the stale set member is skipped");
+        assert_eq!(listed[0].refresh_token_hash.expose(), "hash_list_kept");
     }
 
     #[tokio::test]
@@ -2491,6 +2575,7 @@ mod tests {
             device_id: Some(DEVICE_SENTINEL.to_string()),
             user_agent: Some(USER_AGENT_SENTINEL.to_string()),
             ip_address: Some(IP_SENTINEL.to_string()),
+            location: None,
             created_at: now,
         }
     }

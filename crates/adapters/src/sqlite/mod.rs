@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     device_id           TEXT,
     user_agent          TEXT,
     ip_address          TEXT,
+    location            TEXT,
     created_at          TEXT NOT NULL
 );
 
@@ -170,7 +171,7 @@ async fn ensure_version_column(pool: &SqlitePool) -> std::result::Result<(), Err
 /// predates rotation; each is a no-op once present (`pragma_table_info`
 /// probe first — SQLite's `ADD COLUMN` has no `IF NOT EXISTS`). Legacy rows
 /// get NULL `family_id`/`rotated_at` and generation 0.
-const SESSION_FAMILY_COLUMNS: [(&str, &str); 3] = [
+const SESSION_FAMILY_COLUMNS: [(&str, &str); 4] = [
     (
         "family_id",
         "ALTER TABLE sessions ADD COLUMN family_id TEXT",
@@ -183,6 +184,8 @@ const SESSION_FAMILY_COLUMNS: [(&str, &str); 3] = [
         "rotated_at",
         "ALTER TABLE sessions ADD COLUMN rotated_at TEXT",
     ),
+    // Caller-supplied session location, JSON text; NULL on older rows.
+    ("location", "ALTER TABLE sessions ADD COLUMN location TEXT"),
 ];
 
 /// Idempotently add [`SESSION_FAMILY_COLUMNS`] to a `sessions` table that
@@ -364,6 +367,12 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session> {
         device_id: row.get("device_id"),
         user_agent: row.get("user_agent"),
         ip_address: row.get("ip_address"),
+        location: match row.get::<Option<String>, _>("location") {
+            Some(json) => Some(serde_json::from_str(&json).map_err(|e| Error::StoreError {
+                detail: format!("failed to parse session location: {e}"),
+            })?),
+            None => None,
+        },
         created_at,
     })
 }
@@ -444,12 +453,20 @@ where
     let expires_at_str = session.expires_at.to_rfc3339();
     let created_at_str = session.created_at.to_rfc3339();
     let rotated_at_str = session.rotated_at.map(|ts| ts.to_rfc3339());
+    let location_json = session
+        .location
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| Error::StoreError {
+            detail: format!("failed to encode session location: {e}"),
+        })?;
 
     let conflict_clause = if replace { "OR REPLACE" } else { "" };
     sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT {conflict_clause} INTO sessions \
-             (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+             (refresh_token_hash, user_id, family_id, generation, provider, expires_at, rotated_at, device_id, user_agent, ip_address, created_at, location) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
         )))
     .bind(session.refresh_token_hash.expose())
     .bind(&session.user_id)
@@ -462,6 +479,7 @@ where
     .bind(&session.user_agent)
     .bind(&session.ip_address)
     .bind(&created_at_str)
+    .bind(&location_json)
     .execute(executor)
     .await
     .map_err(|e| Error::StoreError {
@@ -1003,6 +1021,30 @@ impl SessionRepository for SqliteRepository {
     }
 
     #[instrument(skip(self), fields(user_id))]
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<Session>> {
+        // Retired generations live in their own table, so every `sessions` row
+        // is a live generation: one row per family.
+        let rows = sqlx::query(
+            "SELECT * FROM sessions WHERE user_id = ?1 AND expires_at > ?2 \
+             ORDER BY created_at DESC LIMIT ?3",
+        )
+        .bind(user_id)
+        .bind(now.to_rfc3339())
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::StoreError {
+            detail: e.to_string(),
+        })?;
+        rows.iter().map(row_to_session).collect()
+    }
+
+    #[instrument(skip(self), fields(user_id))]
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
         assert!(
             !user_id.is_empty(),
@@ -1275,6 +1317,7 @@ mod tests {
             device_id: Some("device-1".to_string()),
             user_agent: Some("test-agent".to_string()),
             ip_address: Some("10.0.0.1".to_string()),
+            location: None,
             created_at: now,
         };
 
@@ -1311,6 +1354,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         };
         repo.store_refresh_token(&session2)
@@ -2012,6 +2056,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: base,
             generation: 0,
         };
