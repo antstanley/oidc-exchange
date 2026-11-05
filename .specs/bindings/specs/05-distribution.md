@@ -85,9 +85,10 @@ files, and writes `<file>.sigstore.bundle` with `cosign sign-blob --bundle` for 
 for `SHA256SUMS`. Before uploading it verifies every bundle with `cosign verify-blob` against the
 signing identity (below) and fails on any mismatch. It then assumes the upload role through GitHub
 OIDC (`downloads` environment) and writes the version prefix with a conditional create
-(`If-None-Match: *`), so an existing version is never overwritten. `latest.json` is written last,
-only after the prefix is complete, and is not moved backwards. The job alone adds `id-token: write`
-and holds `contents: read`. `create-release` does not depend on this job, so a download-host outage
+(`If-None-Match: *`), so an existing version is never overwritten. A separate `publish-latest` job (needs `publish-downloads`, same environment and role) writes
+`latest.json` only after the version prefix is complete, so it can be re-run alone. It reads the
+current file with retries and fails closed unless the response is 200 or 404, skips pre-releases,
+and never moves `latest.json` backwards. Both jobs add `id-token: write` and hold `contents: read`. `create-release` depends on neither job, so a download-host outage
 cannot block the GitHub release. The host itself is specified in
 [06-download-host.md](06-download-host.md).
 

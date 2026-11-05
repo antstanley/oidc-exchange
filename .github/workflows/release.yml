@@ -608,15 +608,44 @@ jobs:
               --cache-control 'public, max-age=31536000, immutable' \
               --content-type application/octet-stream
           done
+    permissions:
+      contents: read
+      id-token: write
+  publish-latest:
+    name: Publish latest.json
+    needs:
+      - validate
+      - publish-downloads
+    runs-on: ubuntu-latest
+    environment: downloads
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      BUCKET: oidc-exchange-downloads-115019372186
+      DOWNLOAD_HOST: https://dl.oidc-exchange.iamstan.dev
+    steps:
+      - name: Assume upload role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::115019372186:role/oidc-exchange-downloads-upload
+          aws-region: us-east-1
       - name: Publish latest.json
         run: |
           set -euo pipefail
-          # Written last, so it never points at an incomplete prefix. The contract is a
-          # stable X.Y.Z, so a pre-release never becomes "latest" (and sort -V ranks
-          # 1.2.3-rc.1 above 1.2.3, which would also block the final release).
-          # Do not move "latest" backwards when an older tag is re-released.
+          # Separate job so it can be re-run alone: re-running publish-downloads would
+          # fail its conditional create. Written only after the version prefix is
+          # complete. The contract is a stable X.Y.Z, so a pre-release never becomes
+          # "latest" (and sort -V ranks 1.2.3-rc.1 above 1.2.3).
           case "$VERSION" in *-*) echo "pre-release $VERSION; leaving latest.json"; exit 0 ;; esac
-          current=$(curl -fsS "${DOWNLOAD_HOST}/latest.json" | jq -r .version 2>/dev/null || true)
+          # Fail closed on read errors: only a 404 means "no latest yet". The query
+          # string bypasses the 60s CloudFront cache for this read.
+          code=$(curl -sS --retry 5 --retry-all-errors --retry-delay 3 -o current.json -w '%{http_code}' \
+            "${DOWNLOAD_HOST}/latest.json?cb=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
+          case "$code" in
+            404) current="" ;;
+            200) current=$(jq -er '.version' current.json) ;;
+            *) echo "::error::could not read current latest.json (HTTP $code); refusing to risk moving it backwards"; exit 1 ;;
+          esac
+          # Do not move "latest" backwards when an older tag is re-released.
           if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n1)" != "$VERSION" ]; then
             echo "latest.json already at $current (newer than $VERSION); leaving it"
             exit 0

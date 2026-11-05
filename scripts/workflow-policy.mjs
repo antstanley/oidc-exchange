@@ -12,6 +12,7 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
   ["release.yml:build-docker", new Set(["packages", "id-token", "attestations"])],
   ["release.yml:docker-manifest", new Set(["packages", "id-token", "attestations"])],
   ["release.yml:publish-downloads", new Set(["id-token"])],
+  ["release.yml:publish-latest", new Set(["id-token"])],
   ["release.yml:publish-npm", new Set(["id-token"])],
   ["release.yml:publish-pypi", new Set(["id-token"])],
   ["release.yml:create-release", new Set(["contents"])],
@@ -206,11 +207,21 @@ export function validateWorkflow(text, workflowName) {
       if (downloadsJob.permissions?.contents !== "read")
         errors.push(`${workflowName}: publish-downloads holds contents: read only`);
     }
+    const latestJob = workflow.jobs["publish-latest"];
+    if (latestJob) {
+      const latestNeeds = Array.isArray(latestJob.needs) ? latestJob.needs : [latestJob.needs];
+      if (!latestNeeds.includes("publish-downloads"))
+        errors.push(`${workflowName}: publish-latest must follow publish-downloads`);
+      if (latestJob.environment !== "downloads")
+        errors.push(`${workflowName}: publish-latest must run in the downloads environment`);
+      if (latestJob.permissions?.contents !== "read")
+        errors.push(`${workflowName}: publish-latest holds contents: read only`);
+    }
     const releaseNeeds = Array.isArray(releaseJob?.needs) ? releaseJob.needs : [releaseJob?.needs];
     if (!releaseNeeds.includes("build-binaries") || !releaseNeeds.includes("docker-manifest"))
       errors.push(`${workflowName}: release does not depend on attested artifacts`);
-    if (releaseNeeds.includes("publish-downloads"))
-      errors.push(`${workflowName}: create-release must not depend on publish-downloads`);
+    if (releaseNeeds.includes("publish-downloads") || releaseNeeds.includes("publish-latest"))
+      errors.push(`${workflowName}: create-release must not depend on the download host jobs`);
   }
   return errors;
 }
