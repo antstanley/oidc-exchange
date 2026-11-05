@@ -1,6 +1,6 @@
 {
   "name": "@oidc-exchange/lambda",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "AWS Lambda adapter for oidc-exchange - handles API Gateway, ALB, and Function URL events",
   "license": "MIT",
   "repository": {
@@ -35,7 +35,7 @@
     "vitest": "5.1.0"
   },
   "peerDependencies": {
-    "@oidc-exchange/node": "^0.4.1"
+    "@oidc-exchange/node": "^0.5.0"
   },
   "engines": {
     "node": ">= 22"
