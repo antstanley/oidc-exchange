@@ -2,12 +2,15 @@
 "@oidc-exchange/node": patch
 ---
 
-Default download-host zone to oidc-exchange.iamstan.dev
+Download-host zone name and npm dist-tag for pre-releases
 
-The account has no `iamstan.dev` hosted zone; `dl.oidc-exchange.iamstan.dev` belongs in the existing `oidc-exchange.iamstan.dev` zone (`Z03720342C1JO5SG517CQ`). The `cdk.json` default and the `06-download-host.md` runbook both pointed at the wrong zone name, which would have put the ACM validation records outside the real zone.
+Two release-readiness fixes found while preparing the first release with the new pipeline.
 
-- `infra/downloads/cdk.json`: default `zoneName` → `oidc-exchange.iamstan.dev`
-- `06-download-host.md`: runbook command and a note on the zone
-- stack test fixture updated to match
+**Download-host zone**
+The account has no `iamstan.dev` hosted zone; `dl.oidc-exchange.iamstan.dev` belongs in the existing `oidc-exchange.iamstan.dev` zone (`Z03720342C1JO5SG517CQ`). The `cdk.json` default and the `06-download-host.md` runbook pointed at the wrong zone name. Updated both and the stack test fixture. (The stack is already deployed with the correct context.)
 
-No resource changes: a `cdk diff` against the account with the correct context is purely additive. `pnpm test`, `cdk synth` and format check pass.
+**npm dist-tag for pre-releases**
+`publish-npm` called `npm stage publish` without `--tag`, so an approved pre-release such as `v0.5.0-rc.1` would become `latest` for every user. A new step derives the tag from the release version (`1.2.3` → `latest`, `1.2.3-rc.1` → `rc`, `1.2.3-beta.4` → `beta`) and all three stage calls pass it. Ported from blogwright's `release.yml`; `05-distribution.md` notes it.
+
+**Validation**
+`pnpm test:supply-chain` (54 pass), stack tests and `cdk synth`. The derivation was checked against `1.2.3`, `1.2.3-rc.1`, `1.2.3-beta.4` and `1.2.3-alpha`; the workflow change itself only runs on a real tag.
