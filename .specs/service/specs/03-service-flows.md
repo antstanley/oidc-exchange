@@ -352,7 +352,7 @@ so an audit write failure follows `audit.durability`; their events have
 | `admin_clear_claims` | set claims to empty |
 | `admin_stats` | `count_by_status` + `count_active_sessions` → `AdminStats` |
 | `admin_list_users` | `list_users(offset, limit)` |
-| `admin_list_user_sessions` | `get_user_by_id`; `None` when the user is absent or soft-deleted, otherwise `list_live_sessions(user_id, now, 50)` mapped to `SessionSummary` values (one per family, newest first) |
+| `admin_list_user_sessions` | `get_user_by_id`; `None` when the user is absent or soft-deleted, otherwise `list_live_sessions(user_id, now, 50)` mapped to `SessionSummary` values (one per family, newest first); a pre-rotation row with no `family_id` has no stable id and is omitted |
 
 Admin mutations are audited: `admin_create_user` → `UserCreated`, `admin_update_user` →
 `UserUpdated` (and `UserSuspended` when the patch sets `status = Suspended`),

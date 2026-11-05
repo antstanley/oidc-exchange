@@ -600,7 +600,7 @@ impl SessionRepository for ValkeySessionRepository {
             /* ARGV[7] */ retired_expires_at.to_rfc3339(),
             /* ARGV[8] */ ttl_seconds.to_string(),
         ];
-        // ARGV[8..]: the replacement's field pairs, HSET'ed verbatim so the
+        // ARGV[9..]: the replacement's field pairs, HSET'ed verbatim so the
         // script's install writes exactly what `store_refresh_token` would.
         args.push("user_id".to_string());
         args.push(replacement.user_id.clone());

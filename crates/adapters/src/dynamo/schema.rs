@@ -779,6 +779,31 @@ mod tests {
     }
 
     #[test]
+    fn session_location_round_trips_and_absent_reads_none() {
+        let mut session = sample_session();
+        assert!(!session_to_item(&session).contains_key("location"));
+        assert_eq!(
+            item_to_session(&session_to_item(&session))
+                .expect("parse")
+                .location,
+            None
+        );
+
+        let location = oidc_exchange_core::domain::SessionLocation::new(
+            Some("Cape Town".into()),
+            None,
+            Some("ZA".into()),
+        )
+        .expect("location");
+        session.location = Some(location.clone());
+        let item = session_to_item(&session);
+        assert_eq!(
+            item_to_session(&item).expect("parse").location,
+            Some(location)
+        );
+    }
+
+    #[test]
     fn session_round_trip() {
         let session = sample_session();
         let item = session_to_item(&session);

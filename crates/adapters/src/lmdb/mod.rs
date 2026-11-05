@@ -1673,8 +1673,6 @@ mod single_use_tests {
         );
     }
 
-    /// `revoke_all_user_sessions` removes the user's live generations *and*
-    /// their retained retirement records, leaving other users untouched.
     #[tokio::test]
     async fn listing_skips_index_members_whose_session_is_missing() {
         let test = create_test_repo().await;
@@ -1704,6 +1702,8 @@ mod single_use_tests {
         assert_eq!(listed[0].family_id, kept.family_id);
     }
 
+    /// `revoke_all_user_sessions` removes the user's live generations *and*
+    /// their retained retirement records, leaving other users untouched.
     #[tokio::test]
     async fn revoke_all_user_sessions_sweeps_retired_records_of_that_user_only() {
         let test = create_test_repo().await;

@@ -66,8 +66,9 @@ pub struct WireRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub hints: TransportHints,
-    /// Embedder-supplied session location for token exchanges; `None` leaves
-    /// location to the `[session.location]` header mapping.
+    /// Embedder-supplied session location for token exchanges. `None` records
+    /// no location: the FFI audit-context layer has no transport peer, so the
+    /// `[session.location]` header mapping is never applied here.
     pub location: Option<WireLocation>,
 }
 

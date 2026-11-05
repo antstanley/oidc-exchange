@@ -857,7 +857,9 @@ pub const LISTING_USER: &str = "usr_listing";
 pub const LISTING_OTHER_USER: &str = "usr_listing_other";
 
 /// A one-family fixture owned by `user_id`, created `age_secs` before `base`
-/// and expiring `ttl_secs` after it (negative = already expired).
+/// and expiring `ttl_secs` after it. Stores that refuse a session whose expiry
+/// is already past (Valkey) cannot hold a negative value, so "expired" fixtures
+/// use a short positive TTL and the listing is evaluated at a later `now`.
 fn listing_family(
     tag: &str,
     label: &str,
@@ -898,11 +900,14 @@ pub async fn assert_listing_returns_live_generations_newest_first<S: SessionRepo
     let oldest = listing_family(tag, "oldest", &user, base, 3_000, 86_400);
     let middle = listing_family(tag, "middle", &user, base, 2_000, 86_400);
     let newest = listing_family(tag, "newest", &user, base, 1_000, 86_400);
-    let expired = listing_family(tag, "expired", &user, base, 4_000, -60);
+    let expired = listing_family(tag, "expired", &user, base, 4_000, 30);
     let foreign = listing_family(tag, "foreign", &other_user, base, 500, 86_400);
     for session in [&oldest, &middle, &newest, &expired, &foreign] {
         repo.store_refresh_token(session).await.expect("store");
     }
+
+    // Evaluate the listing after the short-lived family's expiry.
+    let at = base + chrono::Duration::seconds(60);
 
     // Rotate the middle family: the listing must show only generation 1.
     let rotated = generation_session(
@@ -921,10 +926,7 @@ pub async fn assert_listing_returns_live_generations_newest_first<S: SessionRepo
         "rotation must win"
     );
 
-    let listed = repo
-        .list_live_sessions(&user, base, 50)
-        .await
-        .expect("list");
+    let listed = repo.list_live_sessions(&user, at, 50).await.expect("list");
     let families: Vec<&str> = listed.iter().map(|s| s.family_id.as_str()).collect();
     assert_eq!(
         families,
@@ -943,7 +945,7 @@ pub async fn assert_listing_returns_live_generations_newest_first<S: SessionRepo
     );
     assert_eq!(middle_listed.generation, 1);
 
-    let limited = repo.list_live_sessions(&user, base, 2).await.expect("list");
+    let limited = repo.list_live_sessions(&user, at, 2).await.expect("list");
     let limited_families: Vec<&str> = limited.iter().map(|s| s.family_id.as_str()).collect();
     assert_eq!(
         limited_families,
@@ -952,7 +954,7 @@ pub async fn assert_listing_returns_live_generations_newest_first<S: SessionRepo
     );
 
     assert!(
-        repo.list_live_sessions("usr_listing_nobody", base, 50)
+        repo.list_live_sessions("usr_listing_nobody", at, 50)
             .await
             .expect("list")
             .is_empty(),
@@ -961,10 +963,7 @@ pub async fn assert_listing_returns_live_generations_newest_first<S: SessionRepo
 
     // Revocation removes a family from the listing.
     repo.revoke_family(&newest.family_id).await.expect("revoke");
-    let after = repo
-        .list_live_sessions(&user, base, 50)
-        .await
-        .expect("list");
+    let after = repo.list_live_sessions(&user, at, 50).await.expect("list");
     assert_eq!(after.len(), 2, "a revoked family must leave the listing");
 }
 
