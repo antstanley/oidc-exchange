@@ -17,6 +17,9 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
   // Docs publishing to oidc-exchange.iamstan.dev via blogwright: keyless AWS
   // deploys assume the GitHub OIDC role (id-token), and PR previews comment their
   // URL back on the pull request (pull-requests). No other write scope is granted.
+  // Changesets "Version Packages" bot: pushes the version commit and opens its PR via
+  // the GitHub API. Checkout still sets persist-credentials: false.
+  ["version-packages.yml:version", new Set(["contents", "pull-requests"])],
   ["production.yml:deploy", new Set(["id-token"])],
   ["preview.yml:deploy", new Set(["id-token", "pull-requests"])],
   ["preview.yml:destroy", new Set(["id-token", "pull-requests"])],

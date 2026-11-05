@@ -1,0 +1,20 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
+  "changelog": ["@changesets/changelog-github", { "repo": "antstanley/oidc-exchange" }],
+  "commit": false,
+  "fixed": [
+    [
+      "@oidc-exchange/node",
+      "@oidc-exchange/lambda",
+      "@oidc-exchange/darwin-arm64",
+      "@oidc-exchange/linux-arm64-gnu",
+      "@oidc-exchange/linux-x64-gnu",
+      "@oidc-exchange/win32-x64-msvc"
+    ]
+  ],
+  "linked": [],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": ["website", "admin-ui"]
+}
