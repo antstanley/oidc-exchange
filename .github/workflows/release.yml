@@ -599,7 +599,7 @@ jobs:
           # If-None-Match: * makes each write a conditional create, so a re-run of a
           # release can never replace bytes that were already signed and published.
           for file in oidc-exchange-* SHA256SUMS SHA256SUMS.sigstore.bundle; do
-            [ -f "$file" ] || continue
+            [ -f "$file" ] || { echo "::error::missing $file"; exit 1; }
             aws s3api put-object \
               --bucket "$BUCKET" \
               --key "releases/v${VERSION}/${file}" \
@@ -611,8 +611,11 @@ jobs:
       - name: Publish latest.json
         run: |
           set -euo pipefail
-          # Written last, so it never points at an incomplete prefix. Do not move
-          # "latest" backwards when an older tag is re-released.
+          # Written last, so it never points at an incomplete prefix. The contract is a
+          # stable X.Y.Z, so a pre-release never becomes "latest" (and sort -V ranks
+          # 1.2.3-rc.1 above 1.2.3, which would also block the final release).
+          # Do not move "latest" backwards when an older tag is re-released.
+          case "$VERSION" in *-*) echo "pre-release $VERSION; leaving latest.json"; exit 0 ;; esac
           current=$(curl -fsS "${DOWNLOAD_HOST}/latest.json" | jq -r .version 2>/dev/null || true)
           if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n1)" != "$VERSION" ]; then
             echo "latest.json already at $current (newer than $VERSION); leaving it"

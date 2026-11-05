@@ -171,7 +171,11 @@ fi
 
 if [[ "$authenticated" != true ]]; then
     if [[ "$checksum_verified" = true ]]; then
-        echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
+        if [[ "$SOURCE" == "github" ]]; then
+            echo "Warning: GitHub CLI not found; checksum verified corruption only, artifact provenance was not authenticated (Sigstore bundles are published only on ${DOWNLOAD_HOST})." >&2
+        else
+            echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
+        fi
     else
         echo "Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation." >&2
     fi

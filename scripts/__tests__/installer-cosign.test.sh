@@ -42,15 +42,26 @@ EOS
   if [ "$gh" != none ]; then
     printf '#!/bin/sh\nprintf "gh %%s\\n" "$*" >> "$CALL_LOG"\n[ "$GH" = fail ] && exit 1\nexit 0\n' > "$bin/gh"
   fi
-  chmod +x "$bin"/*
+  # Expose only the tools the installer needs, so a gh or cosign installed on the
+  # host (GitHub runners ship gh in /usr/bin) cannot leak into the "absent" cases.
+  for tool in bash sh env grep sed cut tr mkdir rm mv chmod mktemp dirname basename cat head sort awk perl timeout; do
+    src=$(command -v "$tool" 2>/dev/null || true)
+    if [ -n "$src" ] && [ ! -e "$bin/$tool" ]; then ln -s "$src" "$bin/$tool"; fi
+  done
+  chmod +x "$bin"/cosign "$bin"/gh "$bin"/curl "$bin"/uname "$bin"/id "$bin"/sha256sum 2>/dev/null || true
   set +e
-  PATH="$bin:/usr/bin:/bin" HOME="$home" CALL_LOG="$log" COSIGN="$cosign" GH="$gh" DL="$dl" \
+  PATH="$bin" HOME="$home" CALL_LOG="$log" COSIGN="$cosign" GH="$gh" DL="$dl" \
     bash "$INSTALLER" "${@:6}" >"$sandbox/out" 2>"$sandbox/err"
   status=$?
   set -e
+  # An `a && b` list does not trip `set -e` when `a` fails, so test explicitly.
   case "$expect" in
-    ok)   [ "$status" -eq 0 ] && [ -f "$home/.local/bin/oidc-exchange" ] ;;
-    fail) [ "$status" -ne 0 ] && [ ! -e "$home/.local/bin/oidc-exchange" ] ;;
+    ok)   if [ "$status" -ne 0 ] || [ ! -f "$home/.local/bin/oidc-exchange" ]; then
+            echo "FAIL: $name expected a successful install (status $status)" >&2; cat "$sandbox/err" >&2; exit 1
+          fi ;;
+    fail) if [ "$status" -eq 0 ] || [ -e "$home/.local/bin/oidc-exchange" ]; then
+            echo "FAIL: $name expected an aborted install (status $status)" >&2; exit 1
+          fi ;;
   esac
   case "$name" in
     cosign-verifies)
@@ -58,7 +69,7 @@ EOS
       grep -Fq -- "--certificate-identity $IDENTITY --certificate-oidc-issuer https://token.actions.githubusercontent.com" "$log"
       grep -Fq 'releases/v1.2.3/oidc-exchange-linux-x64.sigstore.bundle' "$log"
       absent '^gh ' "$log" ;;
-    cosign-preferred-over-gh) absent '^gh ' "$log" ;;
+    cosign-preferred-over-gh) grep -Fq 'cosign verify-blob' "$log"; absent '^gh ' "$log" ;;
     cosign-failure-aborts) grep -Fq 'cosign verify-blob' "$log" ;;
     gh-when-no-cosign) grep -Fq 'gh attestation verify' "$log"; absent 'sigstore.bundle' "$log" ;;
     checksum-only) grep -Fq 'corruption only' "$sandbox/err" ;;
