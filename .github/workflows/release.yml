@@ -422,16 +422,20 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          # npm publishes to `latest` unless told otherwise, pre-releases included, so
-          # approving a staged 1.2.3-rc.1 would make it the default install. Derive the
-          # tag instead: 1.2.3-rc.1 ships under `rc`, 1.2.3 under `latest`.
+          # npm refuses to stage a pre-release without an explicit --tag, and rejects a tag
+          # that is a valid semver range (0, 1, x). Derive it from the first pre-release
+          # identifier: 1.2.3-rc.1 ships under `rc`, 1.2.3-0 and 1.2.3-1.rc under `next`.
+          # A stable release passes no --tag, so npm's own guard still stops a lower
+          # stable version from silently taking over `latest`.
+          DIST_TAG=""
           if [[ "$VERSION" == *-* ]]; then
             PRERELEASE="${VERSION#*-}"
             DIST_TAG="${PRERELEASE%%.*}"
-          else
-            DIST_TAG=latest
+            if [[ ! "$DIST_TAG" =~ ^[A-Za-z][A-Za-z0-9-]*$ || "$DIST_TAG" =~ ^[xX]$ ]]; then
+              DIST_TAG=next
+            fi
           fi
-          echo "publishing under dist-tag: ${DIST_TAG}"
+          echo "publishing under dist-tag: ${DIST_TAG:-latest (npm default)}"
           echo "NPM_DIST_TAG=${DIST_TAG}" >> "$GITHUB_ENV"
       - name: Stage platform packages
         working-directory: bindings/nodejs
@@ -446,7 +450,7 @@ jobs:
               echo "staging ${name}@${ver}"
               # ./ prefix: stage the local directory. A bare "npm/<pkg>" is read
               # by npm as a github owner/repo shorthand and it tries to git-clone it.
-              npm stage publish --provenance --access public --ignore-scripts --tag "$NPM_DIST_TAG" "./npm/${pkg}"
+              npm stage publish --provenance --access public --ignore-scripts ${NPM_DIST_TAG:+--tag "$NPM_DIST_TAG"} "./npm/${pkg}"
             fi
           done
       - name: Stage @oidc-exchange/node
@@ -457,7 +461,7 @@ jobs:
           if npm view "@oidc-exchange/node@${ver}" version >/dev/null 2>&1; then
             echo "@oidc-exchange/node@${ver} already published; skipping"
           else
-            npm stage publish --provenance --access public --ignore-scripts --tag "$NPM_DIST_TAG"
+            npm stage publish --provenance --access public --ignore-scripts ${NPM_DIST_TAG:+--tag "$NPM_DIST_TAG"}
           fi
       - name: Build and stage @oidc-exchange/lambda
         working-directory: bindings/lambda
@@ -470,7 +474,7 @@ jobs:
             pnpm install --frozen-lockfile --ignore-scripts
             pnpm run build
             pnpm pack --pack-destination "${RUNNER_TEMP}"
-            npm stage publish --provenance --access public --ignore-scripts --tag "$NPM_DIST_TAG" \
+            npm stage publish --provenance --access public --ignore-scripts ${NPM_DIST_TAG:+--tag "$NPM_DIST_TAG"} \
               "${RUNNER_TEMP}/oidc-exchange-lambda-${ver}.tgz"
           fi
       - name: List pending staged packages (approve these to go live)
