@@ -76,6 +76,7 @@ export default defineConfig({
           label: "Contributing",
           items: [{ slug: "contributing/development" }],
         },
+        { slug: "versions" },
       ],
     }),
     markdownApi(),
