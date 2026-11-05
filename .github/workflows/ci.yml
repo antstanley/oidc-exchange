@@ -29,11 +29,14 @@ jobs:
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Provision pinned scanners
         run: |
           cargo install cargo-deny --version 0.20.2 --locked
           python -m pip install --require-hashes --only-binary=:all: -r config/pip-audit-requirements.txt
-          corepack pnpm@12.16.1 --version
+          pnpm --version
       - name: Evaluate frozen Cargo, pnpm, and Python graphs
         run: node scripts/run-advisory-scans.mjs
       - name: Enforce signing and verification paths
@@ -83,15 +86,12 @@ jobs:
         with:
           node-version: 26.13.0
       - name: Activate pnpm 12.16.1
-        run: |
-          # Enable the corepack shims so later bare `pnpm` script steps resolve
-          # through the repo's packageManager pin (pnpm@12.16.1); the explicit
-          # pinned invocation below proves the exact version is provisioned.
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Lint
         working-directory: bindings/nodejs
         run: pnpm lint
@@ -103,13 +103,13 @@ jobs:
         run: pnpm typecheck
       - name: Build native module
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec napi build --release --dts index.generated.d.ts
+        run: pnpm exec napi build --release --dts index.generated.d.ts
       - name: Run tests
         working-directory: bindings/nodejs
         run: pnpm test
       - name: Install Lambda adapter dependencies
         working-directory: bindings/lambda
-        run: corepack pnpm@12.16.1 install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Lint Lambda adapter
         working-directory: bindings/lambda
         run: pnpm lint
@@ -182,7 +182,7 @@ jobs:
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: corepack pnpm@12.16.1 install --frozen-lockfile --ignore-scripts
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: uv sync --project bindings/python --group build
       - name: Require executable cross-runtime parity
         run: node conformance/report.mjs
@@ -198,14 +198,11 @@ jobs:
         with:
           node-version: 26.13.0
       - name: Activate pnpm 12.16.1
-        run: |
-          # Enable the corepack shims so later bare `pnpm` script steps resolve
-          # through the repo's packageManager pin (pnpm@12.16.1); the explicit
-          # pinned invocation below proves the exact version is provisioned.
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Install dependencies
-        run: corepack pnpm@12.16.1 install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Website — lint
         working-directory: apps/website
         run: pnpm lint

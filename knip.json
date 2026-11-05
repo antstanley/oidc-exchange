@@ -5,8 +5,7 @@
   "workspaces": {
     ".": {
       "entry": ["scripts/*.{js,mjs}", "scripts/__tests__/*.test.mjs", "conformance/*.mjs"],
-      "project": ["scripts/**/*.{js,mjs}", "conformance/**/*.mjs"],
-      "ignoreDependencies": ["blogwright"]
+      "project": ["scripts/**/*.{js,mjs}", "conformance/**/*.mjs"]
     },
     "apps/admin-ui": {
       "entry": ["scripts/*.mjs"],
@@ -16,9 +15,7 @@
       "entry": ["integrations/*"],
       "ignoreDependencies": ["@emnapi/core", "@emnapi/runtime"]
     },
-    "bindings/nodejs": {
-      "ignoreDependencies": ["@arethetypeswrong/cli", "publint"]
-    },
+    "bindings/nodejs": {},
     "bindings/lambda": {}
   }
 }

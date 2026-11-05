@@ -33,20 +33,17 @@ jobs:
         with:
           node-version: 26.13.0
       - name: Activate pnpm 12.16.1
-        run: |
-          # Enable the corepack shims so tools that spawn a bare `pnpm` resolve
-          # through the repo's packageManager pin (pnpm@12.16.1); the explicit
-          # pinned invocation below proves the exact version is provisioned.
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Install cross
         run: cargo install cross --version 0.2.5 --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Build addon via cross
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec napi build --release --platform --target ${{ matrix.target }} --use-cross
+        run: pnpm exec napi build --release --platform --target ${{ matrix.target }} --use-cross
       - name: Assert glibc floor <= 2.34
         working-directory: bindings/nodejs
         run: |

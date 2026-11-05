@@ -53,11 +53,11 @@ jobs:
         with:
           node-version: 26.13.0
       - name: Activate pnpm 12.16.1
-        run: |
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Install workspace dependencies
-        run: corepack pnpm@12.16.1 install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ env.ROLE_ARN }}
@@ -65,4 +65,4 @@ jobs:
       - name: Deploy docs to production
         # The docs site itself is built inside the MicroVM; the runner only runs
         # the blogwright CLI installed from the frozen workspace install.
-        run: corepack pnpm@12.16.1 exec blogwright deploy production
+        run: pnpm exec blogwright deploy production

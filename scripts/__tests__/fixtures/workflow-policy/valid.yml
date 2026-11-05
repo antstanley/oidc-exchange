@@ -9,4 +9,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
-      - run: corepack pnpm@12.16.1 install --frozen-lockfile
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115
+        with:
+          version: 12.16.1
+      - run: pnpm install --frozen-lockfile

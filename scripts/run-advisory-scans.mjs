@@ -60,8 +60,8 @@ function cargoFindings() {
 }
 
 function pnpmFindings() {
-  requireVersion("corepack", [`pnpm@${PNPM_VERSION}`, "--version"], PNPM_VERSION);
-  const result = run("corepack", [`pnpm@${PNPM_VERSION}`, "audit", "--recursive", "--json", "--prod", "--audit-level", "high"]);
+  requireVersion("pnpm", ["--version"], PNPM_VERSION);
+  const result = run("pnpm", ["audit", "--recursive", "--json", "--prod", "--audit-level", "high"]);
   if (result.error || ![0, 1].includes(result.status)) throw new Error("pnpm audit tool or registry failure");
   let report;
   try { report = JSON.parse(result.stdout); } catch { throw new Error("pnpm audit emitted malformed JSON"); }

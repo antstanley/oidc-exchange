@@ -66,7 +66,7 @@ have `id-token: write` for trusted publishing. The binary attestation consumes t
 attestation consumes the digest resolved after composing the two platform subjects.
 
 `build-nodejs` installs with exact pnpm 12.16.1 and a frozen lockfile, then executes the locked napi
-CLI through the pinned corepack pnpm — the tool comes from the frozen install, and
+CLI through the pinned pnpm (provisioned by `pnpm/action-setup`) — the tool comes from the frozen install, and
 dynamic runners (dlx/npx/@latest) are policy-rejected. A separate read-only `validate-npm-package` job runs locked `publint` and
 `@arethetypeswrong/cli`, distributes artifacts, and proves all four platform binaries exist before
 uploading a validated package tree. Only then does `publish-npm` receive OIDC identity and stage

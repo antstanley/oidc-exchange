@@ -94,12 +94,19 @@ export function validateWorkflow(text, workflowName) {
         !step.run.includes("--frozen-lockfile")
       )
         errors.push(`${key}: non-frozen pnpm install`);
-      // pnpm 11 has no `--offline` flag for `exec`; the enforceable invariant
-      // is that exec runs the pinned corepack pnpm (so the tool comes from the
-      // frozen install's node_modules) and never a dynamic runner — dlx/npx
-      // are rejected above as dynamic commands.
-      if (step.run.includes("pnpm exec") && !/corepack pnpm@[\w.-]+ (?:--\S+ )*exec\b/.test(step.run))
-        errors.push(`${key}: pnpm exec must use the pinned corepack invocation`);
+      // Node 25+ no longer bundles corepack; pnpm comes from a pinned
+      // pnpm/action-setup step with a literal exact version.
+      if (/\bcorepack\b/.test(step.run))
+        errors.push(`${key}: corepack is not available on Node 26; use pnpm/action-setup`);
+      // pnpm has no `--offline` flag for `exec`; the enforceable invariant is
+      // that exec runs the exact pnpm provisioned by pnpm/action-setup (so the
+      // tool comes from the frozen install's node_modules) and never a dynamic
+      // runner — dlx/npx are rejected above as dynamic commands.
+      if (/\bpnpm\b/.test(step.run)) {
+        const setup = job.steps.find((s) => String(s.uses ?? "").startsWith("pnpm/action-setup@"));
+        if (!setup || typeof setup.with?.version !== "string" || !EXACT_STABLE_VERSION.test(setup.with.version))
+          errors.push(`${key}: pnpm requires a pnpm/action-setup step with a literal exact version`);
+      }
       if (/\bpnpm(?:@[\w.-]+)?\s+exec\s+--offline\b/.test(step.run))
         errors.push(`${key}: pnpm 11 exec treats everything after exec as the command; --offline is not a flag there`);
       for (const command of step.run.matchAll(/\bcargo\s+install\s+cross\b[^\n]*/g)) {
