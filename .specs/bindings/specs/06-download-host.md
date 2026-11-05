@@ -11,7 +11,7 @@ A CloudFront distribution in front of a private S3 bucket (`oidc-exchange-downlo
 reached through origin access control; the bucket blocks all public access and enforces TLS. An
 ACM certificate in `us-east-1` covers the hostname and a Route 53 alias (A and AAAA) points at the
 distribution. The stack creates the certificate validation records and the aliases in the
-hosted zone supplied as CDK context.
+hosted zone supplied as CDK context: the existing `oidc-exchange.iamstan.dev` zone (the account has no `iamstan.dev` zone), so pass `zoneName=oidc-exchange.iamstan.dev`.
 
 ## Layout
 
@@ -44,7 +44,7 @@ The stack is the CDK app in `infra/downloads` (`DownloadsStack`). Deployment is 
 never a CI step; CI runs the stack's assertion tests (`pnpm --filter downloads test`).
 
 ```bash
-pnpm --filter downloads exec cdk deploy -c hostedZoneId=<zone-id> -c zoneName=iamstan.dev
+pnpm --filter downloads exec cdk deploy -c hostedZoneId=<zone-id> -c zoneName=oidc-exchange.iamstan.dev
 ```
 
 After the first deploy the operator creates the `downloads` GitHub environment with a deployment

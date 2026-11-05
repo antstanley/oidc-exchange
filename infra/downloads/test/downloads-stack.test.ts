@@ -7,7 +7,7 @@ const template = Template.fromStack(
   new DownloadsStack(new App(), "Test", {
     env: { account: ACCOUNT, region: REGION },
     hostedZoneId: "Z0000000000TEST",
-    zoneName: "iamstan.dev",
+    zoneName: "oidc-exchange.iamstan.dev",
   }),
 );
 
