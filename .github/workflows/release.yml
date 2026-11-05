@@ -10,22 +10,25 @@ jobs:
     name: Dependency policy (release blocking)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.13.0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.10"
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Provision pinned scanners
         run: |
           cargo install cargo-deny --version 0.20.2 --locked
           python -m pip install --require-hashes --only-binary=:all: -r config/pip-audit-requirements.txt
-          corepack pnpm@12.16.1 --version
+          pnpm --version
       - name: Enforce frozen Cargo, pnpm, and Python graphs
         run: node scripts/run-advisory-scans.mjs
       - name: Enforce signing and verification paths
@@ -42,7 +45,7 @@ jobs:
       pypi_published: ${{ steps.preflight.outputs.pypi_published }}
       docker_published: ${{ steps.preflight.outputs.docker_published }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Extract and validate version
@@ -118,13 +121,13 @@ jobs:
             artifact: oidc-exchange-darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --version 0.2.5 --locked
@@ -148,7 +151,7 @@ jobs:
           sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
       - name: Attest release binary
         # actions/attest-build-provenance@v3
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: target/${{ matrix.target }}/release/${{ matrix.artifact }}.sha256
       - name: Smoke test
@@ -161,7 +164,7 @@ jobs:
             ./target/${{ matrix.target }}/release/oidc-exchange --version
           fi
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-${{ matrix.target }}
           path: |
@@ -185,28 +188,28 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Prepare platform pair
         env:
           PLATFORM: ${{ matrix.platform }}
         run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Docker metadata (labels)
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
       - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -219,13 +222,13 @@ jobs:
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - name: Attest platform image digest
         # actions/attest-build-provenance@v3
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/digests/*
@@ -242,19 +245,19 @@ jobs:
     runs-on: ubuntu-latest
     environment: docker
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
           merge-multiple: true
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository }}
@@ -265,13 +268,13 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest
       - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Login to Docker Hub
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -296,7 +299,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Attest multi-arch manifest digest
         # actions/attest-build-provenance@v3
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
@@ -305,7 +308,7 @@ jobs:
         run: docker buildx imagetools inspect ghcr.io/${{ github.repository }}@${{ steps.manifest.outputs.digest }}
       - name: Sync Docker Hub description
         continue-on-error: true
-        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -337,34 +340,31 @@ jobs:
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.13.0
       - name: Activate pnpm 12.16.1
-        run: |
-          # Enable the corepack shims so tools that spawn a bare `pnpm` resolve
-          # through the repo's packageManager pin (pnpm@12.16.1); the explicit
-          # pinned invocation below proves the exact version is provisioned.
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --version 0.2.5 --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Build
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
+        run: pnpm exec napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nodejs-${{ matrix.target }}
           path: bindings/nodejs/*.node
@@ -382,22 +382,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - &a1
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - &a2
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.13.0
           registry-url: https://registry.npmjs.org
       - name: Activate pnpm 12.16.1
-        run: |
-          # Enable the corepack shims so package scripts that spawn a bare
-          # `pnpm` resolve through the repo's packageManager pin (pnpm@12.16.1).
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Download validated npm package tree
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: validated-npm-packages
           path: bindings/nodejs
@@ -435,9 +433,9 @@ jobs:
           if npm view "@oidc-exchange/lambda@${ver}" version >/dev/null 2>&1; then
             echo "@oidc-exchange/lambda@${ver} already published; skipping"
           else
-            corepack pnpm@12.16.1 install --frozen-lockfile --ignore-scripts
-            corepack pnpm@12.16.1 run build
-            corepack pnpm@12.16.1 pack --pack-destination "${RUNNER_TEMP}"
+            pnpm install --frozen-lockfile --ignore-scripts
+            pnpm run build
+            pnpm pack --pack-destination "${RUNNER_TEMP}"
             npm stage publish --provenance --access public --ignore-scripts \
               "${RUNNER_TEMP}/oidc-exchange-lambda-${ver}.tgz"
           fi
@@ -474,13 +472,13 @@ jobs:
             args: --out dist
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Build with maturin
-        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
-          maturin-version: "1.9.4"
+          maturin-version: "1.16.0"
           command: ${{ matrix.command }}
           args: ${{ matrix.args }}
           target: ${{ matrix.target }}
@@ -489,7 +487,7 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheels-${{ matrix.target || matrix.command }}
           path: bindings/python/dist/*
@@ -505,13 +503,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/
           skip-existing: true
@@ -526,12 +524,12 @@ jobs:
     if: ${{ !cancelled() && needs.build-binaries.result == 'success' && needs.docker-manifest.result != 'failure' && needs.publish-npm.result != 'failure' && needs.publish-pypi.result != 'failure' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Download binary artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: binary-*
           path: release-artifacts
@@ -551,7 +549,7 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: v${{ needs.validate.outputs.version }}
           name: v${{ needs.validate.outputs.version }}
@@ -610,27 +608,24 @@ jobs:
       - *a1
       - *a2
       - name: Activate pnpm 12.16.1
-        run: |
-          # Enable the corepack shims: publint packs via a bare `pnpm pack`
-          # child process, which resolves through the repo's packageManager pin
-          # (pnpm@12.16.1) only when the shims are on PATH.
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Install locked package tooling
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 install --frozen-lockfile --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Sync platform package versions to the release version
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec napi version
+        run: pnpm exec napi version
       - name: Download Node.js artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: nodejs-*
           path: bindings/nodejs/artifacts
           merge-multiple: true
       - name: Distribute binaries into platform packages
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec napi artifacts
+        run: pnpm exec napi artifacts
       - name: Verify every platform binary is present
         working-directory: bindings/nodejs
         run: |
@@ -651,12 +646,12 @@ jobs:
           fi
       - name: Validate package metadata (publint)
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec publint
+        run: pnpm exec publint
       - name: Validate type definitions (arethetypeswrong)
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec attw --pack --profile esm-only
+        run: pnpm exec attw --pack --profile esm-only
       - name: Upload validated npm package tree
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: validated-npm-packages
           path: bindings/nodejs

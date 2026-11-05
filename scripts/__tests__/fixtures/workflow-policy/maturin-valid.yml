@@ -7,5 +7,5 @@ jobs:
     steps:
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b
         with:
-          maturin-version: "1.9.4"
+          maturin-version: "1.16.0"
           command: build

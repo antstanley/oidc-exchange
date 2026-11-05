@@ -56,7 +56,7 @@ test("negative fixtures reject each authority and tool-resolution violation", ()
     ["maturin-range-version.yml", "literal exact stable maturin-version"],
     ["maturin-prerelease-version.yml", "literal exact stable maturin-version"],
     ["maturin-expression-version.yml", "literal exact stable maturin-version"],
-    ["maturin-mismatch-version.yml", "does not match audited maturin 1.9.4"],
+    ["maturin-mismatch-version.yml", "does not match audited maturin 1.16.0"],
   ]);
   assert.equal(expected.size, 17);
   for (const [name, message] of expected) {

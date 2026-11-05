@@ -32,7 +32,7 @@
     "@napi-rs/cli": "3.10.12",
     "@types/node": "26.6.6",
     "oxfmt": "0.76.0",
-    "oxlint": "1.90.0",
+    "oxlint": "1.91.0",
     "publint": "0.3.25",
     "typescript": "7.1.0-beta",
     "vitest": "5.1.0"

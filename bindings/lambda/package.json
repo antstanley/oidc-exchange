@@ -30,7 +30,7 @@
     "@types/aws-lambda": "8.10.164",
     "@types/node": "26.6.6",
     "oxfmt": "0.76.0",
-    "oxlint": "1.90.0",
+    "oxlint": "1.91.0",
     "typescript": "7.1.0-beta",
     "vitest": "5.1.0"
   },

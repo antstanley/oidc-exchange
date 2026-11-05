@@ -22,31 +22,28 @@ jobs:
     env:
       MAX_GLIBC_MINOR: "34"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.13.0
       - name: Activate pnpm 12.16.1
-        run: |
-          # Enable the corepack shims so tools that spawn a bare `pnpm` resolve
-          # through the repo's packageManager pin (pnpm@12.16.1); the explicit
-          # pinned invocation below proves the exact version is provisioned.
-          corepack enable
-          corepack pnpm@12.16.1 --version
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 12.16.1
       - name: Install cross
         run: cargo install cross --version 0.2.5 --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Build addon via cross
         working-directory: bindings/nodejs
-        run: corepack pnpm@12.16.1 exec napi build --release --platform --target ${{ matrix.target }} --use-cross
+        run: pnpm exec napi build --release --platform --target ${{ matrix.target }} --use-cross
       - name: Assert glibc floor <= 2.34
         working-directory: bindings/nodejs
         run: |

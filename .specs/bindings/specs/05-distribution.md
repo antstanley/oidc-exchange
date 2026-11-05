@@ -66,7 +66,7 @@ have `id-token: write` for trusted publishing. The binary attestation consumes t
 attestation consumes the digest resolved after composing the two platform subjects.
 
 `build-nodejs` installs with exact pnpm 12.16.1 and a frozen lockfile, then executes the locked napi
-CLI through the pinned corepack pnpm — the tool comes from the frozen install, and
+CLI through the pinned pnpm (provisioned by `pnpm/action-setup`) — the tool comes from the frozen install, and
 dynamic runners (dlx/npx/@latest) are policy-rejected. A separate read-only `validate-npm-package` job runs locked `publint` and
 `@arethetypeswrong/cli`, distributes artifacts, and proves all four platform binaries exist before
 uploading a validated package tree. Only then does `publish-npm` receive OIDC identity and stage
@@ -81,14 +81,14 @@ through PyPI Trusted Publishing. The binding uses `pyo3 0.29.2` with `extension-
 ## Supply-chain gates
 
 - **Pinning and lockfiles.** Every action is a full commit SHA. Executed tools are locked or exact:
-  pnpm 12.16.1, cargo-deny 0.20.2, pip-audit 2.10.1, maturin 1.9.4, and cross 0.2.5. CI/release installs are frozen; publish-path
+  pnpm 12.16.1, cargo-deny 0.20.2, pip-audit 2.10.1, maturin 1.16.0, and cross 0.2.5. CI/release installs are frozen; publish-path
   installs use `--ignore-scripts`. `minimumReleaseAge` is explicit in `pnpm-workspace.yaml`.
 - **Least privilege.** Permissions are per job. Checkout jobs explicitly retain only
   `contents: read`, disable persisted credentials when they do not push, and cannot inherit an
   omitted workflow-level write scope.
 - **Three dependency graphs.** `scripts/run-advisory-scans.mjs` scans committed `Cargo.lock`, all
   owned pnpm lockfiles recursively, and the nonempty frozen build export of
-  `bindings/python/uv.lock` (`maturin==1.9.4` plus its conditional `tomli==2.4.1` dependency). The production runtime export is separately empty. Unknown and expired high-severity findings fail; exact unexpired
+  `bindings/python/uv.lock` (`maturin==1.16.0` plus its conditional `tomli==2.5.0` dependency). The production runtime export is separately empty. Unknown and expired high-severity findings fail; exact unexpired
   exceptions pass only when ecosystem, advisory, package, version/range, rationale, owner, expiry,
   and review date match. Cargo unmaintained and yanked findings warn. Scanner, database, registry,
   malformed-output, version, and frozen-export failures exit separately as tool failure rather

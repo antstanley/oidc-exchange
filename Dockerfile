@@ -1,10 +1,10 @@
-FROM rust:1.96-slim AS builder
+FROM rust:1.99-slim AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --release --bin oidc-exchange
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/oidc-exchange /usr/local/bin/
 WORKDIR /app
