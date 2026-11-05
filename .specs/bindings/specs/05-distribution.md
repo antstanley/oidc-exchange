@@ -87,7 +87,8 @@ signing identity (below) and fails on any mismatch. It then assumes the upload r
 OIDC (`downloads` environment) and writes the version prefix with a conditional create
 (`If-None-Match: *`), so an existing version is never overwritten. A separate `publish-latest` job (needs `publish-downloads`, same environment and role) writes
 `latest.json` only after the version prefix is complete, so it can be re-run alone. It reads the
-current file with retries and fails closed unless the response is 200 or 404, skips pre-releases,
+current file with retries and fails closed unless the response is 200, or 403/404 (the bucket
+answers 403 for a missing object) with this version's `SHA256SUMS` readable from the same host, skips pre-releases,
 and never moves `latest.json` backwards. Both jobs add `id-token: write` and hold `contents: read`. `create-release` depends on neither job, so a download-host outage
 cannot block the GitHub release. The host itself is specified in
 [06-download-host.md](06-download-host.md).

@@ -655,13 +655,19 @@ jobs:
           # complete. The contract is a stable X.Y.Z, so a pre-release never becomes
           # "latest" (and sort -V ranks 1.2.3-rc.1 above 1.2.3).
           case "$VERSION" in *-*) echo "pre-release $VERSION; leaving latest.json"; exit 0 ;; esac
-          # Fail closed on read errors: only a 404 means "no latest yet". The query
-          # string bypasses the 60s CloudFront cache for this read.
-          code=$(curl -sS --retry 5 --retry-all-errors --retry-delay 3 -o current.json -w '%{http_code}' \
-            "${DOWNLOAD_HOST}/latest.json?cb=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
+          # Fail closed on read errors. The bucket has no s3:ListBucket for CloudFront, so a
+          # missing object answers 403, not 404. Treat 403/404 as "no latest yet" only when
+          # this version's SHA256SUMS is readable from the same host (proving the host is
+          # serving); any other status, or an unreadable host, fails the job. The query
+          # string bypasses the 60s CloudFront cache for the read.
+          fetch() { curl -sS --retry 5 --retry-all-errors --retry-delay 3 -o "$2" -w '%{http_code}' "$1"; }
+          code=$(fetch "${DOWNLOAD_HOST}/latest.json?cb=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" current.json)
           case "$code" in
-            404) current="" ;;
             200) current=$(jq -er '.version' current.json) ;;
+            403|404)
+              probe=$(fetch "${DOWNLOAD_HOST}/releases/v${VERSION}/SHA256SUMS" /dev/null)
+              [ "$probe" = 200 ] || { echo "::error::latest.json returned $code and SHA256SUMS returned $probe; host not serving this release"; exit 1; }
+              current="" ;;
             *) echo "::error::could not read current latest.json (HTTP $code); refusing to risk moving it backwards"; exit 1 ;;
           esac
           # Do not move "latest" backwards when an older tag is re-released.
