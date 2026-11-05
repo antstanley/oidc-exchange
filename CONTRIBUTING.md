@@ -11,7 +11,7 @@
 - **jj (Jujutsu)** — version control. Install from [martinvonz/jj](https://github.com/martinvonz/jj). This project uses jj exclusively; do not use git CLI commands.
 - **Node.js 22+** — required for Node.js bindings development.
 - **pnpm** — Node.js package manager. Install with `npm install -g pnpm`.
-- **Python 3.10+** — required for Python bindings development.
+- **Python 3.11+** — required for Python bindings development.
 - **uv** — Python package manager. Install from [astral.sh/uv](https://docs.astral.sh/uv/).
 
 ### Clone and build

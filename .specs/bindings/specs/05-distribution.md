@@ -74,9 +74,9 @@ platform, root Node, and Lambda packages with provenance and ignored lifecycle s
 its own committed lockfile and a frozen, `--ignore-scripts` install. No publishing job resolves
 `@latest`, runs `npx --yes`, or bypasses a lockfile.
 
-Python builds four `cp310-abi3` wheels plus an sdist with the SHA-pinned maturin action and publishes
+Python builds four `cp311-abi3` wheels plus an sdist with the SHA-pinned maturin action and publishes
 through PyPI Trusted Publishing. The binding uses `pyo3 0.29.2` with `extension-module` and
-`abi3-py310`; the obsolete pyo3 advisory exceptions have been removed.
+`abi3-py311`; the obsolete pyo3 advisory exceptions have been removed.
 
 ## Supply-chain gates
 
@@ -88,7 +88,7 @@ through PyPI Trusted Publishing. The binding uses `pyo3 0.29.2` with `extension-
   omitted workflow-level write scope.
 - **Three dependency graphs.** `scripts/run-advisory-scans.mjs` scans committed `Cargo.lock`, all
   owned pnpm lockfiles recursively, and the nonempty frozen build export of
-  `bindings/python/uv.lock` (`maturin==1.16.0` plus its conditional `tomli==2.5.0` dependency). The production runtime export is separately empty. Unknown and expired high-severity findings fail; exact unexpired
+  `bindings/python/uv.lock` (`maturin==1.16.0`, which has no runtime dependencies on Python 3.11+). The production runtime export is separately empty. Unknown and expired high-severity findings fail; exact unexpired
   exceptions pass only when ecosystem, advisory, package, version/range, rationale, owner, expiry,
   and review date match. Cargo unmaintained and yanked findings warn. Scanner, database, registry,
   malformed-output, version, and frozen-export failures exit separately as tool failure rather

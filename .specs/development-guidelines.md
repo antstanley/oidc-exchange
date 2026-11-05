@@ -23,7 +23,7 @@ in the global spec layer.
 | oxlint | latest | `pnpm lint` |
 | tsc / astro check / svelte-check | latest | `pnpm typecheck` per TS workspace (`tsc --noEmit` for the bindings; `astro check` / `svelte-check` for the apps) |
 | vitest | latest | `pnpm test` |
-| Python | 3.10+ (abi3) | bindings/python |
+| Python | 3.11+ (abi3) | bindings/python |
 | uv | latest | `uv sync`; never `pip` or manual virtualenvs |
 | ruff | latest | `uv run ruff format .` and `uv run ruff check .` |
 | pydantic | latest | data models requiring validation |

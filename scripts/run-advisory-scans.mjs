@@ -88,8 +88,6 @@ function pythonFindings() {
   const maturin = packages.find((pkg) => pkg.name === "maturin");
   if (!maturin) throw new Error("uv frozen build export is missing maturin");
   if (maturin.version !== MATURIN_VERSION) throw new Error(`uv frozen build export has maturin ${maturin.version}, expected ${MATURIN_VERSION}`);
-  if (!/^tomli==2\.5\.0\s*;\s*python_full_version\s*<\s*['"]3\.11['"](?:\s*\\)?\s*$/m.test(exported))
-    throw new Error("uv frozen build export is missing audited conditional tomli");
   const audit = run("pip-audit", ["--requirement", requirements, "--no-deps", "--disable-pip", "--format", "json", "--progress-spinner", "off"]);
   if (audit.error || ![0, 1].includes(audit.status)) throw new Error("pip-audit tool or vulnerability DB failure");
   let report;

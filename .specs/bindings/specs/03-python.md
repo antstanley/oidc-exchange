@@ -46,8 +46,8 @@ response `dict` is `{ "status", "headers": dict[str,str], "body": bytes }`.
 
 ## Distribution
 
-maturin, `abi3` stable ABI targeting Python 3.10+ — `pyproject.toml` enables the
-`pyo3/abi3-py310` feature so one wheel per platform works across 3.10–3.13. Linux wheels are
+maturin, `abi3` stable ABI targeting Python 3.11+ — `pyproject.toml` enables the
+`pyo3/abi3-py311` feature so one wheel per platform works across 3.11–3.15. Linux wheels are
 built in a `manylinux_2_28` container; platforms: `manylinux_2_28_{x86_64,aarch64}`,
 `win_amd64`, `macosx_11_0_arm64`. An sdist is published alongside the wheels. See
 [05-distribution.md](05-distribution.md).
@@ -70,8 +70,8 @@ are dev dependencies for adapter-level tests.
 - *Async wraps sync via executor.* **`handle_request` runs `handle_request_sync` in the default
   executor.** The FFI call is blocking; offloading keeps the event loop responsive without a
   second async runtime. (The older design's `pyo3_asyncio` future approach was not used.)
-- *abi3 single wheel per platform.* **Built against the Python 3.10 stable ABI.** One wheel
-  spans 3.10–3.13, cutting the build matrix.
+- *abi3 single wheel per platform.* **Built against the Python 3.11 stable ABI.** One wheel
+  spans 3.11–3.15, cutting the build matrix.
 
 ### Open questions
 
