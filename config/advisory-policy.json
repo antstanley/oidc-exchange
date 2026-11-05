@@ -26,50 +26,5 @@
       "scanner": { "name": "pip-audit", "version": "2.9.0" }
     }
   },
-  "exceptions": [
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-52cp-r559-cp3m", "package": "js-yaml", "version": "4.1.1", "range": "=4.1.1",
-      "rationale": "Transitive build tooling input; no untrusted YAML is parsed in a shipped runtime. Frozen baseline recorded without silently updating dependencies.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-5p4m-2wfm-xmqj", "package": "js-yaml", "version": "4.1.1", "range": "=4.1.1",
-      "rationale": "Transitive build tooling input; no untrusted YAML is parsed in a shipped runtime. Frozen baseline recorded without silently updating dependencies.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-5p4m-2wfm-xmqj", "package": "js-yaml", "version": "4.3.0", "range": "=4.3.0",
-      "rationale": "Transitive build tooling input; no untrusted YAML is parsed in a shipped runtime. Frozen baseline recorded without silently updating dependencies.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-6g55-p6wh-862q", "package": "postcss", "version": "8.5.8", "range": "=8.5.8",
-      "rationale": "Transitive static-site build dependency; production services do not accept CSS for parsing. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-r28c-9q8g-f849", "package": "postcss", "version": "8.5.8", "range": "=8.5.8",
-      "rationale": "Transitive static-site build dependency; production services do not accept CSS for parsing. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-r28c-9q8g-f849", "package": "postcss", "version": "8.5.16", "range": "=8.5.16",
-      "rationale": "Transitive static-site build dependency; production services do not accept CSS for parsing. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-28wg-ghj8-5hjv", "package": "nanoid", "version": "3.3.11", "range": "=3.3.11",
-      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-28wg-ghj8-5hjv", "package": "nanoid", "version": "3.3.15", "range": "=3.3.15",
-      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-2v37-7h3g-55p8", "package": "nanoid", "version": "3.3.11", "range": "=3.3.11",
-      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-2v37-7h3g-55p8", "package": "nanoid", "version": "3.3.15", "range": "=3.3.15",
-      "rationale": "Transitive build dependency; identifier generation is not used by shipped authentication code. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    },
-    {
-      "ecosystem": "pnpm", "advisory": "GHSA-2p49-hgcm-8545", "package": "svgo", "version": "4.0.1", "range": "=4.0.1",
-      "rationale": "Transitive static asset optimizer; release workflows do not process attacker-controlled SVG. Frozen baseline recorded without dependency updates.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
-    }
-  ]
+  "exceptions": []
 }
