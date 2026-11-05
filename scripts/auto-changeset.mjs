@@ -29,25 +29,34 @@ export function cleanBody(body = "") {
   let text = body.replace(/\r\n/g, "\n").replace(/<!--[\s\S]*?-->/g, "");
   const cut = text.search(/^.*Generated with \[Claude Code\]/m);
   if (cut >= 0) text = text.slice(0, cut);
+  let fenced = false;
   text = text
     .split("\n")
-    .map((line) => line.replace(/^#{1,6}\s+(.*)$/, "**$1**"))
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+      return fenced ? line : line.replace(/^#{1,6}\s+(.*)$/, "**$1**");
+    })
     .join("\n")
     .trim();
   if (text.length > BODY_LIMIT) {
     const head = text.slice(0, BODY_LIMIT);
-    text = `${head.slice(0, Math.max(head.lastIndexOf("\n\n"), 200)).trim()}\n\n…`;
+    let kept = head.slice(0, Math.max(head.lastIndexOf("\n\n"), 200)).trim();
+    // Close a code fence the cut left open so the changelog stays well formed.
+    if ((kept.match(/^\s*(```|~~~)/gm) ?? []).length % 2 === 1) kept += "\n```";
+    text = `${kept}\n\n…`;
   }
   return text;
 }
 
+// Returns null for types that do not affect a release (chore, docs, ci, ...): an empty
+// changeset would only make the Version Packages workflow open a PR that bumps nothing.
 export function renderChangeset({ title, body }) {
   const parsed = parseTitle(title);
   const bump = bumpFor(parsed, body);
+  if (!bump) return null;
   const summary = parsed.description.charAt(0).toUpperCase() + parsed.description.slice(1);
   const detail = cleanBody(body);
-  const frontmatter = bump ? `---\n"${PACKAGE}": ${bump}\n---` : "---\n---";
-  return `${frontmatter}\n\n${summary}${detail ? `\n\n${detail}` : ""}\n`;
+  return `---\n"${PACKAGE}": ${bump}\n---\n\n${summary}${detail ? `\n\n${detail}` : ""}\n`;
 }
 
 const gh = (args, input) =>
@@ -70,7 +79,9 @@ function main() {
   if (pr.head.ref.startsWith("changeset-release/")) return console.log("version PR: skipping");
 
   const path = `.changeset/auto-pr-${pr.number}.md`;
-  const skip = pr.labels.some((label) => label.name === "no-changeset");
+  const content = renderChangeset({ title: pr.title, body: pr.body ?? "" });
+  const optOut = pr.labels.some((label) => label.name === "no-changeset");
+  const skip = optOut || content === null;
   const files = JSON.parse(gh(["--paginate", "--slurp", `repos/${base}/pulls/${pr.number}/files`])).flat();
   const human = files.some(
     (file) =>
@@ -87,12 +98,11 @@ function main() {
         ["--method", "DELETE", `repos/${base}/contents/${path}`, "--input", "-"],
         JSON.stringify({ message: `chore(changeset): remove generated changeset for #${pr.number}`, sha: current.sha, branch: pr.head.ref }),
       );
-      console.log(`removed ${path} (${skip ? "no-changeset label" : "author-written changeset present"})`);
+      console.log(`removed ${path} (${optOut ? "no-changeset label" : content === null ? "title needs no release" : "author-written changeset present"})`);
     } else console.log("nothing to do");
     return;
   }
 
-  const content = renderChangeset({ title: pr.title, body: pr.body ?? "" });
   if (current && Buffer.from(current.content, "base64").toString("utf8") === content)
     return console.log("changeset up to date");
   gh(

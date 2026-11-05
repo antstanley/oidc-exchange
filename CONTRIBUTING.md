@@ -370,10 +370,12 @@ with your change.
 You usually don't need to. On same-repo PRs the `Auto changeset` workflow commits
 `.changeset/auto-pr-<n>.md` from the PR title and body: `feat` → minor, `fix`/`perf`/`revert` →
 patch, `!` or a `BREAKING CHANGE:` line → major, and any other type (`chore`, `docs`, `ci`,
-`refactor`, …) → an empty changeset. The file is regenerated when you edit the title or body.
-Write your own `.changeset/*.md` to override it (the generated file is removed), or add the
-`no-changeset` label to opt out. Fork PRs are skipped. Commits made with `GITHUB_TOKEN` do not
-trigger CI, so the generated commit has no check runs of its own.
+`refactor`, …) → no changeset (any generated file is removed). The file is regenerated when you
+edit the title or body, and deleting it by hand is undone on the next push. Write your own
+`.changeset/*.md` to override it (the generated file is removed), or add the `no-changeset`
+label to opt out. Fork PRs are skipped. Commits made with `GITHUB_TOKEN` do not trigger CI, so
+the generated commit has no check runs of its own, and you must fetch it (`jj git fetch`) before
+your next push.
 
 ### Step 1 — apply the pending changesets
 

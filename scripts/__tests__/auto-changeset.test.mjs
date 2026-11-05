@@ -24,8 +24,14 @@ test("renders a changeset with summary and trimmed body", () => {
   );
 });
 
-test("non-release types produce an empty changeset", () => {
-  assert.equal(renderChangeset({ title: "ci: tweak", body: "" }), "---\n---\n\nTweak\n");
+test("non-release types produce no changeset", () => {
+  assert.equal(renderChangeset({ title: "ci: tweak", body: "" }), null);
+});
+
+test("headings inside code fences are kept and truncation closes open fences", () => {
+  assert.equal(cleanBody("# Top\n```\n# comment\n```"), "**Top**\n```\n# comment\n```");
+  const cleaned = cleanBody(`\`\`\`\n${"line\n".repeat(600)}`);
+  assert.ok(cleaned.includes("\n```\n\n…"));
 });
 
 test("long bodies are truncated and comments removed", () => {
