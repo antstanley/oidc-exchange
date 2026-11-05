@@ -18,3 +18,4 @@ first:
 | [specs/03-python.md](specs/03-python.md) | `oidc-exchange` (PyO3) + ASGI/WSGI adapters |
 | [specs/04-lambda.md](specs/04-lambda.md) | `@oidc-exchange/lambda` event adapter |
 | [specs/05-distribution.md](specs/05-distribution.md) | install script, Docker, release pipeline, version parity |
+| [specs/06-download-host.md](specs/06-download-host.md) | `dl.oidc-exchange.iamstan.dev`: S3 + CloudFront (CDK), upload role, layout |

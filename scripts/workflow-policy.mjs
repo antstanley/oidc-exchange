@@ -11,6 +11,8 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
   ["release.yml:build-binaries", new Set(["id-token", "attestations"])],
   ["release.yml:build-docker", new Set(["packages", "id-token", "attestations"])],
   ["release.yml:docker-manifest", new Set(["packages", "id-token", "attestations"])],
+  ["release.yml:publish-downloads", new Set(["id-token"])],
+  ["release.yml:publish-latest", new Set(["id-token"])],
   ["release.yml:publish-npm", new Set(["id-token"])],
   ["release.yml:publish-pypi", new Set(["id-token"])],
   ["release.yml:create-release", new Set(["contents"])],
@@ -28,6 +30,8 @@ export const ALLOWED_WRITE_PERMISSIONS = new Map([
 const ACTION_SHA = /^[^\s@]+@[0-9a-f]{40}$/;
 const EXACT_STABLE_VERSION = /^\d+\.\d+\.\d+$/;
 const MATURIN_ACTION = /^PyO3\/maturin-action@/;
+const COSIGN_ACTION = /^sigstore\/cosign-installer@/;
+const EXACT_COSIGN_RELEASE = /^v\d+\.\d+\.\d+$/;
 const DYNAMIC_COMMANDS = [
   /\bnpx\b/,
   /\bpnpm\s+(?:dlx|add\s+-g)\b/,
@@ -82,6 +86,11 @@ export function validateWorkflow(text, workflowName) {
           errors.push(`${key}: maturin-action requires literal exact stable maturin-version`);
         else if (version !== maturinVersion)
           errors.push(`${key}: maturin-action version ${version} does not match audited maturin ${maturinVersion}`);
+      }
+      if (COSIGN_ACTION.test(String(step.uses ?? ""))) {
+        const release = step.with?.["cosign-release"];
+        if (typeof release !== "string" || !EXACT_COSIGN_RELEASE.test(release))
+          errors.push(`${key}: cosign-installer requires literal exact stable cosign-release`);
       }
       if (String(step.uses ?? "").startsWith("actions/checkout@")) {
         if (permissions.contents !== "read" && permissions.contents !== "write")
@@ -186,9 +195,33 @@ export function validateWorkflow(text, workflowName) {
     const manifestAttest = manifestJob?.steps.find((step) => step.uses === attestAction);
     if (manifestAttest?.with?.["subject-digest"] !== "${{ steps.manifest.outputs.digest }}")
       errors.push(`${workflowName}: manifest attestation uses wrong digest`);
+    const downloadsJob = workflow.jobs["publish-downloads"];
+    if (downloadsJob) {
+      const downloadsNeeds = Array.isArray(downloadsJob.needs) ? downloadsJob.needs : [downloadsJob.needs];
+      if (!downloadsNeeds.includes("build-binaries") || !downloadsNeeds.includes("validate"))
+        errors.push(`${workflowName}: publish-downloads must follow build-binaries and validate`);
+      if (!downloadsJob.steps.some((step) => COSIGN_ACTION.test(String(step.uses ?? ""))))
+        errors.push(`${workflowName}: publish-downloads must install a pinned cosign`);
+      if (downloadsJob.environment !== "downloads")
+        errors.push(`${workflowName}: publish-downloads must run in the downloads environment`);
+      if (downloadsJob.permissions?.contents !== "read")
+        errors.push(`${workflowName}: publish-downloads holds contents: read only`);
+    }
+    const latestJob = workflow.jobs["publish-latest"];
+    if (latestJob) {
+      const latestNeeds = Array.isArray(latestJob.needs) ? latestJob.needs : [latestJob.needs];
+      if (!latestNeeds.includes("publish-downloads"))
+        errors.push(`${workflowName}: publish-latest must follow publish-downloads`);
+      if (latestJob.environment !== "downloads")
+        errors.push(`${workflowName}: publish-latest must run in the downloads environment`);
+      if (latestJob.permissions?.contents !== "read")
+        errors.push(`${workflowName}: publish-latest holds contents: read only`);
+    }
     const releaseNeeds = Array.isArray(releaseJob?.needs) ? releaseJob.needs : [releaseJob?.needs];
     if (!releaseNeeds.includes("build-binaries") || !releaseNeeds.includes("docker-manifest"))
       errors.push(`${workflowName}: release does not depend on attested artifacts`);
+    if (releaseNeeds.includes("publish-downloads") || releaseNeeds.includes("publish-latest"))
+      errors.push(`${workflowName}: create-release must not depend on the download host jobs`);
   }
   return errors;
 }

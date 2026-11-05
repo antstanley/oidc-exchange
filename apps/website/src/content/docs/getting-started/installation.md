@@ -9,7 +9,26 @@ description: Install oidc-exchange with a script, prebuilt binary, Docker, npm, 
 curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
-The installer verifies the downloaded binary's checksum and, when the GitHub CLI (`gh`) is available, requires GitHub build provenance from `antstanley/oidc-exchange` and `.github/workflows/release.yml`. Without `gh`, it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
+The installer downloads from `dl.oidc-exchange.iamstan.dev` (falling back to GitHub Releases) and verifies the checksum, then:
+
+1. if `cosign` is installed, the Sigstore signature, pinned to `antstanley/oidc-exchange` and the release workflow for that exact version;
+2. otherwise, if the GitHub CLI (`gh`) is installed, the GitHub build provenance;
+3. otherwise it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
+
+A failed signature or provenance check aborts the install.
+
+To verify a download yourself, without the installer:
+
+```bash
+BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.4.1
+curl -fsSLO "$BASE/oidc-exchange-linux-x64"
+curl -fsSLO "$BASE/oidc-exchange-linux-x64.sigstore.bundle"
+cosign verify-blob \
+  --bundle oidc-exchange-linux-x64.sigstore.bundle \
+  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.4.1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  oidc-exchange-linux-x64
+```
 
 To install a specific version:
 

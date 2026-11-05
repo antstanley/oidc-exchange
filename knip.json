@@ -15,6 +15,9 @@
       "entry": ["integrations/*"],
       "ignoreDependencies": ["@emnapi/core", "@emnapi/runtime"]
     },
+    "infra/downloads": {
+      "entry": ["bin/app.ts"]
+    },
     "bindings/nodejs": {},
     "bindings/lambda": {}
   }

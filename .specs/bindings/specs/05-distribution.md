@@ -1,6 +1,6 @@
 # Distribution
 
-**Status:** Implemented · **Date:** 2026-08-24 · **Owner:** Ant Stanley · **Scope:** install.sh, Dockerfile, .github/workflows
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** install.sh, Dockerfile, .github/workflows
 
 How every artifact is built, authenticated, and shipped.
 
@@ -8,7 +8,7 @@ How every artifact is built, authenticated, and shipped.
 
 | Artifact | Target | Channel | Provenance |
 |---|---|---|---|
-| Binary `oidc-exchange` | linux x64/arm64, windows x64, macOS arm64 | GitHub Releases (+ checksums) | GitHub/Sigstore build attestation |
+| Binary `oidc-exchange` | linux x64/arm64, windows x64, macOS arm64 | GitHub Releases and `dl.oidc-exchange.iamstan.dev` (+ checksums) | Sigstore keyless signature bundle per artifact and for `SHA256SUMS` (download host), plus the GitHub/Sigstore build attestation |
 | Docker image | `linux/amd64`, `linux/arm64` | ghcr.io and Docker Hub | GHCR build attestations for each platform digest and the final manifest digest |
 | `@oidc-exchange/node` + 4 platform packages (`@oidc-exchange/{linux-x64-gnu,linux-arm64-gnu,win32-x64-msvc,darwin-arm64}`) | 4 napi targets | npm (OIDC trusted publishing) | npm `--provenance` |
 | `oidc-exchange` wheels | 4 abi3 platforms | PyPI (OIDC trusted publishing) | PyPI attestations |
@@ -28,21 +28,22 @@ The Bash installer is fixed to repository `antstanley/oidc-exchange` and signer 
 `antstanley/oidc-exchange/.github/workflows/release.yml`. It maps the detected OS and architecture
 to a release asset. `--version` accepts only
 `^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$`; malformed or missing
-operands fail before a request or URL construction. After downloading the binary and SHA-256
-sidecar from GitHub Releases, it verifies the checksum. Verification is mandatory: if neither
-checksum utility is present the installer prints the missing dependency and exits non-zero
-**before** any download — there is no path through the script that installs an unverified
-binary. If `gh` is present, installation also requires:
-
-```bash
-gh attestation verify <downloaded-binary> \
-  --repo antstanley/oidc-exchange \
-  --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
-```
-
-A failed or timed-out provenance check stops installation. Without `gh`, the installer loudly says
-that checksum verification detects corruption only and does not authenticate the artifact. It
-installs to `/usr/local/bin` for root or `~/.local/bin` otherwise.
+operands fail before a request or URL construction. It resolves the version from
+`https://dl.oidc-exchange.iamstan.dev/latest.json` (or uses `--version`), downloads the artifact and
+its `.sha256` from `/releases/v<version>/`, and verifies in this order: (1) the checksum — mandatory:
+if neither checksum utility is present the installer exits non-zero **before** any download; (2) if
+`cosign` is on `PATH`, it downloads `<artifact>.sigstore.bundle` and runs `cosign verify-blob
+--bundle` with certificate identity
+`https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v<version>`
+(pinned to the version being installed) and issuer `https://token.actions.githubusercontent.com`;
+(3) otherwise, if `gh` is on `PATH`, `gh attestation verify <downloaded-binary> --repo
+antstanley/oidc-exchange --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml`;
+(4) otherwise it prints that checksum verification detects corruption only and does not
+authenticate the artifact. A signature or attestation failure (or timeout) aborts the install. If
+the download host is unreachable or returns a non-2xx status for the artifact, the installer falls
+back to GitHub Releases for the same version. Signature bundles are published only on the download
+host, so the fallback is authenticated through `gh` (step 3), not `cosign`. It installs to
+`/usr/local/bin` for root or `~/.local/bin` otherwise.
 
 ## Docker (`Dockerfile`)
 
@@ -78,11 +79,31 @@ Python builds four `cp311-abi3` wheels plus an sdist with the SHA-pinned maturin
 through PyPI Trusted Publishing. The binding uses `pyo3 0.29.2` with `extension-module` and
 `abi3-py311`; the obsolete pyo3 advisory exceptions have been removed.
 
+**Download host (`publish-downloads`).** Runs after `build-binaries` and `validate`. It downloads the
+binary artifacts, installs a pinned `cosign`, composes `SHA256SUMS` from the per-artifact `.sha256`
+files, and writes `<file>.sigstore.bundle` with `cosign sign-blob --bundle` for each artifact and
+for `SHA256SUMS`. Before uploading it verifies every bundle with `cosign verify-blob` against the
+signing identity (below) and fails on any mismatch. It then assumes the upload role through GitHub
+OIDC (`downloads` environment) and writes the version prefix with a conditional create
+(`If-None-Match: *`), so an existing version is never overwritten. A separate `publish-latest` job (needs `publish-downloads`, same environment and role) writes
+`latest.json` only after the version prefix is complete, so it can be re-run alone. It reads the
+current file with retries and fails closed unless the response is 200 or 404, skips pre-releases,
+and never moves `latest.json` backwards. Both jobs add `id-token: write` and hold `contents: read`. `create-release` depends on neither job, so a download-host outage
+cannot block the GitHub release. The host itself is specified in
+[06-download-host.md](06-download-host.md).
+
 ## Supply-chain gates
 
 - **Pinning and lockfiles.** Every action is a full commit SHA. Executed tools are locked or exact:
   pnpm 12.16.1, cargo-deny 0.20.2, pip-audit 2.10.1, maturin 1.16.0, and cross 0.2.5. CI/release installs are frozen; publish-path
   installs use `--ignore-scripts`. `minimumReleaseAge` is explicit in `pnpm-workspace.yaml`.
+- **Signing identity.** The Sigstore certificate subject is
+  `https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v<version>`
+  with issuer `https://token.actions.githubusercontent.com`. `cosign` is installed through a
+  SHA-pinned `sigstore/cosign-installer` with a literal exact stable `cosign-release`. Workflow
+  policy rejects an unpinned or ranged cosign release, any `id-token: write` on
+  `publish-downloads` beyond its allowlist entry, and a `create-release` that depends on
+  `publish-downloads`.
 - **Least privilege.** Permissions are per job. Checkout jobs explicitly retain only
   `contents: read`, disable persisted credentials when they do not push, and cannot inherit an
   omitted workflow-level write scope.

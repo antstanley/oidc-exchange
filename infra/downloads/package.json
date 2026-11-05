@@ -1,0 +1,32 @@
+{
+  "name": "downloads",
+  "version": "0.0.0",
+  "private": true,
+  "description": "CDK app for the dl.oidc-exchange.iamstan.dev download host (S3 + CloudFront)",
+  "type": "module",
+  "scripts": {
+    "synth": "cdk synth",
+    "cdk": "cdk",
+    "test": "vitest run",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint --deny-warnings",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.275.0",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "aws-cdk": "2.1147.0",
+    "oxfmt": "0.76.0",
+    "oxlint": "1.91.0",
+    "typescript": "7.1.0-beta",
+    "vitest": "5.1.0"
+  },
+  "engines": {
+    "node": ">= 22"
+  },
+  "packageManager": "pnpm@12.16.1"
+}
