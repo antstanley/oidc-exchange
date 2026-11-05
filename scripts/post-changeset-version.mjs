@@ -10,6 +10,8 @@
 //
 //   - Cargo.toml            [workspace.package] version   (+ Cargo.lock via cargo update)
 //   - bindings/python/pyproject.toml  [project] version   (+ uv.lock via uv lock)
+//   - config/signing-path-policy.json  the pinned oidc-exchange-adapters@<version> roots/paths
+//   - generated CHANGELOG.md files formatted with the packages' own oxfmt (CI format:check)
 //   - pnpm-lock.yaml (refreshed) mirrored into the two binding copies
 //   - apps/website/src/data/versions.json  (new { version, date } prepended)
 //
@@ -68,10 +70,17 @@ if (oldVersion !== newVersion) {
   console.log(`Projecting ${oldVersion} -> ${newVersion} onto Rust + Python:\n`)
   sub('Cargo.toml', `\nversion = "${oldVersion}"\n`, `\nversion = "${newVersion}"\n`)
   sub('bindings/python/pyproject.toml', `\nversion = "${oldVersion}"\n`, `\nversion = "${newVersion}"\n`)
+  // The signing-path policy pins the workspace crate version in its roots and paths.
+  sub('config/signing-path-policy.json', `oidc-exchange-adapters@${oldVersion}`, `oidc-exchange-adapters@${newVersion}`, 4)
   run('Cargo.lock', 'cargo', ['update', '--workspace'], repoRoot)
   run('bindings/python/uv.lock', 'uv', ['lock'], R('bindings/python'))
 } else {
   console.log(`Rust/Python already at ${newVersion}; skipping manifest projection.`)
+}
+
+// Changesets writes CHANGELOG.md unformatted; CI runs `format:check` in these packages.
+for (const dir of ['bindings/nodejs', 'bindings/lambda']) {
+  run(`${dir} changelog format`, 'pnpm', ['format'], R(dir))
 }
 
 // Refresh the root pnpm lockfile (npm package versions changed) and mirror it into
