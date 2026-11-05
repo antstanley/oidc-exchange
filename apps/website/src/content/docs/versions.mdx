@@ -1,0 +1,38 @@
+---
+title: Versions
+description: Every released version of oidc-exchange, with release notes.
+---
+
+import versions from "../../versions.json";
+
+Every tagged release of oidc-exchange, newest first. The `@oidc-exchange/*` npm packages, the Rust
+workspace and the Python package share one version number.
+
+<table>
+  <thead>
+    <tr>
+      <th>Version</th>
+      <th>Released</th>
+      <th>Release notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    {versions.map((v) => (
+      <tr>
+        <td>
+          <code>{v.version}</code>
+        </td>
+        <td>
+          <time datetime={v.date}>{v.date}</time>
+        </td>
+        <td>
+          <a href={`https://github.com/antstanley/oidc-exchange/releases/tag/v${v.version}`}>
+            v{v.version}
+          </a>
+        </td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+This list is updated automatically by the release process (`scripts/post-changeset-version.mjs`).
