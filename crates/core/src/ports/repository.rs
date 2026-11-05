@@ -123,6 +123,19 @@ pub trait SessionRepository: Send + Sync {
     /// of a user's families (the SR5 guarantee, family-set-wide). Idempotent.
     async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
 
+    /// List the live generation of each of `user_id`'s families whose
+    /// `expires_at` is after `now`, ordered by `created_at` descending, at most
+    /// `limit` entries. Retired generations are never returned, so a rotated
+    /// family appears once. Strongly consistent with the most recent write.
+    /// Adapters do not mint ids; core maps results to
+    /// [`crate::domain::SessionSummary`].
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<Session>>;
+
     /// Count live sessions whose `expires_at` is in the future.
     async fn count_active_sessions(&self) -> Result<u64>;
 

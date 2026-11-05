@@ -91,6 +91,9 @@ pub enum AuditEventType {
 pub enum ClientAddrSource {
     Peer,
     Forwarded,
+    /// Read from the configured `session.location.ip_header` on a request
+    /// whose peer is in `server.trusted_proxies`.
+    Reported,
     Asserted,
     Unknown,
 }
@@ -102,6 +105,10 @@ pub enum ClientAddr {
     Peer(IpAddr),
     /// Read from a forwarded header only after a trusted proxy was established.
     Forwarded(IpAddr),
+    /// Read from a configured header (`session.location.ip_header`) on a
+    /// request whose observed peer is in `server.trusted_proxies`. Wins over
+    /// `Forwarded` when both are available.
+    Reported(IpAddr),
     /// Client-authored, length-bounded, and never eligible for rate limiting.
     Asserted(AssertedClientAddr),
     /// No usable address was available.
@@ -144,6 +151,7 @@ impl ClientAddr {
         match self {
             Self::Peer(_) => ClientAddrSource::Peer,
             Self::Forwarded(_) => ClientAddrSource::Forwarded,
+            Self::Reported(_) => ClientAddrSource::Reported,
             Self::Asserted(_) => ClientAddrSource::Asserted,
             Self::Unknown => ClientAddrSource::Unknown,
         }
@@ -151,7 +159,9 @@ impl ClientAddr {
 
     pub fn audit_address(&self) -> Option<String> {
         match self {
-            Self::Peer(address) | Self::Forwarded(address) => Some(address.to_string()),
+            Self::Peer(address) | Self::Forwarded(address) | Self::Reported(address) => {
+                Some(address.to_string())
+            }
             Self::Asserted(value) => Some(value.as_str().to_owned()),
             Self::Unknown => None,
         }
@@ -160,7 +170,9 @@ impl ClientAddr {
     /// Returns an address that the server established and may safely use as a rate key.
     pub fn rate_limit_key(&self) -> Option<IpAddr> {
         match self {
-            Self::Peer(address) | Self::Forwarded(address) => Some(*address),
+            Self::Peer(address) | Self::Forwarded(address) | Self::Reported(address) => {
+                Some(*address)
+            }
             Self::Asserted(_) | Self::Unknown => None,
         }
     }

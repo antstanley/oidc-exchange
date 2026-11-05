@@ -86,6 +86,7 @@ async fn seed_live_session(repo: &MockRepository, raw_token: &str) -> String {
         device_id: None,
         user_agent: None,
         ip_address: None,
+        location: None,
         created_at: chrono::Utc::now(),
     };
     repo.store_refresh_token(&session)

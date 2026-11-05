@@ -1,5 +1,19 @@
 # Release notes
 
+## Unreleased
+
+- **List a user's sessions.** `GET /internal/users/{id}/sessions` returns the user's live
+  sessions (newest first, at most 50) as opaque `SessionSummary` entries.
+- **Session location.** Sessions carry an optional `location` (`city`, `region`, `country`)
+  supplied by the caller of the exchange flow and carried forward by rotation. The HTTP server
+  fills it from operator-named request headers under the new `[session.location]` section
+  (off by default; trusted-proxy gated). `ip_header` may also supply the client address,
+  recorded as `reported` (trusted-proxy peer, throttle-eligible) or `asserted`
+  (`trust_headers_from_any_peer`, never throttled). `ip_address_source` gains `reported`.
+- **Storage.** SQLite and PostgreSQL add a nullable `sessions.location` column via an idempotent
+  `ALTER TABLE`; DynamoDB, LMDB and Valkey store it inside the session record. Existing rows read
+  back with no location. `SessionRepository` gains `list_live_sessions`.
+
 ## 0.4.0
 
 0.4.0 closes the code-side divergences found by the post-0.3.0 conformance audit of the

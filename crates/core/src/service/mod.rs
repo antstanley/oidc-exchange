@@ -818,6 +818,14 @@ mod validate_access_token_tests {
         async fn revoke_all_user_sessions(&self, _: &str) -> Result<()> {
             unreachable!("validate_access_token must never revoke all sessions")
         }
+        async fn list_live_sessions(
+            &self,
+            _: &str,
+            _: chrono::DateTime<chrono::Utc>,
+            _: usize,
+        ) -> crate::error::Result<Vec<crate::domain::Session>> {
+            unreachable!("list_live_sessions is not exercised by this fixture")
+        }
         async fn count_active_sessions(&self) -> Result<u64> {
             unreachable!("validate_access_token must not count sessions")
         }

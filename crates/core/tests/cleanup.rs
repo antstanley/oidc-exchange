@@ -22,6 +22,7 @@ async fn cleanup_expired_sessions_removes_stale_entries() {
         device_id: None,
         user_agent: None,
         ip_address: None,
+        location: None,
         created_at: now - chrono::Duration::hours(25),
     };
     repo.store_refresh_token(&expired_session).await.unwrap();
@@ -38,6 +39,7 @@ async fn cleanup_expired_sessions_removes_stale_entries() {
         device_id: None,
         user_agent: None,
         ip_address: None,
+        location: None,
         created_at: now,
     };
     repo.store_refresh_token(&active_session).await.unwrap();
@@ -72,6 +74,7 @@ async fn cleanup_no_expired_sessions_returns_zero() {
         device_id: None,
         user_agent: None,
         ip_address: None,
+        location: None,
         created_at: now,
     };
     repo.store_refresh_token(&active_session).await.unwrap();

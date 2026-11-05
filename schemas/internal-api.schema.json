@@ -54,6 +54,39 @@
         "updated_at": { "type": "string", "format": "date-time" }
       }
     },
+    "SessionLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "city": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "region": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "country": { "type": "string", "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "SessionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "created_at", "expires_at"],
+      "description": "A user's live session (one per refresh-token family). Carries no refresh-token hash, device id, or family id.",
+      "properties": {
+        "id": { "type": "string", "pattern": "^ses_[A-Za-z0-9_-]{22}$", "description": "Opaque; stable per family across rotation." },
+        "provider": { "type": "string" },
+        "user_agent": { "type": ["string", "null"] },
+        "ip_address": { "type": ["string", "null"] },
+        "location": { "$ref": "#/$defs/SessionLocation" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "SessionList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions"],
+      "properties": {
+        "sessions": { "type": "array", "maxItems": 50, "items": { "$ref": "#/$defs/SessionSummary" } }
+      }
+    },
     "NewUser": {
       "type": "object",
       "required": ["external_id", "provider"],
@@ -208,6 +241,21 @@
         ],
         "responses": {
           "200": { "type": "null" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      }
+    },
+    "/internal/users/{id}/sessions": {
+      "get": {
+        "operationId": "listUserSessions",
+        "description": "List the user's live sessions, newest first, at most 50. 404 for an unknown or soft-deleted user.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/$defs/SessionList" },
           "404": { "$ref": "#/$defs/ErrorResponse" },
           "401": { "$ref": "#/$defs/ErrorResponse" },
           "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }

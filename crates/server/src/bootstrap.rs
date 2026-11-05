@@ -4130,6 +4130,7 @@ mod postgres_bootstrap_tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         };
         session_repo.store_refresh_token(&session).await.expect(

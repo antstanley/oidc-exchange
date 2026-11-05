@@ -122,6 +122,7 @@ async fn exchange_and_get_refresh_token(_repo: &MockRepository, svc: &AppService
         client_addr: oidc_exchange_core::domain::ClientAddr::Unknown,
         user_agent: None,
         device_id: None,
+        location: None,
     };
     let response = svc
         .exchange(request)
@@ -995,6 +996,14 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
         async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
             self.inner.revoke_all_user_sessions(user_id).await
         }
+        async fn list_live_sessions(
+            &self,
+            user_id: &str,
+            now: chrono::DateTime<chrono::Utc>,
+            limit: usize,
+        ) -> oidc_exchange_core::error::Result<Vec<oidc_exchange_core::domain::Session>> {
+            self.inner.list_live_sessions(user_id, now, limit).await
+        }
         async fn count_active_sessions(&self) -> Result<u64> {
             self.inner.count_active_sessions().await
         }
@@ -1181,6 +1190,7 @@ async fn legacy_row_first_redemption_mints_family_without_retirement_record() {
         device_id: None,
         user_agent: None,
         ip_address: None,
+        location: None,
         created_at: Utc::now(),
     };
     repo.store_refresh_token(&legacy)
@@ -1362,6 +1372,14 @@ async fn missing_user_is_refused_before_any_write() {
         }
         async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
             self.inner.revoke_all_user_sessions(user_id).await
+        }
+        async fn list_live_sessions(
+            &self,
+            user_id: &str,
+            now: chrono::DateTime<chrono::Utc>,
+            limit: usize,
+        ) -> oidc_exchange_core::error::Result<Vec<oidc_exchange_core::domain::Session>> {
+            self.inner.list_live_sessions(user_id, now, limit).await
         }
         async fn count_active_sessions(&self) -> Result<u64> {
             self.inner.count_active_sessions().await

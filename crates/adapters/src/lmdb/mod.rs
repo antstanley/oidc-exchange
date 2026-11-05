@@ -639,6 +639,52 @@ impl SessionRepository for LmdbSessionRepository {
         })?
     }
 
+    #[instrument(skip(self), fields(user_id))]
+    async fn list_live_sessions(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> oidc_exchange_core::error::Result<Vec<Session>> {
+        let env = self.env.clone();
+        let dbs = self.databases();
+        let user_id = user_id.to_owned();
+
+        tokio::task::spawn_blocking(move || {
+            let rtxn = env.read_txn().map_err(Dbs::store_err)?;
+            let prefix = format!("{user_id}:");
+            let mut live: Vec<Session> = Vec::new();
+            let iter = dbs
+                .user_sessions
+                .prefix_iter(&rtxn, &prefix)
+                .map_err(Dbs::store_err)?;
+            for result in iter {
+                let (key, _val) = result.map_err(Dbs::store_err)?;
+                let token_hash = key
+                    .strip_prefix(&prefix)
+                    .expect("prefix_iter keys carry the prefix");
+                // The index can outlive the sessions it names: skip members
+                // whose record is missing or expired.
+                let Some(bytes) = dbs
+                    .sessions
+                    .get(&rtxn, token_hash)
+                    .map_err(Dbs::store_err)?
+                else {
+                    continue;
+                };
+                let session: Session = serde_json::from_slice(bytes).map_err(Dbs::store_err)?;
+                if session.user_id == user_id && session.expires_at > now {
+                    live.push(session);
+                }
+            }
+            live.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+            live.truncate(limit);
+            Ok(live)
+        })
+        .await
+        .map_err(Dbs::store_err)?
+    }
+
     #[instrument(skip(self))]
     async fn count_active_sessions(&self) -> oidc_exchange_core::error::Result<u64> {
         let env = self.env.clone();
@@ -1010,6 +1056,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         }
     }
@@ -1429,6 +1476,7 @@ mod single_use_tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
         };
         repo.store_refresh_token(&legacy)
             .await
@@ -1512,6 +1560,7 @@ mod single_use_tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
         };
         repo.store_refresh_token(&legacy)
             .await
@@ -1626,6 +1675,35 @@ mod single_use_tests {
 
     /// `revoke_all_user_sessions` removes the user's live generations *and*
     /// their retained retirement records, leaving other users untouched.
+    #[tokio::test]
+    async fn listing_skips_index_members_whose_session_is_missing() {
+        let test = create_test_repo().await;
+        let repo = &test.repo;
+        let kept = family_chain("lmdb:list-stale", 0, "usr_list_stale");
+        let orphaned = family_chain("lmdb:list-stale", 1, "usr_list_stale");
+        repo.store_refresh_token(&kept.gen0).await.expect("store");
+        repo.store_refresh_token(&orphaned.gen0)
+            .await
+            .expect("store");
+
+        // Drop the session record but leave its `user_sessions` index member,
+        // as an index that outlived its session would be.
+        {
+            let mut wtxn = repo.env.write_txn().expect("write txn");
+            repo.sessions
+                .delete(&mut wtxn, orphaned.gen0.refresh_token_hash.expose())
+                .expect("delete session record");
+            wtxn.commit().expect("commit");
+        }
+
+        let listed = repo
+            .list_live_sessions("usr_list_stale", Utc::now(), 50)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1, "the orphaned index member is skipped");
+        assert_eq!(listed[0].family_id, kept.family_id);
+    }
+
     #[tokio::test]
     async fn revoke_all_user_sessions_sweeps_retired_records_of_that_user_only() {
         let test = create_test_repo().await;
@@ -1941,6 +2019,7 @@ mod leak_span_tests_2 {
             device_id: Some(DEVICE_SENTINEL.to_string()),
             user_agent: Some(USER_AGENT_SENTINEL.to_string()),
             ip_address: Some(IP_SENTINEL.to_string()),
+            location: None,
             created_at: now,
         }
     }

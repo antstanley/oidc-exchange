@@ -245,6 +245,7 @@ pub async fn token_handler(
                     client_addr: audit_ctx.client_addr.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
+                    location: audit_ctx.location.clone(),
                 })
                 .await?;
             Ok(Json(result))
@@ -263,6 +264,7 @@ pub async fn token_handler(
                     client_addr: audit_ctx.client_addr.clone(),
                     user_agent: audit_ctx.user_agent.clone(),
                     device_id: audit_ctx.device_id.clone(),
+                    location: audit_ctx.location.clone(),
                 })
                 .await?;
             Ok(Json(result))

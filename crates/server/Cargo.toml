@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-conformance = ["dep:percent-encoding"]
+conformance = []
 
 [dependencies]
 oidc-exchange-core.workspace = true
@@ -31,7 +31,7 @@ aws-sdk-kms = { version = "1", default-features = false, features = ["default-ht
 aws-sdk-sqs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 futures = "0.3"
 lambda_http = "1"
-percent-encoding = { version = "2", optional = true }
+percent-encoding = "2"
 ipnet.workspace = true
 
 [dev-dependencies]

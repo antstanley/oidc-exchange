@@ -219,6 +219,19 @@ pub fn session_to_item(session: &Session) -> HashMap<String, AttributeValue> {
             AttributeValue::S(ip_address.clone()),
         );
     }
+    if let Some(ref location) = session.location {
+        let mut map = HashMap::new();
+        for (key, part) in [
+            ("city", &location.city),
+            ("region", &location.region),
+            ("country", &location.country),
+        ] {
+            if let Some(value) = part {
+                map.insert(key.to_string(), AttributeValue::S(value.clone()));
+            }
+        }
+        item.insert("location".to_string(), AttributeValue::M(map));
+    }
 
     // TTL for DynamoDB automatic expiration (epoch seconds)
     item.insert(
@@ -254,6 +267,19 @@ pub fn item_to_session(item: &HashMap<String, AttributeValue>) -> Result<Session
         device_id: get_s_opt(item, "device_id"),
         user_agent: get_s_opt(item, "user_agent"),
         ip_address: get_s_opt(item, "ip_address"),
+        location: match item.get("location") {
+            Some(value) => {
+                let map = value.as_m().map_err(|_| Error::StoreError {
+                    detail: "session item attribute location is not a map".to_string(),
+                })?;
+                Some(oidc_exchange_core::domain::SessionLocation {
+                    city: get_s_opt(map, "city"),
+                    region: get_s_opt(map, "region"),
+                    country: get_s_opt(map, "country"),
+                })
+            }
+            None => None,
+        },
         created_at: parse_datetime(&get_s(item, "created_at")?)?,
     })
 }
@@ -650,6 +676,7 @@ mod tests {
             device_id: Some("device_1".to_string()),
             user_agent: Some("Mozilla/5.0".to_string()),
             ip_address: Some("127.0.0.1".to_string()),
+            location: None,
             created_at: now,
         }
     }
@@ -857,6 +884,7 @@ mod tests {
             device_id: None,
             user_agent: None,
             ip_address: None,
+            location: None,
             created_at: now,
         };
 

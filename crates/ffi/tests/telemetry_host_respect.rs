@@ -77,6 +77,7 @@ fn host_subscriber_survives_construction_and_captures_the_boundary_warning() {
             headers: vec![("invalid header name".to_string(), "value".to_string())],
             body: Vec::new(),
             hints: TransportHints { path_is_raw: true },
+            location: None,
         })
         .expect("the request with a dropped header is still answered");
     assert_eq!(

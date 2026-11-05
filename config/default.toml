@@ -10,6 +10,17 @@ trusted_proxy_hops = 1
 [registration]
 mode = "open"
 
+# Opt-in session location. Name the request headers a trusted proxy sets; an empty
+# name disables that field. Headers are honoured only from `server.trusted_proxies`
+# peers unless `trust_headers_from_any_peer = true`, which asserts the origin is
+# reachable only through the proxy that sets them.
+[session.location]
+city_header = ""
+region_header = ""
+country_header = ""
+ip_header = ""
+trust_headers_from_any_peer = false
+
 [token]
 access_token_ttl = "15m"
 refresh_token_ttl = "30d"
