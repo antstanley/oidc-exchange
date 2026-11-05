@@ -28,17 +28,6 @@
   },
   "exceptions": [
     {
-      "ecosystem": "cargo",
-      "advisory": "RUSTSEC-2023-0071",
-      "package": "rsa",
-      "version": "0.10.0-rc.18",
-      "range": "=0.10.0-rc.18",
-      "rationale": "Shipped KMS code parses and verifies public keys only; every RSA private-key construction is cfg(test). This exact prerelease is separately governed by signing-path policy in task 06.",
-      "owner": "Ant Stanley",
-      "expires": "2026-09-30",
-      "review_date": "2026-09-15"
-    },
-    {
       "ecosystem": "pnpm", "advisory": "GHSA-52cp-r559-cp3m", "package": "js-yaml", "version": "4.1.1", "range": "=4.1.1",
       "rationale": "Transitive build tooling input; no untrusted YAML is parsed in a shipped runtime. Frozen baseline recorded without silently updating dependencies.", "owner": "Ant Stanley", "expires": "2026-09-15", "review_date": "2026-09-08"
     },
