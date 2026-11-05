@@ -36,8 +36,12 @@ jobs:
         uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 12.16.1
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-binstall@1.26.2
       - name: Install cross
-        run: cargo install cross --version 0.2.5 --locked
+        run: cargo binstall --no-confirm --strategies crate-meta-data cross@0.2.5
       - name: Install dependencies
         working-directory: bindings/nodejs
         run: pnpm install --frozen-lockfile
