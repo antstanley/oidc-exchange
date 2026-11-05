@@ -1,6 +1,6 @@
 # Change: List a user's sessions and record caller-supplied session location
 
-**Status:** Accepted · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Target:** service (crates/core, crates/adapters, crates/server, crates/ffi, bindings), schemas
+**Status:** Merged · **Date:** 2026-11-05 · **Merged:** 2026-11-05 · **Owner:** Ant Stanley · **Target:** service (crates/core, crates/adapters, crates/server, crates/ffi, bindings), schemas
 
 Add `GET /internal/users/{id}/sessions`, which lists a user's live sessions (one per refresh-token
 family, newest first, capped at 50) with an opaque stable id and an optional `location`. Add a
@@ -10,7 +10,7 @@ is one such caller; it fills the value from operator-named request headers under
 (off by default, trust-gated), and may also take the client address from a named header, recorded as
 `Reported` (trusted-proxy peer) or `Asserted` (escape hatch) provenance. No cloud-provider name appears
 in code. Resolves GitHub issue #53. Merge order relative to
-[`2026-08-25-close_r2_audit_code_divergences.md`](2026-08-25-close_r2_audit_code_divergences.md) is
+[`2026-08-25-close_r2_audit_code_divergences.md`](../2026-08-25-close_r2_audit_code_divergences.md) is
 settled in the Merge plan.
 
 ---
@@ -36,13 +36,13 @@ not a stable, listable CIDR.
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md) | Add `SessionLocation` and `SessionSummary`; `Session` gains `location`; `ExchangeRequest` gains `location`; `ClientAddr` gains `Reported`; Session lifecycle notes location survives rotation |
-| [`.specs/service/specs/02-ports-and-adapters.md`](../service/specs/02-ports-and-adapters.md) | `SessionRepository` gains `list_live_sessions`; conformance suite gains listing and location cases |
-| [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md) | Exchange stores location; refresh copies it; new `admin_list_user_sessions` flow |
-| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md) | New internal route; audit-context middleware step reads the location and address headers; the per-IP throttle paragraph admits `Reported` as a key |
-| [`.specs/service/specs/06-configuration.md`](../service/specs/06-configuration.md) | New `[session.location]` section and validation rules; Committed default block and Defaults summary rows |
-| [`.specs/service/specs/08-persistence.md`](../service/specs/08-persistence.md) | `location` column/attribute per adapter and idempotent migration |
-| [`.specs/service/specs/canonical-types.schema.json`](../service/specs/canonical-types.schema.json) | `SessionLocation`, `SessionSummary`; `Session.location`; `ExchangeRequest.location`; `ClientAddrSource` gains `reported` |
+| [`.specs/service/specs/01-domain-model.md`](../../service/specs/01-domain-model.md) | Add `SessionLocation` and `SessionSummary`; `Session` gains `location`; `ExchangeRequest` gains `location`; `ClientAddr` gains `Reported`; Session lifecycle notes location survives rotation |
+| [`.specs/service/specs/02-ports-and-adapters.md`](../../service/specs/02-ports-and-adapters.md) | `SessionRepository` gains `list_live_sessions`; conformance suite gains listing and location cases |
+| [`.specs/service/specs/03-service-flows.md`](../../service/specs/03-service-flows.md) | Exchange stores location; refresh copies it; new `admin_list_user_sessions` flow |
+| [`.specs/service/specs/04-http-api.md`](../../service/specs/04-http-api.md) | New internal route; audit-context middleware step reads the location and address headers; the per-IP throttle paragraph admits `Reported` as a key |
+| [`.specs/service/specs/06-configuration.md`](../../service/specs/06-configuration.md) | New `[session.location]` section and validation rules; Committed default block and Defaults summary rows |
+| [`.specs/service/specs/08-persistence.md`](../../service/specs/08-persistence.md) | `location` column/attribute per adapter and idempotent migration |
+| [`.specs/service/specs/canonical-types.schema.json`](../../service/specs/canonical-types.schema.json) | `SessionLocation`, `SessionSummary`; `Session.location`; `ExchangeRequest.location`; `ClientAddrSource` gains `reported` |
 | `schemas/datamodel.schema.json` | Code-side artifact: `sessions` gains nullable `location`; `ip_address_source` enum gains `reported` |
 | `config/default.toml` | Commented `[session.location]` block, all header names empty |
 
@@ -284,6 +284,12 @@ not a stable, listable CIDR.
    Merge the R2 change first. Before merging this one, re-resolve its `ExchangeRequest`, `ClientAddr`,
    and throttle Modify blocks against the merged text (the R2 change replaces `ip_address` with
    `client_addr` and adds `ClientAddr`/`provider_access_token` to the schema).
+   *Merged ahead of R2:* this change was merged before R2, deliberately, against the canonical text
+   as it then stood (`ExchangeRequest.ip_address: Option<String>`, `ClientAddr` with `Peer`,
+   `Forwarded`, `Asserted`, `Unknown`, and the unchanged throttle paragraph). The `ExchangeRequest`
+   sketch and schema entry, the `ClientAddr` prose, and the `04` throttle paragraph now already
+   carry `location` and `Reported`, so R2 must re-resolve its `ExchangeRequest`, `ClientAddr`, and
+   throttle blocks against this merged text rather than the pre-merge shapes.
 1. Apply each `Proposed changes` block to its canonical page; bump each page's `**Date:**`.
 2. Fold the `Type changes` `$defs` into `canonical-types.schema.json`; update
    `schemas/datamodel.schema.json` in the code change.

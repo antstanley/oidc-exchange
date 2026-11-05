@@ -1,6 +1,6 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-08-23 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
@@ -44,6 +44,7 @@ async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolut
 async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool>;
 async fn revoke_family(&self, family_id: &str) -> Result<u64>;
 async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
+async fn list_live_sessions(&self, user_id: &str, now: DateTime<Utc>, limit: usize) -> Result<Vec<Session>>;
 async fn count_active_sessions(&self) -> Result<u64>;
 async fn cleanup_expired_sessions(&self) -> Result<u64>;  // returns rows deleted
 async fn put_single_use(&self, key: &str, expires_at: DateTime<Utc>) -> Result<bool>;
@@ -80,6 +81,12 @@ either meets them or it does not ship.
 | **SR4** | **Retirement durability.** By the time a rotation is observable, the retirement record it wrote is readable. A rotation whose replacement is visible before its retirement record leaves a window in which reuse reads as `Unknown`. |
 | **SR5** | **Revocation completeness.** `revoke_family` removes the family's live generation and every retained retirement record, and returns the count removed, or it errors. `revoke_all_user_sessions` gives the same removal guarantee across all of a user's families (its `Result<()>` signature is unchanged). Neither reports success for work it did not do. |
 
+`list_live_sessions` returns the live generation of each of the user's families whose `expires_at`
+is after `now`, ordered by `created_at` descending, at most `limit` entries. Retired generations are
+never returned, so a rotated family appears once. The result is strongly consistent with the most
+recent write. Adapters do not mint ids; core maps results to `SessionSummary` (see
+[01-domain-model.md](01-domain-model.md) → SessionLocation and SessionSummary).
+
 `store_refresh_token` writes the generation-0 row of a new family. `get_session_by_refresh_token`
 remains for `/revoke`, which needs only liveness.
 
@@ -109,7 +116,12 @@ suite covers, at minimum:
 - `revoke_family` removes the live generation and every retirement record, and its count
   matches (SR5);
 - `resolve_refresh_token` immediately after `revoke_session` returns `Unknown` (SR1);
-- the replacement's `expires_at` equals the retired generation's.
+- the replacement's `expires_at` equals the retired generation's;
+- `list_live_sessions`: a rotated family lists once with its live generation; expired families are
+  omitted; ordering is newest first and the limit is honoured;
+- `location` round-trips and survives rotation, and a row written without `location` lists with
+  `None`;
+- on LMDB and Valkey, an index member whose session is missing or expired is skipped.
 
 Adapters needing a live backend keep their existing `#[ignore]` gating and environment-variable
 URLs; the suite runs against them in the integration job, and against SQLite, LMDB and
