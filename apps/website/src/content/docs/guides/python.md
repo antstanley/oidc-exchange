@@ -15,7 +15,7 @@ Or with pip:
 pip install oidc-exchange
 ```
 
-Use **Python 3.10 or later**. Prebuilt wheels are included for Linux (x64, ARM64), macOS (ARM64), and Windows (x64).
+Use **Python 3.11 or later**. Prebuilt wheels are included for Linux (x64, ARM64), macOS (ARM64), and Windows (x64).
 
 ## Basic usage
 

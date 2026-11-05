@@ -14,7 +14,7 @@ The service is embedded in-process as a native extension (built with [PyO3](http
 pip install oidc-exchange
 ```
 
-Ships as an `abi3` wheel — one wheel per platform works on **Python 3.10+**: `manylinux_2_28` x86_64/aarch64, `win_amd64`, and `macosx_11_0_arm64`. An sdist is published alongside for other platforms (needs a Rust toolchain to build).
+Ships as an `abi3` wheel — one wheel per platform works on **Python 3.11+**: `manylinux_2_28` x86_64/aarch64, `win_amd64`, and `macosx_11_0_arm64`. An sdist is published alongside for other platforms (needs a Rust toolchain to build).
 
 ## Usage
 

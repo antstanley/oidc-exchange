@@ -164,7 +164,7 @@ internal admin service, or both. See [service/specs/04-http-api.md](service/spec
 | Error modelling | thiserror, domain `Error` enum |
 | IDs | ULID, prefixed (`usr_…`) |
 | Node bindings | napi-rs |
-| Python bindings | PyO3 + maturin (abi3, Python 3.10+) |
+| Python bindings | PyO3 + maturin (abi3, Python 3.11+) |
 | Admin UI | SvelteKit + adapter-node + Tailwind 4 + LayerChart |
 | Docs site | Astro + Starlight |
 | Test runner (Rust) | cargo-nextest |
