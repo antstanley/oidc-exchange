@@ -60,6 +60,6 @@ test("policy requires exact non-wildcard exception versions and complete ownersh
 
 test("committed policy has exact scanners and bounded current exceptions", () => {
   validatePolicy(POLICY);
-  assert.deepEqual(Object.fromEntries(Object.entries(POLICY.ecosystems).map(([name, graph]) => [name, graph.scanner.version])), { cargo: "0.19.0", pnpm: "11.9.0", python: "2.9.0" });
+  assert.deepEqual(Object.fromEntries(Object.entries(POLICY.ecosystems).map(([name, graph]) => [name, graph.scanner.version])), { cargo: "0.20.2", pnpm: "12.16.1", python: "2.10.1" });
   assert.equal(POLICY.exceptions.length, 0);
 });

@@ -9,7 +9,7 @@ import test from "node:test";
 import YAML from "yaml";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const PNPM_VERSION = "11.9.0";
+const PNPM_VERSION = "12.16.1";
 const PACKAGE_MANAGER = `pnpm@${PNPM_VERSION}`;
 const WORKFLOWS = ["ci.yml", "release.yml", "nodejs-addon-glibc.yml"];
 

@@ -251,7 +251,7 @@ You can deploy with AWS Serverless Application Model (SAM), AWS Cloud Developmen
 
 `@oidc-exchange/lambda` supports two deployment formats:
 
-- **Managed runtime:** Deploy a zip bundle that includes the native addon from `@oidc-exchange/node`. The `nodejs22.x` runtime uses Amazon Linux 2023 with GNU C Library (glibc) 2.34.
+- **Managed runtime:** Deploy a zip bundle that includes the native addon from `@oidc-exchange/node`. The `nodejs24.x` runtime uses Amazon Linux 2023 with GNU C Library (glibc) 2.34.
 - **Container image:** Package the function with the AWS Lambda Runtime Interface Client (RIC). Use an image such as `public.ecr.aws/lambda/nodejs:22` to reproduce the runtime locally or choose a specific base image.
 
 The published `@oidc-exchange/linux-{x64,arm64}-gnu` addons require glibc 2.17 or later. Amazon Linux 2023 meets this requirement. The operating system provides glibc, so changing the Node.js version does not change the available glibc version.

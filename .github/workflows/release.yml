@@ -16,16 +16,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: 24.18.0
+          node-version: 26.13.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: "3.10"
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
       - name: Provision pinned scanners
         run: |
-          cargo install cargo-deny --version 0.19.0 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
           python -m pip install --require-hashes --only-binary=:all: -r config/pip-audit-requirements.txt
-          corepack pnpm@11.9.0 --version
+          corepack pnpm@12.16.1 --version
       - name: Enforce frozen Cargo, pnpm, and Python graphs
         run: node scripts/run-advisory-scans.mjs
       - name: Enforce signing and verification paths
@@ -346,23 +346,23 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: 24.18.0
-      - name: Activate pnpm 11.9.0
+          node-version: 26.13.0
+      - name: Activate pnpm 12.16.1
         run: |
           # Enable the corepack shims so tools that spawn a bare `pnpm` resolve
-          # through the repo's packageManager pin (pnpm@11.9.0); the explicit
+          # through the repo's packageManager pin (pnpm@12.16.1); the explicit
           # pinned invocation below proves the exact version is provisioned.
           corepack enable
-          corepack pnpm@11.9.0 --version
+          corepack pnpm@12.16.1 --version
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --version 0.2.5 --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 install --frozen-lockfile
+        run: corepack pnpm@12.16.1 install --frozen-lockfile
       - name: Build
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
+        run: corepack pnpm@12.16.1 exec napi build --release --platform --target ${{ matrix.target }} ${{ matrix.use_cross && '--use-cross' || '' }}
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
@@ -388,14 +388,14 @@ jobs:
       - &a2
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: 24.18.0
+          node-version: 26.13.0
           registry-url: https://registry.npmjs.org
-      - name: Activate pnpm 11.9.0
+      - name: Activate pnpm 12.16.1
         run: |
           # Enable the corepack shims so package scripts that spawn a bare
-          # `pnpm` resolve through the repo's packageManager pin (pnpm@11.9.0).
+          # `pnpm` resolve through the repo's packageManager pin (pnpm@12.16.1).
           corepack enable
-          corepack pnpm@11.9.0 --version
+          corepack pnpm@12.16.1 --version
       - name: Download validated npm package tree
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -435,9 +435,9 @@ jobs:
           if npm view "@oidc-exchange/lambda@${ver}" version >/dev/null 2>&1; then
             echo "@oidc-exchange/lambda@${ver} already published; skipping"
           else
-            corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
-            corepack pnpm@11.9.0 run build
-            corepack pnpm@11.9.0 pack --pack-destination "${RUNNER_TEMP}"
+            corepack pnpm@12.16.1 install --frozen-lockfile --ignore-scripts
+            corepack pnpm@12.16.1 run build
+            corepack pnpm@12.16.1 pack --pack-destination "${RUNNER_TEMP}"
             npm stage publish --provenance --access public --ignore-scripts \
               "${RUNNER_TEMP}/oidc-exchange-lambda-${ver}.tgz"
           fi
@@ -609,19 +609,19 @@ jobs:
     steps:
       - *a1
       - *a2
-      - name: Activate pnpm 11.9.0
+      - name: Activate pnpm 12.16.1
         run: |
           # Enable the corepack shims: publint packs via a bare `pnpm pack`
           # child process, which resolves through the repo's packageManager pin
-          # (pnpm@11.9.0) only when the shims are on PATH.
+          # (pnpm@12.16.1) only when the shims are on PATH.
           corepack enable
-          corepack pnpm@11.9.0 --version
+          corepack pnpm@12.16.1 --version
       - name: Install locked package tooling
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
+        run: corepack pnpm@12.16.1 install --frozen-lockfile --ignore-scripts
       - name: Sync platform package versions to the release version
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec napi version
+        run: corepack pnpm@12.16.1 exec napi version
       - name: Download Node.js artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -630,7 +630,7 @@ jobs:
           merge-multiple: true
       - name: Distribute binaries into platform packages
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec napi artifacts
+        run: corepack pnpm@12.16.1 exec napi artifacts
       - name: Verify every platform binary is present
         working-directory: bindings/nodejs
         run: |
@@ -651,10 +651,10 @@ jobs:
           fi
       - name: Validate package metadata (publint)
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec publint
+        run: corepack pnpm@12.16.1 exec publint
       - name: Validate type definitions (arethetypeswrong)
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec attw --pack --profile esm-only
+        run: corepack pnpm@12.16.1 exec attw --pack --profile esm-only
       - name: Upload validated npm package tree
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

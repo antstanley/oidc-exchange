@@ -31,22 +31,22 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
-          node-version: 24.18.0
-      - name: Activate pnpm 11.9.0
+          node-version: 26.13.0
+      - name: Activate pnpm 12.16.1
         run: |
           # Enable the corepack shims so tools that spawn a bare `pnpm` resolve
-          # through the repo's packageManager pin (pnpm@11.9.0); the explicit
+          # through the repo's packageManager pin (pnpm@12.16.1); the explicit
           # pinned invocation below proves the exact version is provisioned.
           corepack enable
-          corepack pnpm@11.9.0 --version
+          corepack pnpm@12.16.1 --version
       - name: Install cross
         run: cargo install cross --version 0.2.5 --locked
       - name: Install dependencies
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 install --frozen-lockfile
+        run: corepack pnpm@12.16.1 install --frozen-lockfile
       - name: Build addon via cross
         working-directory: bindings/nodejs
-        run: corepack pnpm@11.9.0 exec napi build --release --platform --target ${{ matrix.target }} --use-cross
+        run: corepack pnpm@12.16.1 exec napi build --release --platform --target ${{ matrix.target }} --use-cross
       - name: Assert glibc floor <= 2.34
         working-directory: bindings/nodejs
         run: |

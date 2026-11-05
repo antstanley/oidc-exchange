@@ -9,21 +9,21 @@
       "severity_threshold": "high",
       "unmaintained": "warn",
       "yanked": "warn",
-      "scanner": { "name": "cargo-deny", "version": "0.19.0" }
+      "scanner": { "name": "cargo-deny", "version": "0.20.2" }
     },
     "pnpm": {
       "lockfile": "pnpm-lock.yaml",
       "severity_threshold": "high",
       "unmaintained": "warn",
       "yanked": "warn",
-      "scanner": { "name": "pnpm", "version": "11.9.0" }
+      "scanner": { "name": "pnpm", "version": "12.16.1" }
     },
     "python": {
       "lockfile": "bindings/python/uv.lock",
       "severity_threshold": "high",
       "unmaintained": "warn",
       "yanked": "warn",
-      "scanner": { "name": "pip-audit", "version": "2.9.0" }
+      "scanner": { "name": "pip-audit", "version": "2.10.1" }
     }
   },
   "exceptions": []
