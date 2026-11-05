@@ -71,7 +71,7 @@ CLI through the pinned pnpm (provisioned by `pnpm/action-setup`) — the tool co
 dynamic runners (dlx/npx/@latest) are policy-rejected. A separate read-only `validate-npm-package` job runs locked `publint` and
 `@arethetypeswrong/cli`, distributes artifacts, and proves all four platform binaries exist before
 uploading a validated package tree. Only then does `publish-npm` receive OIDC identity and stage
-platform, root Node, and Lambda packages with provenance and ignored lifecycle scripts. Lambda uses
+platform, root Node, and Lambda packages with provenance and ignored lifecycle scripts. The npm dist-tag is derived from the tag (`1.2.3` → `latest`, `1.2.3-rc.1` → `rc`), so a staged pre-release never becomes the default install. Lambda uses
 its own committed lockfile and a frozen, `--ignore-scripts` install. No publishing job resolves
 `@latest`, runs `npx --yes`, or bypasses a lockfile.
 
