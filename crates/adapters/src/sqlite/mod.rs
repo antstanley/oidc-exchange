@@ -1963,6 +1963,24 @@ mod tests {
         .await;
     }
 
+    /// A pre-rotation row (NULL `family_id`) counts as one session in the bulk
+    /// revocation count.
+    #[tokio::test]
+    async fn revoke_all_counts_legacy_row_as_one_session() {
+        let repo = create_test_repo().await;
+        let hash = oidc_exchange_test_utils::session_contract::fixture_hash("sqlite-legacy:count");
+        seed_legacy_session(&repo, &hash, "usr_legacy").await;
+
+        assert_eq!(
+            repo.revoke_all_user_sessions("usr_legacy").await.unwrap(),
+            1
+        );
+        assert_eq!(
+            repo.revoke_all_user_sessions("usr_legacy").await.unwrap(),
+            0
+        );
+    }
+
     /// A legacy row's first redemption swaps atomically but writes no
     /// retirement record — there is no prior generation to detect reuse
     /// against — and the presented hash reads Unknown afterwards. The

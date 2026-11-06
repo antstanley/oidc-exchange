@@ -2102,10 +2102,15 @@ impl SessionRepository for DynamoRepository {
                 !delete_keys.is_empty(),
                 "non-empty roster must name at least one deletable entry"
             );
-            // Sessions removed: one per family (each has exactly one live
-            // generation), plus each live hash no family claims (a pre-rotation
-            // row). Hashes deleted and retirement records are not counted.
-            let sessions_removed = roster.families.len() as u64
+            // Sessions removed: one per family that still has a live generation
+            // (a live-less family, `live` empty, kept only retirement records),
+            // plus each live hash no family claims (a pre-rotation row). Hashes
+            // deleted and retirement records are not counted.
+            let sessions_removed = roster
+                .families
+                .values()
+                .filter(|family| !family.live.is_empty())
+                .count() as u64
                 + roster
                     .sessions
                     .iter()

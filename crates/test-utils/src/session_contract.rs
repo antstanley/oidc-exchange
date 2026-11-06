@@ -994,9 +994,8 @@ pub async fn assert_bulk_revocation_returns_session_count<S: SessionRepository +
     let plain = listing_family(tag, "count-plain", &user, base, 1_000, 86_400);
     let rotating = listing_family(tag, "count-rotating", &user, base, 2_000, 86_400);
     let foreign = listing_family(tag, "count-foreign", &other_user, base, 500, 86_400);
-    let mut legacy = listing_family(tag, "count-legacy", &user, base, 4_000, 86_400);
-    legacy.family_id = String::new();
-    for session in [&plain, &rotating, &foreign, &legacy] {
+    let orphaned = listing_family(tag, "count-orphaned", &user, base, 4_000, 86_400);
+    for session in [&plain, &rotating, &foreign, &orphaned] {
         repo.store_refresh_token(session).await.expect("store");
     }
 
@@ -1021,10 +1020,31 @@ pub async fn assert_bulk_revocation_returns_session_count<S: SessionRepository +
         presented = next.refresh_token_hash.expose().clone();
     }
 
+    // One rotation, then revoke the live generation alone: the family keeps a
+    // retirement record but has no live generation, so it is not a session.
+    let orphan_next = generation_session(
+        &user,
+        &orphaned.family_id,
+        1,
+        fixture_hash(&format!("{tag}:count-orphaned:gen1")),
+        orphaned.expires_at,
+        orphaned.created_at,
+        Some(base),
+    );
+    assert!(
+        repo.rotate_refresh_token(orphaned.refresh_token_hash.expose(), &orphan_next)
+            .await
+            .expect("rotate orphaned"),
+        "rotation must win"
+    );
+    repo.revoke_session(&orphan_next.refresh_token_hash)
+        .await
+        .expect("revoke live generation");
+
     let removed = repo.revoke_all_user_sessions(&user).await.expect("revoke");
     assert_eq!(
-        removed, 3,
-        "plain + rotated (once) + pre-rotation row; retirement records and other users' \
+        removed, 2,
+        "plain + rotated (once); a live-less family, retirement records and other users' \
          families are not counted"
     );
     assert_eq!(

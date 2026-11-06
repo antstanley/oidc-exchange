@@ -128,7 +128,7 @@ suite covers, at minimum:
   omitted; ordering is newest first and the limit is honoured;
 - `revoke_all_user_sessions` returns the number of live families removed and not the number of
   records; a repeated call returns `0`; it counts only the named user's families; a rotated family
-  counts once; a pre-rotation row with no `family_id` counts as one session;
+  counts once; a family whose live generation was already revoked (retirement records only) counts zero; the pre-rotation row with no `family_id` (one session) is covered by adapter-local tests, since DynamoDB refuses to store a row without a family id;
 - `location` round-trips and survives rotation, and a row written without `location` lists with
   `None`;
 - on LMDB and Valkey, an index member whose session is missing or expired is skipped.
