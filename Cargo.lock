@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2435,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-adapters"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2493,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-ffi"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "axum",
  "ed25519-dalek",
@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-nodejs"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-providers"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-python"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "oidc-exchange-ffi",
  "pyo3",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "oidc-exchange-test-utils"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",

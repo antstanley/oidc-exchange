@@ -1,5 +1,12 @@
 # @oidc-exchange/lambda
 
+## 0.5.1
+
+### Patch Changes
+
+- Updated dependencies [[`fc6dcbb`](https://github.com/antstanley/oidc-exchange/commit/fc6dcbb2387549967fdf073329a85dbd7323f491)]:
+  - @oidc-exchange/node@0.5.1
+
 ## 0.5.0
 
 ### Patch Changes
