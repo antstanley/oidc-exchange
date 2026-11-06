@@ -11,22 +11,34 @@ A Rust service that validates ID tokens from third-party OIDC providers and exch
 
 **Verified install script** (Linux/macOS):
 
-For an authenticated binary install, install the [GitHub CLI](https://cli.github.com/) first. The installer requires the downloaded binary to have GitHub build provenance from repository `antstanley/oidc-exchange` and signer workflow `antstanley/oidc-exchange/.github/workflows/release.yml`:
+The installer downloads from the project download host, `dl.oidc-exchange.iamstan.dev` (falling back to GitHub Releases), and verifies the SHA-256 checksum. For an authenticated install, have [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) installed (Sigstore signature, checked against the release workflow for that exact version) or the [GitHub CLI](https://cli.github.com/) (build provenance):
 
 ```bash
-command -v gh
 curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
 ```
 
-To verify a manually downloaded binary, run:
+To verify a manually downloaded binary with cosign:
 
 ```bash
-gh attestation verify ./oidc-exchange-linux-x64 \
-  --repo antstanley/oidc-exchange \
+BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.5.1
+curl -fsSLO "$BASE/oidc-exchange-linux-x64"
+curl -fsSLO "$BASE/oidc-exchange-linux-x64.sigstore.bundle"
+cosign verify-blob \\
+  --bundle oidc-exchange-linux-x64.sigstore.bundle \\
+  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.5.1 \\
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+  oidc-exchange-linux-x64
+```
+
+Or with the GitHub CLI:
+
+```bash
+gh attestation verify ./oidc-exchange-linux-x64 \\
+  --repo antstanley/oidc-exchange \\
   --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml
 ```
 
-Without `gh`, the installer loudly falls back to checksum-only corruption detection; that does not authenticate the release.
+Without `cosign` or `gh`, the installer loudly falls back to checksum-only corruption detection; that does not authenticate the release.
 
 **Docker:**
 
