@@ -5,12 +5,12 @@
     {
       "name": "workspace-all-targets",
       "metadata_args": ["--locked", "--format-version", "1", "--all-features"],
-      "roots": ["oidc-exchange-adapters@0.5.1"]
+      "roots": ["oidc-exchange-adapters@0.6.0"]
     },
     {
       "name": "linux-release-target",
       "metadata_args": ["--locked", "--format-version", "1", "--all-features", "--filter-platform", "x86_64-unknown-linux-gnu"],
-      "roots": ["oidc-exchange-adapters@0.5.1"]
+      "roots": ["oidc-exchange-adapters@0.6.0"]
     }
   ],
   "protected_packages": [
@@ -30,7 +30,7 @@
       "mode": "workspace-all-targets",
       "package": "rsa",
       "version": "0.10.0-rc.20",
-      "path": ["oidc-exchange-adapters@0.5.1", "rsa@0.10.0-rc.20"],
+      "path": ["oidc-exchange-adapters@0.6.0", "rsa@0.10.0-rc.20"],
       "rationale": "Existing direct KMS public-key parse and verification dependency; private-key operations remain test-only. Detection lands without a broad cryptography upgrade.",
       "owner": "Ant Stanley",
       "expires": "2027-01-15",
@@ -40,7 +40,7 @@
       "mode": "linux-release-target",
       "package": "rsa",
       "version": "0.10.0-rc.20",
-      "path": ["oidc-exchange-adapters@0.5.1", "rsa@0.10.0-rc.20"],
+      "path": ["oidc-exchange-adapters@0.6.0", "rsa@0.10.0-rc.20"],
       "rationale": "Existing direct KMS verification dependency on the release target; no broad cryptography upgrade is performed.",
       "owner": "Ant Stanley",
       "expires": "2027-01-15",
