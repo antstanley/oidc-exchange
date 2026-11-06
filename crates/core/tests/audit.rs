@@ -564,6 +564,20 @@ fn security_events_have_exhaustive_fixed_audit_mappings() {
             AuditSeverity::Notice,
         ),
         (
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::SessionRevoked,
+            },
+            AuditEventType::SessionRevoked,
+            AuditSeverity::Notice,
+        ),
+        (
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::SessionsRevoked,
+            },
+            AuditEventType::AllSessionsRevoked,
+            AuditSeverity::Notice,
+        ),
+        (
             SecurityEvent::ThrottleExceeded,
             AuditEventType::ThrottleExceeded,
             AuditSeverity::Warning,

@@ -218,6 +218,13 @@ pub enum AdminMutationKind {
     Updated,
     Suspended,
     Deleted,
+    /// An operator revoked one of a user's sessions. Renders as
+    /// [`AuditEventType::SessionRevoked`], distinct from the top-level
+    /// [`SecurityEvent::SessionRevoked`] that `POST /revoke` emits.
+    SessionRevoked,
+    /// An operator revoked all of a user's sessions. Renders as
+    /// [`AuditEventType::AllSessionsRevoked`].
+    SessionsRevoked,
 }
 
 impl SecurityEvent {
@@ -264,6 +271,12 @@ impl SecurityEvent {
             Self::AdminMutation {
                 kind: AdminMutationKind::Deleted,
             } => AuditEventType::UserDeleted,
+            Self::AdminMutation {
+                kind: AdminMutationKind::SessionRevoked,
+            } => AuditEventType::SessionRevoked,
+            Self::AdminMutation {
+                kind: AdminMutationKind::SessionsRevoked,
+            } => AuditEventType::AllSessionsRevoked,
             Self::OperatorAuthenticationFailed { .. } => AuditEventType::Unauthorized,
             Self::RefreshTokenReuse => AuditEventType::RefreshTokenReuse,
             Self::ThrottleExceeded => AuditEventType::ThrottleExceeded,

@@ -2066,7 +2066,7 @@ impl SessionRepository for DynamoRepository {
     /// transactional mutation landed between the reads, erroring once the
     /// budget is exhausted rather than reporting incomplete success.
     #[instrument(skip(self), fields(user_id))]
-    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
         assert!(
             !user_id.is_empty(),
             "revoke_all_user_sessions: user_id must not be empty"
@@ -2077,7 +2077,7 @@ impl SessionRepository for DynamoRepository {
             if roster.sessions.is_empty() && roster.families.is_empty() {
                 // Nothing to revoke; also the post-clear steady state, so a
                 // repeated call is a cheap no-op.
-                return Ok(());
+                return Ok(0);
             }
 
             // Every live generation the roster names, plus a retirement record
@@ -2102,6 +2102,20 @@ impl SessionRepository for DynamoRepository {
                 !delete_keys.is_empty(),
                 "non-empty roster must name at least one deletable entry"
             );
+            // Sessions removed: one per family that still has a live generation
+            // (a live-less family, `live` empty, kept only retirement records),
+            // plus each live hash no family claims (a pre-rotation row). Hashes
+            // deleted and retirement records are not counted.
+            let sessions_removed = roster
+                .families
+                .values()
+                .filter(|family| !family.live.is_empty())
+                .count() as u64
+                + roster
+                    .sessions
+                    .iter()
+                    .filter(|hash| !live_hashes.contains(hash))
+                    .count() as u64;
 
             for chunk in delete_keys.chunks(BATCH_WRITE_MAX_ITEMS) {
                 let requests = chunk
@@ -2151,7 +2165,7 @@ impl SessionRepository for DynamoRepository {
                 .await
                 .map_err(Self::store_err)?;
 
-            return Ok(());
+            return Ok(sessions_removed);
         }
 
         Err(Error::StoreError {

@@ -57,7 +57,7 @@ pub trait UserRepository: Send + Sync {
 /// | **SR2** | **Atomicity.** [`rotate_refresh_token`](Self::rotate_refresh_token) applies its three effects — delete the live session, write the retirement record, install the replacement — as one atomic unit conditioned on `live_hash` still being live, or applies none of them. A partial application either strands the old generation as still-valid or locks the holder out of a session they legitimately hold. |
 /// | **SR3** | **Single live generation.** At most one generation of a family is live at any instant, under concurrent redemption. Two callers redeeming the same hash produce exactly one `true` return. |
 /// | **SR4** | **Retirement durability.** By the time a rotation is observable, the retirement record it wrote is readable. A rotation whose replacement is visible before its retirement record leaves a window in which reuse reads as unknown. |
-/// | **SR5** | **Revocation completeness.** [`revoke_family`](Self::revoke_family) removes the family's live generation and every retained retirement record, and returns the count removed, or it errors. [`revoke_all_user_sessions`](Self::revoke_all_user_sessions) gives the same removal guarantee across all of a user's families (its `Result<()>` signature is unchanged). Neither reports success for work it did not do. |
+/// | **SR5** | **Revocation completeness.** [`revoke_family`](Self::revoke_family) removes the family's live generation and every retained retirement record, and returns the count removed, or it errors. [`revoke_all_user_sessions`](Self::revoke_all_user_sessions) gives the same removal guarantee across all of a user's families and returns the number of live sessions (families with a live generation) removed. Neither reports success for work it did not do. |
 ///
 /// Identifiers passed to this port are minted by core: refresh-token hashes
 /// are SHA-256 hex digests of opaque tokens (never the raw tokens), and family
@@ -120,8 +120,12 @@ pub trait SessionRepository: Send + Sync {
     async fn revoke_family(&self, family_id: &str) -> Result<u64>;
 
     /// Remove every live generation and retained retirement record across all
-    /// of a user's families (the SR5 guarantee, family-set-wide). Idempotent.
-    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
+    /// of a user's families (the SR5 guarantee, family-set-wide), returning the
+    /// number of **sessions** removed: families that had a live generation
+    /// (including one past `expires_at` that the reaper has not swept, and a
+    /// pre-rotation row with no `family_id`, which counts as one). Retirement
+    /// records are not counted. Idempotent: no live sessions returns `Ok(0)`.
+    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64>;
 
     /// List the live generation of each of `user_id`'s families whose
     /// `expires_at` is after `now`, ordered by `created_at` descending, at most

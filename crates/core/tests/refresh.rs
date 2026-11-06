@@ -993,7 +993,7 @@ async fn concurrent_loser_refuses_without_revocation_or_alarm() {
         async fn revoke_family(&self, family_id: &str) -> Result<u64> {
             self.inner.revoke_family(family_id).await
         }
-        async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+        async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
             self.inner.revoke_all_user_sessions(user_id).await
         }
         async fn list_live_sessions(
@@ -1370,7 +1370,7 @@ async fn missing_user_is_refused_before_any_write() {
         async fn revoke_family(&self, family_id: &str) -> Result<u64> {
             self.inner.revoke_family(family_id).await
         }
-        async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+        async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
             self.inner.revoke_all_user_sessions(user_id).await
         }
         async fn list_live_sessions(

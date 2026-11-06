@@ -1,6 +1,6 @@
 # Telemetry and Audit
 
-**Status:** Implemented · **Date:** 2026-08-31 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
+**Status:** Implemented · **Date:** 2026-11-06 · **Owner:** Ant Stanley · **Scope:** crates/server/src/telemetry.rs, crates/core audit
 
 Two independent observability systems with different purposes.
 
@@ -73,6 +73,10 @@ the mandatory channel. The best-effort channel is not embedder-only: the exchang
 records its infrastructure store fault there as an operational `StoreError` event at
 `Error` severity — an operational record of a 5xx condition, deliberately not a
 `SecurityEvent` ([03-service-flows.md](03-service-flows.md)).
+The internal session-revocation routes emit on the mandatory channel with the operator principal
+stamped. `DELETE /internal/users/{id}/sessions/{sessionId}` emits `SessionRevoked` for the subject
+user id with `detail.session_id`; `DELETE /internal/users/{id}/sessions` emits `AllSessionsRevoked`
+with `detail.sessions_revoked`. Neither `detail` holds a token, hash, or family id.
 
 Severity remains on both channels because sinks and SIEMs route and alert on it; on the
 mandatory channel it never determines whether a security event exists.

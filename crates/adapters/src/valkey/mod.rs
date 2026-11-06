@@ -1098,7 +1098,7 @@ impl SessionRepository for ValkeySessionRepository {
     }
 
     #[instrument(skip(self))]
-    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
         let user_set_key = self.user_sessions_key(user_id);
 
         let token_hashes: Vec<String> =
@@ -1202,7 +1202,9 @@ impl SessionRepository for ValkeySessionRepository {
             }
         }
 
-        Ok(())
+        // One session key per live generation, one live generation per family:
+        // the keys that actually existed are the sessions removed.
+        Ok(deleted_count)
     }
 
     #[instrument(skip(self, key))]

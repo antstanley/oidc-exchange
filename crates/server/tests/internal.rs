@@ -1231,3 +1231,336 @@ async fn list_sessions_for_soft_deleted_user_is_404() {
     let response = app.oneshot(sessions_request(&user_id, true)).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// DELETE /internal/users/{id}/sessions[/{sessionId}]
+// ---------------------------------------------------------------------------
+
+/// Like [`build_admin_plane_with_store`], also returning the shared audit log.
+fn build_admin_plane_with_store_and_audit() -> (Router, MockRepository, MockAuditLog) {
+    let config = test_config(TEST_SECRET);
+    let repo = MockRepository::new();
+    let audit = MockAuditLog::new();
+    let service = AppService::new(
+        Box::new(repo.clone()),
+        Box::new(repo.clone()),
+        Box::new(MockKeyManager::new()),
+        Box::new(audit.clone()),
+        Box::new(MockUserSync::new()),
+        Box::new(MockRateLimiter::new()),
+        HashMap::new(),
+        config.clone(),
+    );
+    let routers = build_routers(&config, service).expect("the admin test config builds routers");
+    (routers.admin.expect("admin router"), repo, audit)
+}
+
+fn delete_request(uri: &str, auth: bool) -> Request<Body> {
+    let mut builder = Request::builder().method("DELETE").uri(uri);
+    if auth {
+        builder = builder.header("authorization", format!("Bearer {TEST_SECRET}"));
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+/// A second live session (fresh family, distinct hash) for `user_id`.
+async fn seed_extra_session(
+    repo: &MockRepository,
+    user_id: &str,
+    hash_char: char,
+) -> oidc_exchange_core::domain::Session {
+    use oidc_exchange_core::domain::Session;
+    use oidc_exchange_core::ports::SessionRepository;
+    use oidc_exchange_core::secret::Secret;
+    let session = Session {
+        user_id: user_id.to_string(),
+        refresh_token_hash: Secret::new(hash_char.to_string().repeat(64)),
+        family_id: oidc_exchange_core::domain::new_family_id(),
+        generation: 0,
+        provider: "google".into(),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        rotated_at: None,
+        device_id: None,
+        user_agent: None,
+        ip_address: None,
+        location: None,
+        created_at: chrono::Utc::now(),
+    };
+    repo.store_refresh_token(&session).await.expect("store");
+    session
+}
+
+fn session_uri(user_id: &str, session: &oidc_exchange_core::domain::Session) -> String {
+    format!(
+        "/internal/users/{user_id}/sessions/{}",
+        oidc_exchange_core::domain::session_id_for_family(&session.family_id)
+    )
+}
+
+#[tokio::test]
+async fn revoke_session_routes_require_internal_auth() {
+    let (app, repo, audit) = build_admin_plane_with_store_and_audit();
+    let (user_id, session) = seed_user_with_session(&repo).await;
+
+    let single = app
+        .clone()
+        .oneshot(delete_request(&session_uri(&user_id, &session), false))
+        .await
+        .unwrap();
+    assert_eq!(single.status(), StatusCode::UNAUTHORIZED);
+    let bulk = app
+        .oneshot(delete_request(
+            &format!("/internal/users/{user_id}/sessions"),
+            false,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bulk.status(), StatusCode::UNAUTHORIZED);
+
+    assert_eq!(repo.get_all_sessions().await.len(), 1, "nothing revoked");
+    assert!(
+        audit.events().await.iter().all(|e| {
+            e.event_type != oidc_exchange_core::domain::AuditEventType::SessionRevoked
+                && e.event_type != oidc_exchange_core::domain::AuditEventType::AllSessionsRevoked
+        }),
+        "rejected requests audit no revocation (only the auth failure)"
+    );
+}
+
+#[tokio::test]
+async fn revoke_one_session_is_204_then_404_and_audited_once() {
+    use oidc_exchange_core::domain::AuditEventType;
+    let (app, repo, audit) = build_admin_plane_with_store_and_audit();
+    let (user_id, kept) = seed_user_with_session(&repo).await;
+    let target = seed_extra_session(&repo, &user_id, 'b').await;
+    let uri = session_uri(&user_id, &target);
+
+    let response = app
+        .clone()
+        .oneshot(delete_request(&uri, true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let remaining = repo.get_all_sessions().await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining[0].family_id, kept.family_id,
+        "only the target went"
+    );
+
+    // Repeating after success is a 404 and audits nothing more.
+    let again = app.oneshot(delete_request(&uri, true)).await.unwrap();
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_to_json(again.into_body()).await["error"], "not_found");
+
+    let events = audit.events().await;
+    assert_eq!(events.len(), 1, "one event for the one revocation");
+    let event = &events[0];
+    assert_eq!(event.event_type, AuditEventType::SessionRevoked);
+    assert_eq!(event.actor.as_deref(), Some(user_id.as_str()));
+    assert!(event.operator.is_some(), "operator-attributed");
+    assert_eq!(
+        event.detail["session_id"],
+        oidc_exchange_core::domain::session_id_for_family(&target.family_id)
+    );
+}
+
+#[tokio::test]
+async fn revoke_one_session_of_another_user_is_404_and_survives() {
+    use oidc_exchange_core::domain::NewUser;
+    use oidc_exchange_core::ports::UserRepository;
+    let (app, repo, audit) = build_admin_plane_with_store_and_audit();
+    let (owner_id, session) = seed_user_with_session(&repo).await;
+    let other = repo
+        .create_user(&NewUser {
+            external_id: "ext-other".into(),
+            provider: "google".into(),
+            email: None,
+            display_name: None,
+        })
+        .await
+        .expect("create other user");
+
+    let response = app
+        .oneshot(delete_request(&session_uri(&other.id, &session), true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        repo.get_all_sessions().await.len(),
+        1,
+        "the owner's session survives"
+    );
+    assert_eq!(repo.get_all_sessions().await[0].user_id, owner_id);
+    assert!(audit.events().await.is_empty());
+}
+
+#[tokio::test]
+async fn revoke_one_session_unknown_malformed_or_deleted_user_is_404() {
+    use oidc_exchange_core::ports::UserRepository;
+    let (app, repo, audit) = build_admin_plane_with_store_and_audit();
+    let (user_id, session) = seed_user_with_session(&repo).await;
+
+    for uri in [
+        format!("/internal/users/{user_id}/sessions/ses_unknown"),
+        format!("/internal/users/{user_id}/sessions/not-an-id"),
+        session_uri("usr_missing", &session),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(delete_request(&uri, true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+
+    repo.delete_user(&user_id).await.expect("soft delete");
+    let response = app
+        .oneshot(delete_request(&session_uri(&user_id, &session), true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(repo.get_all_sessions().await.len(), 1, "nothing revoked");
+    assert!(audit.events().await.is_empty());
+}
+
+#[tokio::test]
+async fn revoke_one_rotated_session_removes_family_and_rejects_stale_token() {
+    use oidc_exchange_core::domain::{RefreshResolution, Session};
+    use oidc_exchange_core::ports::SessionRepository;
+    use oidc_exchange_core::secret::Secret;
+    let (app, repo, _audit) = build_admin_plane_with_store_and_audit();
+    let (user_id, gen0) = seed_user_with_session(&repo).await;
+    let gen1 = Session {
+        refresh_token_hash: Secret::new("c".repeat(64)),
+        generation: 1,
+        rotated_at: Some(chrono::Utc::now()),
+        ..gen0.clone()
+    };
+    assert!(repo
+        .rotate_refresh_token(gen0.refresh_token_hash.expose(), &gen1)
+        .await
+        .unwrap());
+    assert_eq!(repo.get_all_retired_tokens().await.len(), 1);
+
+    let response = app
+        .oneshot(delete_request(&session_uri(&user_id, &gen0), true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(repo.get_all_sessions().await.is_empty());
+    assert!(
+        repo.get_all_retired_tokens().await.is_empty(),
+        "retirement records go with the family"
+    );
+    for hash in [&gen0.refresh_token_hash, &gen1.refresh_token_hash] {
+        assert!(
+            matches!(
+                repo.resolve_refresh_token(hash.expose()).await.unwrap(),
+                RefreshResolution::Unknown
+            ),
+            "a stale or live token of the revoked family no longer resolves"
+        );
+    }
+}
+
+#[tokio::test]
+async fn revoke_all_sessions_counts_is_idempotent_and_keeps_user_active() {
+    use oidc_exchange_core::domain::{AuditEventType, UserStatus};
+    use oidc_exchange_core::ports::UserRepository;
+    let (app, repo, audit) = build_admin_plane_with_store_and_audit();
+    let (user_id, _) = seed_user_with_session(&repo).await;
+    seed_extra_session(&repo, &user_id, 'b').await;
+    let uri = format!("/internal/users/{user_id}/sessions");
+
+    let first = app
+        .clone()
+        .oneshot(delete_request(&uri, true))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(
+        body_to_json(first.into_body()).await,
+        json!({"sessions_revoked": 2})
+    );
+    assert!(repo.get_all_sessions().await.is_empty());
+    let user = repo.get_user_by_id(&user_id).await.unwrap().unwrap();
+    assert_eq!(user.status, UserStatus::Active, "user stays active");
+
+    let second = app.oneshot(delete_request(&uri, true)).await.unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(
+        body_to_json(second.into_body()).await,
+        json!({"sessions_revoked": 0})
+    );
+
+    let events = audit.events().await;
+    assert_eq!(events.len(), 2, "the zero result is audited too");
+    assert!(events
+        .iter()
+        .all(|e| e.event_type == AuditEventType::AllSessionsRevoked && e.operator.is_some()));
+    assert_eq!(events[0].detail["sessions_revoked"], 2);
+    assert_eq!(events[1].detail["sessions_revoked"], 0);
+}
+
+#[tokio::test]
+async fn revoke_all_sessions_unknown_or_deleted_user_is_404() {
+    use oidc_exchange_core::ports::UserRepository;
+    let (app, repo, audit) = build_admin_plane_with_store_and_audit();
+    let (user_id, _) = seed_user_with_session(&repo).await;
+
+    let unknown = app
+        .clone()
+        .oneshot(delete_request("/internal/users/usr_missing/sessions", true))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body_to_json(unknown.into_body()).await["error"],
+        "not_found"
+    );
+
+    repo.delete_user(&user_id).await.expect("soft delete");
+    let deleted = app
+        .oneshot(delete_request(
+            &format!("/internal/users/{user_id}/sessions"),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::NOT_FOUND);
+    assert_eq!(repo.get_all_sessions().await.len(), 1, "nothing revoked");
+    assert!(audit.events().await.is_empty());
+}
+
+#[tokio::test]
+async fn revocation_audit_detail_holds_no_token_hash_or_family_id() {
+    let (app, repo, audit) = build_admin_plane_with_store_and_audit();
+    let (user_id, session) = seed_user_with_session(&repo).await;
+    let extra = seed_extra_session(&repo, &user_id, 'b').await;
+
+    app.clone()
+        .oneshot(delete_request(&session_uri(&user_id, &extra), true))
+        .await
+        .unwrap();
+    app.oneshot(delete_request(
+        &format!("/internal/users/{user_id}/sessions"),
+        true,
+    ))
+    .await
+    .unwrap();
+
+    let events = audit.events().await;
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        let serialized = serde_json::to_string(&event.detail).unwrap();
+        for secret in [
+            session.refresh_token_hash.expose().as_str(),
+            extra.refresh_token_hash.expose().as_str(),
+            session.family_id.as_str(),
+            extra.family_id.as_str(),
+        ] {
+            assert!(!serialized.contains(secret), "audit detail leaked {secret}");
+        }
+    }
+}

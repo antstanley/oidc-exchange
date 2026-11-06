@@ -179,6 +179,14 @@
         "country": { "type": "string", "minLength": 1, "maxLength": 80 }
       }
     },
+    "SessionsRevokedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions_revoked"],
+      "properties": {
+        "sessions_revoked": { "type": "integer", "minimum": 0 }
+      }
+    },
     "SessionSummary": {
       "type": "object",
       "description": "Read model of one live session family, returned by GET /internal/users/{id}/sessions. Carries no refresh-token hash, device_id, or family_id.",

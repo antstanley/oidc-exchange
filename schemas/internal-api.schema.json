@@ -79,6 +79,14 @@
         "expires_at": { "type": "string", "format": "date-time" }
       }
     },
+    "SessionsRevokedResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessions_revoked"],
+      "properties": {
+        "sessions_revoked": { "type": "integer", "minimum": 0 }
+      }
+    },
     "SessionList": {
       "type": "object",
       "additionalProperties": false,
@@ -256,6 +264,35 @@
         ],
         "responses": {
           "200": { "$ref": "#/$defs/SessionList" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      },
+      "delete": {
+        "operationId": "revokeUserSessions",
+        "description": "Revoke every live session of the user. The user stays active. Access tokens already issued remain valid until they expire. 404 for an unknown or soft-deleted user.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "$ref": "#/$defs/SessionsRevokedResponse" },
+          "404": { "$ref": "#/$defs/ErrorResponse" },
+          "401": { "$ref": "#/$defs/ErrorResponse" },
+          "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }
+        }
+      }
+    },
+    "/internal/users/{id}/sessions/{sessionId}": {
+      "delete": {
+        "operationId": "revokeUserSession",
+        "description": "Revoke one live session by the opaque id listUserSessions returned. 404 for an unknown or soft-deleted user, or an id that is not one of that user's live sessions. Access tokens already issued remain valid until they expire.",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "204": { "type": "null" },
           "404": { "$ref": "#/$defs/ErrorResponse" },
           "401": { "$ref": "#/$defs/ErrorResponse" },
           "429": { "$ref": "#/$defs/ErrorResponse", "x-throttled": true }

@@ -1,6 +1,6 @@
 # Persistence
 
-**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
+**Status:** Implemented · **Date:** 2026-11-06 · **Owner:** Ant Stanley · **Scope:** crates/adapters storage, schemas/
 
 How the domain entities ([01-domain-model.md](01-domain-model.md)) are stored by each
 repository adapter. The adapter-agnostic logical model is `schemas/datamodel.schema.json`; the
@@ -67,7 +67,7 @@ same `TransactWriteItems`** as the session item itself — creation on exchange,
 delete-plus-put of a rotation, retirement, and revocation — so the list and the items cannot
 disagree, and a strongly consistent `GetItem` on the user item is a complete roster.
 `revoke_family` and `revoke_all_user_sessions` read that roster with `consistent_read(true)`,
-delete exactly the hashes it names, and return the count. The cost is stated plainly: every
+delete exactly the hashes it names, and return the count: for `revoke_family` the count is records removed (live plus retired); for `revoke_all_user_sessions` the count is the number of families in the roster that had a live generation, not the number of hashes deleted. The cost is stated plainly: every
 session write becomes a transaction touching the user item, so a single user's concurrent
 logins now contend on one item, and that item grows with live session count. That is the
 price of a revocation that means what it says; SR5 in the conformance suite

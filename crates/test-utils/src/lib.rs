@@ -593,16 +593,20 @@ impl SessionRepository for MockRepository {
     /// Remove every live generation and retained retirement record belonging
     /// to `user_id` — the SR5 removal guarantee applied across the user's
     /// whole family set.
-    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
         if *self.session_fail_mode.lock().await {
             return Err(Error::StoreError {
                 detail: "mock session store failure".into(),
             });
         }
         let mut state = self.state.lock().await;
+        // One live generation per family (or one pre-rotation row): live rows
+        // removed are the sessions removed. Retirement records are not counted.
+        let live_before = state.sessions.len();
         state.sessions.retain(|_, s| s.user_id != user_id);
+        let removed = (live_before - state.sessions.len()) as u64;
         state.retired.retain(|_, r| r.user_id != user_id);
-        Ok(())
+        Ok(removed)
     }
 
     /// Sweep both expired sessions and expired retirement records; the count

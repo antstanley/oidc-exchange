@@ -224,6 +224,8 @@ shared_secret = "${INTERNAL_API_SECRET}"
 | PATCH | `/internal/users/{id}` | Update a user |
 | DELETE | `/internal/users/{id}` | Soft-delete a user (revokes all sessions) |
 | GET | `/internal/users/{id}/sessions` | List the user's live sessions, newest first, at most 50 (404 for an unknown or soft-deleted user) |
+| DELETE | `/internal/users/{id}/sessions` | Revoke all of the user's live sessions; returns `{ "sessions_revoked": <n> }` (404 for an unknown or soft-deleted user) |
+| DELETE | `/internal/users/{id}/sessions/{sessionId}` | Revoke one live session by the `ses_…` id the list returned; `204` (404 for an unknown or soft-deleted user, or an id that is not one of that user's live sessions) |
 | GET | `/internal/users/{id}/claims` | Get a user's private claims |
 | PUT | `/internal/users/{id}/claims` | Replace all of a user's private claims |
 | PATCH | `/internal/users/{id}/claims` | Merge into a user's private claims |
@@ -236,6 +238,25 @@ opaque `id` (`ses_…`, stable across rotation), `provider`, `user_agent`, `ip_a
 `created_at`, `expires_at`, and a `location` (`city`, `region`, `country`) that is omitted
 when none was recorded. Refresh-token hashes, device ids, and family ids are never returned.
 See [Session location](/guides/configuration/#session-location) for how locations are recorded.
+
+### DELETE /internal/users/{id}/sessions/{sessionId}
+
+Revokes the one live session (refresh-token family) whose opaque `ses_…` id
+`GET /internal/users/{id}/sessions` returned, retired refresh-token records included, and
+answers `204`. The id is resolved among that user's own listed sessions, so an id belonging to
+another user, an unknown id, and an already-revoked id are all `404`. Repeating the call after
+success is `404`.
+
+### DELETE /internal/users/{id}/sessions
+
+Revokes every live session of the user and answers `200 { "sessions_revoked": <n> }`. The user
+stays active. Repeating the call returns `{ "sessions_revoked": 0 }`. If the user has more than 50
+live sessions, this is the way to clear the ones beyond the list window.
+
+Both routes record an operator-attributed audit event (`SessionRevoked` with
+`detail.session_id`; `AllSessionsRevoked` with `detail.sessions_revoked`). Revocation ends
+refresh-token families only: access tokens issued before the call stay valid until they expire,
+exactly as with `POST /revoke`.
 
 ### POST /internal/users
 

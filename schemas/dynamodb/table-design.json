@@ -41,7 +41,7 @@
     },
     "revoke_all_user_sessions": {
       "operation": "Query + BatchWrite (delete)",
-      "description": "Query all sessions for user via GSI1, then batch delete"
+      "description": "Read the user roster, batch delete the live and retired items it names, then clear the roster. Returns the number of sessions removed: families with a live generation (plus any pre-rotation live hash no family claims), not the number of hashes deleted"
     },
     "delete_user": {
       "operation": "TransactWriteItems (Put + Delete)",

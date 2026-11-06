@@ -1,6 +1,6 @@
 # HTTP API, Roles, and Bootstrap
 
-**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/server
+**Status:** Implemented · **Date:** 2026-11-06 · **Owner:** Ant Stanley · **Scope:** crates/server
 
 The axum layer: routes, middleware, the `role`-based route/adapter selection, the
 startup sequence, and the domain-error-to-HTTP mapping. Lives in `crates/server/src/`.
@@ -38,10 +38,16 @@ role. When mounted they sit behind Bearer auth (see Middleware stack).
 | PATCH | `/internal/users/{id}/claims` | merge claims (404 if absent) |
 | DELETE | `/internal/users/{id}/claims` | clear claims (404 if absent) |
 | GET | `/internal/users/{id}/sessions` | list the user's live sessions, newest first, at most 50; 404 for an unknown or soft-deleted user |
+| DELETE | `/internal/users/{id}/sessions/{sessionId}` | revoke one live session by the opaque id the list returned; `204`; 404 for an unknown or soft-deleted user, or an id that is not one of that user's live sessions |
+| DELETE | `/internal/users/{id}/sessions` | revoke all of the user's live sessions; `200 { "sessions_revoked": <n> }`; 404 for an unknown or soft-deleted user |
 
 `GET /internal/users/{id}/sessions` responds `200` with `{ "sessions": [SessionSummary…] }`, with
 `location` omitted when none was recorded. Auth and error behaviour are those of every other internal
 route.
+
+Repeating the single revocation route after success is `404`. Repeating the bulk route returns
+`{ "sessions_revoked": 0 }`. An id belonging to another user is `404`. Auth and other error behaviour
+are those of every internal route. The `404` body is the existing `not_found` error.
 
 ### POST /nonce
 

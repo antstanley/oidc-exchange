@@ -39,7 +39,14 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/users/{id}",
             get(get_user).patch(update_user).delete(delete_user),
         )
-        .route("/users/{id}/sessions", get(list_user_sessions))
+        .route(
+            "/users/{id}/sessions",
+            get(list_user_sessions).delete(revoke_user_sessions),
+        )
+        .route(
+            "/users/{id}/sessions/{session_id}",
+            axum::routing::delete(revoke_user_session),
+        )
         .route(
             "/users/{id}/claims",
             get(get_claims)
@@ -148,6 +155,43 @@ pub async fn list_user_sessions(
         )
             .into_response()),
     }
+}
+
+/// Response body of `DELETE /internal/users/{id}/sessions`: only the count.
+#[derive(Debug, Serialize)]
+pub struct SessionsRevokedResponse {
+    pub sessions_revoked: u64,
+}
+
+/// `DELETE /internal/users/{id}/sessions/{sessionId}`: revoke one live session
+/// by the opaque id the list returned. `204`; `404` for an unknown or
+/// soft-deleted user, or an id that is not one of that user's live sessions.
+/// Access tokens already issued stay valid until they expire.
+pub async fn revoke_user_session(
+    State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
+    Path((id, session_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    state
+        .service
+        .admin_revoke_user_session(&operator, &id, &session_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /internal/users/{id}/sessions`: revoke every live session of the
+/// user. `200 { "sessions_revoked": n }`; the user stays active. `404` for an
+/// unknown or soft-deleted user.
+pub async fn revoke_user_sessions(
+    State(state): State<AppState>,
+    Extension(operator): Extension<OperatorPrincipal>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sessions_revoked = state
+        .service
+        .admin_revoke_user_sessions(&operator, &id)
+        .await?;
+    Ok(Json(SessionsRevokedResponse { sessions_revoked }))
 }
 
 // ---------------------------------------------------------------------------
