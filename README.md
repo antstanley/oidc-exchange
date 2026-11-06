@@ -228,6 +228,7 @@ The server starts on the configured host/port. Set `AWS_LAMBDA_RUNTIME_API` to r
 | PUT | `/internal/users/{id}/claims` | Replace user claims |
 | PATCH | `/internal/users/{id}/claims` | Merge user claims |
 | DELETE | `/internal/users/{id}/claims` | Clear user claims |
+| GET | `/internal/users/{id}/sessions` | List the user's live sessions, newest first (at most 50) |
 
 ## Token Exchange Flow
 
