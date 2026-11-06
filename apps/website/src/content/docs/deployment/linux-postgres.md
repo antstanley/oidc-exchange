@@ -5,7 +5,7 @@ description: Deploy oidc-exchange with PostgreSQL for users and optional Valkey 
 
 Run oidc-exchange on Linux with PostgreSQL for persistent user and session storage. To reduce session lookup time, you can store sessions separately in Valkey or Redis.
 
-A runnable example is in [`examples/linux-postgres/`](https://github.com/example/oidc-exchange/tree/main/examples/linux-postgres).
+A runnable example is in [`examples/linux-postgres/`](https://github.com/antstanley/oidc-exchange/tree/main/examples/linux-postgres).
 
 ## When to use this
 

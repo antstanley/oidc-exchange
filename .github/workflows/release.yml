@@ -767,7 +767,7 @@ jobs:
             curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash
             ```
 
-            The installer downloads from `dl.oidc-exchange.iamstan.dev` and verifies the checksum, then the Sigstore signature when `cosign` is installed, otherwise the GitHub attestation when `gh` is installed. With neither, it loudly performs checksum-only corruption detection, not authentication.
+            The installer downloads from `dl.oidc-exchange.iamstan.dev` and verifies the checksum, then the Sigstore signature when `cosign` is installed. Without `cosign`, it loudly performs checksum-only corruption detection, not authentication.
 
             ### Verify a binary manually
 

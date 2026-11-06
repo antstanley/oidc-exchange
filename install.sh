@@ -2,11 +2,10 @@
 set -euo pipefail
 
 readonly REPO="antstanley/oidc-exchange"
-readonly SIGNER_WORKFLOW="antstanley/oidc-exchange/.github/workflows/release.yml"
 readonly BINARY_NAME="oidc-exchange"
 readonly DOWNLOAD_HOST="https://dl.oidc-exchange.iamstan.dev"
 readonly SIGNER_ISSUER="https://token.actions.githubusercontent.com"
-readonly GH_VERIFY_TIMEOUT="30s"
+readonly VERIFY_TIMEOUT="30s"
 VERSION=""
 
 # Parse arguments
@@ -114,30 +113,27 @@ if ! curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "${BASE}/${BINARY_FILENAME}" |
     exit 1
 fi
 
-# Verify checksum. A missing checksum tool already failed the install closed above.
-checksum_verified=false
+# Verify checksum. A missing checksum tool already failed the install closed above, and
+# set -e aborts on a mismatch, so reaching the next line means the checksum matched.
 echo "Verifying checksum..."
 cd "$TMPDIR"
 if [[ "$CHECKSUM_VERIFIER" == "sha256sum" ]]; then
     sha256sum -c "${BINARY_FILENAME}.sha256"
-    checksum_verified=true
 else
     shasum -a 256 -c "${BINARY_FILENAME}.sha256"
-    checksum_verified=true
 fi
 
 run_with_timeout() {
     if command -v timeout &>/dev/null; then
-        timeout "$GH_VERIFY_TIMEOUT" "$@"
+        timeout "$VERIFY_TIMEOUT" "$@"
     else
         "$@"
     fi
 }
 
-# Authenticate the artifact. The repository, signer workflow and OIDC issuer are
-# constants, never values derived from installer input. Order: Sigstore signature
-# (cosign), then the optional GitHub build attestation (gh), then a loud
-# checksum-only warning.
+# Authenticate the artifact with its Sigstore signature (cosign). The repository and
+# OIDC issuer are constants, never values derived from installer input. Without
+# cosign, fall back to a loud checksum-only warning. No GitHub service is contacted.
 authenticated=false
 if command -v cosign &>/dev/null; then
     echo "Downloading signature bundle..."
@@ -149,20 +145,10 @@ if command -v cosign &>/dev/null; then
         --certificate-oidc-issuer "$SIGNER_ISSUER" \
         "${TMPDIR}/${BINARY_FILENAME}" >/dev/null
     authenticated=true
-elif command -v gh &>/dev/null; then
-    echo "Verifying GitHub build provenance..."
-    run_with_timeout gh attestation verify "${TMPDIR}/${BINARY_FILENAME}" \
-        --repo "$REPO" \
-        --signer-workflow "$SIGNER_WORKFLOW" >/dev/null
-    authenticated=true
 fi
 
 if [[ "$authenticated" != true ]]; then
-    if [[ "$checksum_verified" = true ]]; then
-        echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
-    else
-        echo "Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation." >&2
-    fi
+    echo "Warning: cosign not found; the checksum detects corruption only and does not authenticate the artifact. Install cosign (https://docs.sigstore.dev/cosign/system_config/installation/) to verify the Sigstore signature." >&2
 fi
 
 # Determine install directory

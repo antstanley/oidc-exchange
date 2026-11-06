@@ -26,7 +26,7 @@ This is GitHub build provenance, not a registry signature. The release is also c
 
 ```bash
 docker run -p 8080:8080 \
-  -v "$(pwd)/config.toml:/app/config.toml:ro" \
+  -v "$(pwd)/config:/app/config:ro" \
   antstanley80/oidc-exchange:latest
 ```
 
@@ -34,9 +34,10 @@ The server listens on the port from your config (default `8080`) and exposes `/t
 
 ## Configure
 
-Mount a `config.toml` (as above) and/or override values with environment variables (`OIDC_EXCHANGE__{section}__{key}`); `${VAR}` placeholders in the TOML resolve from the environment. Minimal example:
+The image ships no configuration. Mount a config directory containing `default.toml` (as above; the server reads `config/default.toml`, and `config/$OIDC_EXCHANGE_ENV.toml` when set, relative to `/app`) and/or override values with environment variables (`OIDC_EXCHANGE__{section}__{key}`); `${VAR}` placeholders in the TOML resolve from the environment. Minimal example:
 
 ```toml
+# config/default.toml
 [server]
 host = "0.0.0.0"
 port = 8080
@@ -53,7 +54,7 @@ endpoint_origins = ["https://oauth2.googleapis.com", "https://www.googleapis.com
 
 `endpoint_origins` pins which origins a provider's discovery document is allowed to name; each entry must be a bare `https://host[:port]`, and an unpinned origin logs a warning when discovered.
 
-See the [full configuration guide](https://github.com/antstanley/oidc-exchange#configuration) and the [deployment guides](https://github.com/antstanley/oidc-exchange/tree/main/docs/integration) (ECS Fargate, generic container / Kubernetes, …).
+See the [full configuration guide](https://github.com/antstanley/oidc-exchange#configuration) and the [deployment guides](https://github.com/antstanley/oidc-exchange/tree/main/examples) (ECS Fargate, container, Linux with SQLite or PostgreSQL, …).
 
 ## Links
 

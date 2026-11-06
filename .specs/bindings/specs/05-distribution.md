@@ -36,10 +36,8 @@ if neither checksum utility is present the installer exits non-zero **before** a
 --bundle` with certificate identity
 `https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v<version>`
 (pinned to the version being installed) and issuer `https://token.actions.githubusercontent.com`;
-(3) otherwise, if `gh` is on `PATH`, `gh attestation verify <downloaded-binary> --repo
-antstanley/oidc-exchange --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml`;
-(4) otherwise it prints that checksum verification detects corruption only and does not
-authenticate the artifact. A signature or attestation failure (or timeout) aborts the install. If
+(3) otherwise it prints that checksum verification detects corruption only and does not
+authenticate the artifact. A signature failure (or timeout) aborts the install. If
 the download host is unreachable or returns a non-2xx status, the installer fails: the host is the
 only source, with no GitHub API or GitHub Releases fallback. The installer is itself served from
 `https://dl.oidc-exchange.iamstan.dev/install.sh` and every release signs it

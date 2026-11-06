@@ -7,7 +7,7 @@ Run oidc-exchange on one Linux host with SQLite for persistent storage. This dep
 
 Optionally, store refresh token sessions in Lightning Memory-Mapped Database (LMDB). This adds a local session store without a network service.
 
-A runnable example is in [`examples/linux-sqlite/`](https://github.com/example/oidc-exchange/tree/main/examples/linux-sqlite).
+A runnable example is in [`examples/linux-sqlite/`](https://github.com/antstanley/oidc-exchange/tree/main/examples/linux-sqlite).
 
 ## When to use this
 
