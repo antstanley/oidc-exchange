@@ -1,6 +1,6 @@
 # Change: Revoke one or all of a user's sessions through the internal API
 
-**Status:** Proposed · **Date:** 2026-11-06 · **Owner:** Ant Stanley · **Target:** service (crates/core, crates/adapters, crates/server), schemas, docs
+**Status:** Merged · **Date:** 2026-11-06 · **Merged:** 2026-11-06 · **Owner:** Ant Stanley · **Target:** service (crates/core, crates/adapters, crates/server), schemas, docs
 
 Add two internal routes. `DELETE /internal/users/{id}/sessions/{sessionId}` revokes the single session (refresh-token family) whose opaque `ses_…` id `GET /internal/users/{id}/sessions` returned, and answers `204`. `DELETE /internal/users/{id}/sessions` revokes every live session of the user and answers `200 { "sessions_revoked": <n> }`; the user stays active. Both reuse the existing family revocation (`revoke_family`, `revoke_all_user_sessions`), so retired refresh-token records go with the live generation. Both emit an operator-attributed audit event on the mandatory channel. The bulk port method changes its return from `()` to a count so the route can report it. Resolves GitHub issue #76.
 
@@ -18,13 +18,13 @@ The design keeps the opaque id as the sole handle. Ownership is enforced by reso
 
 | Canonical page | Nature of change |
 |---|---|
-| [`.specs/service/specs/02-ports-and-adapters.md`](../service/specs/02-ports-and-adapters.md) | `revoke_all_user_sessions` returns the count of live sessions removed; SR5 no longer says the signature is unchanged; conformance suite gains count cases |
-| [`.specs/service/specs/03-service-flows.md`](../service/specs/03-service-flows.md) | Admin operations table gains `admin_revoke_user_session` and `admin_revoke_user_sessions`; audit paragraph names the new events |
-| [`.specs/service/specs/04-http-api.md`](../service/specs/04-http-api.md) | Internal route table gains two rows; response paragraph |
-| [`.specs/service/specs/01-domain-model.md`](../service/specs/01-domain-model.md) | `SecurityEvent` / `AdminMutationKind` gain session-revocation variants |
-| [`.specs/service/specs/07-telemetry-and-audit.md`](../service/specs/07-telemetry-and-audit.md) | Audit section names the two operator events and their `detail` keys (the page has no event-catalogue table) |
-| [`.specs/service/specs/08-persistence.md`](../service/specs/08-persistence.md) | DynamoDB roster paragraph: the returned count is families, not hashes |
-| [`.specs/service/specs/canonical-types.schema.json`](../service/specs/canonical-types.schema.json) | `SessionsRevokedResponse` |
+| [`.specs/service/specs/02-ports-and-adapters.md`](../../service/specs/02-ports-and-adapters.md) | `revoke_all_user_sessions` returns the count of live sessions removed; SR5 no longer says the signature is unchanged; conformance suite gains count cases |
+| [`.specs/service/specs/03-service-flows.md`](../../service/specs/03-service-flows.md) | Admin operations table gains `admin_revoke_user_session` and `admin_revoke_user_sessions`; audit paragraph names the new events |
+| [`.specs/service/specs/04-http-api.md`](../../service/specs/04-http-api.md) | Internal route table gains two rows; response paragraph |
+| [`.specs/service/specs/01-domain-model.md`](../../service/specs/01-domain-model.md) | `SecurityEvent` / `AdminMutationKind` gain session-revocation variants |
+| [`.specs/service/specs/07-telemetry-and-audit.md`](../../service/specs/07-telemetry-and-audit.md) | Audit section names the two operator events and their `detail` keys (the page has no event-catalogue table) |
+| [`.specs/service/specs/08-persistence.md`](../../service/specs/08-persistence.md) | DynamoDB roster paragraph: the returned count is families, not hashes |
+| [`.specs/service/specs/canonical-types.schema.json`](../../service/specs/canonical-types.schema.json) | `SessionsRevokedResponse` |
 | `schemas/internal-api.schema.json` | Code-side artifact: two operations, `SessionsRevokedResponse` |
 | `schemas/dynamodb/table-design.json` | Code-side artifact: `revoke_all_user_sessions` access-pattern description notes the returned count |
 | `README.md`, `apps/website/src/content/docs/guides/api-reference.md` | Route tables and a short section on semantics and token lifetime |

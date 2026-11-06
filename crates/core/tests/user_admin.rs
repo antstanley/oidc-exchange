@@ -1785,3 +1785,248 @@ async fn listing_is_none_for_unknown_and_soft_deleted_users() {
         .expect("list")
         .is_none());
 }
+
+// ---------------------------------------------------------------------------
+// admin_revoke_user_session / admin_revoke_user_sessions
+// ---------------------------------------------------------------------------
+
+mod session_revocation {
+    use super::*;
+    use oidc_exchange_core::domain::{session_id_for_family, Session};
+    use oidc_exchange_core::error::Result;
+    use oidc_exchange_core::ports::SessionRepository;
+    use oidc_exchange_core::secret::Secret;
+
+    /// Delegates to a real store, except `revoke_family`, which removes the
+    /// family and then reports `0`: a concurrent revocation won the race.
+    struct RacedRevokeRepo {
+        inner: MockRepository,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionRepository for RacedRevokeRepo {
+        async fn put_single_use(
+            &self,
+            key: &str,
+            expires_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<bool> {
+            self.inner.put_single_use(key, expires_at).await
+        }
+        async fn take_single_use(&self, key: &str) -> Result<bool> {
+            self.inner.take_single_use(key).await
+        }
+        async fn store_refresh_token(&self, session: &Session) -> Result<()> {
+            self.inner.store_refresh_token(session).await
+        }
+        async fn get_session_by_refresh_token(
+            &self,
+            hash: &Secret<String>,
+        ) -> Result<Option<Session>> {
+            self.inner.get_session_by_refresh_token(hash).await
+        }
+        async fn resolve_refresh_token(
+            &self,
+            hash: &str,
+        ) -> Result<oidc_exchange_core::domain::RefreshResolution> {
+            self.inner.resolve_refresh_token(hash).await
+        }
+        async fn rotate_refresh_token(&self, live: &str, repl: &Session) -> Result<bool> {
+            self.inner.rotate_refresh_token(live, repl).await
+        }
+        async fn revoke_session(&self, hash: &Secret<String>) -> Result<()> {
+            self.inner.revoke_session(hash).await
+        }
+        async fn revoke_family(&self, family_id: &str) -> Result<u64> {
+            self.inner.revoke_family(family_id).await?;
+            Ok(0)
+        }
+        async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
+            self.inner.revoke_all_user_sessions(user_id).await
+        }
+        async fn list_live_sessions(
+            &self,
+            user_id: &str,
+            now: chrono::DateTime<chrono::Utc>,
+            limit: usize,
+        ) -> Result<Vec<Session>> {
+            self.inner.list_live_sessions(user_id, now, limit).await
+        }
+        async fn count_active_sessions(&self) -> Result<u64> {
+            self.inner.count_active_sessions().await
+        }
+        async fn cleanup_expired_sessions(&self) -> Result<u64> {
+            self.inner.cleanup_expired_sessions().await
+        }
+    }
+
+    async fn seed(repo: &MockRepository, hash_char: char, user_id: &str) -> Session {
+        let session = Session {
+            user_id: user_id.to_string(),
+            refresh_token_hash: Secret::new(hash_char.to_string().repeat(64)),
+            family_id: oidc_exchange_core::domain::new_family_id(),
+            generation: 0,
+            provider: "mock".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            rotated_at: None,
+            device_id: None,
+            user_agent: None,
+            ip_address: None,
+            location: None,
+            created_at: chrono::Utc::now(),
+        };
+        repo.store_refresh_token(&session).await.expect("store");
+        session
+    }
+
+    async fn seed_user(repo: &MockRepository) -> String {
+        repo.create_user(&NewUser {
+            external_id: "ext-revoke".into(),
+            provider: "mock".into(),
+            email: None,
+            display_name: None,
+        })
+        .await
+        .expect("create user")
+        .id
+    }
+
+    #[tokio::test]
+    async fn single_revocation_emits_operator_attributed_event_with_session_id() {
+        let repo = MockRepository::new();
+        let audit = MockAuditLog::new();
+        let svc = make_service_with_audit(
+            repo.clone(),
+            MockUserSync::new(),
+            audit.clone(),
+            make_config(),
+        );
+        let user_id = seed_user(&repo).await;
+        let session = seed(&repo, 'a', &user_id).await;
+        let session_id = session_id_for_family(&session.family_id);
+
+        svc.admin_revoke_user_session(&operator(), &user_id, &session_id)
+            .await
+            .expect("revoke");
+
+        let events = audit.events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, AuditEventType::SessionRevoked);
+        assert_eq!(events[0].actor.as_deref(), Some(user_id.as_str()));
+        assert_eq!(events[0].operator.as_ref(), Some(&operator()));
+        assert_eq!(events[0].detail["session_id"], json!(session_id));
+        assert!(repo.get_all_sessions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_revocation_audits_the_count_including_zero() {
+        let repo = MockRepository::new();
+        let audit = MockAuditLog::new();
+        let svc = make_service_with_audit(
+            repo.clone(),
+            MockUserSync::new(),
+            audit.clone(),
+            make_config(),
+        );
+        let user_id = seed_user(&repo).await;
+        seed(&repo, 'a', &user_id).await;
+        seed(&repo, 'b', &user_id).await;
+
+        assert_eq!(
+            svc.admin_revoke_user_sessions(&operator(), &user_id)
+                .await
+                .expect("first"),
+            2
+        );
+        assert_eq!(
+            svc.admin_revoke_user_sessions(&operator(), &user_id)
+                .await
+                .expect("second"),
+            0
+        );
+
+        let events = audit.events().await;
+        assert_eq!(events.len(), 2, "n = 0 is recorded too");
+        for event in &events {
+            assert_eq!(event.event_type, AuditEventType::AllSessionsRevoked);
+            assert_eq!(event.operator.as_ref(), Some(&operator()));
+        }
+        assert_eq!(events[0].detail["sessions_revoked"], json!(2));
+        assert_eq!(events[1].detail["sessions_revoked"], json!(0));
+        let user = repo.get_user_by_id(&user_id).await.unwrap().unwrap();
+        assert_eq!(user.status, UserStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn concurrent_revocation_yields_not_found_and_no_audit_event() {
+        let repo = MockRepository::new();
+        let audit = MockAuditLog::new();
+        let user_id = seed_user(&repo).await;
+        let session = seed(&repo, 'a', &user_id).await;
+        let svc = AppService::new(
+            Box::new(repo.clone()),
+            Box::new(RacedRevokeRepo {
+                inner: repo.clone(),
+            }),
+            Box::new(MockKeyManager::new()),
+            Box::new(audit.clone()),
+            Box::new(MockUserSync::new()),
+            Box::new(MockRateLimiter::new()),
+            HashMap::new(),
+            make_config(),
+        );
+
+        // The session list still shows the family, but revoke_family finds
+        // nothing left to remove: the other revoker won.
+        let err = svc
+            .admin_revoke_user_session(
+                &operator(),
+                &user_id,
+                &session_id_for_family(&session.family_id),
+            )
+            .await
+            .expect_err("a lost race is not a success");
+        assert!(matches!(err, Error::NotFound { .. }));
+        assert!(audit.events().await.is_empty(), "nothing is audited");
+    }
+
+    #[tokio::test]
+    async fn unknown_and_soft_deleted_users_are_not_found() {
+        let repo = MockRepository::new();
+        let audit = MockAuditLog::new();
+        let svc = make_service_with_audit(
+            repo.clone(),
+            MockUserSync::new(),
+            audit.clone(),
+            make_config(),
+        );
+        assert!(matches!(
+            svc.admin_revoke_user_sessions(&operator(), "usr_missing")
+                .await,
+            Err(Error::NotFound { .. })
+        ));
+        assert!(matches!(
+            svc.admin_revoke_user_session(&operator(), "usr_missing", "ses_x")
+                .await,
+            Err(Error::NotFound { .. })
+        ));
+
+        let user_id = seed_user(&repo).await;
+        let session = seed(&repo, 'a', &user_id).await;
+        repo.delete_user(&user_id).await.expect("soft delete");
+        assert!(matches!(
+            svc.admin_revoke_user_sessions(&operator(), &user_id).await,
+            Err(Error::NotFound { .. })
+        ));
+        assert!(matches!(
+            svc.admin_revoke_user_session(
+                &operator(),
+                &user_id,
+                &session_id_for_family(&session.family_id)
+            )
+            .await,
+            Err(Error::NotFound { .. })
+        ));
+        assert_eq!(repo.get_all_sessions().await.len(), 1);
+        assert!(audit.events().await.is_empty());
+    }
+}

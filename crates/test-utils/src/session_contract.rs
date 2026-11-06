@@ -59,6 +59,7 @@
 //! | [`assert_rotation_preserves_absolute_expiry`] | SR2 (expiry inheritance) |
 //! | [`assert_listing_returns_live_generations_newest_first`] | listing |
 //! | [`assert_location_round_trips_and_survives_rotation`] | location |
+//! | [`assert_bulk_revocation_returns_session_count`] | SR5 (bulk count) |
 
 use std::time::Duration;
 
@@ -967,6 +968,86 @@ pub async fn assert_listing_returns_live_generations_newest_first<S: SessionRepo
     assert_eq!(after.len(), 2, "a revoked family must leave the listing");
 }
 
+/// **SR5 (bulk count).** `revoke_all_user_sessions` returns the number of
+/// **sessions** removed (families with a live generation), not the number of
+/// records: a rotated
+/// family counts once however many retirement records it left, a pre-rotation
+/// row with no `family_id` counts as one, other users' families are neither
+/// removed nor counted, and a repeated call returns `0`.
+pub async fn assert_bulk_revocation_returns_session_count<S: SessionRepository + ?Sized>(
+    repo: &S,
+    tag: &str,
+) {
+    let base = capture_base_instant();
+    let user = LISTING_USER.to_string();
+    let other_user = LISTING_OTHER_USER.to_string();
+    repo.revoke_all_user_sessions(&user).await.expect("reset");
+    repo.revoke_all_user_sessions(&other_user)
+        .await
+        .expect("reset");
+    assert_eq!(
+        repo.revoke_all_user_sessions(&user).await.expect("empty"),
+        0,
+        "a user with no live sessions revokes zero"
+    );
+
+    let plain = listing_family(tag, "count-plain", &user, base, 1_000, 86_400);
+    let rotating = listing_family(tag, "count-rotating", &user, base, 2_000, 86_400);
+    let foreign = listing_family(tag, "count-foreign", &other_user, base, 500, 86_400);
+    let mut legacy = listing_family(tag, "count-legacy", &user, base, 4_000, 86_400);
+    legacy.family_id = String::new();
+    for session in [&plain, &rotating, &foreign, &legacy] {
+        repo.store_refresh_token(session).await.expect("store");
+    }
+
+    // Rotate twice: one live generation plus two retirement records.
+    let mut presented = rotating.refresh_token_hash.expose().clone();
+    for generation in 1..=2u32 {
+        let next = generation_session(
+            &user,
+            &rotating.family_id,
+            generation,
+            fixture_hash(&format!("{tag}:count-rotating:gen{generation}")),
+            rotating.expires_at,
+            rotating.created_at,
+            Some(base),
+        );
+        assert!(
+            repo.rotate_refresh_token(&presented, &next)
+                .await
+                .expect("rotate"),
+            "rotation must win"
+        );
+        presented = next.refresh_token_hash.expose().clone();
+    }
+
+    let removed = repo.revoke_all_user_sessions(&user).await.expect("revoke");
+    assert_eq!(
+        removed, 3,
+        "plain + rotated (once) + pre-rotation row; retirement records and other users' \
+         families are not counted"
+    );
+    assert_eq!(
+        repo.revoke_all_user_sessions(&user).await.expect("repeat"),
+        0,
+        "a repeated call removes nothing"
+    );
+    assert!(
+        repo.get_session_by_refresh_token(&foreign.refresh_token_hash)
+            .await
+            .expect("get")
+            .is_some(),
+        "another user's family must survive"
+    );
+    assert_eq!(
+        repo.revoke_all_user_sessions(&other_user)
+            .await
+            .expect("revoke other"),
+        1,
+        "the other user's single family counts once"
+    );
+}
+
 /// **Location.** `location` round-trips through the store, survives rotation
 /// when the replacement copies it, and a session written without one reads back
 /// `None`.
@@ -1069,4 +1150,5 @@ pub async fn assert_full_conformance<S: SessionRepository + Send + Sync + ?Sized
     assert_rotation_preserves_absolute_expiry(repo, &format!("{tag}:expiry")).await;
     assert_listing_returns_live_generations_newest_first(repo, &format!("{tag}:listing")).await;
     assert_location_round_trips_and_survives_rotation(repo, &format!("{tag}:location")).await;
+    assert_bulk_revocation_returns_session_count(repo, &format!("{tag}:bulkcount")).await;
 }

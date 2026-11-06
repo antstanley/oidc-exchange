@@ -1,6 +1,6 @@
 # Ports and Adapters
 
-**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
+**Status:** Implemented · **Date:** 2026-11-06 · **Owner:** Ant Stanley · **Scope:** crates/core/src/ports, crates/adapters
 
 > **Read first:** [.specs/architecture-principles.md](../../architecture-principles.md) for
 > the inward-dependency rule and why ports are `Box<dyn Trait>`.
@@ -43,7 +43,7 @@ async fn revoke_session(&self, token_hash: &Secret<String>) -> Result<()>;
 async fn resolve_refresh_token(&self, token_hash: &str) -> Result<RefreshResolution>;
 async fn rotate_refresh_token(&self, live_hash: &str, replacement: &Session) -> Result<bool>;
 async fn revoke_family(&self, family_id: &str) -> Result<u64>;
-async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()>;
+async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64>;
 async fn list_live_sessions(&self, user_id: &str, now: DateTime<Utc>, limit: usize) -> Result<Vec<Session>>;
 async fn count_active_sessions(&self) -> Result<u64>;
 async fn cleanup_expired_sessions(&self) -> Result<u64>;  // returns rows deleted
@@ -79,13 +79,20 @@ either meets them or it does not ship.
 | **SR2** | **Atomicity.** `rotate_refresh_token` applies its three effects — delete the live session, write the retirement record, install the replacement — as one atomic unit conditioned on `live_hash` still being live, or applies none of them. A partial application either strands the old generation as still-valid or locks the holder out of a session they legitimately hold. |
 | **SR3** | **Single live generation.** At most one generation of a family is live at any instant, under concurrent redemption. Two callers redeeming the same hash produce exactly one `true` return. |
 | **SR4** | **Retirement durability.** By the time a rotation is observable, the retirement record it wrote is readable. A rotation whose replacement is visible before its retirement record leaves a window in which reuse reads as `Unknown`. |
-| **SR5** | **Revocation completeness.** `revoke_family` removes the family's live generation and every retained retirement record, and returns the count removed, or it errors. `revoke_all_user_sessions` gives the same removal guarantee across all of a user's families (its `Result<()>` signature is unchanged). Neither reports success for work it did not do. |
+| **SR5** | **Revocation completeness.** `revoke_family` removes the family's live generation and every retained retirement record, and returns the count removed, or it errors. `revoke_all_user_sessions` gives the same removal guarantee across all of a user's families and returns the number of live sessions (families with a live generation) removed. Neither reports success for work it did not do. |
 
 `list_live_sessions` returns the live generation of each of the user's families whose `expires_at`
 is after `now`, ordered by `created_at` descending, at most `limit` entries. Retired generations are
 never returned, so a rotated family appears once. The result is strongly consistent with the most
 recent write. Adapters do not mint ids; core maps results to `SessionSummary` (see
 [01-domain-model.md](01-domain-model.md) → SessionLocation and SessionSummary).
+
+`revoke_all_user_sessions` removes every live generation and retained retirement record across all
+of the user's families (the SR5 guarantee, family-set-wide) and returns the number of **sessions**
+removed, that is, families that had a live generation (including one whose `expires_at` has passed
+but that the reaper has not yet swept, and a pre-rotation row with no `family_id`, which counts as
+one). Retirement records are not counted. Idempotent: a user with no live sessions returns `Ok(0)`.
+Callers that ignore the value (suspend, delete) are unchanged.
 
 `store_refresh_token` writes the generation-0 row of a new family. `get_session_by_refresh_token`
 remains for `/revoke`, which needs only liveness.
@@ -119,6 +126,9 @@ suite covers, at minimum:
 - the replacement's `expires_at` equals the retired generation's;
 - `list_live_sessions`: a rotated family lists once with its live generation; expired families are
   omitted; ordering is newest first and the limit is honoured;
+- `revoke_all_user_sessions` returns the number of live families removed and not the number of
+  records; a repeated call returns `0`; it counts only the named user's families; a rotated family
+  counts once; a pre-rotation row with no `family_id` counts as one session;
 - `location` round-trips and survives rotation, and a row written without `location` lists with
   `None`;
 - on LMDB and Valkey, an index member whose session is missing or expired is skipped.

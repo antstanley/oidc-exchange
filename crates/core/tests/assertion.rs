@@ -870,7 +870,7 @@ impl SessionRepository for SingleUseFailRepo {
         self.inner.revoke_session(token_hash).await
     }
 
-    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
         self.inner.revoke_all_user_sessions(user_id).await
     }
 

@@ -839,7 +839,7 @@ impl SessionRepository for LmdbSessionRepository {
     async fn revoke_all_user_sessions(
         &self,
         user_id: &str,
-    ) -> oidc_exchange_core::error::Result<()> {
+    ) -> oidc_exchange_core::error::Result<u64> {
         assert!(
             !user_id.is_empty(),
             "revoke_all_user_sessions: user_id must not be empty"
@@ -908,7 +908,9 @@ impl SessionRepository for LmdbSessionRepository {
 
             wtxn.commit().map_err(Dbs::store_err)?;
 
-            Ok(())
+            // One live generation per family (or one pre-rotation row): the live
+            // entries removed are the sessions removed.
+            Ok(live.len() as u64)
         })
         .await
         .map_err(|e| Error::StoreError {

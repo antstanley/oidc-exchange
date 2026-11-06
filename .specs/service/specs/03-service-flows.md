@@ -1,6 +1,6 @@
 # Service Flows
 
-**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
+**Status:** Implemented · **Date:** 2026-11-06 · **Owner:** Ant Stanley · **Scope:** crates/core/src/service
 
 `AppService` orchestrates the ports. It holds `user_repo`, `session_repo`, `keys`, `audit`,
 `user_sync`, the configured retained `rate_limiter`, a `providers` map, and `config`. The
@@ -353,13 +353,22 @@ so an audit write failure follows `audit.durability`; their events have
 | `admin_stats` | `count_by_status` + `count_active_sessions` → `AdminStats` |
 | `admin_list_users` | `list_users(offset, limit)` |
 | `admin_list_user_sessions` | `get_user_by_id`; `None` when the user is absent or soft-deleted, otherwise `list_live_sessions(user_id, now, 50)` mapped to `SessionSummary` values (one per family, newest first); a pre-rotation row with no `family_id` has no stable id and is omitted |
+| `admin_revoke_user_session` | `get_user_by_id`; `NotFound` when the user is absent or soft-deleted. Resolve `session_id` by mapping the user's live sessions (`list_live_sessions(user_id, now, 50)`, skipping rows with an empty `family_id`, as the list does) through `session_id_for_family`; `NotFound` when none matches, including a malformed id. Otherwise `revoke_family(family_id)`; when it removes `0` records (a concurrent revocation won) return `NotFound` and emit nothing, else emit the operator-attributed `SessionRevoked` event. |
+| `admin_revoke_user_sessions` | `get_user_by_id`; `NotFound` when the user is absent or soft-deleted. `revoke_all_user_sessions(user_id)` returns `n`; emit the operator-attributed `AllSessionsRevoked` event with `n`, including when `n = 0`. The user's status is unchanged. |
 
 Admin mutations are audited: `admin_create_user` → `UserCreated`, `admin_update_user` →
 `UserUpdated` (and `UserSuspended` when the patch sets `status = Suspended`),
 `admin_delete_user` → `UserDeleted`, and the claims mutations → `UserUpdated` with the
-operation in `detail`. Read-only operations (get, list, list-sessions, stats, get-claims) are not audited.
+operation in `detail`; `admin_revoke_user_session` → `SessionRevoked` with `detail.session_id`;
+`admin_revoke_user_sessions` → `AllSessionsRevoked` with `detail.sessions_revoked`. Both session
+events are operator-attributed, mandatory-channel, and carry the user id as the subject. Neither
+`detail` ever holds a token, hash, or family id. A single revocation that finds no matching session
+emits nothing. Read-only operations (get, list, list-sessions, stats, get-claims) are not audited.
 Audit failures follow `emit_audit`'s blocking rules, unlike best-effort user sync. Admin
 operations carry no client `ip_address`/`user_agent` context.
+
+Revocation ends refresh-token families only. Access tokens issued before the call remain valid
+until they expire, as with `POST /revoke`.
 
 ## Assumptions and open questions
 

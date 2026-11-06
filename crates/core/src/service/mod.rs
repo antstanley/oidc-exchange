@@ -815,7 +815,7 @@ mod validate_access_token_tests {
         async fn revoke_session(&self, _: &crate::secret::Secret<String>) -> Result<()> {
             unreachable!("validate_access_token must never mutate session state")
         }
-        async fn revoke_all_user_sessions(&self, _: &str) -> Result<()> {
+        async fn revoke_all_user_sessions(&self, _: &str) -> Result<u64> {
             unreachable!("validate_access_token must never revoke all sessions")
         }
         async fn list_live_sessions(

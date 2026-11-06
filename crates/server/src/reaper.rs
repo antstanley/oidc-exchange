@@ -482,7 +482,7 @@ mod tests {
                 detail: "failing fixture store".into(),
             })
         }
-        async fn revoke_all_user_sessions(&self, _user_id: &str) -> Result<()> {
+        async fn revoke_all_user_sessions(&self, _user_id: &str) -> Result<u64> {
             Err(Error::StoreError {
                 detail: "failing fixture store".into(),
             })

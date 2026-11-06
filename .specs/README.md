@@ -32,7 +32,7 @@ Proposed deltas to the canonical spec live under `changes/` as single documents
 
 | Change spec | Status | Targets |
 |---|---|---|
-| [changes/2026-11-06-revoke_user_sessions_via_internal_api.md](changes/2026-11-06-revoke_user_sessions_via_internal_api.md) | Proposed | service, schemas, docs: `DELETE /internal/users/{id}/sessions/{sessionId}` and `DELETE /internal/users/{id}/sessions`, operator-audited, `revoke_all_user_sessions` returns a count (issue #76) |
+| [changes/merged/2026-11-06-revoke_user_sessions_via_internal_api.md](changes/merged/2026-11-06-revoke_user_sessions_via_internal_api.md) | Merged | service, schemas, docs: `DELETE /internal/users/{id}/sessions/{sessionId}` and `DELETE /internal/users/{id}/sessions`, operator-audited, `revoke_all_user_sessions` returns a count (issue #76) |
 | [changes/merged/2026-11-05-self_host_signed_binaries.md](changes/merged/2026-11-05-self_host_signed_binaries.md) | Merged | distribution: self-hosted binaries at `dl.oidc-exchange.iamstan.dev` (CDK: S3 + CloudFront), Sigstore keyless signatures, `install.sh` cosign verification (PR 2 of 3) |
 | [changes/merged/2026-11-05-list_user_sessions_with_location.md](changes/merged/2026-11-05-list_user_sessions_with_location.md) | Merged | service, bindings: `GET /internal/users/{id}/sessions`, caller-supplied `SessionLocation`, opt-in header mapping, `Reported`/`Asserted` address provenance (issue #53) |
 | [changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md](changes/merged/2026-08-31-embedded_telemetry_and_store_fault_audit.md) | Merged | service, bindings: tracing subscriber installed by the FFI entrypoint (idempotent `try_init`), operational `store_error` audit event for the exchange flow's infrastructure fault (issue #47) |

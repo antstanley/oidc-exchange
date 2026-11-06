@@ -1045,7 +1045,7 @@ impl SessionRepository for SqliteRepository {
     }
 
     #[instrument(skip(self), fields(user_id))]
-    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<()> {
+    async fn revoke_all_user_sessions(&self, user_id: &str) -> Result<u64> {
         assert!(
             !user_id.is_empty(),
             "revoke_all_user_sessions: user_id must not be empty"
@@ -1056,7 +1056,9 @@ impl SessionRepository for SqliteRepository {
         let mut tx = self.pool.begin().await.map_err(|e| Error::StoreError {
             detail: e.to_string(),
         })?;
-        sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
+        // One live row per family (or one pre-rotation row), so rows removed
+        // from `sessions` is the session count; retirement records are not counted.
+        let live = sqlx::query("DELETE FROM sessions WHERE user_id = ?1")
             .bind(user_id)
             .execute(&mut *tx)
             .await
@@ -1074,7 +1076,7 @@ impl SessionRepository for SqliteRepository {
             detail: e.to_string(),
         })?;
 
-        Ok(())
+        Ok(live.rows_affected())
     }
 
     #[instrument(skip(self))]

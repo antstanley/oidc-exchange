@@ -229,6 +229,8 @@ The server starts on the configured host/port. Set `AWS_LAMBDA_RUNTIME_API` to r
 | PATCH | `/internal/users/{id}/claims` | Merge user claims |
 | DELETE | `/internal/users/{id}/claims` | Clear user claims |
 | GET | `/internal/users/{id}/sessions` | List the user's live sessions, newest first (at most 50) |
+| DELETE | `/internal/users/{id}/sessions` | Revoke all of the user's live sessions; returns `{ "sessions_revoked": <n> }` (the user stays active) |
+| DELETE | `/internal/users/{id}/sessions/{sessionId}` | Revoke one live session by the `ses_…` id the list returned; `204` |
 
 ## Token Exchange Flow
 

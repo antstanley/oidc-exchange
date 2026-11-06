@@ -1,6 +1,6 @@
 # Domain Model
 
-**Status:** Implemented · **Date:** 2026-11-05 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
+**Status:** Implemented · **Date:** 2026-11-06 · **Owner:** Ant Stanley · **Scope:** crates/core/src/domain
 
 The entities that flow through the service, their identifiers, and their lifecycles. Types
 live in `crates/core/src/domain/`; the JSON Schema in
@@ -247,6 +247,13 @@ as the session's `ip_address`. When both a `Reported` and a `Forwarded` address 
 `Reported` wins. `ClientAddrSource` serializes as `peer`, `forwarded`, `reported`, `asserted`, or
 `unknown`, and `ThrottleExceeded` serializes in `AuditEventType` as `throttle_exceeded`. Audit serialization
 retains the address value, when available, and its source.
+
+`AdminMutationKind` gains `SessionRevoked` and `SessionsRevoked`. `SecurityEvent::AdminMutation` with
+these kinds renders as `AuditEventType::SessionRevoked` and `AuditEventType::AllSessionsRevoked` at
+`Notice` severity. These are distinct from the existing top-level `SecurityEvent::SessionRevoked`
+(renders as `TokenRevocation`, `Info`, emitted by `POST /revoke`) and `SecurityEvent::SessionsRevoked`
+(renders as `AllSessionsRevoked`, `Notice`, currently emitted by no flow); the `AuditEventType`
+variants themselves already exist.
 
 ### OidcProviderConfig (`domain/provider.rs`)
 

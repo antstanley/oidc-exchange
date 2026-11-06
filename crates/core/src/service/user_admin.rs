@@ -3,15 +3,23 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::domain::{
-    clamp_admin_page_limit, AdminMutationKind, AuditEvent, AuditOutcome, ClientAddr, NewUser,
-    OperatorPrincipal, SecurityEvent, SessionSummary, User, UserPage, UserPatch, UserStatus,
-    DEFAULT_ADMIN_PAGE_SIZE, MAX_ADMIN_PAGE_SIZE,
+    clamp_admin_page_limit, session_id_for_family, AdminMutationKind, AuditEvent, AuditOutcome,
+    ClientAddr, NewUser, OperatorPrincipal, SecurityEvent, SessionSummary, User, UserPage,
+    UserPatch, UserStatus, DEFAULT_ADMIN_PAGE_SIZE, MAX_ADMIN_PAGE_SIZE,
 };
 use crate::error::{Error, Result};
 use crate::service::{claims::find_reserved_claim_key, AppService};
 
 /// Most sessions `admin_list_user_sessions` returns.
 pub const MAX_LISTED_SESSIONS: usize = 50;
+
+/// `detail` key carrying the opaque `ses_…` id in a single-session revocation
+/// audit event.
+const SESSION_ID_DETAIL_KEY: &str = "session_id";
+
+/// `detail` key carrying the removed-session count in a bulk revocation audit
+/// event.
+const SESSIONS_REVOKED_DETAIL_KEY: &str = "sessions_revoked";
 
 /// Key under which the claims-mutation operation name (`set_claims` /
 /// `merge_claims` / `clear_claims`) is recorded in a `UserUpdated` audit
@@ -126,6 +134,104 @@ impl AppService {
                 .map(SessionSummary::from)
                 .collect(),
         ))
+    }
+
+    /// Load a user that is present and not soft-deleted, else `NotFound`.
+    async fn load_live_user(&self, user_id: &str) -> Result<User> {
+        match self.user_repo.get_user_by_id(user_id).await? {
+            Some(user) if user.status != UserStatus::Deleted => Ok(user),
+            _ => Err(Error::NotFound {
+                detail: format!("user not found: {}", user_id),
+            }),
+        }
+    }
+
+    /// Revoke the one live session of `user_id` whose opaque id is
+    /// `session_id` (a refresh-token family, retirement records included).
+    ///
+    /// The id is resolved among the user's own listed sessions (the same
+    /// window as [`Self::admin_list_user_sessions`]), so another user's id and
+    /// a malformed id are both `NotFound`. A concurrent revocation that wins
+    /// the race (`revoke_family` removes nothing) is also `NotFound`, and
+    /// emits nothing. On success emits the operator-attributed `SessionRevoked`
+    /// event with `detail.session_id`.
+    pub async fn admin_revoke_user_session(
+        &self,
+        operator: &OperatorPrincipal,
+        user_id: &str,
+        session_id: &str,
+    ) -> Result<()> {
+        let user = self.load_live_user(user_id).await?;
+        let not_found = || Error::NotFound {
+            detail: format!("session not found: {}", session_id),
+        };
+        let sessions = self
+            .session_repo
+            .list_live_sessions(user_id, chrono::Utc::now(), MAX_LISTED_SESSIONS)
+            .await?;
+        let family_id = sessions
+            .iter()
+            .filter(|s| !s.family_id.is_empty())
+            .find(|s| session_id_for_family(&s.family_id) == session_id)
+            .map(|s| s.family_id.clone())
+            .ok_or_else(not_found)?;
+
+        let removed = self.session_repo.revoke_family(&family_id).await?;
+        if removed == 0 {
+            return Err(not_found());
+        }
+
+        let mut event = attributed(
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::SessionRevoked,
+            }
+            .into_audit_event(
+                AuditOutcome::Success,
+                Some(user.id.clone()),
+                Some(user.provider.clone()),
+                ClientAddr::Unknown,
+                None,
+            ),
+            operator,
+        );
+        event.detail.insert(
+            SESSION_ID_DETAIL_KEY.to_string(),
+            Value::String(session_id.to_string()),
+        );
+        self.emit_admin_mutation_with_detail(event).await
+    }
+
+    /// Revoke every live session of `user_id` and return how many were
+    /// removed. The user stays active. Emits the operator-attributed
+    /// `AllSessionsRevoked` event with `detail.sessions_revoked`, including
+    /// when the count is zero.
+    pub async fn admin_revoke_user_sessions(
+        &self,
+        operator: &OperatorPrincipal,
+        user_id: &str,
+    ) -> Result<u64> {
+        let user = self.load_live_user(user_id).await?;
+        let revoked = self.session_repo.revoke_all_user_sessions(user_id).await?;
+
+        let mut event = attributed(
+            SecurityEvent::AdminMutation {
+                kind: AdminMutationKind::SessionsRevoked,
+            }
+            .into_audit_event(
+                AuditOutcome::Success,
+                Some(user.id.clone()),
+                Some(user.provider.clone()),
+                ClientAddr::Unknown,
+                None,
+            ),
+            operator,
+        );
+        event.detail.insert(
+            SESSIONS_REVOKED_DETAIL_KEY.to_string(),
+            Value::from(revoked),
+        );
+        self.emit_admin_mutation_with_detail(event).await?;
+        Ok(revoked)
     }
 
     /// Fetch the user (missing id -> `Error::NotFound`), validate any status
