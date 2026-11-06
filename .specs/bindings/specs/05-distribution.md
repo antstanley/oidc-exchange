@@ -42,8 +42,9 @@ antstanley/oidc-exchange --signer-workflow antstanley/oidc-exchange/.github/work
 authenticate the artifact. A signature or attestation failure (or timeout) aborts the install. If
 the download host is unreachable or returns a non-2xx status, the installer fails: the host is the
 only source, with no GitHub API or GitHub Releases fallback. The installer is itself served from
-`https://dl.oidc-exchange.iamstan.dev/install.sh` with a `install.sh.sigstore.bundle` signature
-(the same keyless identity), so users may verify it before piping it to a shell. It installs to
+`https://dl.oidc-exchange.iamstan.dev/install.sh` and every release signs it
+(`install.sh.sigstore.bundle`, the same keyless identity) under `releases/v<version>/`; the root
+copy carries the bundle only once a release has published it. It installs to
 `/usr/local/bin` for root or `~/.local/bin` otherwise.
 
 ## Docker (`Dockerfile`)

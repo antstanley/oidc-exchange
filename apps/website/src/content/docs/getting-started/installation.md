@@ -17,18 +17,6 @@ The installer downloads from `dl.oidc-exchange.iamstan.dev` and verifies the che
 
 A failed signature or provenance check aborts the install. The installer uses the download host only: if it is unreachable the install fails rather than falling back to another source.
 
-The installer is itself signed. To check it before running it:
-
-```bash
-curl -fsSLO https://dl.oidc-exchange.iamstan.dev/install.sh
-curl -fsSLO https://dl.oidc-exchange.iamstan.dev/install.sh.sigstore.bundle
-cosign verify-blob \\
-  --bundle install.sh.sigstore.bundle \\
-  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.5.2 \\
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
-  install.sh
-```
-
 To verify a download yourself, without the installer:
 
 ```bash
