@@ -15,17 +15,17 @@ The installer downloads from `dl.oidc-exchange.iamstan.dev` (falling back to Git
 2. otherwise, if the GitHub CLI (`gh`) is installed, the GitHub build provenance;
 3. otherwise it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
 
-A failed signature or provenance check aborts the install.
+A failed signature or provenance check aborts the install. If the download host is unreachable, the installer falls back to GitHub Releases for the same version (the cosign check applies to the download host only).
 
 To verify a download yourself, without the installer:
 
 ```bash
-BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.4.1
+BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.5.1
 curl -fsSLO "$BASE/oidc-exchange-linux-x64"
 curl -fsSLO "$BASE/oidc-exchange-linux-x64.sigstore.bundle"
 cosign verify-blob \
   --bundle oidc-exchange-linux-x64.sigstore.bundle \
-  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.4.1 \
+  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.5.1 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   oidc-exchange-linux-x64
 ```
@@ -33,7 +33,7 @@ cosign verify-blob \
 To install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash -s -- --version v0.4.0
+curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash -s -- --version v0.5.1
 ```
 
 ## Docker
@@ -72,7 +72,7 @@ See the [Python guide](/guides/python) for framework-specific setup.
 
 ## Prebuilt binaries
 
-Download a binary from [GitHub Releases](https://github.com/antstanley/oidc-exchange/releases):
+Download a binary from the project download host, `https://dl.oidc-exchange.iamstan.dev/releases/v<version>/<binary>` (the latest version is listed in [`latest.json`](https://dl.oidc-exchange.iamstan.dev/latest.json)). Each release also carries a `SHA256SUMS` file and a Sigstore `.sigstore.bundle` per binary. The same files are attached to [GitHub Releases](https://github.com/antstanley/oidc-exchange/releases):
 
 | Platform | Binary |
 |----------|--------|
@@ -93,4 +93,4 @@ cargo build --release
 
 The binary is at `target/release/oidc-exchange`.
 
-When GitHub CLI is unavailable, the installer reports whether checksum verification actually succeeded. If checksum tooling is also unavailable (neither `sha256sum` nor `shasum` is present), the installer aborts before downloading anything rather than installing an unverified binary. Whenever `gh` is present, provenance failure aborts installation.
+When neither `cosign` nor the GitHub CLI is available, the installer reports whether checksum verification actually succeeded. If checksum tooling is also unavailable (neither `sha256sum` nor `shasum` is present), the installer aborts before downloading anything rather than installing an unverified binary. Whenever `cosign` (download host) or `gh` is present, a signature or provenance failure aborts installation.
