@@ -6,16 +6,16 @@ description: Install oidc-exchange with a script, prebuilt binary, Docker, npm, 
 ## Quick install (Linux / macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
+curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash
 ```
 
-The installer downloads from `dl.oidc-exchange.iamstan.dev` (falling back to GitHub Releases) and verifies the checksum, then:
+The installer downloads from `dl.oidc-exchange.iamstan.dev` and verifies the checksum, then:
 
 1. if `cosign` is installed, the Sigstore signature, pinned to `antstanley/oidc-exchange` and the release workflow for that exact version;
 2. otherwise, if the GitHub CLI (`gh`) is installed, the GitHub build provenance;
 3. otherwise it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
 
-A failed signature or provenance check aborts the install. If the download host is unreachable, the installer falls back to GitHub Releases for the same version (the cosign check applies to the download host only).
+A failed signature or provenance check aborts the install. The installer uses the download host only: if it is unreachable the install fails rather than falling back to another source.
 
 To verify a download yourself, without the installer:
 
@@ -33,7 +33,7 @@ cosign verify-blob \
 To install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash -s -- --version v0.5.1
+curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash -s -- --version v0.5.1
 ```
 
 ## Docker

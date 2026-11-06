@@ -13,10 +13,10 @@ Choose one of the following methods:
 
 ### Option 1: Verified install script (recommended)
 
-The installer downloads from the project download host, `dl.oidc-exchange.iamstan.dev` (falling back to GitHub Releases), and verifies the SHA-256 checksum. For an authenticated install, have [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) installed (Sigstore signature, checked against the release workflow for that exact version) or the [GitHub CLI](https://cli.github.com/) (build provenance):
+The installer downloads from the project download host, `dl.oidc-exchange.iamstan.dev`, and verifies the SHA-256 checksum. For an authenticated install, have [`cosign`](https://docs.sigstore.dev/cosign/system_config/installation/) installed (Sigstore signature, checked against the release workflow for that exact version) or the [GitHub CLI](https://cli.github.com/) (build provenance):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/antstanley/oidc-exchange/main/install.sh | bash
+curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash
 ```
 
 To verify a manually downloaded binary with cosign:

@@ -83,15 +83,12 @@ else
     exit 1
 fi
 
-# Resolve version: prefer the project download host, fall back to the GitHub API.
+# Resolve the latest version from the project download host.
 if [[ -z "$VERSION" ]]; then
     echo "Fetching latest version..."
     VERSION="$(curl -fsSL "${DOWNLOAD_HOST}/latest.json" 2>/dev/null | grep '"version"' | sed -E 's/.*"version": *"([^"]+)".*/v\1/' || true)"
     if [[ -z "$VERSION" ]]; then
-        VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-    fi
-    if [[ -z "$VERSION" ]]; then
-        echo "Error: Could not determine latest version from ${DOWNLOAD_HOST} or the GitHub API"
+        echo "Error: Could not determine latest version from ${DOWNLOAD_HOST}" >&2
         exit 1
     fi
     validate_version "$VERSION"
@@ -102,28 +99,19 @@ fi
 echo "Installing ${BINARY_NAME} ${VERSION} (${OS_LABEL}/${ARCH_LABEL})..."
 
 DOWNLOAD_BASE="${DOWNLOAD_HOST}/releases/${VERSION}"
-GITHUB_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
-SOURCE="download-host"
 
 # Create temp directory
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-fetch_artifact() {
-    local base="$1"
-    curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "${base}/${BINARY_FILENAME}" &&
-        curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "${base}/${BINARY_FILENAME}.sha256"
-}
-
-# Download binary and checksum. An unreachable or non-2xx download host falls back to
-# GitHub Releases for the same version; every check below applies to either source.
+# Download binary and checksum from the project download host. There is no other
+# source: if the host is unreachable the install fails rather than trusting a mirror.
 echo "Downloading binary and checksum..."
 BASE="$DOWNLOAD_BASE"
-if ! fetch_artifact "$DOWNLOAD_BASE"; then
-    echo "Download host unavailable for ${VERSION}; falling back to GitHub Releases..." >&2
-    SOURCE="github"
-    BASE="$GITHUB_BASE"
-    fetch_artifact "$GITHUB_BASE"
+if ! curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "${BASE}/${BINARY_FILENAME}" ||
+    ! curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sha256" "${BASE}/${BINARY_FILENAME}.sha256"; then
+    echo "Error: could not download ${BINARY_FILENAME} ${VERSION} from ${BASE}" >&2
+    exit 1
 fi
 
 # Verify checksum. A missing checksum tool already failed the install closed above.
@@ -148,10 +136,10 @@ run_with_timeout() {
 
 # Authenticate the artifact. The repository, signer workflow and OIDC issuer are
 # constants, never values derived from installer input. Order: Sigstore signature
-# (cosign, download host only: the bundle is published there), then the GitHub
-# attestation (gh), then a loud checksum-only warning.
+# (cosign), then the optional GitHub build attestation (gh), then a loud
+# checksum-only warning.
 authenticated=false
-if command -v cosign &>/dev/null && [[ "$SOURCE" == "download-host" ]]; then
+if command -v cosign &>/dev/null; then
     echo "Downloading signature bundle..."
     curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}.sigstore.bundle" "${BASE}/${BINARY_FILENAME}.sigstore.bundle"
     echo "Verifying Sigstore signature..."
@@ -171,11 +159,7 @@ fi
 
 if [[ "$authenticated" != true ]]; then
     if [[ "$checksum_verified" = true ]]; then
-        if [[ "$SOURCE" == "github" ]]; then
-            echo "Warning: GitHub CLI not found; checksum verified corruption only, artifact provenance was not authenticated (Sigstore bundles are published only on ${DOWNLOAD_HOST})." >&2
-        else
-            echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
-        fi
+        echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
     else
         echo "Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation." >&2
     fi
