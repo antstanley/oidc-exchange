@@ -5,8 +5,6 @@ description: Deploy oidc-exchange on a Linux host with systemd and nginx.
 
 Run oidc-exchange directly on a Linux host behind a reverse proxy. This suits single-server deployments on your own infrastructure.
 
-A runnable example is in [`examples/linux-server/`](https://github.com/example/oidc-exchange/tree/main/examples/linux-server).
-
 ## Build
 
 ```bash

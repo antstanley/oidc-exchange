@@ -5,7 +5,7 @@ description: "Development setup, testing, and code standards."
 
 ## Prerequisites
 
-- **Rust:** Install a stable toolchain with [rustup](https://rustup.rs/). Continuous integration (CI) uses rustc 1.98. The workspace does not specify a minimum supported Rust version (MSRV).
+- **Rust:** Install a stable toolchain with [rustup](https://rustup.rs/). Continuous integration (CI) uses the `stable` toolchain and the Docker image builds with `rust:1.99`. The workspace does not specify a minimum supported Rust version (MSRV).
 - **cargo-nextest:** Use this to run tests. Install with `cargo install cargo-nextest`.
 - **cargo-lambda:** Install this if you need to build Lambda binaries. Install with `cargo install cargo-lambda`.
 - **Docker:** Install this to run DynamoDB Local integration tests.

@@ -69,7 +69,7 @@ pip install oidc-exchange
 
 ### Option 5: Build from source
 
-Install a recent stable Rust toolchain. Continuous integration (CI) builds and tests use rustc 1.98. To run tests, also install [cargo-nextest](https://nexte.st).
+Install a recent stable Rust toolchain. Continuous integration (CI) uses the `stable` toolchain and the Docker image builds with `rust:1.99`. To run tests, also install [cargo-nextest](https://nexte.st).
 
 ```bash
 cargo build --release

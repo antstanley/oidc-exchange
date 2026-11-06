@@ -5,18 +5,18 @@ description: Deploy oidc-exchange with Docker, Docker Compose, and Kubernetes.
 
 Run oidc-exchange as a long-lived container on a service such as Amazon Elastic Container Service (ECS), Amazon Elastic Kubernetes Service (EKS), or Cloud Run. The binary runs as an axum HTTP server when `AWS_LAMBDA_RUNTIME_API` is not set.
 
-A runnable example is in [`examples/container/`](https://github.com/example/oidc-exchange/tree/main/examples/container).
+A runnable example is in [`examples/container/`](https://github.com/antstanley/oidc-exchange/tree/main/examples/container).
 
 ## Dockerfile
 
 ```dockerfile
-FROM rust:1.96-slim AS builder
+FROM rust:1.99-slim AS builder
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN cargo build --release --bin oidc-exchange
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/oidc-exchange /usr/local/bin/
 COPY config/ /app/config/
@@ -26,7 +26,7 @@ ENV OIDC_EXCHANGE_ENV=production
 CMD ["oidc-exchange"]
 ```
 
-The build needs `pkg-config` and `libssl-dev` because the HTTP client links the system OpenSSL. `WORKDIR /app` matters at runtime: the binary loads config from `config/` relative to its working directory, so the process must run in the directory that holds the copied `config/` tree. For a prebuilt image, the published `ghcr.io/antstanley/oidc-exchange` (pinned by digest) already handles all of this.
+The build needs `pkg-config` and `libssl-dev` because the HTTP client links the system OpenSSL. `WORKDIR /app` matters at runtime: the binary loads config from `config/` relative to its working directory, so the process must run in the directory that holds the copied `config/` tree. For a prebuilt image, the published `ghcr.io/antstanley/oidc-exchange` (pinned by digest) already sets `WORKDIR /app` and the binary, but it ships no configuration: mount or bake in a `config/` directory containing `default.toml`.
 
 ## Configuration
 

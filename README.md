@@ -263,8 +263,9 @@ Config is loaded in order:
 replace them with your own non-empty identity values before production. Validate a file before
 starting the service with `oidc-exchange config check path/to/config.toml`; it uses the
 side-effect-free resolver, redacts secrets, and distinguishes unresolved placeholders from
-invalid configuration values. It intentionally ignores environment variables and overlays, so
-pass a fully materialized deployment file.
+invalid configuration values. In that single-path form it intentionally ignores environment variables and
+overlays, so pass a fully materialized deployment file; `config check --dir <config-dir>` and
+`config check --file <path>` apply the environment as the server does.
 
 ## Testing
 

@@ -114,16 +114,14 @@ if ! curl -fsSL -o "${TMPDIR}/${BINARY_FILENAME}" "${BASE}/${BINARY_FILENAME}" |
     exit 1
 fi
 
-# Verify checksum. A missing checksum tool already failed the install closed above.
-checksum_verified=false
+# Verify checksum. A missing checksum tool already failed the install closed above, and
+# set -e aborts on a mismatch, so reaching the next line means the checksum matched.
 echo "Verifying checksum..."
 cd "$TMPDIR"
 if [[ "$CHECKSUM_VERIFIER" == "sha256sum" ]]; then
     sha256sum -c "${BINARY_FILENAME}.sha256"
-    checksum_verified=true
 else
     shasum -a 256 -c "${BINARY_FILENAME}.sha256"
-    checksum_verified=true
 fi
 
 run_with_timeout() {
@@ -158,11 +156,7 @@ elif command -v gh &>/dev/null; then
 fi
 
 if [[ "$authenticated" != true ]]; then
-    if [[ "$checksum_verified" = true ]]; then
-        echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
-    else
-        echo "Warning: Neither checksum nor provenance authenticity was verified because sha256sum, shasum, and GitHub CLI are unavailable; continuing due to the current missing-tool limitation." >&2
-    fi
+    echo "Warning: neither cosign nor GitHub CLI found; checksum verified corruption only, artifact provenance was not authenticated." >&2
 fi
 
 # Determine install directory

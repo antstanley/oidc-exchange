@@ -269,7 +269,7 @@ client_secret = "${GOOGLE_CLIENT_SECRET}"
 
 At startup, if `GOOGLE_CLIENT_ID` is set to `123456.apps.googleusercontent.com`, the config value becomes that string. If the environment variable is not set, the service fails to start with a configuration error.
 
-Use `oidc-exchange config check path/to/config.toml` to run the same side-effect-free resolver used at startup. It merges the file with committed defaults but intentionally ignores environment variables and overlays, so pass a fully materialized deployment file. It reports missing deployment inputs (such as unresolved placeholders) separately from invalid value domains, and redacts secrets in its rendered output.
+Use `oidc-exchange config check path/to/config.toml` to run the same side-effect-free resolver used at startup. In this single-path form it merges the file with committed defaults but intentionally ignores environment variables and overlays, so pass a fully materialized deployment file. To check how the server would load configuration with the environment applied, use `oidc-exchange config check --dir <config-dir>` (the `default.toml` / `$OIDC_EXCHANGE_ENV.toml` layering plus `OIDC_EXCHANGE__*` overrides) or `oidc-exchange config check --file <path>` (a single file plus `OIDC_EXCHANGE__*` overrides, as used by the language bindings). It reports missing deployment inputs (such as unresolved placeholders) separately from invalid value domains, and redacts secrets in its rendered output.
 
 ## Defaults
 

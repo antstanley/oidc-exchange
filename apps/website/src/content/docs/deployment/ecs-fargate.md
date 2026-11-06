@@ -5,7 +5,7 @@ description: Deploy oidc-exchange on ECS Fargate with ALB, DynamoDB, and ElastiC
 
 Run oidc-exchange on Amazon Elastic Container Service (ECS) with Fargate for automatic scaling. An Application Load Balancer (ALB) distributes requests. DynamoDB stores users, and ElastiCache Valkey stores refresh token sessions.
 
-Infrastructure is managed with Terraform. A runnable example is in [`examples/ecs-fargate/`](https://github.com/example/oidc-exchange/tree/main/examples/ecs-fargate).
+Infrastructure is managed with Terraform. A runnable example is in [`examples/ecs-fargate/`](https://github.com/antstanley/oidc-exchange/tree/main/examples/ecs-fargate).
 
 ## When to use this
 

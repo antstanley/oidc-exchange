@@ -5,7 +5,7 @@ description: Deploy oidc-exchange as a serverless Lambda function with DynamoDB 
 
 Use this deployment to run oidc-exchange on AWS Lambda. At startup, the service selects Lambda mode if `AWS_LAMBDA_RUNTIME_API` is set.
 
-A runnable example is in [`examples/aws-web/`](https://github.com/example/oidc-exchange/tree/main/examples/aws-web).
+A runnable example is in [`examples/aws-web/`](https://github.com/antstanley/oidc-exchange/tree/main/examples/aws-web).
 
 ## Infrastructure
 
