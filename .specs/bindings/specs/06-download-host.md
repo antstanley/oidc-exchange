@@ -17,15 +17,19 @@ hosted zone supplied as CDK context: the existing `oidc-exchange.iamstan.dev` zo
 
 ```
 /latest.json                                     mutable, schema below
+/install.sh                                      mutable (copy of the latest stable release's installer)
+/install.sh.sigstore.bundle                      mutable (matches /install.sh)
 /releases/v<version>/<artifact>                  immutable
 /releases/v<version>/<artifact>.sha256           immutable
 /releases/v<version>/<artifact>.sigstore.bundle  immutable
+/releases/v<version>/install.sh                  immutable
+/releases/v<version>/install.sh.sigstore.bundle  immutable
 /releases/v<version>/SHA256SUMS                  immutable
 /releases/v<version>/SHA256SUMS.sigstore.bundle  immutable
 ```
 
-Versioned objects are served `Cache-Control: public, max-age=31536000, immutable`; `latest.json`
-is served `max-age=60`. Responses carry HSTS and `X-Content-Type-Options: nosniff`. Bucket
+Versioned objects are served `Cache-Control: public, max-age=31536000, immutable`; `latest.json`,
+`install.sh` and its bundle are served `max-age=60`. Responses carry HSTS and `X-Content-Type-Options: nosniff`. Bucket
 versioning is on and the bucket has `RemovalPolicy.RETAIN`.
 
 `latest.json` is `{"version": "X.Y.Z", "publishedAt": "<date-time>"}` and nothing else; it is a
@@ -35,7 +39,7 @@ public contract for installers and mirrors.
 
 `oidc-exchange-downloads-upload` trusts the account's existing GitHub OIDC provider only for
 `repo:antstanley/oidc-exchange:environment:downloads` jobs whose `job_workflow_ref` is `release.yml`
-at a `v*.*.*` tag. It can `s3:PutObject` under `releases/*` and on `latest.json` and nothing else:
+at a `v*.*.*` tag. It can `s3:PutObject` under `releases/*` and on `latest.json`, `install.sh` and `install.sh.sigstore.bundle` and nothing else:
 no delete, no list, no CloudFront or IAM access.
 
 ## Definition and operations

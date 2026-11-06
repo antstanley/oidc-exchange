@@ -110,7 +110,12 @@ export class DownloadsStack extends Stack {
     role.addToPolicy(
       new iam.PolicyStatement({
         actions: ["s3:PutObject"],
-        resources: [bucket.arnForObjects("releases/*"), bucket.arnForObjects("latest.json")],
+        resources: [
+          bucket.arnForObjects("releases/*"),
+          bucket.arnForObjects("latest.json"),
+          bucket.arnForObjects("install.sh"),
+          bucket.arnForObjects("install.sh.sigstore.bundle"),
+        ],
       }),
     );
 

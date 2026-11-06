@@ -8,7 +8,7 @@ How every artifact is built, authenticated, and shipped.
 
 | Artifact | Target | Channel | Provenance |
 |---|---|---|---|
-| Binary `oidc-exchange` | linux x64/arm64, windows x64, macOS arm64 | GitHub Releases and `dl.oidc-exchange.iamstan.dev` (+ checksums) | Sigstore keyless signature bundle per artifact and for `SHA256SUMS` (download host), plus the GitHub/Sigstore build attestation |
+| Binary `oidc-exchange` | linux x64/arm64, windows x64, macOS arm64 | `dl.oidc-exchange.iamstan.dev` (+ checksums); also attached to GitHub Releases | Sigstore keyless signature bundle per artifact and for `SHA256SUMS` (download host), plus the GitHub/Sigstore build attestation |
 | Docker image | `linux/amd64`, `linux/arm64` | ghcr.io and Docker Hub | GHCR build attestations for each platform digest and the final manifest digest |
 | `@oidc-exchange/node` + 4 platform packages (`@oidc-exchange/{linux-x64-gnu,linux-arm64-gnu,win32-x64-msvc,darwin-arm64}`) | 4 napi targets | npm (OIDC trusted publishing) | npm `--provenance` |
 | `oidc-exchange` wheels | 4 abi3 platforms | PyPI (OIDC trusted publishing) | PyPI attestations |
@@ -40,9 +40,10 @@ if neither checksum utility is present the installer exits non-zero **before** a
 antstanley/oidc-exchange --signer-workflow antstanley/oidc-exchange/.github/workflows/release.yml`;
 (4) otherwise it prints that checksum verification detects corruption only and does not
 authenticate the artifact. A signature or attestation failure (or timeout) aborts the install. If
-the download host is unreachable or returns a non-2xx status for the artifact, the installer falls
-back to GitHub Releases for the same version. Signature bundles are published only on the download
-host, so the fallback is authenticated through `gh` (step 3), not `cosign`. It installs to
+the download host is unreachable or returns a non-2xx status, the installer fails: the host is the
+only source, with no GitHub API or GitHub Releases fallback. The installer is itself served from
+`https://dl.oidc-exchange.iamstan.dev/install.sh` with a `install.sh.sigstore.bundle` signature
+(the same keyless identity), so users may verify it before piping it to a shell. It installs to
 `/usr/local/bin` for root or `~/.local/bin` otherwise.
 
 ## Docker (`Dockerfile`)

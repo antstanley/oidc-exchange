@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh: download host, cosign verification order and GitHub fallback.
+# install.sh: download host, cosign verification order, and no GitHub dependency.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -73,13 +73,11 @@ EOS
     cosign-failure-aborts) grep -Fq 'cosign verify-blob' "$log" ;;
     gh-when-no-cosign) grep -Fq 'gh attestation verify' "$log"; absent 'sigstore.bundle' "$log" ;;
     checksum-only) grep -Fq 'corruption only' "$sandbox/err" ;;
-    github-fallback)
-      grep -Fq 'github.com/antstanley/oidc-exchange/releases/download/v1.2.3/oidc-exchange-linux-x64' "$log"
-      grep -Fq 'gh attestation verify' "$log"; absent 'cosign' "$log" ;;
+    host-down-fails-closed) absent -E 'api\.github\.com|releases/download' "$log" ;;
     latest-from-download-host)
       grep -Fq 'dl.oidc-exchange.iamstan.dev/latest.json' "$log"
       grep -Fq 'releases/v1.2.3/oidc-exchange-linux-x64' "$log"
-      absent 'api.github.com' "$log" ;;
+      absent -E 'api\.github\.com|releases/download' "$log" ;;
   esac
   rm -rf "$sandbox"
   PASS=$((PASS + 1))
@@ -92,7 +90,7 @@ run_case cosign-preferred-over-gh ok     ok    up   ok      --version v1.2.3
 run_case cosign-failure-aborts    fail   ok    up   fail    --version v1.2.3
 run_case gh-when-no-cosign        none   ok    up   ok      --version v1.2.3
 run_case checksum-only            none   none  up   ok      --version v1.2.3
-run_case github-fallback          ok     ok    down ok      --version v1.2.3
+run_case host-down-fails-closed   ok     ok    down fail    --version v1.2.3
 run_case latest-from-download-host ok    none  up   ok
 
 [ "$PASS" -eq 7 ]
