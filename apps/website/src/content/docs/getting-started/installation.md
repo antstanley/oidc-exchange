@@ -12,10 +12,9 @@ curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash
 The installer downloads the binary, checksum and signature bundle from `dl.oidc-exchange.iamstan.dev` only. It verifies the SHA-256 checksum (using `sha256sum` or `shasum`; if neither is installed it aborts before downloading anything, and a checksum mismatch aborts the install), then:
 
 1. if `cosign` is installed, the Sigstore signature, pinned to `antstanley/oidc-exchange` and the release workflow for that exact version;
-2. otherwise, if the GitHub CLI (`gh`) is installed, the GitHub build provenance (`gh attestation verify`, which contacts GitHub rather than the download host);
-3. otherwise it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
+2. otherwise it prints an explicit warning and proceeds with checksum-only corruption detection; the artifact is not authenticated.
 
-A failed signature or provenance check aborts the install. Artifacts come from the download host only: if it is unreachable the install fails rather than falling back to another source.
+A failed signature check aborts the install. The installer contacts the download host only, and no GitHub service: if it is unreachable the install fails rather than falling back to another source.
 
 The binary is installed as `oidc-exchange` in `/usr/local/bin` when the installer runs as root, otherwise in `~/.local/bin` (created if missing). If that directory is not on your `PATH`, the installer prints the `export PATH=...` line to add.
 
