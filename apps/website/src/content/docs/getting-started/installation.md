@@ -18,23 +18,35 @@ A failed signature check aborts the install. The installer contacts the download
 
 The binary is installed as `oidc-exchange` in `/usr/local/bin` when the installer runs as root, otherwise in `~/.local/bin` (created if missing). If that directory is not on your `PATH`, the installer prints the `export PATH=...` line to add.
 
+The installer is itself signed. To check it before running it:
+
+```bash
+curl -fsSLO https://dl.oidc-exchange.iamstan.dev/install.sh
+curl -fsSLO https://dl.oidc-exchange.iamstan.dev/install.sh.sigstore.bundle
+cosign verify-blob \
+  --bundle install.sh.sigstore.bundle \
+  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.6.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  install.sh
+```
+
 To verify a download yourself, without the installer:
 
 ```bash
-BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.5.1
+BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.6.0
 curl -fsSLO "$BASE/oidc-exchange-linux-x64"
 curl -fsSLO "$BASE/oidc-exchange-linux-x64.sigstore.bundle"
 cosign verify-blob \
   --bundle oidc-exchange-linux-x64.sigstore.bundle \
-  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.5.1 \
+  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.6.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   oidc-exchange-linux-x64
 ```
 
-To install a specific version (the `v` prefix is optional, and pre-release versions such as `v0.6.0-rc.1` are accepted; the latest version is read from `latest.json`, which never points at a pre-release):
+To install a specific version (the `v` prefix is optional, and pre-release versions such as `v1.0.0-rc.1` are accepted; the latest version is read from `latest.json`, which never points at a pre-release):
 
 ```bash
-curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash -s -- --version v0.5.1
+curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash -s -- --version v0.6.0
 ```
 
 ## Docker

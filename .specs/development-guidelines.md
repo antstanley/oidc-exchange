@@ -361,6 +361,9 @@ A change is done when:
   - Python: `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyright`, `uv run pytest`.
 - If domain types changed, `canonical-types.schema.json` and the affected prose pages are
   updated together.
+- If user-visible behaviour changed (routes, configuration, bindings, installer, policies), the
+  affected website pages under `apps/website/src/content/docs/` are updated in the same PR. The
+  release docs pass (CONTRIBUTING.md → Releasing, step 2) is the backstop, not the plan.
 - The change description states the *why* and what changed at the architecture level.
 
 ## Assumptions and open questions

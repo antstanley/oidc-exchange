@@ -11,6 +11,7 @@
 //   - Cargo.toml            [workspace.package] version   (+ Cargo.lock via cargo update)
 //   - bindings/python/pyproject.toml  [project] version   (+ uv.lock via uv lock)
 //   - config/signing-path-policy.json  the pinned oidc-exchange-adapters@<version> roots/paths
+//   - README.md + the installation/quick-start docs  the v<version> install/verify pins
 //   - generated CHANGELOG.md files formatted with the packages' own oxfmt (CI format:check)
 //   - pnpm-lock.yaml (refreshed) mirrored into the two binding copies
 //   - apps/website/src/data/versions.json  (new { version, date } prepended)
@@ -53,6 +54,25 @@ function sub(relPath, find, replace, count = 1) {
   console.log(`  ✓ ${relPath}`)
 }
 
+// Docs that pin the current `v<version>` tag, with the exact number of pins each holds.
+const DOC_TAG_PINS = [
+  ['README.md', 2],
+  ['apps/website/src/content/docs/getting-started/installation.md', 4],
+  ['apps/website/src/content/docs/getting-started/quick-start.md', 2],
+]
+
+// Replace the whole tag `v<oldVersion>` only: `v0.6.0` must not match inside
+// `v0.6.0-rc.1` or `v0.6.01`. Asserts the exact count like `sub`.
+function subTag(relPath, count) {
+  const path = R(relPath)
+  const text = readFileSync(path, 'utf8')
+  const pattern = new RegExp(`v${oldVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![0-9A-Za-z.-])`, 'g')
+  const found = text.match(pattern)?.length ?? 0
+  if (found !== count) die(`${relPath}: expected ${count} v${oldVersion} pin(s), found ${found}`)
+  writeFileSync(path, text.replace(pattern, `v${newVersion}`))
+  console.log(`  ✓ ${relPath}`)
+}
+
 function run(label, cmd, args, cwd) {
   try {
     execFileSync(cmd, args, { cwd, stdio: 'inherit' })
@@ -72,6 +92,9 @@ if (oldVersion !== newVersion) {
   sub('bindings/python/pyproject.toml', `\nversion = "${oldVersion}"\n`, `\nversion = "${newVersion}"\n`)
   // The signing-path policy pins the workspace crate version in its roots and paths.
   sub('config/signing-path-policy.json', `oidc-exchange-adapters@${oldVersion}`, `oidc-exchange-adapters@${newVersion}`, 4)
+  // The install and verify examples pin the current release tag (download URL,
+  // cosign certificate identity, installer --version).
+  for (const [doc, count] of DOC_TAG_PINS) subTag(doc, count)
   run('Cargo.lock', 'cargo', ['update', '--workspace'], repoRoot)
   run('bindings/python/uv.lock', 'uv', ['lock'], R('bindings/python'))
 } else {

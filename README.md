@@ -20,12 +20,12 @@ curl -fsSL https://dl.oidc-exchange.iamstan.dev/install.sh | bash
 To verify a manually downloaded binary with cosign:
 
 ```bash
-BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.5.1
+BASE=https://dl.oidc-exchange.iamstan.dev/releases/v0.6.0
 curl -fsSLO "$BASE/oidc-exchange-linux-x64"
 curl -fsSLO "$BASE/oidc-exchange-linux-x64.sigstore.bundle"
 cosign verify-blob \
   --bundle oidc-exchange-linux-x64.sigstore.bundle \
-  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.5.1 \
+  --certificate-identity https://github.com/antstanley/oidc-exchange/.github/workflows/release.yml@refs/tags/v0.6.0 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   oidc-exchange-linux-x64
 ```
