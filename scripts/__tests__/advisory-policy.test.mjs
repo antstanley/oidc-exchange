@@ -61,5 +61,7 @@ test("policy requires exact non-wildcard exception versions and complete ownersh
 test("committed policy has exact scanners and bounded current exceptions", () => {
   validatePolicy(POLICY);
   assert.deepEqual(Object.fromEntries(Object.entries(POLICY.ecosystems).map(([name, graph]) => [name, graph.scanner.version])), { cargo: "0.20.2", pnpm: "12.16.1", python: "2.10.1" });
-  assert.equal(POLICY.exceptions.length, 0);
+  // The reviewed inventory, exactly: adding or widening an exception must change this line.
+  assert.deepEqual(POLICY.exceptions.map((e) => `${e.ecosystem}:${e.advisory}:${e.package}@${e.version}`), ["cargo:RUSTSEC-2026-0459:libsqlite3-sys@0.37.0"]);
+  for (const e of POLICY.exceptions) assert.ok(e.review_date < e.expires, `${e.advisory} must be reviewed before it expires`);
 });

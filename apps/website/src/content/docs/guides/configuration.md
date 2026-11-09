@@ -365,5 +365,9 @@ or overwrite any client-supplied copies. An address accepted this way is recorde
 `asserted` and is never a rate-limit key. The setting is rejected at load when no header is
 named.
 
+The `[session.location]` mapping applies only to the HTTP server, including the native binary on
+Lambda. The Node.js, Python, and `@oidc-exchange/lambda` bindings have no transport peer to
+vouch for headers, so they never apply it and record no session location.
+
 The shipped in-process limiter is per process. Use an API gateway, WAF, or other edge control
 for a global limit across replicas or Lambda execution environments.

@@ -382,7 +382,8 @@ your next push.
 The `Version Packages` workflow (`.github/workflows/version-packages.yml`) does this for you:
 on every push to `main` with pending changesets it opens or updates a
 `chore(release): version packages` PR containing exactly what `pnpm changeset:version` produces.
-Merging that PR replaces steps 1–2 below; continue at step 3 (tag). Note that PRs opened with
+Run the docs pass (step 2) before you merge it. Merging that PR replaces the manual bump below
+and step 3; continue at step 4 (tag). Note that PRs opened with
 the default `GITHUB_TOKEN` do not trigger CI, so close and reopen the PR (or push an empty
 commit) to run the checks before merging. The bot pushes through the GitHub API and the
 checkout keeps `persist-credentials: false`.
@@ -400,14 +401,49 @@ version onto the rest of the polyglot repo, in lockstep:
 
 - `Cargo.toml` (workspace version) and regenerates `Cargo.lock`
 - `bindings/python/pyproject.toml` and regenerates `bindings/python/uv.lock`
+- `config/signing-path-policy.json` (the pinned `oidc-exchange-adapters@<version>` roots and paths)
+- the `v<version>` pins in the install and verify examples in `README.md` and the website's
+  `getting-started/installation.md` and `getting-started/quick-start.md` (don't edit them by hand)
 - `pnpm-lock.yaml` (refreshed), mirrored into `bindings/nodejs/` and `bindings/lambda/`
 - `apps/website/src/versions.json` (the docs Versions page)
 
 `Cargo.toml` stays the source of truth for the number; the release workflow's `validate` job
 re-checks that Cargo, node, and python all agree. Requires `cargo` and `uv` on `PATH`. It
-does **not** commit, tag, or push — see steps 2 and 3.
+does **not** commit, tag, or push — see steps 3 and 4.
 
-### Step 2 — land the bump on `main`
+### Step 2 — docs pass
+
+Before the release is tagged, check that the docs describe everything it ships. The website
+deploys from `main`, so a gap found after the tag stays live until someone notices.
+
+With the Version Packages bot, land the fixes in a separate `docs:` PR and merge it before the
+Version Packages PR. The bot regenerates its PR on every push to `main`, so commits pushed to it
+are lost, and a `docs:` PR gets no changeset. On the manual path, commit the fixes with the bump.
+
+1. **List what ships.** Read the new section of `bindings/nodejs/CHANGELOG.md`, then
+   `git log --oneline v<previous>..main`. PRs with a `chore`, `docs`, or `ci` title get no
+   changeset, so they are missing from the changelog but can still change what users see (#74
+   changed how the installer is served without one).
+2. **Check each change against the pages that describe it.** Paths are under
+   `apps/website/src/content/docs/` unless they start at the repo root.
+
+   | What changed | Check |
+   |---|---|
+   | HTTP routes, request and response shapes, status codes, audit events | `guides/api-reference.md`, `README.md`, `schemas/internal-api.schema.json` |
+   | Config keys and defaults | `guides/configuration.md`, including the defaults table |
+   | Node.js, Python, or Lambda bindings | `guides/nodejs.md`, `guides/python.md`, `deployment/aws-lambda.md` |
+   | Installer, signing, download host | `getting-started/installation.md`, `getting-started/quick-start.md`, `README.md` |
+   | Ports and adapters | `architecture/overview.md`, `architecture/adapters.md` |
+   | Dependencies, advisories, crypto crates | `security/dependency-policy.md` against `config/advisory-policy.json` and `deny.toml`; `security/signing-path-policy.md` against `config/signing-path-policy.json` and the output of `node scripts/run-signing-path-policy.mjs` |
+
+   The canonical specs under `.specs/` change with the code in the feature PR, so a mismatch
+   between a spec and the website usually means the website is the stale one.
+3. **Write the release notes.** Add a `## <version>` section to `RELEASE_NOTES.md` covering
+   behaviour changes and anything an upgrader has to do: breaking changes, changed port
+   signatures for out-of-tree adapters, new configuration that is off by default.
+4. **Build the site** to catch broken links and MDX errors: `pnpm --filter website build`.
+
+### Step 3 — land the bump on `main`
 
 ```bash
 jj describe -m "release: v0.1.2"
@@ -418,7 +454,7 @@ jj git push --bookmark release/v0.1.2
 Open a PR and merge it to `main`. Version bumps go through a PR like any other change — CI
 must be green first.
 
-### Step 3 — tag the release
+### Step 4 — tag the release
 
 Tag the **merged** commit on `main` and push the tag. jj has no native tag command, so this
 is the one sanctioned use of the Git CLI (or create the tag from the GitHub Releases UI):
@@ -433,7 +469,7 @@ Pushing the tag starts the release workflow. Its `validate` job re-checks that `
 `bindings/nodejs/package.json`, and `bindings/python/pyproject.toml` all equal `0.1.2`; a
 mismatch aborts before anything publishes.
 
-### Step 4 — approve the staged npm packages
+### Step 5 — approve the staged npm packages
 
 npm publishing is **staged**: the workflow uploads the packages but does not make them
 public. Approve them to finish the npm release:
@@ -445,7 +481,7 @@ npm stage approve <id>              # or approve from the npmjs.com UI
 
 PyPI and the container images publish without a manual step.
 
-### Step 5 — verify `pnpm-lock.yaml`
+### Step 6 — verify `pnpm-lock.yaml`
 
 The four `@oidc-exchange/*` platform packages live at `bindings/nodejs/npm/*`, which are
 **workspace packages** (`pnpm-workspace.yaml` lists them, with `linkWorkspacePackages:

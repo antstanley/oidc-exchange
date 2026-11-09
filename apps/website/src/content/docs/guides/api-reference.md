@@ -191,7 +191,7 @@ The endpoint returns `200 OK` if the service is running. It does not require aut
 
 ## Internal endpoints
 
-Internal endpoints provide user CRUD and claims management. They are served on a dedicated admin listener (default `127.0.0.1:8081`), and are mounted only when `server.role` is `admin` or `all` and `internal_api.enabled = true`; with either condition unmet, no `/internal/*` routes exist. All internal routes require authentication.
+Internal endpoints provide user CRUD, session listing and revocation, and claims management. They are served on a dedicated admin listener (default `127.0.0.1:8081`), and are mounted only when `server.role` is `admin` or `all` and `internal_api.enabled = true`; with either condition unmet, no `/internal/*` routes exist. All internal routes require authentication.
 
 ### Authentication
 

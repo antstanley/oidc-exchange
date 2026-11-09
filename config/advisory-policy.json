@@ -26,5 +26,11 @@
       "scanner": { "name": "pip-audit", "version": "2.10.1" }
     }
   },
-  "exceptions": []
+  "exceptions": [
+    {
+      "ecosystem": "cargo", "advisory": "RUSTSEC-2026-0459", "package": "libsqlite3-sys", "version": "0.37.0", "range": "=0.37.0",
+      "rationale": "Bundled SQLite before 3.54.0 can return uninitialised page-cache memory when it opens a crafted database and -wal pair with mismatched page sizes. The SQLite adapter opens only the operator-configured database path, which the service creates and writes itself; exposure needs a less trusted party to plant both files at that path. No patched path exists yet: sqlx-sqlite 0.9.0, the latest, requires libsqlite3-sys <0.38 and the fix is in >=0.39.0. Retire when sqlx ships a release that allows 0.39.",
+      "owner": "Ant Stanley", "expires": "2026-12-15", "review_date": "2026-12-01"
+    }
+  ]
 }

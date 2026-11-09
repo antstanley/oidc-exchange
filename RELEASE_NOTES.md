@@ -1,6 +1,45 @@
 # Release notes
 
-## Unreleased
+Upgrade and migration notes for each release. The full per-change log is
+[`bindings/nodejs/CHANGELOG.md`](bindings/nodejs/CHANGELOG.md), which also feeds the GitHub
+Release text.
+
+## 0.6.0
+
+- **Revoke sessions through the internal API.** Two routes act on the list
+  `GET /internal/users/{id}/sessions` returns:
+  - `DELETE /internal/users/{id}/sessions/{sessionId}` revokes one session by its opaque `ses_…`
+    id and answers `204`. An unknown id, another user's id, or an already-revoked id is `404`.
+  - `DELETE /internal/users/{id}/sessions` revokes every live session of the user and answers
+    `200 { "sessions_revoked": <n> }`. The user stays active.
+
+  Both record an operator-attributed audit event (`SessionRevoked` / `AllSessionsRevoked`).
+  Revocation ends refresh-token families only: access tokens already issued stay valid until
+  they expire, as with `POST /revoke`.
+- **Port change for custom adapters.** `SessionRepository::revoke_all_user_sessions` now returns
+  the number of sessions removed (`u64`) instead of `()`. Out-of-tree session adapters must
+  return that count.
+- **Installer served from the download host only.** `install.sh` is signed by every release and
+  served from `https://dl.oidc-exchange.iamstan.dev/install.sh` with its
+  `install.sh.sigstore.bundle`. It no longer falls back to the GitHub API or GitHub Releases: if
+  the download host is unreachable, the install fails.
+
+## 0.5.1
+
+- Release pipeline fix only: `publish-latest` treats a `403` on a missing `latest.json` as
+  absent when this version's `SHA256SUMS` is readable from the same host. No runtime changes.
+
+## 0.5.0
+
+### Behaviour changes
+
+- **Python 3.11 or later.** Python 3.10 is no longer supported; wheels are `cp311-abi3`.
+- **Signed binaries on a download host.** Release binaries are published to
+  `https://dl.oidc-exchange.iamstan.dev` with a Sigstore bundle per artifact and `SHA256SUMS`.
+  `install.sh` downloads from there and verifies the checksum, then the signature when `cosign`
+  is installed.
+
+### Features
 
 - **List a user's sessions.** `GET /internal/users/{id}/sessions` returns the user's live
   sessions (newest first, at most 50) as opaque `SessionSummary` entries.
